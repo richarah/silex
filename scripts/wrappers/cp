@@ -1,0 +1,5 @@
+#!/bin/sh
+# Silex wrapper: cp with reflink=auto for copy-on-write filesystem support
+# Falls back silently to regular cp if reflink is unsupported
+[ "$SILEX_WRAPPERS" = "off" ] && exec /usr/bin/cp "$@"
+exec /usr/bin/cp --reflink=auto "$@" 2>/dev/null || exec /usr/bin/cp "$@"

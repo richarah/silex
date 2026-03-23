@@ -1,0 +1,42 @@
+{
+  "_comment": "Pre-configured BuildKit cache mount paths for common package managers",
+  "_status": "Stub for v0.1 - will be used by entrypoint to suggest cache mount configurations",
+  "_usage": "Reference for users setting up BuildKit cache mounts",
+
+  "pip": {
+    "path": "/root/.cache/pip",
+    "example": "--mount=type=cache,target=/root/.cache/pip,sharing=locked"
+  },
+  "npm": {
+    "path": "/root/.npm",
+    "example": "--mount=type=cache,target=/root/.npm,sharing=locked"
+  },
+  "pnpm": {
+    "path": "/root/.local/share/pnpm/store",
+    "example": "--mount=type=cache,target=/root/.local/share/pnpm/store,sharing=locked"
+  },
+  "cargo": {
+    "path": "/usr/local/cargo/registry",
+    "example": "--mount=type=cache,target=/usr/local/cargo/registry,sharing=locked"
+  },
+  "go": {
+    "path": "/root/.cache/go-build",
+    "example": "--mount=type=cache,target=/root/.cache/go-build,sharing=locked"
+  },
+  "maven": {
+    "path": "/root/.m2",
+    "example": "--mount=type=cache,target=/root/.m2,sharing=locked"
+  },
+  "gradle": {
+    "path": "/root/.gradle",
+    "example": "--mount=type=cache,target=/root/.gradle,sharing=locked"
+  },
+  "apt": {
+    "path": "/var/cache/apt",
+    "example": "--mount=type=cache,target=/var/cache/apt,sharing=locked"
+  },
+  "apk": {
+    "path": "/var/cache/apk",
+    "example": "--mount=type=cache,target=/var/cache/apk,sharing=locked"
+  }
+}

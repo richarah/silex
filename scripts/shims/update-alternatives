@@ -1,0 +1,13 @@
+#!/bin/sh
+# Shim: update-alternatives is a no-op on Wolfi
+# Wolfi uses direct symlinks; alternatives system is Debian-specific
+# Silently succeed for --install, --set, --remove (common in postinstall scripts)
+# Warn and succeed for --list, --display (informational)
+case "${1:-}" in
+    --install|--set|--remove|--auto|--config|--force) exit 0 ;;
+    --list|--display|--query)
+        echo "update-alternatives: warning: not supported on this system (silex/Wolfi)" >&2
+        exit 0 ;;
+    *)
+        exit 0 ;;
+esac

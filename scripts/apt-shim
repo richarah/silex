@@ -1,0 +1,130 @@
+#!/bin/sh
+# Silex apt-get shim: translates apt-get/apt commands to apk
+# Installed as /usr/local/bin/apt-get (and symlinked as apt)
+# Disable with SILEX_APT_SHIM=off
+
+set -e
+
+MAPPING=/usr/local/silex/package-mapping.json
+
+# When shim is disabled, try real apt-get (will fail on Wolfi — by design)
+if [ "$SILEX_APT_SHIM" = "off" ]; then
+    echo "silex: SILEX_APT_SHIM=off — apt-get shim disabled" >&2
+    exit 1
+fi
+
+# Translate a list of Debian package names to apk names via mapping JSON.
+# Unknown packages are passed through with a warning.
+_translate_packages() {
+    python3 - "$@" <<'PYEOF'
+import json, sys, os
+
+mapping_file = '/usr/local/silex/package-mapping.json'
+try:
+    with open(mapping_file) as f:
+        raw = json.load(f)
+    # Filter out keys starting with _ (comments/metadata)
+    mapping = {k: v for k, v in raw.items() if not k.startswith('_')}
+except Exception as e:
+    sys.stderr.write(f'silex apt-shim: could not load mapping: {e}\n')
+    mapping = {}
+
+unmapped = []
+translated = []
+for pkg in sys.argv[1:]:
+    if pkg.startswith('-') or pkg == '':
+        continue
+    # Strip version specs like pkg=1.2.3 or pkg>=1.0
+    base = pkg.split('=')[0].split('>')[0].split('<')[0]
+    mapped = mapping.get(base)
+    if mapped is None:
+        unmapped.append(base)
+        translated.append(base)
+    elif mapped == '':
+        sys.stderr.write(f'silex apt-shim: {base} has no apk equivalent, skipping\n')
+    else:
+        translated.append(mapped)
+
+if unmapped:
+    sys.stderr.write('silex apt-shim: unmapped packages (trying as-is): ' + ' '.join(unmapped) + '\n')
+
+print('\n'.join(translated))
+PYEOF
+}
+
+# Strip common apt flags that mean nothing to apk
+_strip_apt_flags() {
+    for _a in "$@"; do
+        case "$_a" in
+            -y|--yes|--assume-yes) ;;
+            --no-install-recommends) ;;
+            --install-recommends) ;;
+            -q|--quiet|-qq) ;;
+            --allow-unauthenticated) ;;
+            --allow-downgrades) ;;
+            --no-upgrade) ;;
+            --fix-broken) ;;
+            -f) ;;
+            *) printf '%s\n' "$_a" ;;
+        esac
+    done
+}
+
+# Parse leading flags before subcommand (apt-get -y install ...)
+_CMD=""
+_EXTRA_FLAGS=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -y|--yes|--assume-yes|--no-install-recommends|--install-recommends|-q|--quiet|-qq) shift ;;
+        -*) shift ;;  # skip unknown flags before subcommand
+        *)  _CMD="$1"; shift; break ;;
+    esac
+done
+
+case "$_CMD" in
+    install|install-recommends)
+        # Collect packages, strip apt-specific flags
+        _pkgs=$(_strip_apt_flags "$@" | tr '\n' ' ')
+        if [ -z "$(echo "$_pkgs" | tr -d ' ')" ]; then
+            echo "silex apt-shim: no packages specified" >&2
+            exit 1
+        fi
+        # Translate package names
+        _apk_pkgs=$(echo $_pkgs | xargs _translate_packages | tr '\n' ' ')
+        echo "silex apt-shim: apt-get install → apk add --no-cache ${_apk_pkgs}" >&2
+        # shellcheck disable=SC2086
+        exec apk add --no-cache ${_apk_pkgs}
+        ;;
+    update)
+        apk update
+        ;;
+    upgrade)
+        apk upgrade
+        ;;
+    remove|purge)
+        _pkgs=$(_strip_apt_flags "$@" | tr '\n' ' ')
+        echo "silex apt-shim: apt-get remove → apk del ${_pkgs}" >&2
+        # shellcheck disable=SC2086
+        exec apk del ${_pkgs}
+        ;;
+    autoremove|clean|autoclean|check)
+        # no-op: apk doesn't need these
+        ;;
+    dist-upgrade|full-upgrade)
+        apk upgrade
+        ;;
+    download)
+        echo "silex apt-shim: 'apt-get download' not supported in shim" >&2
+        exit 1
+        ;;
+    "")
+        echo "silex apt-shim: no subcommand given" >&2
+        echo "Supported: install, update, upgrade, remove, purge, autoremove, clean" >&2
+        exit 1
+        ;;
+    *)
+        echo "silex apt-shim: unsupported command '$_CMD'" >&2
+        echo "Supported: install, update, upgrade, remove, purge, autoremove, clean" >&2
+        exit 1
+        ;;
+esac
