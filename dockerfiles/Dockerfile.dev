@@ -1,0 +1,22 @@
+# Silex: Development Variant
+# Extends silex:slim with interactive dev tools
+# Not optimised for size — full-sized packages, no stripping
+FROM silex:slim
+
+# Dev-only extras: editors, shells, search, Python tooling
+RUN apk add --no-cache \
+    git \
+    openssh-client \
+    bash \
+    less \
+    vim \
+    ripgrep \
+    fd \
+    uv
+
+# Override locale for interactive use
+ENV LC_ALL=en_US.UTF-8 \
+    LANG=en_US.UTF-8
+
+# Drop back to bash for interactive sessions
+CMD ["/bin/bash"]

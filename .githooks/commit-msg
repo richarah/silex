@@ -1,0 +1,35 @@
+#!/bin/bash
+# Reject commits that contain AI/agent co-author or attribution lines.
+# Commits must be authored in the name of a human.
+
+MSG_FILE="$1"
+MSG=$(cat "$MSG_FILE")
+
+PATTERNS=(
+    "Co-Authored-By:.*Claude"
+    "Co-Authored-By:.*Happy"
+    "Co-Authored-By:.*noreply@anthropic\.com"
+    "Co-Authored-By:.*yesreply@happy\.engineering"
+    "Generated with \[Claude Code\]"
+    "via \[Happy\]"
+    "noreply@anthropic\.com"
+    "yesreply@happy\.engineering"
+)
+
+for pattern in "${PATTERNS[@]}"; do
+    if echo "$MSG" | grep -qiE "$pattern"; then
+        echo ""
+        echo "COMMIT REJECTED: AI/agent attribution detected."
+        echo "Matched pattern: $pattern"
+        echo ""
+        echo "Commits must be authored by a human. Remove any:"
+        echo "  - Co-Authored-By: Claude / Happy lines"
+        echo "  - 'Generated with [Claude Code]' footers"
+        echo "  - 'via [Happy]' footers"
+        echo "  - noreply@anthropic.com / yesreply@happy.engineering addresses"
+        echo ""
+        exit 1
+    fi
+done
+
+exit 0
