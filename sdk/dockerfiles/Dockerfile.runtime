@@ -1,0 +1,23 @@
+# Silex Runtime: Minimal runtime companion image
+# No compiler. Just libc, tini, ca-certificates.
+# Use this as the final stage when building with silex:slim.
+#
+# Target size: <30MB
+#
+# Example:
+#   FROM ghcr.io/richarah/silex:slim AS builder
+#   RUN cmake -B build && cmake --build build
+#
+#   FROM ghcr.io/richarah/silex:runtime
+#   COPY --from=builder /workspace/build/my-app /usr/local/bin/
+#   CMD ["my-app"]
+
+FROM cgr.dev/chainguard/wolfi-base:latest
+
+RUN apk add --no-cache \
+    tini=0.19.0-r25 \
+    ca-certificates=20251003-r4 \
+    libstdc++ \
+    libgcc
+
+ENTRYPOINT ["/usr/bin/tini", "--"]

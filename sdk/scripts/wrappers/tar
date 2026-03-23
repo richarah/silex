@@ -1,0 +1,29 @@
+#!/bin/sh
+# Silex wrapper: tar with parallel compressor injection
+# Substitutes pigz for gzip, pixz for xz, zstd for zstd (already parallel)
+[ "$SILEX_WRAPPERS" = "off" ] && exec /usr/bin/tar "$@"
+
+# Detect compression format from flags and inject parallel compressor
+_use_pigz=0
+_use_pixz=0
+
+for _arg in "$@"; do
+    case "$_arg" in
+        -z|--gzip|--gunzip|--ungzip) _use_pigz=1 ;;
+        -j|--bzip2) : ;;  # pbzip2 rarely available, skip
+        -J|--xz) _use_pixz=1 ;;
+    esac
+    # Also detect from filename extension when -a/--auto-compress
+    case "$_arg" in
+        *.tar.gz|*.tgz) _use_pigz=1 ;;
+        *.tar.xz|*.txz) _use_pixz=1 ;;
+    esac
+done
+
+if [ "$_use_pigz" = "1" ] && command -v pigz >/dev/null 2>&1; then
+    exec /usr/bin/tar --use-compress-program=pigz "$@"
+elif [ "$_use_pixz" = "1" ] && command -v pixz >/dev/null 2>&1; then
+    exec /usr/bin/tar --use-compress-program=pixz "$@"
+fi
+
+exec /usr/bin/tar "$@"

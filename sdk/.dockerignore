@@ -1,0 +1,66 @@
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Documentation
+*.md
+docs/
+
+# CI/CD
+.github/
+
+# Test results and benchmarks
+benchmarks/results/
+test-results/
+*.log
+
+# Build artifacts (if building within repo)
+build/
+target/
+dist/
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.tox/
+venv/
+env/
+
+# Node.js
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# Rust
+Cargo.lock
+target/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Examples (not needed in the image)
+examples/
+
+# Keep only what's needed for the build
+!scripts/
+!config/
+!dockerfiles/

@@ -1,0 +1,18 @@
+#!/bin/sh
+# Silex wrapper: git with automatic shallow clone
+# Adds --depth 1 --single-branch to git clone unless already specified
+# Disable with SILEX_GIT_SHALLOW=off or SILEX_WRAPPERS=off
+[ "$SILEX_WRAPPERS" = "off" ] && exec /usr/bin/git "$@"
+[ "$SILEX_GIT_SHALLOW" = "off" ] && exec /usr/bin/git "$@"
+
+case "$1" in
+    clone)
+        # Pass through if user already specified --depth or --no-single-branch
+        case "$*" in
+            *--depth*|*--no-single-branch*) exec /usr/bin/git "$@" ;;
+        esac
+        shift
+        exec /usr/bin/git clone --depth 1 --single-branch "$@"
+        ;;
+    *) exec /usr/bin/git "$@" ;;
+esac

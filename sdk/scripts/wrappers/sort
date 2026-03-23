@@ -1,0 +1,9 @@
+#!/bin/sh
+# Silex wrapper: sort with --parallel=nproc for faster sorting (GNU sort only)
+[ "$SILEX_WRAPPERS" = "off" ] && exec /usr/bin/sort "$@"
+# Fall back gracefully if --parallel is not supported (e.g. busybox sort)
+if /usr/bin/sort --parallel=1 /dev/null 2>/dev/null; then
+    exec /usr/bin/sort --parallel="$(nproc)" "$@"
+else
+    exec /usr/bin/sort "$@"
+fi

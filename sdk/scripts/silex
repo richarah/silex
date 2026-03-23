@@ -1,0 +1,323 @@
+#!/bin/sh
+# silex: main command dispatcher
+# Subcommands: doctor, lint, version
+
+SILEX_VERSION="${SILEX_IMAGE_VERSION:-slim-1.1.0}"
+SILEX_BASE="${SILEX_IMAGE_BASE:-wolfi}"
+
+_usage() {
+    cat <<EOF
+Usage: silex <command> [args]
+
+Commands:
+  doctor                  Show environment status and configuration
+  lint <Dockerfile> [dir] Check Dockerfile for common issues; optionally
+                          check C/C++ sources in dir for large TUs
+  version                 Print image version
+
+Environment variables:
+  SILEX_QUIET=on          Suppress entrypoint summary line
+  SILEX_WRAPPERS=off      Disable acceleration wrappers
+  SILEX_APT_SHIM=off      Disable apt-get shim
+  SILEX_MALLOC=system     Use system allocator instead of jemalloc
+  SILEX_GIT_SHALLOW=off   Disable automatic shallow git clone
+EOF
+}
+
+# ============================================================================
+# doctor
+# ============================================================================
+_doctor() {
+    printf "Silex configuration\n"
+    printf "  %-14s %s\n" "version:" "$SILEX_VERSION"
+    printf "  %-14s %s\n" "base:" "$SILEX_BASE"
+    printf "\n"
+
+    # -- Compiler --------------------------------------------------------------
+    printf "Compiler\n"
+    _cc="${CC:-clang}"
+    _cxx="${CXX:-clang++}"
+    _cc_ver=$("$_cc" --version 2>/dev/null | head -1 || printf "not found")
+    printf "  %-14s %s\n" "CC:" "$_cc ($CC_ver)"
+    printf "  %-14s %s\n" "CXX:" "$_cxx"
+    printf "  %-14s %s\n" "CC version:" "$_cc_ver"
+    _linker="${SILEX_LINKER:-mold}"
+    _mold_ver=$(/opt/mold/bin/mold --version 2>/dev/null | head -1 || printf "not found")
+    printf "  %-14s %s (%s)\n" "linker:" "$_linker" "$_mold_ver"
+    printf "\n"
+
+    # -- Build system ----------------------------------------------------------
+    printf "Build system\n"
+    _gen="${CMAKE_GENERATOR:-Ninja}"
+    _ninja_ver=$(ninja --version 2>/dev/null || printf "not found")
+    printf "  %-14s %s (%s)\n" "generator:" "$_gen" "$_ninja_ver"
+    _nproc=$(nproc 2>/dev/null || printf "?")
+    printf "  %-14s %s (%s)\n" "parallel:" "$_nproc cores" "${SILEX_PARALLEL:-auto}"
+    _sccache_ver=$(/opt/sccache/bin/sccache --version 2>/dev/null | head -1 || printf "not found")
+    _sccache_dir="${SCCACHE_DIR:-/root/.cache/sccache}"
+    printf "  %-14s %s\n" "cache:" "${SILEX_CACHE:-sccache} ($sccache_ver)"
+    printf "  %-14s %s\n" "sccache dir:" "$_sccache_dir"
+    printf "\n"
+
+    # -- Allocator -------------------------------------------------------------
+    printf "Allocator\n"
+    _malloc="${SILEX_MALLOC:-jemalloc}"
+    case "$_malloc" in
+        jemalloc) _alloc_so=$(find /usr/lib /usr/local/lib -name 'libjemalloc.so*' 2>/dev/null | sort | tail -1) ;;
+        mimalloc) _alloc_so=$(find /usr/lib /usr/local/lib -name 'libmimalloc.so*' 2>/dev/null | sort | tail -1) ;;
+        *)        _alloc_so="" ;;
+    esac
+    if [ -n "$_alloc_so" ]; then
+        printf "  %-14s %s (%s)\n" "malloc:" "$_malloc" "$_alloc_so"
+    else
+        printf "  %-14s %s (library not found)\n" "malloc:" "$_malloc"
+    fi
+    printf "  %-14s %s\n" "LD_PRELOAD:" "${LD_PRELOAD:-not set}"
+    printf "\n"
+
+    # -- Tools -----------------------------------------------------------------
+    printf "Tools\n"
+    for _tool in fd rg uv xxhsum pigz pixz dash; do
+        _tpath=$(command -v "$_tool" 2>/dev/null)
+        if [ -n "$_tpath" ]; then
+            _tver=$("$_tool" --version 2>/dev/null | head -1 || printf "installed")
+            printf "  %-14s %s\n" "$_tool:" "$_tver"
+        else
+            printf "  %-14s not found\n" "$_tool:"
+        fi
+    done
+    _mso=$(find /usr/lib -name 'libmimalloc.so*' 2>/dev/null | head -1)
+    printf "  %-14s %s\n" "mimalloc:" "${_mso:-not found}"
+    printf "\n"
+
+    # -- Wrappers --------------------------------------------------------------
+    printf "Wrappers\n"
+    printf "  %-14s %s\n" "status:" "${SILEX_WRAPPERS:-on}"
+    for _w in cp tar sort git; do
+        _wp="/usr/local/silex/bin/$_w"
+        if [ -x "$_wp" ]; then
+            case "$_w" in
+                cp)   _desc="(reflink=auto)" ;;
+                tar)  _desc="(pigz/pixz aware)" ;;
+                sort) _desc="(--parallel=$_nproc)" ;;
+                git)  _desc="(shallow clone ${SILEX_GIT_SHALLOW:-on})" ;;
+            esac
+            printf "  %-14s %s %s\n" "$_w:" "$_wp" "$_desc"
+        else
+            printf "  %-14s not found\n" "$_w:"
+        fi
+    done
+    printf "\n"
+
+    # -- apt shim --------------------------------------------------------------
+    printf "apt shim\n"
+    printf "  %-14s %s\n" "status:" "${SILEX_APT_SHIM:-on}"
+    _mapping="/usr/local/silex/package-mapping.json"
+    if [ -f "$_mapping" ]; then
+        # Count non-meta keys: lines matching `"word": ` where word doesn't start with _
+        _count=$(grep -c '^[[:space:]]*"[^_]' "$_mapping" 2>/dev/null || printf "?")
+        printf "  %-14s %s (%s entries)\n" "mapping:" "$_mapping" "$_count"
+    else
+        printf "  %-14s not found\n" "mapping:"
+    fi
+    printf "\n"
+
+    # -- Debian shims ----------------------------------------------------------
+    printf "Debian shims\n"
+    for _shim in adduser addgroup lsb_release dpkg-architecture update-alternatives; do
+        if [ -x "/usr/local/bin/$_shim" ]; then
+            printf "  %-22s /usr/local/bin/%s\n" "$_shim:" "$_shim"
+        else
+            printf "  %-22s not found\n" "$_shim:"
+        fi
+    done
+    printf "\n"
+
+    # -- GPU -------------------------------------------------------------------
+    printf "GPU\n"
+    if command -v nvidia-smi >/dev/null 2>&1; then
+        _gpu=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)
+        printf "  %-14s on (%s)\n" "status:" "${_gpu:-detected}"
+    else
+        printf "  %-14s off (nvidia-smi not found)\n" "status:"
+    fi
+    printf "\n"
+
+    # -- Cache mounts ----------------------------------------------------------
+    printf "BuildKit cache mounts (RUN --mount=type=cache,target=PATH):\n"
+    printf "  %-14s /root/.cache/sccache\n" "sccache:"
+    printf "  %-14s /root/.cache/pip\n" "pip:"
+    printf "  %-14s /root/.cache/uv\n" "uv:"
+    printf "  %-14s /root/.cargo/registry\n" "cargo:"
+    printf "  %-14s /root/go/pkg/mod\n" "go:"
+    printf "  %-14s /root/.npm\n" "npm:"
+}
+
+# ============================================================================
+# lint
+# ============================================================================
+_lint() {
+    _df="$1"
+    _srcdir="${2:-.}"
+
+    if [ -z "$_df" ]; then
+        printf "silex lint: usage: silex lint <Dockerfile> [source_dir]\n" >&2
+        exit 1
+    fi
+    if [ ! -f "$_df" ]; then
+        printf "silex lint: file not found: %s\n" "$_df" >&2
+        exit 1
+    fi
+
+    printf "Linting: %s\n\n" "$_df"
+
+    # Temp file accumulates issue lines; each issue's first line starts with "  ["
+    _out=$(mktemp)
+
+    # Parse Dockerfile: join continuation lines, emit TAB-separated records:
+    #   start_lineno TAB INSTRUCTION TAB rest_of_content
+    # Comments and blank lines are skipped.
+    _instr=$(awk '
+        /^[[:space:]]*#/  { next }
+        /^[[:space:]]*$/  { next }
+        /\\[[:space:]]*$/ {
+            sub(/\\[[:space:]]*$/, " ")
+            if (!start) start = NR
+            buf = buf $0
+            next
+        }
+        {
+            if (!start) start = NR
+            buf = buf $0
+            sub(/^[[:space:]]+/, "", buf)
+            n = index(buf, " ")
+            if (n > 0) {
+                printf "%d\t%s\t%s\n", start, substr(buf,1,n-1), substr(buf,n+1)
+            } else {
+                printf "%d\t%s\t\n", start, buf
+            }
+            buf = ""; start = 0
+        }
+    ' "$_df")
+
+    # Check 1: COPY/ADD before first package install (busts cache)
+    _first_pkg=$(printf '%s\n' "$_instr" | awk -F'\t' '
+        $2 == "RUN" && ($3 ~ /apt-get[[:space:]]+install/ || $3 ~ /apk[[:space:]]+add/ ||
+                        $3 ~ /pip[[:space:]]+install/     || $3 ~ /npm[[:space:]]+install/) {
+            print $1; exit
+        }')
+    if [ -n "$_first_pkg" ]; then
+        _early=$(printf '%s\n' "$_instr" | awk -F'\t' -v p="$_first_pkg" '
+            ($2 == "COPY" || $2 == "ADD") && $1+0 < p+0 { last=$1 }
+            END { print last }')
+        [ -n "$_early" ] && printf "  [WARN] Line %s: COPY before package install — source changes bust the package cache layer.\n         Move manifest files (CMakeLists.txt, package.json, requirements.txt) first,\n         install dependencies, then COPY .\n" "$_early" >> "$_out"
+    fi
+
+    # Check 2: apt-get install without -y (hangs in non-interactive builds)
+    printf '%s\n' "$_instr" | awk -F'\t' '
+        $2 == "RUN" && $3 ~ /apt-get[[:space:]]+install/ &&
+        $3 !~ /-y/ && $3 !~ /--yes/ && $3 !~ /--assume-yes/ {
+            printf "  [WARN] Line %s: apt-get install without -y will hang in non-interactive builds\n", $1
+        }' >> "$_out"
+
+    # Check 3: apt-get install without cache cleanup in same RUN
+    printf '%s\n' "$_instr" | awk -F'\t' '
+        $2 == "RUN" && $3 ~ /apt-get[[:space:]]+install/ &&
+        $3 !~ /rm[[:space:]]+-rf[[:space:]]+\/var\/lib\/apt/ &&
+        $3 !~ /apt-get[[:space:]]+(clean|autoclean)/ {
+            printf "  [WARN] Line %s: apt-get install without cache cleanup — add: && rm -rf /var/lib/apt/lists/*\n", $1
+        }' >> "$_out"
+
+    # Check 4: package managers without BuildKit cache mounts
+    printf '%s\n' "$_instr" | awk -F'\t' '
+        $2 == "RUN" && $3 !~ /--mount=type=cache/ {
+            mgrs = ""
+            if ($3 ~ /pip[[:space:]]+install/ || $3 ~ /pip3[[:space:]]+install/) mgrs = mgrs "pip "
+            if ($3 ~ /npm[[:space:]]+install/ || $3 ~ /npm[[:space:]]+ci/)       mgrs = mgrs "npm "
+            if ($3 ~ /cargo[[:space:]]+(build|install)/)                          mgrs = mgrs "cargo "
+            if ($3 ~ /go[[:space:]]+(build|get)/ || $3 ~ /go[[:space:]]+mod[[:space:]]+download/) mgrs = mgrs "go "
+            if ($3 ~ /uv[[:space:]]+pip[[:space:]]+install/)                      mgrs = mgrs "uv "
+            if (mgrs != "")
+                printf "  [INFO] Line %s: %swithout BuildKit cache mount — add --mount=type=cache,... to speed up repeated builds\n", $1, mgrs
+        }' >> "$_out"
+
+    # Check 5: make without -j (serial build)
+    printf '%s\n' "$_instr" | awk -F'\t' '
+        $2 == "RUN" && $3 ~ /\<make\>/ &&
+        $3 !~ /make[[:space:]]+-j/ && $3 !~ /MAKEFLAGS/ && $3 !~ /nproc/ {
+            if ($3 !~ /make[[:space:]]+(install|check|test)[[:space:]]/)
+                printf "  [INFO] Line %s: make without -j — use: make -j$(nproc)\n", $1
+        }' >> "$_out"
+
+    # Check 6: curl/wget piped directly to shell (security)
+    printf '%s\n' "$_instr" | awk -F'\t' '
+        $2 == "RUN" && $3 ~ /(curl|wget).*\|[[:space:]]*(ba)?sh/ {
+            printf "  [WARN] Line %s: piping download to shell — download, verify checksum, then execute\n", $1
+        }' >> "$_out"
+
+    # Check 7: RUN curl/wget downloading a file — BuildKit ADD --checksum is better
+    printf '%s\n' "$_instr" | awk -F'\t' '
+        $2 == "RUN" && ($3 ~ /\<curl\>/ || $3 ~ /\<wget\>/) &&
+        $3 !~ /(curl|wget).*\|[[:space:]]*(ba)?sh/ {
+            if ($3 ~ /curl[[:space:]].*-[oO]/ || $3 ~ /curl[[:space:]].*>[[:space:]]*[^|]/ || $3 ~ /\<wget\>/) {
+                match($3, /https?:\/\/[^[:space:]"'"'"'\\]+/)
+                url = (RLENGTH > 0) ? substr($3, RSTART, RLENGTH) : "https://..."
+                printf "  [INFO] Line %s: RUN curl/wget re-downloads every build — BuildKit caches ADD by URL:\n         ADD --checksum=sha256:<hash> %s /path/to/file\n         (sha256sum the file once; BuildKit skips download if URL+hash unchanged)\n", $1, url
+            }
+        }' >> "$_out"
+
+    # Check 8: Translation unit size (v0.2+)
+    # Preprocess each C/C++ source file; warn if output exceeds 100k lines.
+    # clang -O2 is disproportionately slower than gcc on very large single TUs
+    # (e.g. SQLite amalgamation: 230k lines, clang 10x slower than gcc).
+    if command -v clang >/dev/null 2>&1; then
+        _tu_list=$(mktemp)
+        find "$_srcdir" \( -name '*.c' -o -name '*.cpp' -o -name '*.cc' -o -name '*.cxx' \) \
+            -not -path '*/build/*' -not -path '*/.git/*' 2>/dev/null > "$_tu_list"
+        while IFS= read -r _src; do
+            _lines=$(clang -E "$_src" 2>/dev/null | wc -l)
+            if [ "$_lines" -gt 100000 ]; then
+                # Format with commas: 238419 -> 238,419
+                _fmt=$(printf '%d' "$_lines" | rev | sed 's/[0-9][0-9][0-9]/&,/g' | rev | sed 's/^,//')
+                printf "  [WARN] %s preprocesses to %s lines.\n         clang is significantly slower than gcc on TUs this large.\n         consider: CC=gcc for this file, or split into smaller units.\n" \
+                    "$_src" "$_fmt" >> "$_out"
+            fi
+        done < "$_tu_list"
+        rm -f "$_tu_list"
+    fi
+
+    # -- Summary ---------------------------------------------------------------
+    _issues=$(grep -c '^\s*\[' "$_out" 2>/dev/null || printf 0)
+    cat "$_out"
+    rm -f "$_out"
+
+    if [ "$_issues" -eq 0 ]; then
+        printf "  No issues found.\n"
+    else
+        printf "\n  %d issue(s) found.\n" "$_issues"
+    fi
+
+    [ "$_issues" -eq 0 ]
+}
+
+# ============================================================================
+# version
+# ============================================================================
+_version() {
+    printf "%s\n" "$SILEX_VERSION"
+}
+
+# ============================================================================
+# dispatch
+# ============================================================================
+case "$1" in
+    doctor)           _doctor ;;
+    lint)             shift; _lint "$@" ;;
+    version)          _version ;;
+    -h|--help|help|"") _usage ;;
+    *)
+        printf "silex: unknown command '%s'\n" "$1" >&2
+        _usage >&2
+        exit 1
+        ;;
+esac

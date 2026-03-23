@@ -1,0 +1,13 @@
+#!/bin/sh
+# Shim: translate Debian addgroup to Wolfi/busybox addgroup
+exec_args=""
+groupname=""
+for arg in "$@"; do
+    case "$arg" in
+        --system) exec_args="$exec_args -S" ;;
+        --gid) exec_args="$exec_args -g" ;;
+        -*) ;;
+        *) groupname="$arg" ;;
+    esac
+done
+exec /usr/sbin/addgroup $exec_args "$groupname"

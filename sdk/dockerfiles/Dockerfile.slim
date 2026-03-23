@@ -1,0 +1,274 @@
+# Silex: Fast Docker Build Base Image - Slim Variant
+# Base: Wolfi (glibc, 14MB, zero CVEs, scanner-friendly)
+# Target size: 400-500MB
+# Architecture: x86_64 and arm64
+
+# ============================================================================
+# Stage 1: Download prebuilt tools
+# ============================================================================
+FROM cgr.dev/chainguard/wolfi-base:latest AS builder
+
+ARG TARGETARCH
+ARG MOLD_VERSION=2.35.0
+ARG SCCACHE_VERSION=0.8.2
+
+RUN apk add --no-cache curl ca-certificates
+
+# Download mold (modern linker) — prebuilt binary, avoids ~15min Rust/C++ build
+# Archive layout: mold-VERSION-ARCH-linux/bin/mold
+RUN ARCH=$([ "$TARGETARCH" = "arm64" ] && echo "aarch64" || echo "x86_64") && \
+    mkdir -p /opt/mold && \
+    curl -fsSL "https://github.com/rui314/mold/releases/download/v${MOLD_VERSION}/mold-${MOLD_VERSION}-${ARCH}-linux.tar.gz" | \
+    tar xz --strip-components=1 -C /opt/mold && \
+    strip --strip-unneeded /opt/mold/bin/mold 2>/dev/null || true
+
+# Download sccache — prebuilt musl binary (v0.9.1 does not exist; v0.8.2 is last stable)
+# Architecture-aware: x86_64 and aarch64
+RUN ARCH=$([ "$TARGETARCH" = "arm64" ] && echo "aarch64" || echo "x86_64") && \
+    mkdir -p /opt/sccache && \
+    curl -fsSL "https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/sccache-v${SCCACHE_VERSION}-${ARCH}-unknown-linux-musl.tar.gz" | tar xz && \
+    install -Dm755 "sccache-v${SCCACHE_VERSION}-${ARCH}-unknown-linux-musl/sccache" /opt/sccache/bin/sccache && \
+    strip --strip-unneeded /opt/sccache/bin/sccache 2>/dev/null || true
+
+# ============================================================================
+# Stage 2: Final slim image
+# ============================================================================
+FROM cgr.dev/chainguard/wolfi-base:latest
+
+LABEL maintainer="richarah@github"
+LABEL org.opencontainers.image.title="Silex"
+LABEL org.opencontainers.image.description="Docker base image optimised for fast builds"
+LABEL org.opencontainers.image.url="https://github.com/richarah/silex"
+LABEL org.opencontainers.image.source="https://github.com/richarah/silex"
+LABEL org.opencontainers.image.licenses="MIT"
+
+# Set SOURCE_DATE_EPOCH for reproducible builds
+ENV SOURCE_DATE_EPOCH=1735689600
+
+# ============================================================================
+# Install packages
+# ============================================================================
+RUN apk add --no-cache \
+    clang-18=18.1.8-r22 \
+    libcxx1-18=18.1.8-r22 \
+    libcxx1-18-dev=18.1.8-r22 \
+    ninja-build=1.13.2-r1 \
+    python-3.12=3.12.13-r0 \
+    ca-certificates=20251003-r4 \
+    tini=0.19.0-r25 \
+    zstd=1.5.7-r7 \
+    curl=8.19.0-r4 \
+    make=4.4.1-r10 \
+    bash=5.3-r9 \
+    jemalloc=5.3.0-r11 \
+    pigz=2.8-r4 \
+    pixz=1.0.7-r3 \
+    fd=10.4.2-r3 \
+    ripgrep=15.1.0-r2 \
+    mimalloc=1.9.7-r3 \
+    uv=0.10.12-r1 \
+    xxhash=0.8.3-r3 \
+    dash=0.5.13.2-r0
+
+# ============================================================================
+# Copy prebuilt tools from builder stage
+# ============================================================================
+COPY --from=builder /opt/mold /opt/mold
+COPY --from=builder /opt/sccache /opt/sccache
+
+# ============================================================================
+# Aggressive size reduction
+# ============================================================================
+
+# 1. Strip clang of debug symbols (saves ~100MB)
+RUN find /usr/lib/llvm* -type f -name "*.so*" -exec strip --strip-unneeded {} \; 2>/dev/null || true && \
+    find /usr/bin -type f \( -name "clang*" -o -name "llvm*" \) -exec strip --strip-unneeded {} \; 2>/dev/null || true
+
+# 2. Delete unnecessary locale data (keep only en_US.UTF-8 and C)
+RUN if [ -d /usr/share/i18n/locales ]; then \
+        find /usr/share/i18n/locales -mindepth 1 -maxdepth 1 ! -name 'en_US' ! -name 'C' -exec rm -rf {} + ; \
+    fi && \
+    if [ -d /usr/lib/locale ]; then \
+        find /usr/lib/locale -mindepth 1 -maxdepth 1 ! -name 'en_US*' ! -name 'C*' -exec rm -rf {} + ; \
+    fi
+
+# 3. Delete unnecessary timezone data (keep UTC + common zones)
+RUN if [ -d /usr/share/zoneinfo ]; then \
+        find /usr/share/zoneinfo -mindepth 1 -maxdepth 1 \
+        ! -name 'UTC' \
+        ! -name 'Europe' \
+        ! -name 'America' \
+        ! -name 'zone.tab' \
+        ! -name 'iso3166.tab' \
+        -exec rm -rf {} + ; \
+    fi
+
+# 4. Strip Python (remove tests, __pycache__, idle, tkinter, turtle)
+RUN if [ -d /usr/lib/python3.12 ]; then \
+        rm -rf /usr/lib/python3.12/test \
+               /usr/lib/python3.12/idlelib \
+               /usr/lib/python3.12/tkinter \
+               /usr/lib/python3.12/turtle.py \
+               /usr/lib/python3.12/turtledemo \
+               /usr/lib/python3.12/ensurepip ; \
+    fi && \
+    find /usr/lib/python3.* -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true && \
+    find /usr/lib/python3.* -type d -name "*.dist-info" -exec rm -rf {} + 2>/dev/null || true
+
+# 5. Delete all documentation
+RUN rm -rf /usr/share/doc \
+           /usr/share/man \
+           /usr/share/info \
+           /usr/share/gtk-doc \
+           /usr/share/help
+
+# 6. Hardlink dedup: replace identical files across packages with hardlinks.
+# Groups by SHA-256; identical content → one inode. Saves space without
+# altering any file. Uses only find + sha256sum + sort + awk + ln (all present).
+RUN find /usr/lib /usr/share -xdev -type f -size +4k 2>/dev/null \
+      | sort \
+      | xargs sha256sum 2>/dev/null \
+      | sort -k1,1 \
+      | awk 'prev==$1{printf "%s\0%s\0",pf,$NF}{prev=$1;pf=$NF}' \
+      | xargs -0 -r -n2 ln -f \
+    || true
+
+# 7. Clear package cache
+RUN rm -rf /var/cache/apk/*
+
+# 7. Pre-warm DNS for commonly-hit hosts (saves 50-200ms per unique host per build)
+# Entries are marked so the entrypoint can refresh them on startup.
+# Falls back to normal DNS silently if any host is unresolvable at build time.
+RUN for _host in \
+        packages.wolfi.dev \
+        github.com \
+        objects.githubusercontent.com \
+        pypi.org \
+        registry.npmjs.org \
+        crates.io \
+        proxy.golang.org; do \
+        _ip=$(getent ahosts "$_host" 2>/dev/null | awk '/STREAM/{print $1;exit}'); \
+        [ -n "$_ip" ] && echo "$_ip $_host  # silex-dns-cache" >> /etc/hosts; \
+    done || true
+
+# ============================================================================
+# Set up symlinks
+# ============================================================================
+
+# Symlink mold as /usr/bin/ld for transparent usage
+RUN ln -sf /opt/mold/bin/mold /usr/bin/ld.mold && \
+    ln -sf /opt/mold/bin/mold /usr/bin/ld
+
+# Symlink ninja to expected location
+RUN ln -sf /usr/lib/ninja-build/bin/ninja /usr/bin/ninja
+
+# ============================================================================
+# Copy Silex scripts
+# ============================================================================
+COPY scripts/wrappers/ /usr/local/silex/bin/
+RUN chmod +x /usr/local/silex/bin/*
+
+COPY scripts/apt-shim /usr/local/bin/apt-get
+RUN chmod +x /usr/local/bin/apt-get && \
+    ln -sf /usr/local/bin/apt-get /usr/local/bin/apt
+
+# Debian compatibility shims (adduser, addgroup, lsb_release, dpkg-architecture, update-alternatives)
+COPY scripts/shims/ /usr/local/silex/shims/
+RUN chmod +x /usr/local/silex/shims/* && \
+    for f in /usr/local/silex/shims/*; do \
+        ln -sf "$f" "/usr/local/bin/$(basename $f)"; \
+    done
+
+# Add Debian-compatible os-release field for apt-based tooling
+RUN echo 'ID_LIKE=debian' >> /etc/os-release
+
+COPY scripts/silex /usr/local/bin/silex
+RUN chmod +x /usr/local/bin/silex
+
+COPY config/package-mapping.json /usr/local/silex/package-mapping.json
+
+COPY scripts/entrypoint.sh /usr/local/bin/silex-entrypoint
+RUN chmod +x /usr/local/bin/silex-entrypoint
+
+# ============================================================================
+# Environment configuration
+# ============================================================================
+
+# Wrappers first in PATH for transparent acceleration
+ENV PATH="/usr/local/silex/bin:/opt/mold/bin:/opt/sccache/bin:$PATH"
+
+# Compiler: clang by default
+ENV CC=clang \
+    CXX=clang++
+
+# Linker: mold by default
+ENV LDFLAGS="-fuse-ld=mold"
+
+# CMake: use Ninja generator by default
+ENV CMAKE_GENERATOR=Ninja
+
+# sccache: set as compiler launcher
+ENV RUSTC_WRAPPER=sccache \
+    CMAKE_C_COMPILER_LAUNCHER=sccache \
+    CMAKE_CXX_COMPILER_LAUNCHER=sccache
+
+# HTTP: prefer HTTP/2 multiplexing for all curl/libcurl calls
+ENV CURL_HTTP_VERSION=2TLS
+
+# Compression: zstd with auto thread count
+ENV ZSTD_CLEVEL=3 \
+    ZSTD_NBTHREADS=0
+
+# Locale: C for build tools (spec-compliant, avoids locale-dependent tool output)
+ENV LC_ALL=C \
+    LANG=C.UTF-8
+
+# Timezone: UTC
+ENV TZ=UTC
+
+# Disable Python bytecode generation (saves I/O during builds)
+ENV PYTHONDONTWRITEBYTECODE=1
+
+# Silex configuration (can be overridden by users)
+ENV SILEX_LINKER=mold \
+    SILEX_GENERATOR=Ninja \
+    SILEX_PARALLEL=auto \
+    SILEX_COMPRESSOR=zstd \
+    SILEX_CC=clang \
+    SILEX_CXX=clang++ \
+    SILEX_CACHE=sccache \
+    SILEX_QUIET=off \
+    SILEX_MALLOC=jemalloc \
+    SILEX_WRAPPERS=on \
+    SILEX_GIT_SHALLOW=on \
+    SILEX_APT_SHIM=on \
+    SILEX_USE_GPU=auto \
+    SILEX_IMAGE_VERSION=slim-1.1.0 \
+    SILEX_IMAGE_BASE=wolfi
+
+# ============================================================================
+# Entrypoint
+# ============================================================================
+# tini ensures proper signal handling and zombie reaping
+# silex-entrypoint reads SILEX_* env vars and reconfigures if needed
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/silex-entrypoint"]
+CMD ["/bin/bash"]
+
+# ============================================================================
+# Usage notes
+# ============================================================================
+# When this image starts, it will:
+# 1. Set LD_PRELOAD to jemalloc for faster memory allocation
+# 2. Read SILEX_* environment variables
+# 3. Reconfigure CC/CXX/linker/generator/cache based on user preferences
+# 4. Print a one-line config summary (unless SILEX_QUIET=on)
+# 5. Execute the user's command
+#
+# Example usage:
+#   FROM ghcr.io/richarah/silex:slim
+#   RUN cmake -B build && cmake --build build
+#
+# Override defaults:
+#   ENV SILEX_LINKER=lld
+#   ENV SILEX_MALLOC=system
+#   ENV SILEX_WRAPPERS=off
