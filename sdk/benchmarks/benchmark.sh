@@ -1,8 +1,10 @@
 #!/bin/sh
-# Silex benchmark: package install + compile minimal usage for 6 projects.
-# Compares silex:slim (clang + apk) vs ubuntu:24.04 (gcc + apt).
-# Usage: sh benchmarks/benchmark.sh
+# Silex benchmark: toolchain + library install + compile one file per project.
+# silex:slim has clang/mold/ninja/sccache preinstalled; only installs the library.
+# ubuntu:24.04 installs build-essential + cmake + ninja-build + library from scratch.
+# This matches the real migration scenario: FROM ubuntu → FROM silex.
 #
+# Usage: sh benchmarks/benchmark.sh
 # Requires: docker, silex:slim image already built (make build or make bootstrap).
 # Takes ~30 minutes (4 runs per project, 12 measurements total).
 
@@ -55,11 +57,16 @@ speedup() {
     awk "BEGIN{printf \"%.1fx\",($2+0)/($1+0)}"
 }
 
-printf "Silex benchmark: package install + compile one file\n"
-printf "silex:slim (clang+apk) vs ubuntu:24.04 (gcc+apt)\n"
+printf "Silex benchmark: toolchain + library install + compile one file\n"
+printf "silex:slim: library only (clang/mold/ninja preinstalled)\n"
+printf "ubuntu:24.04: build-essential + cmake + ninja-build + library\n"
 printf "Runs per project: %d (drop highest, average rest)\n\n" "$RUNS"
 
 docker pull ubuntu:24.04 -q >/dev/null 2>&1
+
+# ubuntu must install the full toolchain it doesn't have preinstalled.
+# silex only installs the library; compilers are already there.
+_U='DEBIAN_FRONTEND=noninteractive apt-get update -qq 2>/dev/null && apt-get install -y -qq --no-install-recommends build-essential cmake ninja-build'
 
 # ============================================================================
 # nlohmann/json (header-only)
@@ -68,7 +75,7 @@ printf "\n=== nlohmann/json ===\n" >&2
 S_NLOHMANN=$(bench silex silex:slim \
     'apk add -q nlohmann-json-dev && printf "#include<nlohmann/json.hpp>\nint main(){auto j=nlohmann::json::parse(\"{\\\"x\\\":1}\");return 0;}" > /t.cpp && clang++ -std=c++17 -O2 /t.cpp -o /t')
 U_NLOHMANN=$(bench ubuntu ubuntu:24.04 \
-    'DEBIAN_FRONTEND=noninteractive apt-get update -qq 2>/dev/null && apt-get install -y -qq --no-install-recommends g++ nlohmann-json3-dev 2>/dev/null && printf "#include<nlohmann/json.hpp>\nint main(){return 0;}" > /t.cpp && g++ -std=c++17 -O2 /t.cpp -o /t')
+    "$_U nlohmann-json3-dev 2>/dev/null && printf '#include<nlohmann/json.hpp>\nint main(){auto j=nlohmann::json::parse(\"{\\\"x\\\":1}\");return 0;}' > /t.cpp && g++ -std=c++17 -O2 /t.cpp -o /t")
 
 # ============================================================================
 # fmtlib
@@ -77,7 +84,7 @@ printf "\n=== fmtlib ===\n" >&2
 S_FMT=$(bench silex silex:slim \
     'apk add -q fmt-dev && printf "#include<fmt/core.h>\nint main(){fmt::print(\"{}\",1);return 0;}" > /t.cpp && clang++ -std=c++17 -O2 /t.cpp -lfmt -o /t')
 U_FMT=$(bench ubuntu ubuntu:24.04 \
-    'DEBIAN_FRONTEND=noninteractive apt-get update -qq 2>/dev/null && apt-get install -y -qq --no-install-recommends g++ libfmt-dev 2>/dev/null && printf "#include<fmt/core.h>\nint main(){fmt::print(\"{}\",1);return 0;}" > /t.cpp && g++ -std=c++17 -O2 /t.cpp -lfmt -o /t')
+    "$_U libfmt-dev 2>/dev/null && printf '#include<fmt/core.h>\nint main(){fmt::print(\"{}\",1);return 0;}' > /t.cpp && g++ -std=c++17 -O2 /t.cpp -lfmt -o /t")
 
 # ============================================================================
 # googletest
@@ -86,7 +93,7 @@ printf "\n=== googletest ===\n" >&2
 S_GTEST=$(bench silex silex:slim \
     'apk add -q gtest-dev && printf "#include<gtest/gtest.h>\nTEST(X,Y){EXPECT_EQ(1,1);}\nint main(int c,char**v){::testing::InitGoogleTest(&c,v);return RUN_ALL_TESTS();}" > /t.cpp && clang++ -std=c++17 -O2 /t.cpp -lgtest -lgtest_main -pthread -o /t')
 U_GTEST=$(bench ubuntu ubuntu:24.04 \
-    'DEBIAN_FRONTEND=noninteractive apt-get update -qq 2>/dev/null && apt-get install -y -qq --no-install-recommends g++ libgtest-dev 2>/dev/null && printf "#include<gtest/gtest.h>\nTEST(X,Y){EXPECT_EQ(1,1);}\nint main(int c,char**v){::testing::InitGoogleTest(&c,v);return RUN_ALL_TESTS();}" > /t.cpp && g++ -std=c++17 -O2 /t.cpp -lgtest -lgtest_main -pthread -o /t')
+    "$_U libgtest-dev 2>/dev/null && printf '#include<gtest/gtest.h>\nTEST(X,Y){EXPECT_EQ(1,1);}\nint main(int c,char**v){::testing::InitGoogleTest(&c,v);return RUN_ALL_TESTS();}' > /t.cpp && g++ -std=c++17 -O2 /t.cpp -lgtest -lgtest_main -pthread -o /t")
 
 # ============================================================================
 # abseil-cpp
@@ -95,7 +102,7 @@ printf "\n=== abseil-cpp ===\n" >&2
 S_ABSL=$(bench silex silex:slim \
     'apk add -q abseil-cpp-20250127-dev && printf "#include<absl/strings/str_join.h>\nint main(){std::vector<std::string> v={\"a\",\"b\"};absl::StrJoin(v,\",\");return 0;}" > /t.cpp && clang++ -std=c++17 -O2 /t.cpp -labsl_strings -o /t')
 U_ABSL=$(bench ubuntu ubuntu:24.04 \
-    'DEBIAN_FRONTEND=noninteractive apt-get update -qq 2>/dev/null && apt-get install -y -qq --no-install-recommends g++ libabsl-dev 2>/dev/null && printf "#include<absl/strings/str_join.h>\nint main(){std::vector<std::string> v={\"a\",\"b\"};absl::StrJoin(v,\",\");return 0;}" > /t.cpp && g++ -std=c++17 -O2 /t.cpp -labsl_strings -o /t')
+    "$_U libabsl-dev 2>/dev/null && printf '#include<absl/strings/str_join.h>\nint main(){std::vector<std::string> v={\"a\",\"b\"};absl::StrJoin(v,\",\");return 0;}' > /t.cpp && g++ -std=c++17 -O2 /t.cpp -labsl_strings -o /t")
 
 # ============================================================================
 # re2
@@ -104,7 +111,7 @@ printf "\n=== re2 ===\n" >&2
 S_RE2=$(bench silex silex:slim \
     'apk add -q re2-dev && printf "#include<re2/re2.h>\nint main(){re2::RE2 r(\"a+\");return re2::RE2::FullMatch(\"aaa\",r)?0:1;}" > /t.cpp && clang++ -std=c++17 -O2 /t.cpp -lre2 -o /t')
 U_RE2=$(bench ubuntu ubuntu:24.04 \
-    'DEBIAN_FRONTEND=noninteractive apt-get update -qq 2>/dev/null && apt-get install -y -qq --no-install-recommends g++ libre2-dev 2>/dev/null && printf "#include<re2/re2.h>\nint main(){re2::RE2 r(\"a+\");return re2::RE2::FullMatch(\"aaa\",r)?0:1;}" > /t.cpp && g++ -std=c++17 -O2 /t.cpp -lre2 -o /t')
+    "$_U libre2-dev 2>/dev/null && printf '#include<re2/re2.h>\nint main(){re2::RE2 r(\"a+\");return re2::RE2::FullMatch(\"aaa\",r)?0:1;}' > /t.cpp && g++ -std=c++17 -O2 /t.cpp -lre2 -o /t")
 
 # ============================================================================
 # SQLite amalgam (compile from source; clang -O3 vs gcc -O3)
@@ -113,7 +120,7 @@ printf "\n=== SQLite amalgam ===\n" >&2
 S_SQLITE=$(bench silex silex:slim \
     'apk add -q curl unzip && curl -fsSL https://www.sqlite.org/2024/sqlite-amalgamation-3470200.zip -o /s.zip && unzip -q /s.zip -d /s && clang -O3 /s/sqlite-amalgamation-3470200/sqlite3.c -o /sqlite3 -lpthread -ldl -lm')
 U_SQLITE=$(bench ubuntu ubuntu:24.04 \
-    'DEBIAN_FRONTEND=noninteractive apt-get update -qq 2>/dev/null && apt-get install -y -qq --no-install-recommends gcc curl unzip 2>/dev/null && curl -fsSL https://www.sqlite.org/2024/sqlite-amalgamation-3470200.zip -o /s.zip && unzip -q /s.zip -d /s && gcc -O3 /s/sqlite-amalgamation-3470200/sqlite3.c -o /sqlite3 -lpthread -ldl -lm')
+    "$_U curl unzip 2>/dev/null && curl -fsSL https://www.sqlite.org/2024/sqlite-amalgamation-3470200.zip -o /s.zip && unzip -q /s.zip -d /s && gcc -O3 /s/sqlite-amalgamation-3470200/sqlite3.c -o /sqlite3 -lpthread -ldl -lm")
 
 # ============================================================================
 # Results table

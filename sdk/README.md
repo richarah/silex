@@ -167,20 +167,21 @@ musl won't run (glibc). Recompile from source.
 
 ## Benchmarks
 
-Package install from base image + compile one file using the library.
-Docker 29.2.0, Linux 6.17.0, x86_64, 32 cores. 4 runs per
-measurement, highest dropped, 3-run average.
+Toolchain install + library install + compile one file.
+silex: library only (compilers preinstalled). ubuntu: build-essential
++ cmake + ninja-build + library. Docker 29.2.0, Linux 6.17.0, x86_64,
+32 cores. 4 runs per measurement, highest dropped, 3-run average.
 
     project           silex       ubuntu       speedup
-    nlohmann/json     5,273ms      9,286ms      1.8x
-    fmtlib            4,061ms      8,845ms      2.2x
-    googletest        4,975ms     10,464ms      2.1x
-    abseil-cpp        5,630ms      8,591ms      1.5x
-    google/re2        9,101ms      8,981ms      1.0x      (tie)
-    SQLite amalgam   17,694ms      7,159ms      0.4x      SLOWER
+    nlohmann/json     5,059ms     12,474ms      2.5x
+    fmtlib            3,969ms     10,790ms      2.7x
+    googletest        4,964ms     10,508ms      2.1x
+    abseil-cpp        5,508ms     14,610ms      2.7x
+    google/re2        8,991ms     12,073ms      1.3x
+    SQLite amalgam   17,749ms     11,366ms      0.6x      SLOWER
 
-The honest version: the large speedups include package install time.
-`apt-get update` takes 10-30 seconds; `apk` takes under one.
+silex has clang, mold, Ninja, sccache preinstalled. ubuntu:24.04 has
+none of those and needs apt-get update + build-essential each build.
 Isolated compilation: clang is 14-33% faster than gcc on
 template-heavy C++.
 
@@ -317,10 +318,11 @@ Pinned Dockerfiles break. Source tarballs with SHA256 don't.
 Maybe. `SILEX_WRAPPERS=off` for raw apk. File a bug.
 
 **Are the speedups real?**
-Yes. 1.5-2.2x for typical library usage (apk vs apt-get plus clang
-vs gcc). 18x for warm sccache rebuilds. SQLite is a known exception
-where clang is slower. We show all three because we'd rather be
-trusted than impressive.
+Yes. 2.1-2.7x for typical library usage: silex has compilers
+preinstalled, ubuntu needs apt-get install build-essential cmake
+ninja-build first. 18x for warm sccache rebuilds. SQLite is a known
+exception where clang is slower. We show all three because we'd
+rather be trusted than impressive.
 
 **How about a Rust rewrite?**
 It's a Dockerfile.
