@@ -302,26 +302,32 @@ skipping the 60-minute LLVM step. Silex builds Silex.
 ## FAQ
 
 **Why not Alpine?**
+
 musl. Measurably slower for compilation in our benchmarks,
 despite a newer gcc. The overhead is the libc, not the
 compiler.
 
 **Why build from source?**
+
 Wolfi is rolling. Chainguard deletes packages after 12 months.
 Pinned Dockerfiles break. Source tarballs with SHA256 don't.
 
 **Will this break my Dockerfile?**
-Maybe. `SILEX_WRAPPERS=off` for raw apk. File a bug.
+
+Possibly. `SILEX_WRAPPERS=off` for raw apk. File a bug if the issue persists.
 
 **Are the speedups real?**
+
 2-3x cold, compilers preinstalled vs `apt-get install` each
 build. 18x warm sccache. SQLite is slower. Methodology and
 harness in `benchmarks/`.
 
 **Rust rewrite?**
+
 It's a Dockerfile.
 
 **silex?**
+
 Latin for flint.
 
 ## Licence
