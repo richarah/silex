@@ -9,7 +9,7 @@ Change your FROM line. Keep everything else.
 + FROM silex:slim
 ```
 
-Your Dockerfile doesn't change. Your build time does.
+Your Dockerfile doesn't change, your build time does.
 Cold builds 2-3x faster. Warm sccache rebuilds 18x.
 
 CI/CD pipelines, local development, anywhere you're waiting
