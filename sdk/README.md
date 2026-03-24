@@ -9,8 +9,7 @@ A considered Docker base image.
 
 Cold builds 2-3x faster. Warm sccache rebuilds 18x.
 Everything else in your Dockerfile stays the same.
-`apt-get` still works. If something doesn't,
-`ENV SILEX_WRAPPERS=off` and you're on raw apk.
+`apt-get` still works. If it doesn't, `ENV SILEX_WRAPPERS=off` and you're on raw apk.
 
 ## Why this exists
 
@@ -209,7 +208,7 @@ are bash. Use POSIX sh or `#!/bin/bash`.
 
 **`python3` on PATH. `python` is not.** Per PEP 394.
 
-**504 common pkgs mapped, not all.** There are 68,000 in Debian.
+**504 common pkgs mapped, not all.** There are 68,000 in Debian, most of them irrelevant to Docker builds.
 `apk search` for the rest, or file an issue.
 
 **No GPU in slim.** CPU only.
