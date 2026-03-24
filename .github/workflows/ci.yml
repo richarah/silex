@@ -18,8 +18,32 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build silex:slim
-        run: bash scripts/build.sh --only slim
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Pull the previous silex:slim to use as the build base.
+      # If no published image exists yet, fall back to bootstrap.
+      - name: Pull or bootstrap silex:slim
+        run: |
+          if docker pull ghcr.io/${{ github.repository }}:slim 2>/dev/null; then
+            docker tag ghcr.io/${{ github.repository }}:slim silex:slim
+            echo "SILEX_BUILD_MODE=self-hosted" >> $GITHUB_ENV
+          else
+            echo "No published image found; running bootstrap build."
+            echo "SILEX_BUILD_MODE=bootstrap" >> $GITHUB_ENV
+          fi
+
+      - name: Build silex:slim (self-hosted)
+        if: env.SILEX_BUILD_MODE == 'self-hosted'
+        run: make build
+
+      - name: Build silex:slim (bootstrap)
+        if: env.SILEX_BUILD_MODE == 'bootstrap'
+        run: make bootstrap
 
       - name: Check image size
         run: |
@@ -30,8 +54,8 @@ jobs:
             exit 1
           fi
 
-      - name: Run test suite
-        run: bash scripts/test.sh
+      - name: Run compat tests
+        run: make test
 
       - name: Lint examples
         run: |

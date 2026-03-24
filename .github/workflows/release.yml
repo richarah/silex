@@ -11,7 +11,7 @@ env:
 
 jobs:
   release:
-    name: Build and Push Multi-Arch Images
+    name: Build and Push
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -20,9 +20,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Set up QEMU (for ARM64 cross-build)
-        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -38,45 +35,25 @@ jobs:
         id: version
         run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
 
-      - name: Build and push silex:slim (multi-arch)
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: dockerfiles/Dockerfile.slim
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:slim
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:slim-${{ steps.version.outputs.VERSION }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:slim-latest
+      # Bootstrap build from source. Reproducible, no dependency on previous image.
+      # arm64 via QEMU is too slow for a full LLVM build; native arm64 runner required.
+      - name: Build silex:slim (bootstrap, amd64)
+        run: make bootstrap TARGETARCH=amd64
 
-      - name: Build and push silex:dev (multi-arch)
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: dockerfiles/Dockerfile.dev
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:dev
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:dev-${{ steps.version.outputs.VERSION }}
-
-      - name: Build and push silex:runtime (multi-arch)
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: dockerfiles/Dockerfile.runtime
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:runtime
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:runtime-${{ steps.version.outputs.VERSION }}
+      - name: Tag and push silex:slim
+        run: |
+          IMG="${{ env.REGISTRY }}/$(echo "${{ env.IMAGE_NAME }}" | tr '[:upper:]' '[:lower:]')"
+          docker tag silex:slim "${IMG}:slim"
+          docker tag silex:slim "${IMG}:slim-${{ steps.version.outputs.VERSION }}"
+          docker tag silex:slim "${IMG}:slim-latest"
+          docker push "${IMG}:slim"
+          docker push "${IMG}:slim-${{ steps.version.outputs.VERSION }}"
+          docker push "${IMG}:slim-latest"
 
       - name: Get image size
         id: image_size
         run: |
-          docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:slim
-          SIZE_MB=$(docker inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:slim --format='{{.Size}}' | awk '{printf "%.0f\n", $1/1024/1024}')
+          SIZE_MB=$(docker inspect silex:slim --format='{{.Size}}' | awk '{printf "%.0f\n", $1/1024/1024}')
           echo "SIZE_MB=${SIZE_MB}" >> $GITHUB_OUTPUT
 
       - name: Create GitHub Release
@@ -90,8 +67,6 @@ jobs:
 
             ```
             docker pull ghcr.io/richarah/silex:slim
-            docker pull ghcr.io/richarah/silex:dev
-            docker pull ghcr.io/richarah/silex:runtime
             ```
 
             ### Image Sizes
