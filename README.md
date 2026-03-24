@@ -1,5 +1,7 @@
 # silex
 
+A Docker image where everything is fast.
+
 Change your FROM line. Keep everything else.
 
 ```dockerfile
