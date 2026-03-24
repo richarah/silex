@@ -1,6 +1,7 @@
 # silex
 
-A Docker base image built for compilation speed.
+A Docker base image with nothing accidental in it.
+
 ```dockerfile
 - FROM ubuntu:24.04
 + FROM silex:slim
@@ -18,7 +19,7 @@ back to raw apk. Nothing is irreversible.
 
 ## Why this exists
 
-Because `dpkg --configure -a` has mass.
+Because your compiler shouldn't wait for dpkg.
 
 The tools inside a typical base image were designed for
 systems that persist. A build layer doesn't, it succeeds or it fails.
