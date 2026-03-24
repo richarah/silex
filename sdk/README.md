@@ -1,6 +1,6 @@
-A Docker base image where everything is fast.
-
 # silex
+
+A Docker base image where everything is fast.
 
 Change your FROM line. Keep everything else.
 
