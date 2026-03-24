@@ -10,7 +10,7 @@ Change your FROM line. Keep everything else.
 ```
 
 Your Dockerfile doesn't change. Your build time does.
-Cold builds 6-32x faster. Warm rebuilds 21x.
+Cold builds 2-3x faster. Warm sccache rebuilds 18x.
 
 ## Why this exists
 
@@ -33,7 +33,7 @@ on tools that weren't designed around floppy disk throughput.
 | Compiler | clang 18.1.8 | gcc | 14-33% faster on template-heavy C++ |
 | Linker | mold 2.40.4 | ld/gold/lld | 5-10x faster per link step |
 | Build system | ninja 1.12.1 | make | Better job scheduling, lower overhead |
-| Compiler cache | sccache 0.8.2 | ccache | 21x faster warm rebuilds. Remote backends. |
+| Compiler cache | sccache 0.8.2 | ccache | 18x faster warm rebuilds. Remote backends. |
 | Allocator | mimalloc 2.1.7 | glibc malloc | 9% faster under multi-threaded builds. LD_PRELOAD. |
 | Compression | zstd 1.5.6 | gzip | Parallel. |
 | Coreutils | busybox 1.37.0 | GNU coreutils | Single binary. Fastest in benchmark. |
