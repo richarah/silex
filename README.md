@@ -32,7 +32,7 @@ Your build layer's job is to compile C++ and exit with code 0.
 | Compression | zstd 1.5.6 | gzip | Parallel. |
 | Coreutils | busybox 1.37.0 | GNU coreutils | Single binary. Fastest in benchmark. |
 | Shell | dash 0.5.12 | bash | /bin/sh. 4x faster startup. |
-| Package mgr | apk (+ apt/dpkg fallback) | apt/dpkg | No postinstall scripts. Sub-second installs. |
+| Package mgr | apk (+ apt shim) | apt/dpkg | No postinstall scripts. Sub-second installs. |
 | PID 1 | tini 0.19.0 | nothing | Signal reaping, zombie prevention |
 
 Also ships fd and ripgrep alongside find and grep.
