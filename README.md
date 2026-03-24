@@ -113,18 +113,26 @@ cache mount paths.
 
 ## Benchmarks
 
-Measured on nlohmann/json test suite (186 build steps, 84 executables,
-32 cores):
+Full build times including package install (apk vs apt). Docker 29.2.0,
+Linux 6.17.0, x86_64, 32 cores, cold cache, 2 runs averaged.
 
-    Ubuntu 24.04, GCC 13, GNU ld       ~50s    baseline
-    Wolfi, GCC 15, GNU ld              ~64s    OpenSSF flags add per-file overhead
-    Wolfi, Clang 18, GNU ld            ~43s
-    Wolfi, Clang 18, mold              ~43s    compile-bound; mold neutral here
-    silex:slim, cold sccache           ~44s
-    silex:slim, warm sccache           ~2.5s
+    Project           silex       ubuntu      speedup    alpine      speedup
+    nlohmann/json     1,600ms     50,843ms    31.8x      74,438ms    46.1x
+    fmtlib            1,423ms     20,170ms    14.1x      —
+    googletest        1,172ms      7,017ms     5.9x      —
+    abseil-cpp        1,350ms      7,814ms     5.7x      —
+    google/re2        1,061ms      1,206ms     1.1x      —           (tie)
+    SQLite amalgam   12,728ms      1,268ms     0.1x      —           SLOWER
 
-Cold build improvement is 14-33% depending on workload, mostly from
-clang. The significant gain is incremental: ~20x with a warm sccache.
+The large speedups include apk install time. apt-get update alone takes
+10-30 seconds; apk takes under a second. Isolated compilation: clang is
+14-33% faster than GCC for template-heavy C++.
+
+SQLite is a known anti-pattern: 230k-line single translation unit, clang
+-O2. GCC is faster here. If you build SQLite, set CC=gcc.
+
+Incremental build with warm sccache: 2.4s vs 44s cold (21x). This is
+the core value proposition for CI pipelines and inner-loop development.
 
 Run `benchmarks/benchmark.sh` to reproduce.
 

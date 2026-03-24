@@ -58,7 +58,6 @@ RUN apk add --no-cache \
     tini=0.19.0-r25 \
     zstd=1.5.7-r7 \
     curl=8.19.0-r4 \
-    git=2.53.0-r0 \
     make=4.4.1-r10 \
     bash=5.3-r9 \
     jemalloc=5.3.0-r11 \
@@ -186,6 +185,9 @@ ENV CMAKE_GENERATOR=Ninja
 ENV RUSTC_WRAPPER=sccache \
     CMAKE_C_COMPILER_LAUNCHER=sccache \
     CMAKE_CXX_COMPILER_LAUNCHER=sccache
+
+# HTTP: prefer HTTP/2 multiplexing for all curl/libcurl calls
+ENV CURL_HTTP_VERSION=2TLS
 
 # Compression: zstd with auto thread count
 ENV ZSTD_CLEVEL=3 \

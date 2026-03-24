@@ -5,9 +5,8 @@ FROM silex:slim
 
 # Dev-only extras: editors, shells (fd/ripgrep/uv are in slim)
 RUN apk add --no-cache \
-    git \
+    git=2.53.0-r0 \
     openssh-client \
-    bash \
     less \
     vim
 

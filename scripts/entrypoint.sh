@@ -24,7 +24,7 @@ case "$MALLOC" in
         if [ -n "$_mimalloc_so" ]; then
             export LD_PRELOAD="$_mimalloc_so"
         else
-            echo "silex: Warning: mimalloc not available in silex:slim, using system allocator" >&2
+            echo "silex: Warning: mimalloc library not found, using system allocator" >&2
         fi
         ;;
     system)
