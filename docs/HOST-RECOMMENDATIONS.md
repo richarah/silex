@@ -61,6 +61,39 @@ docker run --cpuset-cpus="0-7" silex:slim ...
 
 Ensure your Docker host uses cgroups v2. Most modern Linux distributions (Fedora, Ubuntu 22.04+) default to it. Improves resource accounting.
 
+## Layer compression
+
+Docker layers are gzip-compressed by default. BuildKit supports zstd, which
+is smaller and faster to decompress (silex ships zstd, so the irony is noted).
+
+Enable zstd compression at push time:
+
+```bash
+DOCKER_BUILDKIT=1 docker build \
+    --output type=image,name=myimage,push=true,compression=zstd .
+```
+
+Or permanently in `/etc/docker/daemon.json` (requires containerd snapshotter):
+
+```json
+{
+  "features": {"containerd-snapshotter": true}
+}
+```
+
+Typical savings vs gzip: 15-25% smaller compressed size. Decompression is
+3-4x faster, which matters for cold starts on slow disks or network storage.
+
+The image size numbers in the README are uncompressed (`docker images` output).
+Compressed pull size is roughly 40% of that.
+
+To investigate what is large in a built image before pushing:
+
+```bash
+docker run --rm silex:slim sh -c \
+  "du -sh /opt/llvm /usr/bin /usr/lib /usr/local 2>/dev/null | sort -rh | head -20"
+```
+
 ## apk package pre-fetch
 
 Pre-fetch packages into a host cache before the build layer runs. Avoids re-downloading the same packages across builds:

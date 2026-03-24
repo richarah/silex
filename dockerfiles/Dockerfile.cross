@@ -1,6 +1,12 @@
 # Silex Cross-Compilation Variant
-# Extends silex:slim with cross-compilation sysroot and toolchain files
-# for building x86_64 binaries that run on arm64 (and vice versa).
+# Extends silex:slim with QEMU user-mode emulation and CMake toolchain files
+# for cross-compilation between x86_64 and arm64.
+#
+# clang and lld are already in silex:slim (compiled from source with both
+# X86 and AArch64 targets enabled). No additional compiler packages needed.
+#
+# For sysroot-based cross-compilation without QEMU, install target libc
+# headers and libraries manually (apk add or bind-mount a sysroot).
 #
 # Usage:
 #   FROM ghcr.io/richarah/silex:cross
@@ -8,51 +14,42 @@
 #       -DCMAKE_TOOLCHAIN_FILE=/usr/local/silex/toolchains/aarch64-linux-gnu.cmake \
 #       && cmake --build build
 
-FROM ghcr.io/richarah/silex:slim
+FROM silex:slim
 
-LABEL org.opencontainers.image.title="Silex Cross"
-LABEL org.opencontainers.image.description="Silex with cross-compilation sysroot (x86_64 ↔ arm64)"
+# qemu-user-static: executes foreign-architecture binaries via binfmt_misc.
+# Requires host kernel binfmts registered (docker run --privileged or
+# tonistiigi/binfmt image pre-run on the host).
+RUN apk add --no-cache qemu-user-static
 
-# Install cross-compilation sysroot and toolchain support packages
-RUN apk add --no-cache \
-    clang-18-extras \
-    lld \
-    qemu-user-static
-
-# Create CMake toolchain files for cross-compilation
 RUN mkdir -p /usr/local/silex/toolchains
 
-# aarch64 (arm64) target toolchain
-RUN cat > /usr/local/silex/toolchains/aarch64-linux-gnu.cmake <<'EOF'
-set(CMAKE_SYSTEM_NAME Linux)
-set(CMAKE_SYSTEM_PROCESSOR aarch64)
+# aarch64 target: builds arm64 binaries from an x86_64 host.
+RUN printf '%s\n' \
+      'set(CMAKE_SYSTEM_NAME Linux)' \
+      'set(CMAKE_SYSTEM_PROCESSOR aarch64)' \
+      'set(CMAKE_C_COMPILER clang)' \
+      'set(CMAKE_CXX_COMPILER clang++)' \
+      'set(CMAKE_C_COMPILER_TARGET aarch64-linux-gnu)' \
+      'set(CMAKE_CXX_COMPILER_TARGET aarch64-linux-gnu)' \
+      'set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)' \
+      'set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)' \
+      'set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)' \
+    > /usr/local/silex/toolchains/aarch64-linux-gnu.cmake
 
-set(CMAKE_C_COMPILER clang)
-set(CMAKE_CXX_COMPILER clang++)
+# x86_64 target: builds amd64 binaries from an arm64 host.
+RUN printf '%s\n' \
+      'set(CMAKE_SYSTEM_NAME Linux)' \
+      'set(CMAKE_SYSTEM_PROCESSOR x86_64)' \
+      'set(CMAKE_C_COMPILER clang)' \
+      'set(CMAKE_CXX_COMPILER clang++)' \
+      'set(CMAKE_C_COMPILER_TARGET x86_64-linux-gnu)' \
+      'set(CMAKE_CXX_COMPILER_TARGET x86_64-linux-gnu)' \
+      'set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)' \
+      'set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)' \
+      'set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)' \
+    > /usr/local/silex/toolchains/x86_64-linux-gnu.cmake
 
-set(CMAKE_C_COMPILER_TARGET aarch64-linux-gnu)
-set(CMAKE_CXX_COMPILER_TARGET aarch64-linux-gnu)
-
-set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
-set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
-set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
-EOF
-
-# x86_64 target toolchain (for cross-building on arm64 hosts)
-RUN cat > /usr/local/silex/toolchains/x86_64-linux-gnu.cmake <<'EOF'
-set(CMAKE_SYSTEM_NAME Linux)
-set(CMAKE_SYSTEM_PROCESSOR x86_64)
-
-set(CMAKE_C_COMPILER clang)
-set(CMAKE_CXX_COMPILER clang++)
-
-set(CMAKE_C_COMPILER_TARGET x86_64-linux-gnu)
-set(CMAKE_CXX_COMPILER_TARGET x86_64-linux-gnu)
-
-set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
-set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
-set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
-EOF
-
+LABEL org.opencontainers.image.title="Silex Cross"
+LABEL org.opencontainers.image.description="Silex with cross-compilation support (x86_64 <-> arm64)"
 LABEL org.opencontainers.image.source="https://github.com/richarah/silex"
 LABEL org.opencontainers.image.licenses="MIT"

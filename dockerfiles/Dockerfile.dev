@@ -1,18 +1,22 @@
 # Silex: Development Variant
-# Extends silex:slim with interactive dev tools
-# Not optimised for size — full-sized packages, no stripping
+# Extends silex:slim with interactive dev tools.
+# Not optimised for size.
+#
+# Adds: git (GPLv2), openssh-client, less, vim.
+# git is the only GPLv2 component in the silex image family.
+# Source availability: https://github.com/wolfi-dev/os (git.yaml)
 FROM silex:slim
 
-# Dev-only extras: editors, shells (fd/ripgrep/uv are in slim)
+# Pin versions: run `apk info -v git openssh-client less vim` inside
+# cgr.dev/chainguard/wolfi-base to get current values.
 RUN apk add --no-cache \
     git=2.53.0-r0 \
     openssh-client \
     less \
     vim
 
-# Override locale for interactive use
+# Locale for interactive sessions.
 ENV LC_ALL=en_US.UTF-8 \
     LANG=en_US.UTF-8
 
-# Drop back to bash for interactive sessions
 CMD ["/bin/bash"]
