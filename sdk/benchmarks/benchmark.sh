@@ -1,222 +1,138 @@
-#!/bin/bash
-# Silex benchmark script: compare build times vs ubuntu:24.04
-# Runs the same C++ project build in both environments and reports timing
+#!/bin/sh
+# Silex benchmark: package install + compile minimal usage for 6 projects.
+# Compares silex:slim (clang + apk) vs ubuntu:24.04 (gcc + apt).
+# Usage: sh benchmarks/benchmark.sh
+#
+# Requires: docker, silex:slim image already built (make build or make bootstrap).
+# Takes ~30 minutes (4 runs per project, 12 measurements total).
 
 set -e
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="$SCRIPT_DIR/projects/cpp-json-parser"
-RESULTS_DIR="$SCRIPT_DIR/results"
-TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+RUNS=4   # 4 runs per image per project; drop highest, average remaining 3
 
-# Colours for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
-
-echo -e "${BLUE}=====================================${NC}"
-echo -e "${BLUE}Silex Build Performance Benchmark${NC}"
-echo -e "${BLUE}=====================================${NC}"
-echo ""
-
-# Create results directory
-mkdir -p "$RESULTS_DIR"
-
-# ============================================================================
-# Build Silex image
-# ============================================================================
-echo -e "${YELLOW}Building Silex image...${NC}"
-cd "$SCRIPT_DIR/.."
-docker build -f dockerfiles/Dockerfile.slim -t silex:slim . || {
-    echo -e "${RED}Failed to build Silex image${NC}"
-    exit 1
+# Run command in container, print elapsed ms to stdout.
+_time_run() {
+    _img="$1"
+    _cmd="$2"
+    _t0=$(date +%s%3N)
+    docker run --rm "$_img" sh -c "$_cmd" >/dev/null 2>&1
+    _t1=$(date +%s%3N)
+    printf '%d' $((_t1 - _t0))
 }
-echo -e "${GREEN}✓ Silex image built${NC}"
-echo ""
 
-# ============================================================================
-# Create Ubuntu comparison Dockerfile
-# ============================================================================
-echo -e "${YELLOW}Creating Ubuntu comparison image...${NC}"
-cat > /tmp/Dockerfile.ubuntu-build <<'EOF'
-FROM ubuntu:24.04
-
-ENV DEBIAN_FRONTEND=noninteractive
-
-RUN apt-get update && \
-    apt-get install -y \
-        build-essential \
-        cmake \
-        ninja-build \
-    && rm -rf /var/lib/apt/lists/*
-
-# Use bash as shell
-SHELL ["/bin/bash", "-c"]
-EOF
-
-docker build -f /tmp/Dockerfile.ubuntu-build -t ubuntu-build:test . || {
-    echo -e "${RED}Failed to build Ubuntu comparison image${NC}"
-    exit 1
-}
-echo -e "${GREEN}✓ Ubuntu comparison image built${NC}"
-echo ""
-
-# ============================================================================
-# Benchmark function
-# ============================================================================
-run_benchmark() {
-    local image="$1"
-    local name="$2"
-    local runs=3
-
-    echo -e "${YELLOW}Benchmarking ${name}...${NC}" >&2
-
-    local total_time=0
-    local best_time=999999
-    local worst_time=0
-
-    for i in $(seq 1 $runs); do
-        echo -n "  Run $i/$runs: " >&2
-
-        # Run build and time it
-        local start
-        start=$(date +%s%3N)
-
-        docker run --rm \
-            -v "$PROJECT_DIR:/workspace" \
-            -w /workspace \
-            "$image" \
-            bash -c "
-                rm -rf build && \
-                cmake -B build -DCMAKE_BUILD_TYPE=Release -G Ninja -Wno-dev && \
-                cmake --build build --parallel \$(nproc)
-            " > /dev/null 2>&1
-
-        local end
-        end=$(date +%s%3N)
-        local duration=$(( end - start )) # milliseconds
-        local duration_sec
-        duration_sec=$(echo "scale=2; $duration / 1000" | bc)
-
-        echo "${duration_sec}s" >&2
-
-        total_time=$(( total_time + duration ))
-
-        if (( duration < best_time )); then
-            best_time=$duration
-        fi
-
-        if (( duration > worst_time )); then
-            worst_time=$duration
-        fi
+# bench LABEL IMAGE CMD — prints avg ms (drop-highest of RUNS runs).
+bench() {
+    _label="$1"
+    _image="$2"
+    _cmd="$3"
+    _results=""
+    _i=0
+    while [ "$_i" -lt "$RUNS" ]; do
+        _dt=$(_time_run "$_image" "$_cmd")
+        _results="$_results $_dt"
+        printf '  %s r%d: %dms\n' "$_label" "$((_i+1))" "$_dt" >&2
+        _i=$((_i + 1))
     done
-
-    local avg_time=$(( total_time / runs ))
-    local avg_sec
-    avg_sec=$(echo "scale=2; $avg_time / 1000" | bc)
-    local best_sec
-    best_sec=$(echo "scale=2; $best_time / 1000" | bc)
-    local worst_sec
-    worst_sec=$(echo "scale=2; $worst_time / 1000" | bc)
-
-    echo -e "${GREEN}  Average: ${avg_sec}s (best: ${best_sec}s, worst: ${worst_sec}s)${NC}" >&2
-    echo "" >&2
-
-    # Return average time in milliseconds (stdout only — no ANSI codes)
-    echo "$avg_time"
+    _sorted=$(printf '%s\n' $_results | sort -n)
+    _a=$(printf '%s\n' $_sorted | sed -n '1p')
+    _b=$(printf '%s\n' $_sorted | sed -n '2p')
+    _c=$(printf '%s\n' $_sorted | sed -n '3p')
+    printf '%d' $(((_a + _b + _c) / 3))
 }
 
-# ============================================================================
-# Run benchmarks
-# ============================================================================
-silex_time=$(run_benchmark "silex:slim" "Silex")
-ubuntu_time=$(run_benchmark "ubuntu-build:test" "Ubuntu 24.04")
+# Format ms with thousands separator.
+comma() {
+    _n=$1
+    if [ "$_n" -ge 10000 ]; then
+        printf '%d,%03d' $((_n / 1000)) $((_n % 1000))
+    else
+        printf '%d' "$_n"
+    fi
+}
+
+# Print speedup as N.Nx.
+speedup() {
+    awk "BEGIN{printf \"%.1fx\",($2+0)/($1+0)}"
+}
+
+printf "Silex benchmark: package install + compile one file\n"
+printf "silex:slim (clang+apk) vs ubuntu:24.04 (gcc+apt)\n"
+printf "Runs per project: %d (drop highest, average rest)\n\n" "$RUNS"
+
+docker pull ubuntu:24.04 -q >/dev/null 2>&1
 
 # ============================================================================
-# Calculate speedup
+# nlohmann/json (header-only)
 # ============================================================================
-speedup=$(echo "scale=2; $ubuntu_time / $silex_time" | bc)
-silex_sec=$(echo "scale=2; $silex_time / 1000" | bc)
-ubuntu_sec=$(echo "scale=2; $ubuntu_time / 1000" | bc)
-time_saved=$(echo "scale=2; ($ubuntu_time - $silex_time) / 1000" | bc)
-
-echo -e "${BLUE}=====================================${NC}"
-echo -e "${BLUE}Results${NC}"
-echo -e "${BLUE}=====================================${NC}"
-echo -e "Silex:      ${GREEN}${silex_sec}s${NC}"
-echo -e "Ubuntu:     ${ubuntu_sec}s"
-echo -e "Speedup:    ${GREEN}${speedup}x${NC}"
-echo -e "Time saved: ${GREEN}${time_saved}s${NC}"
-echo ""
-
-if (( $(echo "$speedup >= 2.0" | bc -l) )); then
-    echo -e "${GREEN}✓ SUCCESS: Silex is ${speedup}x faster than Ubuntu!${NC}"
-elif (( $(echo "$speedup >= 1.5" | bc -l) )); then
-    echo -e "${YELLOW}⚠ MODERATE: Silex is ${speedup}x faster (target: 2-3x)${NC}"
-else
-    echo -e "${RED}✗ FAIL: Silex speedup is only ${speedup}x (target: 2-3x)${NC}"
-fi
-echo ""
+printf "\n=== nlohmann/json ===\n" >&2
+S_NLOHMANN=$(bench silex silex:slim \
+    'apk add -q nlohmann-json-dev && printf "#include<nlohmann/json.hpp>\nint main(){auto j=nlohmann::json::parse(\"{\\\"x\\\":1}\");return 0;}" > /t.cpp && clang++ -std=c++17 -O2 /t.cpp -o /t')
+U_NLOHMANN=$(bench ubuntu ubuntu:24.04 \
+    'DEBIAN_FRONTEND=noninteractive apt-get update -qq 2>/dev/null && apt-get install -y -qq --no-install-recommends g++ nlohmann-json3-dev 2>/dev/null && printf "#include<nlohmann/json.hpp>\nint main(){return 0;}" > /t.cpp && g++ -std=c++17 -O2 /t.cpp -o /t')
 
 # ============================================================================
-# Save results to file
+# fmtlib
 # ============================================================================
-RESULTS_FILE="$RESULTS_DIR/benchmark_$TIMESTAMP.txt"
-cat > "$RESULTS_FILE" <<EOF
-Silex Build Performance Benchmark
-Timestamp: $(date)
-Project: C++ JSON Parser
-
-Results:
---------
-Silex (avg):    ${silex_sec}s
-Ubuntu (avg):   ${ubuntu_sec}s
-Speedup:        ${speedup}x
-Time saved:     ${time_saved}s
-
-Environment:
-------------
-Silex image:    silex:slim
-Ubuntu image:   ubuntu:24.04 + build-essential + cmake + ninja-build
-Test project:   benchmarks/projects/cpp-json-parser
-Build command:  cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build
-Runs per test:  3
-
-System:
--------
-$(uname -a)
-Docker version: $(docker --version)
-EOF
-
-echo -e "Results saved to: ${RESULTS_FILE}"
+printf "\n=== fmtlib ===\n" >&2
+S_FMT=$(bench silex silex:slim \
+    'apk add -q fmt-dev && printf "#include<fmt/core.h>\nint main(){fmt::print(\"{}\",1);return 0;}" > /t.cpp && clang++ -std=c++17 -O2 /t.cpp -lfmt -o /t')
+U_FMT=$(bench ubuntu ubuntu:24.04 \
+    'DEBIAN_FRONTEND=noninteractive apt-get update -qq 2>/dev/null && apt-get install -y -qq --no-install-recommends g++ libfmt-dev 2>/dev/null && printf "#include<fmt/core.h>\nint main(){fmt::print(\"{}\",1);return 0;}" > /t.cpp && g++ -std=c++17 -O2 /t.cpp -lfmt -o /t')
 
 # ============================================================================
-# Image size comparison
+# googletest
 # ============================================================================
-echo ""
-echo -e "${BLUE}=====================================${NC}"
-echo -e "${BLUE}Image Size Comparison${NC}"
-echo -e "${BLUE}=====================================${NC}"
-
-silex_size=$(docker images silex:slim --format "{{.Size}}")
-ubuntu_size=$(docker images ubuntu-build:test --format "{{.Size}}")
-
-echo -e "Silex:  ${silex_size}"
-echo -e "Ubuntu: ${ubuntu_size}"
-echo ""
+printf "\n=== googletest ===\n" >&2
+S_GTEST=$(bench silex silex:slim \
+    'apk add -q gtest-dev && printf "#include<gtest/gtest.h>\nTEST(X,Y){EXPECT_EQ(1,1);}\nint main(int c,char**v){::testing::InitGoogleTest(&c,v);return RUN_ALL_TESTS();}" > /t.cpp && clang++ -std=c++17 -O2 /t.cpp -lgtest -lgtest_main -pthread -o /t')
+U_GTEST=$(bench ubuntu ubuntu:24.04 \
+    'DEBIAN_FRONTEND=noninteractive apt-get update -qq 2>/dev/null && apt-get install -y -qq --no-install-recommends g++ libgtest-dev 2>/dev/null && printf "#include<gtest/gtest.h>\nTEST(X,Y){EXPECT_EQ(1,1);}\nint main(int c,char**v){::testing::InitGoogleTest(&c,v);return RUN_ALL_TESTS();}" > /t.cpp && g++ -std=c++17 -O2 /t.cpp -lgtest -lgtest_main -pthread -o /t')
 
 # ============================================================================
-# Cleanup
+# abseil-cpp
 # ============================================================================
-echo -e "${YELLOW}Cleanup${NC}"
-echo -n "Remove test images? [y/N] "
-read -r response
-if [[ "$response" =~ ^[Yy]$ ]]; then
-    docker rmi ubuntu-build:test 2>/dev/null || true
-    echo -e "${GREEN}✓ Cleaned up test images${NC}"
-fi
+printf "\n=== abseil-cpp ===\n" >&2
+S_ABSL=$(bench silex silex:slim \
+    'apk add -q abseil-cpp-20250127-dev && printf "#include<absl/strings/str_join.h>\nint main(){std::vector<std::string> v={\"a\",\"b\"};absl::StrJoin(v,\",\");return 0;}" > /t.cpp && clang++ -std=c++17 -O2 /t.cpp -labsl_strings -o /t')
+U_ABSL=$(bench ubuntu ubuntu:24.04 \
+    'DEBIAN_FRONTEND=noninteractive apt-get update -qq 2>/dev/null && apt-get install -y -qq --no-install-recommends g++ libabsl-dev 2>/dev/null && printf "#include<absl/strings/str_join.h>\nint main(){std::vector<std::string> v={\"a\",\"b\"};absl::StrJoin(v,\",\");return 0;}" > /t.cpp && g++ -std=c++17 -O2 /t.cpp -labsl_strings -o /t')
 
-echo ""
-echo -e "${GREEN}Benchmark complete!${NC}"
+# ============================================================================
+# re2
+# ============================================================================
+printf "\n=== re2 ===\n" >&2
+S_RE2=$(bench silex silex:slim \
+    'apk add -q re2-dev && printf "#include<re2/re2.h>\nint main(){re2::RE2 r(\"a+\");return re2::RE2::FullMatch(\"aaa\",r)?0:1;}" > /t.cpp && clang++ -std=c++17 -O2 /t.cpp -lre2 -o /t')
+U_RE2=$(bench ubuntu ubuntu:24.04 \
+    'DEBIAN_FRONTEND=noninteractive apt-get update -qq 2>/dev/null && apt-get install -y -qq --no-install-recommends g++ libre2-dev 2>/dev/null && printf "#include<re2/re2.h>\nint main(){re2::RE2 r(\"a+\");return re2::RE2::FullMatch(\"aaa\",r)?0:1;}" > /t.cpp && g++ -std=c++17 -O2 /t.cpp -lre2 -o /t')
+
+# ============================================================================
+# SQLite amalgam (compile from source; clang -O3 vs gcc -O3)
+# ============================================================================
+printf "\n=== SQLite amalgam ===\n" >&2
+S_SQLITE=$(bench silex silex:slim \
+    'apk add -q curl unzip && curl -fsSL https://www.sqlite.org/2024/sqlite-amalgamation-3470200.zip -o /s.zip && unzip -q /s.zip -d /s && clang -O3 /s/sqlite-amalgamation-3470200/sqlite3.c -o /sqlite3 -lpthread -ldl -lm')
+U_SQLITE=$(bench ubuntu ubuntu:24.04 \
+    'DEBIAN_FRONTEND=noninteractive apt-get update -qq 2>/dev/null && apt-get install -y -qq --no-install-recommends gcc curl unzip 2>/dev/null && curl -fsSL https://www.sqlite.org/2024/sqlite-amalgamation-3470200.zip -o /s.zip && unzip -q /s.zip -d /s && gcc -O3 /s/sqlite-amalgamation-3470200/sqlite3.c -o /sqlite3 -lpthread -ldl -lm')
+
+# ============================================================================
+# Results table
+# ============================================================================
+printf "\nResults (4 runs, drop highest, 3-run average):\n"
+printf "%-18s  %9s  %9s  %s\n" "project" "silex" "ubuntu" "speedup"
+for _row in \
+    "nlohmann/json:$S_NLOHMANN:$U_NLOHMANN" \
+    "fmtlib:$S_FMT:$U_FMT" \
+    "googletest:$S_GTEST:$U_GTEST" \
+    "abseil-cpp:$S_ABSL:$U_ABSL" \
+    "google/re2:$S_RE2:$U_RE2" \
+    "SQLite amalgam:$S_SQLITE:$U_SQLITE"; do
+    _lbl="${_row%%:*}"
+    _rest="${_row#*:}"
+    _s="${_rest%%:*}"
+    _u="${_rest#*:}"
+    printf "%-18s  %6sms   %6sms   %s\n" "$_lbl" "$(comma "$_s")" "$(comma "$_u")" "$(speedup "$_s" "$_u")"
+done
+
+printf "\nSystem: %s\n" "$(uname -srm)"
+printf "Docker: %s\n" "$(docker --version)"

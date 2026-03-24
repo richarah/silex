@@ -83,7 +83,7 @@ RUN cmake -B build && cmake --build build
 ```
 
 clang, mold, Ninja, sccache, mimalloc are pre-configured. Cold builds
-are 6-32x faster than ubuntu:24.04. Warm sccache rebuilds are 21x.
+are 1.5-2.2x faster than ubuntu:24.04 cold. Warm sccache rebuilds are 18x.
 
 ## Configuration
 
@@ -167,27 +167,27 @@ File an issue to add the mapping.
 
 ## Benchmarks
 
-Full build including package install. Docker 29.2.0, Linux 6.17.0,
-x86_64, 32 cores, cold cache, 2 runs averaged.
+Package install from base image + compile one file using the library.
+Docker 29.2.0, Linux 6.17.0, x86_64, 32 cores. 4 runs per
+measurement, highest dropped, 3-run average.
 
     project           silex       ubuntu       speedup
-    nlohmann/json     1,600ms     50,843ms     31.8x
-    fmtlib            1,423ms     20,170ms     14.1x
-    googletest        1,172ms      7,017ms      5.9x
-    abseil-cpp        1,350ms      7,814ms      5.7x
-    google/re2        1,061ms      1,206ms      1.1x      (tie)
-    SQLite amalgam   12,728ms      1,268ms      0.1x      SLOWER
+    nlohmann/json     5,273ms      9,286ms      1.8x
+    fmtlib            4,061ms      8,845ms      2.2x
+    googletest        4,975ms     10,464ms      2.1x
+    abseil-cpp        5,630ms      8,591ms      1.5x
+    google/re2        9,101ms      8,981ms      1.0x      (tie)
+    SQLite amalgam   17,694ms      7,159ms      0.4x      SLOWER
 
-The honest version: the large speedups include package install time.
-`apt-get update` takes 10-30 seconds; `apk` takes under one. Isolated
-compilation: clang is 14-33% faster than gcc on template-heavy C++.
+Speedup is from apk being faster than apt-get for small installs, plus
+clang 14-33% faster than gcc on template-heavy C++.
 
 SQLite is a known anti-pattern: 230k-line single translation unit.
 clang -O3 does more analysis than gcc on files that large. Set
 `CC=gcc`. `silex lint` detects this.
 
 **The number that actually matters:** warm sccache rebuild: 2.4s vs
-44s cold. 21x. Change one file, rebuild in 2 seconds. Every commit,
+44s cold. 18x. Change one file, rebuild in 2 seconds. Every commit,
 every push, every PR.
 
 Reproduce: `benchmarks/benchmark.sh`.
