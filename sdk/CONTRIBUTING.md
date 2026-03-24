@@ -1,94 +1,44 @@
-# Contributing to Silex
+# Contributing
 
-**Note**: This project is currently at v0.1. Full contribution guidelines will be established for v0.2 when the project is publicly available on GitHub.
-
-## Development Status
-
-- **v0.1** (current): All core features implemented, 43 tests passing — accepting bug reports
-- **v0.2**: Public beta with CI/CD — accepting contributions
-- **v1.0**: Public launch, full contribution workflow
-
-## Getting Started
-
-If you want to experiment with Silex:
+## Build and test
 
 ```bash
-# Clone the repository
-git clone https://github.com/richarah/silex.git
-cd silex
-
-# Set up git hooks (one-time, required for contributors)
-./scripts/setup-dev.sh
-
-# Build the image
-./scripts/build.sh
-
-# Run benchmarks
-cd benchmarks
-./benchmark.sh
-
-# Test in your own Dockerfile
-docker build -f your-dockerfile --build-arg BASE_IMAGE=silex:slim .
+make verify-sources    # verify SHA256 values in sources.json
+make bootstrap         # cold build from debian:bookworm-slim (~90-120 min)
+make build             # self-hosted build, reuses previous silex:slim (~15-20 min)
+make test              # unit + compat tests
 ```
 
-## Reporting Issues
+## Code rules
 
-For v0.2+, open issues on GitHub for:
-- Build failures
-- Performance regressions
-- Documentation errors
-- Package mapping mistakes (apt-shim)
-- Feature requests
+- No Python in image internals. Scripts use sh/awk/sed/grep. C for binaries.
+- POSIX sh only. No `[[`, no arrays, no bashisms. Scripts run under dash.
+- Pin every version. No `latest`, no floating tags, no unpinned `apk add`.
+- Verify SHA256 for every source tarball. Add to `sources.json`.
+- Every file in the final image justifies its presence.
 
-## Code Style
+## Adding package mappings
 
-- Shell scripts: Follow Google Shell Style Guide
-- Dockerfiles: Comments above every non-obvious RUN command
-- Documentation: British English, technical tone, no marketing copy
+Edit `config/package-mapping.json`:
 
-## Testing
+```json
+"debian-package-name": "wolfi-package-name"
+```
 
-Before submitting changes:
-1. Build all images: `./scripts/build.sh`
-2. Run tests: `./scripts/test.sh` (v0.1+)
-3. Run benchmarks: `cd benchmarks && ./benchmark.sh`
-4. Verify image size hasn't increased unexpectedly
+Map to `""` if there is no Wolfi equivalent (package is silently skipped).
+Test with `docker run --rm silex:slim apt-get install -y <package>`.
 
-## Commit Messages
+## Adding a tool
 
-Use conventional commits:
-- `feat: add GPU support to Dockerfile.full`
-- `fix: correct package mapping for libssl-dev`
-- `docs: update README with new examples`
-- `perf: reduce image size by 50MB`
+1. Add source tarball to `sources.json` with version and SHA256.
+2. Add build step to `dockerfiles/Dockerfile.bootstrap`.
+3. COPY binary into the final stage.
+4. Add a test in `scripts/test.sh`.
+5. Update the tools table in README.md.
 
-## Pull Request Process
+## Pull requests
 
-(For v0.2+)
-
-1. Fork the repository
-2. Create a feature branch: `git checkout -b feat/your-feature`
-3. Make your changes
-4. Run tests and benchmarks
-5. Commit with conventional commit messages
-6. Push and open a PR
-7. Wait for CI to pass and maintainer review
-
-## Areas for Contribution
-
-Future areas where contributions will be welcome:
-
-- **Package mappings**: Expanding `config/package-mapping.json` with more Debian packages
-- **Example Dockerfiles**: Real-world examples for different languages and frameworks
-- **Documentation**: Migration guides, troubleshooting, best practices
-- **Testing**: Test scripts for different build scenarios
-- **Benchmarking**: Additional benchmark projects, different languages
-- **Tooling**: Improvements to `silex doctor`, `silex lint`, etc.
-
-## Questions?
-
-For now, open an issue on GitHub (v0.2+) or email (details in README once public).
-
----
-
-**Thank you for your interest in Silex!**
+- One concern per PR.
+- `make test` must pass.
+- `silex doctor` must exit 0 in the built image.
+- No new documentation files. README.md, CONTRIBUTING.md, docs/LICENSING.md only.
