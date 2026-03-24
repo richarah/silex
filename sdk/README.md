@@ -9,17 +9,12 @@ A considered Docker base image.
 
 Cold builds 2-3x faster. Warm sccache rebuilds 18x.
 Everything else in your Dockerfile stays the same.
-
-CI/CD pipelines, local development, anywhere you're waiting
-for `apt-get install build-essential` to finish its 200
-postinstall scripts so you can compile 12 lines of C++.
-
-If something breaks, `ENV SILEX_WRAPPERS=off` and you're
-back to raw apk. Nothing is irreversible.
+`apt-get` still works. If something doesn't,
+`ENV SILEX_WRAPPERS=off` and you're on raw apk.
 
 ## Why this exists
 
-Because your compiler shouldn't wait for dpkg.
+Because `dpkg --configure -a` has mass.
 
 The tools inside a typical base image were designed for
 systems that persist. A build layer doesn't, it succeeds or it fails.
