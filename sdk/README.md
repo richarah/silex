@@ -11,8 +11,10 @@ Everything else in your Dockerfile stays the same.
 
 ## Why this exists
 
-Because the fastest part of your container build is
-probably your code.
+Faster tools exist for every component in a typical base
+image, and the gains compound. Distros can't ship them
+because a distro is a social contract with every computer on earth.
+Silex is a social contract with one Dockerfile.
 
 ## What's inside
 
