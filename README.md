@@ -57,10 +57,10 @@ of upstream rebuild schedules).
 
 ## Image variants
 
-| Tag | What | Size |
-|-----|------|------|
-| `silex:slim` | Everything above | ~900MB |
-| `silex:dev` | Adds development tooling (git, etc.) | larger |
+| Tag | What | Size (uncompressed) |
+|-----|------|---------------------|
+| `silex:slim` | Everything above | ~900MB (~360MB compressed) |
+| `silex:dev` | Adds git and interactive tooling | larger |
 | `silex:runtime` | Companion for multi-stage builds, no compiler | ~30MB |
 | `silex:cross` | Adds cross-compilation support (arm64 <-> x86_64) | larger |
 
@@ -135,7 +135,7 @@ The large speedups include apk install time. apt-get update alone takes
 14-33% faster than GCC for template-heavy C++.
 
 SQLite is a known anti-pattern: 230k-line single translation unit, clang
--O2. GCC is faster here. If you build SQLite, set CC=gcc.
+-O3. GCC is faster here. If you build SQLite, set CC=gcc.
 
 Incremental build with warm sccache: 2.4s vs 44s cold (21x). This is
 the core value proposition for CI pipelines and inner-loop development.
@@ -169,13 +169,124 @@ against SHA256 values in `sources.json`.
 `make build` reuses the clang and mold from the previous `silex:slim`,
 skipping the ~60 minute LLVM compilation step.
 
+## Migration
+
+### From ubuntu:24.04
+
+Before:
+
+```dockerfile
+FROM ubuntu:24.04
+RUN apt-get update && apt-get install -y build-essential cmake ninja-build libssl-dev
+COPY . /src
+WORKDIR /src
+RUN cmake -B build && cmake --build build
+```
+
+After:
+
+```dockerfile
+FROM ghcr.io/richarah/silex:slim
+RUN apt-get install -y libssl-dev          # shim handles update automatically
+COPY . /src
+WORKDIR /src
+RUN --mount=type=cache,target=/root/.cache/sccache \
+    cmake -B build && cmake --build build
+```
+
+`build-essential`, `cmake`, `ninja-build` are preinstalled. Remove them.
+`--mount=type=cache` persists the sccache across builds (15-20x speedup on
+repeated CI runs).
+
+### From alpine
+
+Most `apk add` commands work unchanged. The only difference: binaries
+compiled for musl won't run in silex (glibc). Recompile from source.
+
+### Common gotchas
+
+**GCC hardcoded.** If your CMakeLists sets `CMAKE_C_COMPILER=gcc`, either
+install gcc (`apk add gcc`) or unset it and let silex default to clang.
+
+**`/bin/sh` is dash, not bash.** Scripts using `[[ ]]`, arrays, or other
+bash extensions will fail. Add `#!/bin/bash` or use POSIX syntax.
+
+**`python` not on PATH.** Silex has `python3`. Add `RUN ln -sf /usr/bin/python3 /usr/bin/python` if needed.
+
+**Package not in mapping.** Run `apk search <name>` to find the Wolfi
+name, then `apt-get install <wolfi-name>` or file an issue to add the mapping.
+
+## Troubleshooting
+
+**mold + sccache cache misses every build.** Known issue
+([mozilla/sccache#1755](https://github.com/mozilla/sccache/issues/1755)).
+Switch to lld: `ENV SILEX_LINKER=lld`.
+
+**Allocator warning at startup.** Run `silex doctor` to verify mimalloc
+is found and LD_PRELOAD is set correctly.
+
+**LD_PRELOAD conflict.** If your app preloads its own library: `ENV SILEX_MALLOC=system`.
+
+**Locale errors.** Silex sets `LC_ALL=C`. Override with:
+`ENV LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8`.
+
+**Disable everything.** To run without any silex modifications:
+
+```bash
+docker run --rm \
+  -e SILEX_MALLOC=system -e SILEX_WRAPPERS=off \
+  -e SILEX_APT_SHIM=off -e SILEX_CACHE=off \
+  silex:slim bash
+```
+
+**Reporting bugs.** Open an issue at https://github.com/richarah/silex/issues.
+Include: output of `silex doctor`, the failing Dockerfile, full error output,
+and `docker version`.
+
+## Host setup
+
+### BuildKit cache mounts
+
+Add cache mounts to avoid re-downloading compiler artifacts across builds:
+
+```dockerfile
+RUN --mount=type=cache,target=/root/.cache/sccache \
+    cmake --build build
+
+RUN --mount=type=cache,target=/root/.cargo/registry \
+    cargo build --release
+```
+
+Cache paths: sccache `/root/.cache/sccache`, pip `/root/.cache/pip`,
+uv `/root/.cache/uv`, cargo `/root/.cargo/registry`, npm `/root/.npm`.
+
+### Layer compression
+
+BuildKit supports zstd layer compression (smaller and faster than gzip):
+
+```bash
+DOCKER_BUILDKIT=1 docker build \
+    --output type=image,name=myimage,push=true,compression=zstd .
+```
+
+Typical savings: 15-25% vs gzip. The ~900MB uncompressed image pulls as
+~360MB with zstd compression.
+
+### File descriptor limits
+
+Linkers and compilers open many fds simultaneously. On busy hosts:
+
+```bash
+docker run --ulimit nofile=65535:65535 silex:slim ...
+```
+
 ## Known limitations
 
 **SQLite and other amalgamation builds.** clang's optimiser is more
 aggressive than gcc on very large single translation units. On the SQLite
-amalgamation (230k preprocessed lines), clang -O2 is 10x slower than gcc.
+amalgamation (230k preprocessed lines), clang -O3 is 10x slower than gcc.
 Set `CC=gcc` for these files. `silex lint` detects this automatically
-(v0.2+, requires source directory as second argument).
+(requires source directory as second argument).
 
 **Wolfi package names differ from Debian.** The apt-get shim covers 504
 common packages. If `apt-get install libfoo-dev` fails, run
@@ -210,10 +321,11 @@ Maybe. The apt shim covers 504 common packages. If something breaks,
 **Can I use gcc instead of clang?**
 `ENV SILEX_CC=gcc SILEX_CXX=g++`. Install gcc with `apk add gcc`.
 
-**Why is the image ~900MB?**
-LLVM 18 compiled from source with GCC -O2 (no LTO) produces larger binaries
-than pre-built distribution packages. libLLVM.so alone is ~400MB stripped.
-`silex:runtime` is ~30MB for when you only need to run the output.
+**Why is the image ~900MB uncompressed?**
+LLVM 18 compiled from source with -O3 produces larger binaries than
+pre-built distribution packages. libLLVM.so alone is ~400MB stripped.
+Compressed pull size is ~360MB. `silex:runtime` is ~30MB for the final
+stage.
 
 ## License
 
