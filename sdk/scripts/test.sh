@@ -60,7 +60,7 @@ echo ""
 # Check image exists
 if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
     _red "ERROR"
-    echo ": image '$IMAGE' not found. Run ./scripts/build.sh first."
+    echo ": image '$IMAGE' not found. Run: make build"
     exit 1
 fi
 
