@@ -88,12 +88,14 @@ RUN cmake -B build && cmake --build build
 
 Most Dockerfiles assume Debian. Silex isn't Debian, but it pretends to
 be. An `apt-get` shim translates `apt-get install` into the equivalent
-apk operation. 449 package mappings included.
+apk operation. 504 package mappings included.
 
 ```dockerfile
 RUN apt-get install -y cmake libssl-dev libcurl4-openssl-dev
 # becomes: apk add cmake openssl-dev curl-dev
 ```
+
+Package installs run with `silex-nosync.so` preloaded, suppressing `fsync`/`fdatasync` calls that are redundant inside container build layers. Saves ~20% of `apk add` time.
 
 When the shim doesn't know a package:
 
@@ -143,7 +145,7 @@ git clone https://github.com/richarah/silex.git
 cd silex
 bash scripts/setup-dev.sh   # once, configures git hooks
 bash scripts/build.sh       # builds silex:slim
-bash scripts/test.sh        # 43 tests
+bash scripts/test.sh        # 62 tests
 ```
 
 ## Known limitations
@@ -154,7 +156,7 @@ amalgamation (230k preprocessed lines), clang -O2 is 10x slower than gcc.
 Set `CC=gcc` for these files. `silex lint` detects this automatically
 (v0.2+, requires source directory as second argument).
 
-**Wolfi package names differ from Debian.** The apt-get shim covers 449
+**Wolfi package names differ from Debian.** The apt-get shim covers 504
 common packages. If `apt-get install libfoo-dev` fails with "not found in
 package map", run `apk search foo` to find the Wolfi name and file an issue.
 
@@ -178,7 +180,7 @@ rebuilds, works with Trivy/Grype/Snyk. Alpine was the alternative but
 musl is measurably slower for the one thing this image is supposed to do.
 
 **Will this break my Dockerfile?**
-Maybe. The apt shim covers 449 common packages. If something breaks,
+Maybe. The apt shim covers 504 common packages. If something breaks,
 `SILEX_WRAPPERS=off` gives you raw apk. File a bug with the package name.
 
 **Can I use gcc instead of clang?**
