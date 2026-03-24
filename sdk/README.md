@@ -16,8 +16,7 @@ Because the slowest part of your container builds probably isn't your code.
 gcc, ld, make, gzip, dpkg. Every one of those has had
 a faster replacement for years. Distros can't ship them
 because a distro's job is to run on everything from Raspberry
-Pis to submarines. Your build layer's job is to compile C++
-and exit with code 0.
+Pis to submarines. Your build's job is to compile code and exit with code 0.
 
 ## What's inside
 
