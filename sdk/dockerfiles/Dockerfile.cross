@@ -16,10 +16,10 @@
 
 FROM silex:slim
 
-# qemu-user-static: executes foreign-architecture binaries via binfmt_misc.
+# qemu-user: executes foreign-architecture binaries via binfmt_misc.
 # Requires host kernel binfmts registered (docker run --privileged or
 # tonistiigi/binfmt image pre-run on the host).
-RUN apk add --no-cache qemu-user-static
+RUN apk add --no-cache qemu-user
 
 RUN mkdir -p /usr/local/silex/toolchains
 
