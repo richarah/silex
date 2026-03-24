@@ -332,7 +332,7 @@ Latin for flint.
 
 ## Licence
 
-MIT. See `LICENSE`.
+MIT.
 
 Bundled tool licences and source manifest:
 [docs/LICENSING.md](docs/LICENSING.md).
