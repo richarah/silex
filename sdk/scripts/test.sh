@@ -140,16 +140,11 @@ echo "--- Allocator ---"
 
 _run "jemalloc library present" 'find /usr/lib /usr/local/lib -name "libjemalloc*" | grep -q jemalloc'
 
-_run "LD_PRELOAD set to jemalloc" 'echo "$LD_PRELOAD" | grep -q jemalloc'
+_run "mimalloc library present" 'find /usr/lib /usr/local/lib -name "libmimalloc*" | grep -q mimalloc'
 
-_run "jemalloc actually loaded" '
-cat > /tmp/check_malloc.c << "EOF"
-#include <stdlib.h>
-int main() { void *p = malloc(1024); free(p); return 0; }
-EOF
-clang -o /tmp/check_malloc /tmp/check_malloc.c
-ldd /tmp/check_malloc 2>/dev/null || true
-# Check if jemalloc is in LD_PRELOAD and accessible
+_run "LD_PRELOAD set to mimalloc" 'echo "$LD_PRELOAD" | grep -q mimalloc'
+
+_run "mimalloc actually loaded" '
 test -n "$LD_PRELOAD" && test -f "$LD_PRELOAD"
 '
 
@@ -171,8 +166,8 @@ _run "git wrapper does shallow clone" '
 grep -q "depth 1" /usr/local/silex/bin/git
 '
 
-_run "SILEX_WRAPPERS=off bypasses wrappers" '
-SILEX_WRAPPERS=off /usr/local/silex/bin/git --version >/dev/null 2>&1
+_run "SILEX_WRAPPERS=off bypasses cp wrapper" '
+SILEX_WRAPPERS=off /usr/local/silex/bin/cp --version >/dev/null 2>&1
 '
 
 # --------------------------------------------------------------------------
@@ -189,23 +184,12 @@ SILEX_APT_SHIM=on apt-get install -y curl 2>&1 | grep -q "apk add"
 _run "package mapping file present" 'test -f /usr/local/silex/package-mapping.json'
 
 _run "package mapping has 100+ entries" '
-python3 -c "
-import json
-with open(\"/usr/local/silex/package-mapping.json\") as f:
-    d = json.load(f)
-count = len([k for k in d if not k.startswith(\"_\")])
-assert count >= 100, f\"Only {count} entries\"
-print(f\"{count} entries\")
-"
+count=$(grep -c "^[[:space:]]*\"[^_]" /usr/local/silex/package-mapping.json 2>/dev/null)
+test "$count" -ge 100
 '
 
 _run "build-essential maps to build-base" '
-python3 -c "
-import json
-with open(\"/usr/local/silex/package-mapping.json\") as f:
-    d = json.load(f)
-assert d.get(\"build-essential\") == \"build-base\", f\"Got: {d.get(\"build-essential\")}\"
-"
+grep -q "\"build-essential\":[[:space:]]*\"build-base\"" /usr/local/silex/package-mapping.json
 '
 
 # --------------------------------------------------------------------------
@@ -289,7 +273,7 @@ echo "--- Environment ---"
 
 _run_with_output "SILEX_WRAPPERS=on by default" "on" 'echo "$SILEX_WRAPPERS"'
 
-_run_with_output "SILEX_MALLOC=jemalloc by default" "jemalloc" 'echo "$SILEX_MALLOC"'
+_run_with_output "SILEX_MALLOC=mimalloc by default" "mimalloc" 'echo "$SILEX_MALLOC"'
 
 _run_with_output "SILEX_GIT_SHALLOW=on by default" "on" 'echo "$SILEX_GIT_SHALLOW"'
 
@@ -305,7 +289,7 @@ _T1=$(date +%s%N 2>/dev/null || date +%s)
 _total_ms=$(( (_T1 - _T0) / 1000000 ))
 
 _total=$((PASS + FAIL))
-echo "Results: $(_green "$PASS passed") / $FAIL failed / $total total  (${_total_ms}ms)"
+echo "Results: $(_green "$PASS passed") / $FAIL failed / $_total total  (${_total_ms}ms)"
 echo ""
 
 if [ "$FAIL" -gt 0 ]; then

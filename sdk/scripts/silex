@@ -39,7 +39,7 @@ _doctor() {
     _cc="${CC:-clang}"
     _cxx="${CXX:-clang++}"
     _cc_ver=$("$_cc" --version 2>/dev/null | head -1 || printf "not found")
-    printf "  %-14s %s\n" "CC:" "$_cc ($CC_ver)"
+    printf "  %-14s %s\n" "CC:" "$_cc"
     printf "  %-14s %s\n" "CXX:" "$_cxx"
     printf "  %-14s %s\n" "CC version:" "$_cc_ver"
     _linker="${SILEX_LINKER:-mold}"
@@ -56,7 +56,7 @@ _doctor() {
     printf "  %-14s %s (%s)\n" "parallel:" "$_nproc cores" "${SILEX_PARALLEL:-auto}"
     _sccache_ver=$(/opt/sccache/bin/sccache --version 2>/dev/null | head -1 || printf "not found")
     _sccache_dir="${SCCACHE_DIR:-/root/.cache/sccache}"
-    printf "  %-14s %s\n" "cache:" "${SILEX_CACHE:-sccache} ($sccache_ver)"
+    printf "  %-14s %s\n" "cache:" "${SILEX_CACHE:-sccache} ($_sccache_ver)"
     printf "  %-14s %s\n" "sccache dir:" "$_sccache_dir"
     printf "\n"
 
