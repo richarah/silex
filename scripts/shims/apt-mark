@@ -1,0 +1,25 @@
+#!/bin/sh
+# Silex apt-mark shim: apk has no hold/pin mechanism equivalent.
+# hold/unhold are accepted silently; marking operations are no-ops.
+# Installed as /usr/local/bin/apt-mark via shims/ symlink.
+
+_CMD="$1"
+shift || true
+
+case "$_CMD" in
+    hold)
+        printf 'silex apt-mark: hold not supported; packages will not be pinned\n' >&2
+        ;;
+    unhold|auto|manual)
+        ;;
+    showhold|showauto|showmanual)
+        ;;
+    "")
+        printf 'silex apt-mark: no subcommand given\n' >&2
+        exit 1
+        ;;
+    *)
+        printf 'silex apt-mark: unsupported command: %s\n' "$_CMD" >&2
+        exit 1
+        ;;
+esac

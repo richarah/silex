@@ -529,6 +529,7 @@ RUN chmod +x /usr/local/bin/apt-get \
     && chmod +x /usr/local/silex/shims/* \
     && chmod +x /usr/local/silex/bin/* \
     && ln -sf /usr/local/bin/apt-get /usr/local/bin/apt \
+    && ln -sf /usr/local/bin/apt-get /usr/local/bin/aptitude \
     && for f in /usr/local/silex/shims/*; do \
            ln -sf "$f" "/usr/local/bin/$(basename "$f")"; \
        done

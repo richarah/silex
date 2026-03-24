@@ -1,0 +1,32 @@
+#!/bin/sh
+# Silex apt-cache shim: translates apt-cache queries to apk equivalents.
+# Installed as /usr/local/bin/apt-cache via shims/ symlink.
+
+_CMD="$1"
+shift || true
+
+case "$_CMD" in
+    search)
+        exec apk search "$@"
+        ;;
+    show)
+        exec apk info -e "$@"
+        ;;
+    policy)
+        for _p in "$@"; do
+            apk info "$_p" 2>/dev/null || printf 'silex apt-cache: %s: not found\n' "$_p" >&2
+        done
+        ;;
+    madison|depends|rdepends)
+        printf 'silex apt-cache: %s: not supported\n' "$_CMD" >&2
+        exit 1
+        ;;
+    "")
+        printf 'silex apt-cache: no subcommand given\n' >&2
+        exit 1
+        ;;
+    *)
+        printf 'silex apt-cache: unsupported command: %s\n' "$_CMD" >&2
+        exit 1
+        ;;
+esac
