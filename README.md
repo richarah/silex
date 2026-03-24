@@ -14,19 +14,7 @@ Everything else in your Dockerfile stays the same.
 
 ## Why this exists
 
-Because `dpkg --configure -a` has mass.
-
-The tools inside a typical base image were designed for
-systems that persist. A build layer doesn't, it succeeds or it fails.
-But dpkg still calls fsync() after
-every file it unpacks, because the power might go out
-between installing libssl-dev and libcurl-dev. Postinstall
-scripts still start services that nothing will ever connect
-to, while apt still downloads the package index fresh on every
-build because it assumes something changed since last time.
-
-Silex replaces them with tools that weren't designed
-around floppy disk throughput.
+The fastest part of your container build is probably your code.
 
 ## What's inside
 
