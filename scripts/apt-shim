@@ -6,6 +6,7 @@
 set -e
 
 MAPPING=/usr/local/silex/package-mapping.json
+NOSYNC_SO=/usr/local/silex/lib/silex-nosync.so
 
 # When shim is disabled, try real apt-get (will fail on Wolfi — by design)
 if [ "$SILEX_APT_SHIM" = "off" ]; then
@@ -92,8 +93,13 @@ case "$_CMD" in
         # Translate package names
         _apk_pkgs=$(echo $_pkgs | xargs _translate_packages | tr '\n' ' ')
         echo "silex apt-shim: apt-get install → apk add --no-cache ${_apk_pkgs}" >&2
+        # Use nosync shim to suppress redundant fsync calls during package install
         # shellcheck disable=SC2086
-        exec apk add --no-cache ${_apk_pkgs}
+        if [ -f "$NOSYNC_SO" ]; then
+            exec env LD_PRELOAD="${LD_PRELOAD:+$LD_PRELOAD:}$NOSYNC_SO" apk add --no-cache ${_apk_pkgs}
+        else
+            exec apk add --no-cache ${_apk_pkgs}
+        fi
         ;;
     update)
         apk update

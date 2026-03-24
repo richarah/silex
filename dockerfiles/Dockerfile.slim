@@ -12,7 +12,13 @@ ARG TARGETARCH
 ARG MOLD_VERSION=2.35.0
 ARG SCCACHE_VERSION=0.8.2
 
-RUN apk add --no-cache curl ca-certificates
+RUN apk add --no-cache curl ca-certificates gcc
+
+# Build silex-nosync.so — MIT-licensed fsync interceptor (zero GPL)
+# Used by apt-shim to suppress redundant syncs during apk add inside containers
+COPY src/silex-nosync.c /tmp/silex-nosync.c
+RUN gcc -O2 -shared -fPIC -nostartfiles -o /opt/silex-nosync.so /tmp/silex-nosync.c && \
+    strip /opt/silex-nosync.so
 
 # Download mold (modern linker) — prebuilt binary, avoids ~15min Rust/C++ build
 # Archive layout: mold-VERSION-ARCH-linux/bin/mold
@@ -75,6 +81,7 @@ RUN apk add --no-cache \
 # ============================================================================
 COPY --from=builder /opt/mold /opt/mold
 COPY --from=builder /opt/sccache /opt/sccache
+COPY --from=builder /opt/silex-nosync.so /usr/local/silex/lib/silex-nosync.so
 
 # ============================================================================
 # Aggressive size reduction

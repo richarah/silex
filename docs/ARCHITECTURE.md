@@ -119,6 +119,8 @@ jemalloc is faster than glibc malloc for multi-threaded allocators (typical in c
 
 The entrypoint discovers the `.so` path at runtime: `find /usr/lib /usr/local/lib -name 'libjemalloc.so*' | head -1`. This avoids hardcoding a path that may change between package versions.
 
+**jemalloc vs mimalloc**: both are installed. jemalloc is the current default. Benchmark plan: compile template-heavy C++ project (nlohmann/json) under each allocator, compare peak RSS and wall time. `SILEX_MALLOC=mimalloc` switches to mimalloc.
+
 ### Compression: zstd
 
 zstd is default because:
@@ -178,7 +180,7 @@ Most Dockerfiles have `RUN apt-get install foo`. Wolfi uses `apk`, not `apt-get`
 
 ### Package Mapping
 
-`config/package-mapping.json` contains 449 Debian→Wolfi mappings covering:
+`config/package-mapping.json` contains 504 Debian→Wolfi mappings covering:
 - Build tools (`build-essential`, `cmake`, `ninja-build`, etc.)
 - Libraries (`libssl-dev`, `libz-dev`, `libpng-dev`, etc.)
 - Languages (`python3`, `nodejs`, `golang`, etc.)
@@ -265,9 +267,9 @@ The image does not require `--privileged`. All operations in the entrypoint scri
 
 ## 7. Future Directions
 
-### uutils-coreutils (v0.2)
+### Coreutils
 
-[uutils](https://github.com/uutils/coreutils) is a Rust rewrite of GNU coreutils — a single statically-linked binary, 20-50% faster than GNU on sorting tasks. Deferred from v0.1 pending stability validation.
+Toybox vs uutils: decision pending benchmark. Currently shipping Wolfi's default coreutils (BusyBox-compatible). [uutils](https://github.com/uutils/coreutils) (Rust, statically linked) is 20-50% faster on sort tasks. Deferred pending stability validation on C++ build workloads.
 
 ### GPU Acceleration (v0.2)
 
