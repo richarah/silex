@@ -422,14 +422,26 @@ RUN clang -O2 -shared -fPIC -nostartfiles \
         /src/silex-nosync.c \
     && strip /out/lib/silex-nosync.so
 
-# Strip LLVM install: remove headers, static libs, tools we do not ship.
-# Keep: clang, clang++, clang-18, lld, libc++, libc++abi, compiler-rt, libLLVM.
+# Strip LLVM install: remove headers, static libs, cmake files, and shared libs
+# not needed for compilation.
+# Keep: clang, clang++, clang-18, lld, ld.lld, libLLVM.so, libc++.so, libc++abi.so,
+#        compiler-rt clang_rt libraries.
+# Drop: libclang-cpp.so (not needed: CLANG_LINK_CLANG_DYLIB not set; clang binary
+#        statically links clang components and only dynamically links libLLVM.so),
+#        libclang.so (C API, unused), libLTO.so, libRemarks.so, cmake/, share/.
 RUN find /opt/llvm/include -mindepth 1 -delete 2>/dev/null || true \
-    && find /opt/llvm/lib -name "*.a" -not -name "clang" -delete 2>/dev/null || true \
+    && find /opt/llvm/lib -name "*.a" -delete 2>/dev/null || true \
+    && rm -f /opt/llvm/lib/libclang-cpp.so* \
+    && rm -f /opt/llvm/lib/libclang.so* \
+    && rm -f /opt/llvm/lib/libLTO.so* \
+    && rm -f /opt/llvm/lib/libRemarks.so* \
+    && rm -rf /opt/llvm/lib/cmake/ \
+    && rm -rf /opt/llvm/share/ \
     && find /opt/llvm/bin -mindepth 1 \
-        ! -name "clang" ! -name "clang++" ! -name "clang-${LLVM_VERSION%.*.*}" \
-        ! -name "clang-${LLVM_VERSION%%.*}" ! -name "lld" ! -name "ld.lld" \
-        ! -name "llvm-profdata" ! -name "llvm-bolt" \
+        ! -name "clang" ! -name "clang++" \
+        ! -name "clang-${LLVM_VERSION%%.*}" \
+        ! -name "lld" ! -name "ld.lld" \
+        ! -name "llvm-profdata" \
         -delete 2>/dev/null || true \
     && find /opt/llvm/lib -name "*.so*" -exec strip --strip-unneeded {} \; 2>/dev/null || true \
     && find /opt/llvm/bin -type f -exec strip --strip-unneeded {} \; 2>/dev/null || true
