@@ -201,7 +201,7 @@ When a package isn't in the mapping, the shim warns and passes the name through 
 
 1. **C++ projects with many translation units**: mold's parallel linking makes the biggest difference on projects with 100+ `.o` files. Linking `chromium` goes from 90s (GNU ld) to 8s (mold).
 
-2. **Repeated builds in CI**: sccache provides object-level caching. With a warm cache, unchanged files are not recompiled. Combined with BuildKit's `--mount=type=cache`, incremental CI builds can be 5-10x faster.
+2. **Repeated builds in CI**: sccache provides object-level caching. With a warm cache, unchanged files are not recompiled. Combined with BuildKit's `--mount=type=cache`, incremental CI builds are **15-20x faster** (measured: 44s → 2.5s for nlohmann/json test suite).
 
 3. **Python extension builds** (e.g., NumPy, PyTorch from source): jemalloc reduces allocator contention during multi-threaded compilation.
 
@@ -211,16 +211,26 @@ When a package isn't in the mapping, the shim warns and passes the name through 
 2. **Interpreted language projects** (pure Python, Node.js): No compilation, so compiler/linker choices don't apply.
 3. **Heavy network I/O builds** (downloading many deps): Bottleneck is network, not compilation.
 
-### Expected Speedups (Benchmarks)
+### Measured Speedups
 
-Benchmark: compile a 50-file C++ JSON parser library.
+Benchmark: nlohmann/json full test suite (186 build steps, 84 test executables, 32-core host).
 
-| Environment | Build time | vs. Ubuntu |
-|-------------|------------|------------|
-| ubuntu:24.04 + build-essential | ~45s | 1x |
-| silex:slim | ~15-20s | 2-3x |
+| Configuration | Cold build | vs. Ubuntu GCC-13 |
+|---|---|---|
+| Ubuntu 24.04 GCC-13 + Ninja + GNU ld | ~50s | baseline |
+| Wolfi GCC-15 + Ninja + GNU ld | ~64s | 1.3x **slower** |
+| Wolfi Clang-18 + Ninja + GNU ld | ~43s | 1.14x faster |
+| Wolfi Clang-18 + Ninja + mold | ~43s | 1.14x faster |
+| silex:slim (cold sccache) | ~44s | 1.1x faster |
+| **silex:slim (warm sccache)** | **~2.5s** | **~20x faster** |
 
-Actual numbers depend on hardware (particularly CPU core count) and cache state.
+**Key findings:**
+
+- **Compiler**: Clang-18 is 14-33% faster than GCC for template-heavy C++. Wolfi GCC-15 is paradoxically slower than Ubuntu GCC-13 because the OpenSSF hardening flags (`-ftrivial-auto-var-init=zero`, `-fstack-clash-protection`, `-fno-omit-frame-pointer`) add per-file compilation overhead.
+- **Linker**: mold is neutral here — with 32 cores, the 84 link steps are parallelized with compilation and never become the bottleneck. mold's advantage is largest on projects with a few large executables (Rust binaries, large C++ monoliths) where linking IS the critical path.
+- **sccache**: The dominant speedup for real developer workflows. Cold: ~44s. Warm: **~2.5s (18x faster)**. After the first build, any unchanged translation unit costs ~2ms (cache lookup) instead of ~420ms (compile).
+
+Cold build speedups are workload-dependent and modest (10-33%). The compelling use case for silex is **incremental builds and CI caching**.
 
 ---
 

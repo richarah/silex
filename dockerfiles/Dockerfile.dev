@@ -3,16 +3,13 @@
 # Not optimised for size — full-sized packages, no stripping
 FROM silex:slim
 
-# Dev-only extras: editors, shells, search, Python tooling
+# Dev-only extras: editors, shells (fd/ripgrep/uv are in slim)
 RUN apk add --no-cache \
     git \
     openssh-client \
     bash \
     less \
-    vim \
-    ripgrep \
-    fd \
-    uv
+    vim
 
 # Override locale for interactive use
 ENV LC_ALL=en_US.UTF-8 \

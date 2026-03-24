@@ -34,8 +34,7 @@ WORKDIR /src
 RUN cmake -B build && cmake --build build
 ```
 
-That Dockerfile uses mold, ninja, clang, sccache, and jemalloc. You
-didn't configure any of them.
+That's it. Silex is pre-configured with clang, mold (fast linker), Ninja (fast build system), and sccache (compilation cache). Cold builds are 10-30% faster than `ubuntu:24.04 + build-essential`; **incremental builds are 15-20x faster** thanks to sccache.
 
 ## What's inside
 

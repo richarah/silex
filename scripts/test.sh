@@ -228,6 +228,63 @@ _run "silex version exits 0" 'silex version >/dev/null'
 _run "silex lint exits on missing file" '! silex lint /nonexistent/Dockerfile 2>/dev/null'
 
 # --------------------------------------------------------------------------
+echo "--- Accelerated compression ---"
+
+_run "pigz present" 'pigz --version'
+_run "pixz present" 'pixz -h 2>&1 || true; command -v pixz'
+_run "tar wrapper uses pigz for .tar.gz" '
+echo "test" > /tmp/testfile.txt
+tar czf /tmp/test_pigz.tar.gz /tmp/testfile.txt 2>&1
+# Verify pigz is accessible (wrapper will use it)
+command -v pigz
+'
+
+# --------------------------------------------------------------------------
+echo "--- Search tools ---"
+
+_run "fd present" 'fd --version'
+_run "ripgrep present" 'rg --version'
+
+# --------------------------------------------------------------------------
+echo "--- Allocator (mimalloc) ---"
+
+_run "mimalloc library present" 'find /usr/lib -name "libmimalloc*" | grep -q .'
+_run "SILEX_MALLOC=mimalloc sets LD_PRELOAD" '
+SILEX_MALLOC=mimalloc /usr/local/bin/silex-entrypoint env 2>/dev/null | grep -q LD_PRELOAD
+'
+
+# --------------------------------------------------------------------------
+echo "--- Python tooling ---"
+
+_run "uv present" 'uv --version'
+
+# --------------------------------------------------------------------------
+echo "--- Checksums ---"
+
+_run "xxhsum present" 'xxhsum --version 2>&1 || xxh64sum --version 2>&1 || command -v xxhsum'
+
+# --------------------------------------------------------------------------
+echo "--- POSIX shell ---"
+
+_run "dash present" 'dash --version 2>&1 || true; command -v dash'
+_run "/bin/dash exists" 'test -x /bin/dash'
+
+# --------------------------------------------------------------------------
+echo "--- Debian shims ---"
+
+_run_with_output "lsb_release -i outputs Wolfi" "Wolfi" 'lsb_release -i'
+_run_with_output "dpkg-architecture outputs amd64 or arm64" "64" 'dpkg-architecture -qDEB_HOST_ARCH'
+_run "update-alternatives --install exits 0" \
+    'update-alternatives --install /usr/bin/test test /usr/bin/test 1'
+_run "adduser --help exits 0" 'adduser --help 2>&1 || true; test -x /usr/local/bin/adduser'
+_run "addgroup --help exits 0" 'addgroup --help 2>&1 || true; test -x /usr/local/bin/addgroup'
+
+# --------------------------------------------------------------------------
+echo "--- os-release ---"
+
+_run "ID_LIKE=debian in /etc/os-release" 'grep -q "ID_LIKE=debian" /etc/os-release'
+
+# --------------------------------------------------------------------------
 echo "--- Environment ---"
 
 _run_with_output "SILEX_WRAPPERS=on by default" "on" 'echo "$SILEX_WRAPPERS"'

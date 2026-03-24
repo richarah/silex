@@ -71,17 +71,18 @@ run_benchmark() {
     local name="$2"
     local runs=3
 
-    echo -e "${YELLOW}Benchmarking ${name}...${NC}"
+    echo -e "${YELLOW}Benchmarking ${name}...${NC}" >&2
 
     local total_time=0
     local best_time=999999
     local worst_time=0
 
     for i in $(seq 1 $runs); do
-        echo -n "  Run $i/$runs: "
+        echo -n "  Run $i/$runs: " >&2
 
         # Run build and time it
-        local start=$(date +%s%N)
+        local start
+        start=$(date +%s%3N)
 
         docker run --rm \
             -v "$PROJECT_DIR:/workspace" \
@@ -89,15 +90,17 @@ run_benchmark() {
             "$image" \
             bash -c "
                 rm -rf build && \
-                cmake -B build -DCMAKE_BUILD_TYPE=Release && \
-                cmake --build build
+                cmake -B build -DCMAKE_BUILD_TYPE=Release -G Ninja -Wno-dev && \
+                cmake --build build --parallel \$(nproc)
             " > /dev/null 2>&1
 
-        local end=$(date +%s%N)
-        local duration=$(( (end - start) / 1000000 )) # Convert to milliseconds
-        local duration_sec=$(echo "scale=2; $duration / 1000" | bc)
+        local end
+        end=$(date +%s%3N)
+        local duration=$(( end - start )) # milliseconds
+        local duration_sec
+        duration_sec=$(echo "scale=2; $duration / 1000" | bc)
 
-        echo "${duration_sec}s"
+        echo "${duration_sec}s" >&2
 
         total_time=$(( total_time + duration ))
 
@@ -111,14 +114,17 @@ run_benchmark() {
     done
 
     local avg_time=$(( total_time / runs ))
-    local avg_sec=$(echo "scale=2; $avg_time / 1000" | bc)
-    local best_sec=$(echo "scale=2; $best_time / 1000" | bc)
-    local worst_sec=$(echo "scale=2; $worst_time / 1000" | bc)
+    local avg_sec
+    avg_sec=$(echo "scale=2; $avg_time / 1000" | bc)
+    local best_sec
+    best_sec=$(echo "scale=2; $best_time / 1000" | bc)
+    local worst_sec
+    worst_sec=$(echo "scale=2; $worst_time / 1000" | bc)
 
-    echo -e "${GREEN}  Average: ${avg_sec}s (best: ${best_sec}s, worst: ${worst_sec}s)${NC}"
-    echo ""
+    echo -e "${GREEN}  Average: ${avg_sec}s (best: ${best_sec}s, worst: ${worst_sec}s)${NC}" >&2
+    echo "" >&2
 
-    # Return average time in milliseconds
+    # Return average time in milliseconds (stdout only — no ANSI codes)
     echo "$avg_time"
 }
 
