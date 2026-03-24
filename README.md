@@ -14,7 +14,7 @@ Everything else in your Dockerfile stays the same.
 
 ## Why this exists
 
-The fastest part of your container build is probably your code.
+Because the fastest part of your container build is probably your code.
 
 ## What's inside
 
