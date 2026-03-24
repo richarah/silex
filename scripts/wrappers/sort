@@ -1,9 +1,11 @@
 #!/bin/sh
-# Silex wrapper: sort with --parallel=nproc for faster sorting (GNU sort only)
+# Silex wrapper: sort with --parallel=nproc via uutils coreutils
+# uutils-coreutils is extracted at image build time; busybox remains
+# at /usr/bin/sort for system use. Falls back silently if uutils-coreutils is absent.
 [ "$SILEX_WRAPPERS" = "off" ] && exec /usr/bin/sort "$@"
-# Fall back gracefully if --parallel is not supported (e.g. busybox sort)
-if /usr/bin/sort --parallel=1 /dev/null 2>/dev/null; then
-    exec /usr/bin/sort --parallel="$(nproc)" "$@"
+_impl=/usr/local/silex/bin/uutils-coreutils
+if [ -x "$_impl" ]; then
+    exec "$_impl" sort --parallel="$(nproc)" "$@"
 else
     exec /usr/bin/sort "$@"
 fi

@@ -1,29 +1,39 @@
 #!/bin/sh
-# Silex wrapper: tar with parallel compressor injection
-# Substitutes pigz for gzip, pixz for xz, zstd for zstd (already parallel)
+# Silex wrapper: tar with parallel compressor injection (creation only)
+# Uses pigz for .tar.gz and pixz for .tar.xz when creating archives.
+# Extraction is passed through unchanged — decompression is sequential.
+# Uses busybox-compatible -I flag, not GNU-only --use-compress-program.
 [ "$SILEX_WRAPPERS" = "off" ] && exec /usr/bin/tar "$@"
 
-# Detect compression format from flags and inject parallel compressor
+_creating=0
 _use_pigz=0
 _use_pixz=0
 
 for _arg in "$@"; do
     case "$_arg" in
-        -z|--gzip|--gunzip|--ungzip) _use_pigz=1 ;;
-        -j|--bzip2) : ;;  # pbzip2 rarely available, skip
-        -J|--xz) _use_pixz=1 ;;
-    esac
-    # Also detect from filename extension when -a/--auto-compress
-    case "$_arg" in
-        *.tar.gz|*.tgz) _use_pigz=1 ;;
-        *.tar.xz|*.txz) _use_pixz=1 ;;
+        -c|--create)            _creating=1 ;;
+        -x|--extract|-t|--list) _creating=0 ;;
+        -z|--gzip)              _use_pigz=1 ;;
+        -J|--xz)                _use_pixz=1 ;;
+        *.tar.gz|*.tgz)         _use_pigz=1 ;;
+        *.tar.xz|*.txz)         _use_pixz=1 ;;
     esac
 done
 
+# Handle bundled short flags: tar czf, tar xf, tar cJf, etc.
+_first="${1:-}"
+case "$_first" in
+    *c*) _creating=1 ;;
+    *x*|*t*) _creating=0 ;;
+esac
+
+[ "$_creating" = "0" ] && exec /usr/bin/tar "$@"
+
+# Creation: inject parallel compressor via -I (busybox-compatible)
 if [ "$_use_pigz" = "1" ] && command -v pigz >/dev/null 2>&1; then
-    exec /usr/bin/tar --use-compress-program=pigz "$@"
+    exec /usr/bin/tar -I pigz "$@"
 elif [ "$_use_pixz" = "1" ] && command -v pixz >/dev/null 2>&1; then
-    exec /usr/bin/tar --use-compress-program=pixz "$@"
+    exec /usr/bin/tar -I pixz "$@"
 fi
 
 exec /usr/bin/tar "$@"

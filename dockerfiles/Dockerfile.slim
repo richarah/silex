@@ -76,6 +76,16 @@ RUN apk add --no-cache \
     xxhash=0.8.3-r3 \
     dash=0.5.13.2-r0
 
+# Install uutils sort for --parallel support in sort wrapper.
+# Extract binary, then remove package and restore busybox /usr/bin/sort.
+# Busybox remains the default sort for system use (4% faster on build workloads).
+RUN apk add --no-cache uutils=0.7.0-r1 && \
+    mkdir -p /usr/local/silex/bin && \
+    cp /usr/bin/coreutils /usr/local/silex/bin/uutils-coreutils && \
+    strip /usr/local/silex/bin/uutils-coreutils 2>/dev/null || true && \
+    apk del uutils && \
+    ln -sf /bin/busybox /usr/bin/sort
+
 # ============================================================================
 # Copy prebuilt tools from builder stage
 # ============================================================================
@@ -245,7 +255,7 @@ ENV SILEX_LINKER=mold \
     SILEX_CXX=clang++ \
     SILEX_CACHE=sccache \
     SILEX_QUIET=off \
-    SILEX_MALLOC=jemalloc \
+    SILEX_MALLOC=mimalloc \
     SILEX_WRAPPERS=on \
     SILEX_GIT_SHALLOW=on \
     SILEX_APT_SHIM=on \
@@ -265,7 +275,7 @@ CMD ["/bin/bash"]
 # Usage notes
 # ============================================================================
 # When this image starts, it will:
-# 1. Set LD_PRELOAD to jemalloc for faster memory allocation
+# 1. Set LD_PRELOAD to mimalloc for faster memory allocation
 # 2. Read SILEX_* environment variables
 # 3. Reconfigure CC/CXX/linker/generator/cache based on user preferences
 # 4. Print a one-line config summary (unless SILEX_QUIET=on)

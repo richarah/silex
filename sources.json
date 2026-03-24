@@ -1,0 +1,145 @@
+{
+  "_schema": "silex-sources/1",
+  "_note": "Canonical source manifest. Verify all sha256 values before building.",
+  "_verify": "Run: make verify-sources",
+
+  "llvm": {
+    "version": "18.1.8",
+    "url": "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/llvm-project-18.1.8.src.tar.xz",
+    "sha256": "0b58557a6d32ceee97c8d533a59b9212d87e0fc4d2833924eb6c611247db2f2a",
+    "licence": "Apache-2.0 WITH LLVM-exception"
+  },
+
+  "mold": {
+    "version": "2.40.4",
+    "url": "https://github.com/rui314/mold/archive/refs/tags/v2.40.4.tar.gz",
+    "sha256": "69414c702ec1084e1fa8ca16da24f167f549e5e11e9ecd5d70a8dcda6f08c249",
+    "licence": "MIT",
+    "notes": "mold >=2.36 no longer ships release tarballs; use GitHub archive URL."
+  },
+
+  "ninja": {
+    "version": "1.12.1",
+    "url": "https://github.com/ninja-build/ninja/archive/refs/tags/v1.12.1.tar.gz",
+    "sha256": "821bdff48a3f683bc4bb3b6f0b5fe7b2d647cf65d52aeb63328c91a6c6df285a",
+    "licence": "Apache-2.0"
+  },
+
+  "zstd": {
+    "version": "1.5.6",
+    "url": "https://github.com/facebook/zstd/releases/download/v1.5.6/zstd-1.5.6.tar.gz",
+    "sha256": "8c29e06cf42aacc1eafc4077ae2ec6c6fcb96a626157e0593d5e82a34fd403c1",
+    "licence": "BSD-3-Clause OR GPL-2.0-only"
+  },
+
+  "xxhash": {
+    "version": "0.8.2",
+    "url": "https://github.com/Cyan4973/xxHash/archive/refs/tags/v0.8.2.tar.gz",
+    "sha256": "baee0c6afd4f03165de7a4e67988d16f0f2b257b51d0e3cb91909302a26a79c4",
+    "licence": "BSD-2-Clause"
+  },
+
+  "mimalloc": {
+    "version": "2.1.7",
+    "url": "https://github.com/microsoft/mimalloc/archive/refs/tags/v2.1.7.tar.gz",
+    "sha256": "0eed39319f139afde8515010ff59baf24de9e47ea316a315398e8027d198202d",
+    "licence": "MIT"
+  },
+
+  "apk-tools": {
+    "version": "2.14.4",
+    "url": "https://gitlab.alpinelinux.org/alpine/apk-tools/-/archive/v2.14.4/apk-tools-v2.14.4.tar.gz",
+    "sha256": "c8ad16bddfae988392ad067a244cfdaf643eb7d6761b73450739585ca76f9a25",
+    "licence": "GPL-2.0-only",
+    "notes": "GPL-2.0 only applies to apk-tools itself. Written offer in LICENSING.md."
+  },
+
+  "busybox": {
+    "version": "1.37.0",
+    "url": "https://busybox.net/downloads/busybox-1.37.0.tar.bz2",
+    "sha256": "3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4",
+    "licence": "GPL-2.0-only",
+    "notes": "GPL-2.0 only. Written offer in LICENSING.md. busybox.net is unreliable; add retry."
+  },
+
+  "dash": {
+    "version": "0.5.12",
+    "url": "http://gondor.apana.org.au/~herbert/dash/files/dash-0.5.12.tar.gz",
+    "sha256": "6a474ac46e8b0b32916c4c60df694c82058d3297d8b385b74508030ca4a8f28a",
+    "licence": "BSD-3-Clause"
+  },
+
+  "tini": {
+    "version": "0.19.0",
+    "url": "https://github.com/krallin/tini/archive/refs/tags/v0.19.0.tar.gz",
+    "sha256": "0fd35a7030052acd9f58948d1d900fe1e432ee37103c5561554408bdac6bbf0d",
+    "licence": "MIT"
+  },
+
+  "pigz": {
+    "version": "2.8",
+    "url": "https://zlib.net/pigz/pigz-2.8.tar.gz",
+    "sha256": "eb872b4f0e1f0ebe59c9f7bd8c506c4204893ba6a8492de31df416f0d5170fd0",
+    "licence": "zlib"
+  },
+
+  "pixz": {
+    "version": "1.0.7",
+    "url": "https://github.com/vasi/pixz/releases/download/v1.0.7/pixz-1.0.7.tar.xz",
+    "sha256": "e5e32c6eb0bf112b98e74a5da8fb63b9f2cae71800f599d97ce540e150c8ddc5",
+    "licence": "BSD-2-Clause"
+  },
+
+  "coreutils": {
+    "version": "9.5",
+    "url": "https://ftp.gnu.org/gnu/coreutils/coreutils-9.5.tar.xz",
+    "sha256": "cd328edeac92f6a665de9f323c93b712af1858bc2e0d88f3f7100469470a1b8a",
+    "licence": "GPL-3.0-or-later",
+    "notes": "Only the sort binary is installed. GPLv3, not GPLv2."
+  },
+
+  "sccache": {
+    "version": "0.8.2",
+    "url": "https://github.com/mozilla/sccache/archive/refs/tags/v0.8.2.tar.gz",
+    "sha256": "2b3e0ef8902fe7bcdcfccf393e29f4ccaafc0194cbb93681eaac238cdc9b94f8",
+    "licence": "Apache-2.0"
+  },
+
+  "fd": {
+    "version": "10.2.0",
+    "url": "https://github.com/sharkdp/fd/archive/refs/tags/v10.2.0.tar.gz",
+    "sha256": "73329fe24c53f0ca47cd0939256ca5c4644742cb7c14cf4114c8c9871336d342",
+    "licence": "MIT OR Apache-2.0"
+  },
+
+  "ripgrep": {
+    "version": "14.1.1",
+    "url": "https://github.com/BurntSushi/ripgrep/archive/refs/tags/14.1.1.tar.gz",
+    "sha256": "4dad02a2f9c8c3c8d89434e47337aa654cb0e2aa50e806589132f186bf5c2b66",
+    "licence": "MIT OR Unlicense"
+  },
+
+  "uv": {
+    "version": "0.4.30",
+    "url": "https://github.com/astral-sh/uv/archive/refs/tags/0.4.30.tar.gz",
+    "sha256": "0f74a570e52affd82ff7987ade2553e144a326e7ff58de24ab4242999a3dc931",
+    "licence": "MIT OR Apache-2.0"
+  },
+
+  "rust": {
+    "version": "1.82.0",
+    "url_x86_64": "https://static.rust-lang.org/dist/rust-1.82.0-x86_64-unknown-linux-gnu.tar.xz",
+    "url_aarch64": "https://static.rust-lang.org/dist/rust-1.82.0-aarch64-unknown-linux-gnu.tar.xz",
+    "sha256_x86_64": "8a6bf24ca1fee2bd861590431c7954674191a0c0dfa0af4169731bc1459cf58a",
+    "sha256_aarch64": "99acf175be33bd96ac82d644125d0e2acc6962d61ee64851edc7d8ba3bd23ca4",
+    "licence": "MIT OR Apache-2.0"
+  },
+
+  "silex-nosync": {
+    "version": "internal",
+    "url": "src/silex-nosync.c",
+    "sha256": "n/a",
+    "licence": "MIT",
+    "notes": "Written from scratch. No GPL code."
+  }
+}
