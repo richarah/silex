@@ -1,7 +1,7 @@
 # silex
 
 A Docker base image where everything is fast. `FROM silex:slim` and
-your builds inherit clang, mold, ninja, sccache, and jemalloc.
+your builds inherit clang, mold, ninja, sccache, and mimalloc.
 
 Replaces `FROM ubuntu:24.04`. Does not replace Docker, BuildKit, or
 your build system. Just makes them faster.
@@ -38,25 +38,29 @@ That's it. Silex is pre-configured with clang, mold (fast linker), Ninja (fast b
 
 ## What's inside
 
-| Component | Default | Replaces | Why |
+| Component | Version | Replaces | Why |
 |-----------|---------|----------|-----|
-| Compiler | clang-18 | gcc | LLVM integration, ThinLTO, cross-compilation from a single binary |
-| Linker | mold 2.35.0 | ld/gold/lld | 5-10x faster per link step |
-| Build system | ninja | make | Better job scheduling, lower overhead |
+| Compiler | clang 18.1.8 | gcc | LLVM integration, ThinLTO, cross-compilation from a single binary |
+| Linker | mold 2.40.4 | ld/gold/lld | 5-10x faster per link step |
+| Build system | ninja 1.12.1 | make | Better job scheduling, lower overhead |
 | Compiler cache | sccache 0.8.2 | ccache | Remote backends (S3, GCS, Redis), Rust support |
-| Allocator | jemalloc 5.3.0 | glibc malloc | Faster under multi-threaded allocation, loaded via LD_PRELOAD |
+| Allocator | mimalloc 2.1.7 | glibc malloc | 9% faster than system allocator under multi-threaded builds, loaded via LD_PRELOAD |
 | PID 1 | tini 0.19.0 | nothing | Signal reaping, zombie prevention |
 
-Base: cgr.dev/chainguard/wolfi-base (glibc, ~14MB, daily CVE rebuilds).
-Not Alpine (musl is slower for compilation). Not Debian (dpkg is the
-disease, not the cure).
+Base: debian:bookworm-slim (glibc). Every binary compiled from source
+with pinned SHA256 values. Runtime packages installed via apk from
+Wolfi/Chainguard repos.
+
+Not Alpine (musl is slower for compilation). Not a Wolfi base image
+(building from source gives reproducible, auditable binaries independent
+of upstream rebuild schedules).
 
 ## Image variants
 
 | Tag | What | Size |
 |-----|------|------|
-| `silex:slim` | Everything above | ~512MB |
-| `silex:dev` | Adds development tooling | larger |
+| `silex:slim` | Everything above | ~540MB |
+| `silex:dev` | Adds development tooling (git, etc.) | larger |
 | `silex:runtime` | Companion for multi-stage builds, no compiler | ~30MB |
 | `silex:cross` | Adds cross-compilation support (arm64 <-> x86_64) | larger |
 
@@ -72,6 +76,7 @@ Environment variables, set in your Dockerfile or at runtime.
 | `SILEX_GENERATOR` | Ninja | Ninja, "Unix Makefiles" |
 | `SILEX_PARALLEL` | auto | auto, off, or a number |
 | `SILEX_CACHE` | sccache | sccache, ccache, off |
+| `SILEX_MALLOC` | mimalloc | mimalloc, jemalloc, system |
 | `SILEX_WRAPPERS` | on | on, off |
 | `SILEX_QUIET` | off | on, off |
 
@@ -99,8 +104,7 @@ Package installs run with `silex-nosync.so` preloaded, suppressing `fsync`/`fdat
 
 When the shim doesn't know a package:
 
-    silex: package 'libobscure-dev' not found in package map.
-           Try: apk search obscure
+    silex apt-shim: libobscure-dev: no mapping, trying as-is
 
 Disable with `ENV SILEX_WRAPPERS=off`.
 
@@ -143,10 +147,27 @@ Run `benchmarks/benchmark.sh` to reproduce.
 ```bash
 git clone https://github.com/richarah/silex.git
 cd silex
-bash scripts/setup-dev.sh   # once, configures git hooks
-bash scripts/build.sh       # builds silex:slim
-bash scripts/test.sh        # 62 tests
+
+# Verify source SHA256 values (required once before first build)
+make verify-sources
+
+# Cold-start build from debian:bookworm-slim (~90-120 min)
+make bootstrap
+
+# Self-hosted build using previous silex:slim (~15-20 min)
+make build
+
+# Run compat tests
+make test
 ```
+
+`make bootstrap` compiles everything from source: LLVM 18.1.8, mold,
+ninja, zstd, mimalloc, busybox, dash, tini, pigz, pixz, GNU coreutils
+(sort only), apk-tools, sccache, fd, ripgrep, uv. All tarballs verified
+against SHA256 values in `sources.json`.
+
+`make build` reuses the clang and mold from the previous `silex:slim`,
+skipping the ~60 minute LLVM compilation step.
 
 ## Known limitations
 
@@ -157,16 +178,14 @@ Set `CC=gcc` for these files. `silex lint` detects this automatically
 (v0.2+, requires source directory as second argument).
 
 **Wolfi package names differ from Debian.** The apt-get shim covers 504
-common packages. If `apt-get install libfoo-dev` fails with "not found in
-package map", run `apk search foo` to find the Wolfi name and file an issue.
+common packages. If `apt-get install libfoo-dev` fails, run
+`apk search foo` to find the Wolfi name and file an issue.
 
-**No GPU support in slim.** nvCOMP decompression and GPU-accelerated hashing
-are in `silex:full` (not yet released). `silex:slim` is CPU-only.
+**No GPU support in slim.** `silex:slim` is CPU-only.
 
-**Coreutils are Busybox.** Wolfi's base uses Busybox, not GNU coreutils or
-uutils. Some GNU-specific flags won't work. The sort wrapper adds
-`--parallel=$(nproc)` only if the installed sort supports it; falls back
-silently.
+**Coreutils are Busybox.** Some GNU-specific flags won't work. The sort
+wrapper adds `--parallel=$(nproc)` via a GNU coreutils sort binary
+installed alongside busybox; other GNU sort flags are not available.
 
 **git is not in silex:slim.** It's in `silex:dev`. If your build stage needs
 git for FetchContent or submodules, either use `silex:dev` as the build base
@@ -174,19 +193,24 @@ or `RUN apk add git` to install it. `silex:slim` has zero GPLv2 components.
 
 ## FAQ
 
-**Why Wolfi?**
-glibc (faster than musl for compilation), container-native, daily CVE
-rebuilds, works with Trivy/Grype/Snyk. Alpine was the alternative but
-musl is measurably slower for the one thing this image is supposed to do.
+**Why debian:bookworm-slim as base?**
+glibc (faster than musl), container-native, daily CVE rebuilds for the
+Wolfi package layer. Building from source rather than using a Wolfi base
+image gives a reproducible, auditable image where every binary can be
+traced back to a specific commit and SHA256-verified tarball.
+
+**Why Wolfi repos for runtime packages?**
+glibc-compatible, container-native, daily CVE rebuilds, works with
+Trivy/Grype/Snyk. Alpine repos use musl ABIs and are not compatible.
 
 **Will this break my Dockerfile?**
 Maybe. The apt shim covers 504 common packages. If something breaks,
 `SILEX_WRAPPERS=off` gives you raw apk. File a bug with the package name.
 
 **Can I use gcc instead of clang?**
-`ENV SILEX_CC=gcc SILEX_CXX=g++`. gcc is in the image.
+`ENV SILEX_CC=gcc SILEX_CXX=g++`. Install gcc with `apk add gcc`.
 
-**Why is the image 512MB?**
+**Why is the image ~540MB?**
 Clang is 150-200MB. The rest is build tools. `silex:runtime` is ~30MB
 for when you only need to run the output.
 
@@ -194,6 +218,11 @@ for when you only need to run the output.
 
 MIT. See LICENSE.
 
-Bundled tools: clang/LLVM (Apache 2.0 + LLVM exceptions), mold (MIT),
-sccache (Apache 2.0), ninja (Apache 2.0), jemalloc (BSD 2-Clause),
-tini (MIT), Wolfi base (Apache 2.0).
+Bundled tools (all compiled from source): clang/LLVM 18.1.8 (Apache 2.0
++ LLVM exceptions), mold 2.40.4 (MIT), sccache 0.8.2 (Apache 2.0),
+ninja 1.12.1 (Apache 2.0), mimalloc 2.1.7 (MIT), tini 0.19.0 (MIT),
+busybox 1.37.0 (GPL-2.0), dash 0.5.12 (BSD), pigz 2.8 (zlib),
+pixz 1.0.7 (BSD), zstd 1.5.6 (BSD/GPL-2.0), xxhash 0.8.2 (BSD),
+apk-tools 2.14.4 (GPL-2.0), GNU coreutils 9.5 sort (GPL-3.0),
+fd 10.2.0 (MIT/Apache-2.0), ripgrep 14.1.1 (MIT/Unlicense),
+uv 0.4.30 (MIT/Apache-2.0).
