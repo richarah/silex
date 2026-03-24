@@ -19,7 +19,8 @@ Environment variables:
   SILEX_QUIET=on          Suppress entrypoint summary line
   SILEX_WRAPPERS=off      Disable acceleration wrappers
   SILEX_APT_SHIM=off      Disable apt-get shim
-  SILEX_MALLOC=system     Use system allocator instead of jemalloc
+  SILEX_MALLOC=jemalloc   Use jemalloc instead of mimalloc (default)
+  SILEX_MALLOC=system     Use system allocator
   SILEX_GIT_SHALLOW=off   Disable automatic shallow git clone
 EOF
 }
@@ -61,7 +62,7 @@ _doctor() {
 
     # -- Allocator -------------------------------------------------------------
     printf "Allocator\n"
-    _malloc="${SILEX_MALLOC:-jemalloc}"
+    _malloc="${SILEX_MALLOC:-mimalloc}"
     case "$_malloc" in
         jemalloc) _alloc_so=$(find /usr/lib /usr/local/lib -name 'libjemalloc.so*' 2>/dev/null | sort | tail -1) ;;
         mimalloc) _alloc_so=$(find /usr/lib /usr/local/lib -name 'libmimalloc.so*' 2>/dev/null | sort | tail -1) ;;

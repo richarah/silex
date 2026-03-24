@@ -53,7 +53,7 @@ Every package in `apk add` is justified:
 | `git` | Source checkout and submodule fetching |
 | `make` | Fallback for projects that require GNU Make |
 | `bash` | Entrypoint script requires bash; common build scripts use bash |
-| `jemalloc` | Faster memory allocator, loaded via LD_PRELOAD |
+| `mimalloc` + `jemalloc` | Memory allocators; mimalloc is default (fastest measured), jemalloc available via `SILEX_MALLOC=jemalloc` |
 
 ### Size Optimisation
 
@@ -113,13 +113,19 @@ sccache chosen over ccache because:
 
 sccache is downloaded as a prebuilt musl binary, which runs on glibc systems without issues.
 
-### Allocator: jemalloc
+### Allocator: mimalloc
 
-jemalloc is faster than glibc malloc for multi-threaded allocators (typical in compiler workloads). It's loaded via `LD_PRELOAD` by the entrypoint, transparently accelerating any process that uses malloc.
+mimalloc is loaded via `LD_PRELOAD` by the entrypoint, transparently accelerating any process that uses malloc. The entrypoint discovers the `.so` path at runtime: `find /usr/lib /usr/local/lib -name 'libmimalloc.so*' | sort | tail -1`.
 
-The entrypoint discovers the `.so` path at runtime: `find /usr/lib /usr/local/lib -name 'libjemalloc.so*' | head -1`. This avoids hardcoding a path that may change between package versions.
+**Decision**: mimalloc. 10% faster than system malloc, 7% faster than jemalloc on nlohmann/json full build. Consistent variance (32.3–32.7s across 3 runs).
 
-**jemalloc vs mimalloc**: both are installed. jemalloc is the current default. Benchmark plan: compile template-heavy C++ project (nlohmann/json) under each allocator, compare peak RSS and wall time. `SILEX_MALLOC=mimalloc` switches to mimalloc.
+| allocator | run 1 | run 2 | run 3 | avg |
+|-----------|-------|-------|-------|-----|
+| system malloc | 36340ms | 35055ms | 36690ms | 36028ms |
+| jemalloc | 34891ms | 36325ms | 33132ms | 34782ms |
+| **mimalloc** | **32711ms** | **32524ms** | **32304ms** | **32513ms** |
+
+jemalloc remains available via `SILEX_MALLOC=jemalloc`. Raw: `docs/benchmarks/coreutils-allocator-2026-03-24.txt`
 
 ### Compression: zstd
 
@@ -205,7 +211,7 @@ When a package isn't in the mapping, the shim warns and passes the name through 
 
 2. **Repeated builds in CI**: sccache provides object-level caching. With a warm cache, unchanged files are not recompiled. Combined with BuildKit's `--mount=type=cache`, incremental CI builds are **15-20x faster** (measured: 44s → 2.5s for nlohmann/json test suite).
 
-3. **Python extension builds** (e.g., NumPy, PyTorch from source): jemalloc reduces allocator contention during multi-threaded compilation.
+3. **Python extension builds** (e.g., NumPy, PyTorch from source): mimalloc reduces allocator contention during multi-threaded compilation.
 
 ### Where Silex Doesn't Help Much
 
@@ -269,7 +275,17 @@ The image does not require `--privileged`. All operations in the entrypoint scri
 
 ### Coreutils
 
-Toybox vs uutils: decision pending benchmark. Currently shipping Wolfi's default coreutils (BusyBox-compatible). [uutils](https://github.com/uutils/coreutils) (Rust, statically linked) is 20-50% faster on sort tasks. Deferred pending stability validation on C++ build workloads.
+**Decision**: busybox (Wolfi default). 4% faster than uutils and GNU on the benchmark workload. Toybox is not in the Wolfi repo.
+
+| variant | run 1 | run 2 | run 3 | avg |
+|---------|-------|-------|-------|-----|
+| **Wolfi default (busybox)** | **34677ms** | **34855ms** | **35213ms** | **34915ms** |
+| GNU coreutils 9.10 | 35187ms | 35683ms | 38600ms | 36490ms |
+| uutils 0.7.0 | 37366ms | 35551ms | 35802ms | 36239ms |
+
+sort --parallel: busybox sort does not support `--parallel`. The silex sort wrapper uses `/usr/local/silex/bin/sort-impl` — a uutils sort binary extracted at image build time — for parallel sort, without replacing busybox system-wide.
+
+Raw: `docs/benchmarks/coreutils-allocator-2026-03-24.txt`
 
 ### GPU Acceleration (v0.2)
 
