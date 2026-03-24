@@ -1,296 +1,310 @@
 # Silex Architecture
 
-A technical deep-dive into how Silex is built and why each decision was made.
+A technical description of how silex:slim is built and why each decision was made.
 
 ---
 
-## 1. Base Layer Design
+## 1. Build Pipeline
 
-### Why Wolfi?
+### Three Stages
 
-Silex uses [Wolfi](https://github.com/wolfi-dev) (by Chainguard) as its base, not Alpine or Ubuntu.
-
-| Property | Wolfi | Alpine | Ubuntu 24.04 |
-|----------|-------|--------|--------------|
-| Base size | 14MB | 7MB | 77MB |
-| libc | glibc 2.43 | musl | glibc |
-| CVE posture | Zero CVEs (daily updates) | Moderate | Moderate |
-| Scanner support | All major scanners | Good | Good |
-| Package freshness | Daily rebuilds | Varies | LTS freeze |
-| Container-native | Yes | Yes | No |
-
-**Why not Alpine?** Alpine uses musl libc, which has subtle performance differences from glibc during compilation (particularly with ThinLTO and large template-heavy C++ codebases). Pre-built toolchain binaries (mold, sccache) target glibc. Alpine is excellent for runtime images; less ideal for build images.
-
-**Why not Ubuntu/Debian?** `apt-get update` takes 10-30 seconds. Ubuntu ships ~800 packages for a "minimal" install. Postinstall scripts (locale-gen, man-db rebuilds, dpkg triggers) run during every `RUN apt-get install`. In a multi-stage build environment, these are pure waste.
-
-**Why not scratch/distroless?** Build images need shell, package manager, and build tools. Scratch is for runtime.
-
-### Multi-Stage Build
-
-The Dockerfile uses two stages:
+The bootstrap build (`dockerfiles/Dockerfile.bootstrap`) has three stages:
 
 ```
-builder  → Downloads mold and sccache prebuilt binaries (curl-only)
-final    → apk installs all packages, then copies binaries from builder
+build-c      FROM debian:bookworm-slim
+             GCC builds mold; mold builds stage-1 clang.
+             stage-1 clang builds: ninja, zstd, xxhash, mimalloc,
+             busybox, dash, tini, pigz, pixz, coreutils sort,
+             apk-tools, silex-nosync.so.
+
+build-rust   FROM debian:bookworm-slim (parallel with build-c)
+             Rust 1.82.0 builds: sccache, fd, ripgrep, uv.
+
+final        FROM debian:bookworm-slim
+             Installs ca-certificates, libssl3, zlib1g via apt.
+             Removes apt and dpkg.
+             COPYs compiled artifacts from build-c and build-rust.
+             Configures apk for Wolfi/Chainguard repos.
+             Installs scripts, wrappers, shims.
 ```
 
-The builder stage keeps the final image clean: no curl, no downloaded tarballs, no intermediate files.
+The self-hosted build (`dockerfiles/Dockerfile`) carries `/opt/llvm/` and
+`/opt/mold/` forward from the previous `silex:slim` via `COPY --from`,
+skipping the ~60-minute LLVM compilation step.
 
-### Package Selection Strategy
+### Why Compile From Source
 
-Every package in `apk add` is justified:
+- Pinned SHA256 on every source tarball. Every binary in the image is
+  traceable to a specific commit.
+- No dependency on upstream rebuild schedules. The image does not break
+  when a Wolfi package is updated.
+- Compiler flags chosen for the build image workload: `-O3`, mold as linker,
+  `x86-64-v3` microarchitecture target (or `armv8.2-a+crypto` on arm64).
 
-| Package | Reason |
-|---------|--------|
-| `clang-18` | Compiler (better with mold/ThinLTO than gcc) |
-| `libcxx1-18` + `libcxx1-18-dev` | libc++ for C++ builds |
-| `ninja-build` | Fast build system (lower overhead than Make) |
-| `python-3.12` | Required by many build systems (Meson, GN, wheel builds) |
-| `ca-certificates` | HTTPS for downloading dependencies at build time |
-| `tini` | Signal reaping for container entrypoint |
-| `zstd` | Fast compression for layer caching and artifact packaging |
-| `curl` | Downloading dependencies at build time |
-| `git` | Source checkout and submodule fetching |
-| `make` | Fallback for projects that require GNU Make |
-| `bash` | Entrypoint script requires bash; common build scripts use bash |
-| `mimalloc` + `jemalloc` | Memory allocators; mimalloc is default (fastest measured), jemalloc available via `SILEX_MALLOC=jemalloc` |
+### Base: debian:bookworm-slim
 
-### Size Optimisation
+- glibc 2.36. Binaries compiled here run on any glibc >= 2.36 system.
+- Minimal attack surface: ~30 packages in the slim variant.
+- apt and dpkg are removed after the package install step; apk replaces them.
 
-The Dockerfile applies six size-reduction passes after installation:
+### Why Not Wolfi Base
 
-1. **Strip LLVM shared objects**: `strip --strip-unneeded` on all `.so*` files under `/usr/lib/llvm*`. Saves ~100MB.
-2. **Strip locale data**: Keep only `en_US` and `C`. glibc ships ~200MB of locales; we reduce to ~2MB.
-3. **Strip timezone data**: Keep UTC, Europe/, America/. Reduces tzdata from ~20MB to ~5MB.
-4. **Strip Python**: Remove `test/`, `idlelib/`, `tkinter/`, `turtledemo/`, `ensurepip/`, all `__pycache__/`. Reduces Python from ~80MB to ~30MB.
-5. **Strip documentation**: Remove `/usr/share/doc`, `man`, `info`, `gtk-doc`, `help`. Saves ~50-100MB.
-6. **Clear package cache**: `rm -rf /var/cache/apk/*`.
+Wolfi's package repo (apk.cgr.dev/chainguard) is used for runtime packages
+(`apk add` inside user Dockerfiles). The *base image* is Debian because:
+
+- Debian's glibc is the de-facto standard ABI for pre-built binaries.
+- Building from source requires a stable, widely available compiler (gcc).
+  Debian bookworm provides gcc 12.2, which is sufficient for LLVM 18.
+- Wolfi rebuilds daily; a Wolfi-based bootstrap would produce different
+  toolchain binaries on different days.
 
 ---
 
-## 2. Tool Selection Rationale
+## 2. Compiler Flags
 
-### Compiler: clang-18
+### Stage-1 clang (gcc-compiled)
 
-clang is chosen over gcc because:
-- Better integration with the LLVM toolchain (mold uses LLVM IR for LTO; sccache has better clang support)
-- Single binary can target multiple architectures without separate cross-compiler packages
-- ThinLTO is more mature and faster in clang than in gcc
-- `clang-18` is a specific version (not floating `clang`) for reproducibility
+```
+-O3
+-fuse-ld=/opt/mold/bin/mold
+```
 
-gcc is not excluded by design — users can `apk add gcc` and set `SILEX_CC=gcc`.
+No LTO: gcc cannot produce ThinLTO bitcode for LLVM's linker. The flag
+`LLVM_ENABLE_LTO=OFF` is set explicitly. `-O3` (rather than `-O2`) makes the
+clang binary in the final image faster; there is no correctness risk on a
+well-tested codebase like LLVM.
 
-### Linker: mold 2.35.0
+### All other C/C++ tools (compiled by stage-1 clang)
 
-mold is the default linker, symlinked as `/usr/bin/ld`:
+```
+-O3 -fomit-frame-pointer -march=x86-64-v3 (or -march=armv8.2-a+crypto)
+-fuse-ld=/opt/mold/bin/mold
+```
+
+`x86-64-v3` requires AVX2 (Intel Haswell 2013+, AMD Zen 1 2017+). All
+modern CI runners meet this bar. Override with `--build-arg MARCH_FLAG=-march=x86-64`
+if you need to build on older hardware.
+
+### Rust tools (sccache, fd, ripgrep, uv)
+
+Compiled with the stage-1 clang as linker, `CARGO_PROFILE_RELEASE_LTO=thin`,
+`CARGO_PROFILE_RELEASE_OPT_LEVEL=3`. Produces smaller and faster binaries
+than the default Rust release profile.
+
+---
+
+## 3. LLVM Strip Step
+
+After installation, `/opt/llvm/` is pruned to only what is needed at
+runtime for compilation:
+
+| Kept | Dropped |
+|------|---------|
+| `clang`, `clang++`, `clang-18` | All other binaries (100+ llvm-* tools) |
+| `lld`, `ld.lld` | libclang-cpp.so (~400MB) |
+| `libLLVM.so` | libclang.so (C API) |
+| `libc++.so`, `libc++abi.so` | libLTO.so, libRemarks.so |
+| `compiler-rt` clang_rt libs | All `.a` static libs |
+| | `lib/cmake/`, `share/` |
+
+`libclang-cpp.so` is NOT needed at runtime because `CLANG_LINK_CLANG_DYLIB`
+was not set at configure time. The clang binary statically links its clang
+component code and only dynamically links `libLLVM.so`.
+
+---
+
+## 4. Tool Selection
+
+### Compiler: clang 18.1.8
+
+- Single binary targets both X86 and AArch64 (built with
+  `-DLLVM_TARGETS_TO_BUILD="X86;AArch64"` when building for both arches).
+- ThinLTO and PGO are better integrated in clang than gcc.
+- Faster on template-heavy C++: 14-33% over gcc in measurements.
+
+gcc is not excluded — users can `apk add gcc` and set `CC=gcc`.
+
+### Linker: mold 2.40.4
 
 | Linker | Relative speed | Notes |
 |--------|---------------|-------|
 | GNU ld | 1x | Baseline |
-| gold | 2-5x | Better than ld, worse than mold |
+| gold | 2-5x | Better than ld |
 | lld | 2-4x | Good; better sccache compatibility |
 | mold | 5-10x | Fastest; parallel by design |
 
-mold is downloaded as a prebuilt binary (not compiled from source) because compiling mold requires Rust + C++, which would add ~5 minutes and ~2GB to the builder stage.
+mold is compiled from source. Release tarballs were discontinued around
+v2.36; the archive URL is used (`refs/tags/vVERSION.tar.gz`).
 
-Known issue: [mozilla/sccache#1755](https://github.com/mozilla/sccache/issues/1755) — mold can occasionally break sccache's hash-based caching. Workaround: `SILEX_LINKER=lld`.
+### Build System: Ninja 1.12.1
 
-### Build System: Ninja
+`CMAKE_GENERATOR=Ninja` is set so all CMake projects use Ninja automatically.
+Lower overhead than Make; better parallel job scheduling.
 
-Ninja has two advantages over Make:
-1. **Better job scheduling**: Ninja computes the full dependency graph before starting; Make processes it incrementally.
-2. **Lower overhead**: No recursive Make, no shell invocation per rule.
+### Compiler Cache: sccache 0.8.2
 
-`CMAKE_GENERATOR=Ninja` is set so all CMake projects automatically use Ninja. Make remains available as fallback.
+- Remote backends (S3, GCS, Redis, GitHub Actions cache).
+- Works with Rust (`RUSTC_WRAPPER`).
+- Stateless: no daemon required.
+- `SCCACHE_IDLE_TIMEOUT=0` keeps the daemon alive for the container lifetime.
 
-### Compilation Cache: sccache 0.8.2
+### Allocator: mimalloc 2.1.7
 
-sccache chosen over ccache because:
-- Supports remote backends (S3, GCS, Redis, GitHub Actions cache) — important for CI/CD
-- Works with Rust (RUSTC_WRAPPER)
-- Better multi-language support
-- Stateless: no daemon required
+Loaded via `LD_PRELOAD` by the entrypoint. Benchmark on nlohmann/json full
+test suite (32 cores, 3 runs):
 
-sccache is downloaded as a prebuilt musl binary, which runs on glibc systems without issues.
+| allocator | avg time |
+|-----------|----------|
+| system malloc | 36028ms |
+| jemalloc | 34782ms |
+| **mimalloc** | **32513ms** |
 
-### Allocator: mimalloc
+mimalloc -9% vs system, jemalloc -3% vs system. Both allocators are in the
+image; switch with `SILEX_MALLOC=jemalloc` or `SILEX_MALLOC=system`.
 
-mimalloc is loaded via `LD_PRELOAD` by the entrypoint, transparently accelerating any process that uses malloc. The entrypoint discovers the `.so` path at runtime: `find /usr/lib /usr/local/lib -name 'libmimalloc.so*' | sort | tail -1`.
+### Package Manager: apk-tools 2.14.4
 
-**Decision**: mimalloc. 10% faster than system malloc, 7% faster than jemalloc on nlohmann/json full build. Consistent variance (32.3–32.7s across 3 runs).
+Compiled from source. Points at `https://apk.cgr.dev/chainguard` (Wolfi).
+The signing key is copied from `cgr.dev/chainguard/wolfi-base:latest` at
+build time. Provides package installs with:
 
-| allocator | run 1 | run 2 | run 3 | avg |
-|-----------|-------|-------|-------|-----|
-| system malloc | 36340ms | 35055ms | 36690ms | 36028ms |
-| jemalloc | 34891ms | 36325ms | 33132ms | 34782ms |
-| **mimalloc** | **32711ms** | **32524ms** | **32304ms** | **32513ms** |
+- ~1s `apk update` vs 10-30s `apt-get update`
+- No postinstall scripts
+- `silex-nosync.so` preloaded during `apk add` to suppress redundant fsync
+  calls (saves ~20% of install time)
 
-jemalloc remains available via `SILEX_MALLOC=jemalloc`. Raw: `docs/benchmarks/coreutils-allocator-2026-03-24.txt`
+### Shell: dash 0.5.12 + busybox 1.37.0
 
-### Compression: zstd
+`/bin/sh` → dash. Busybox provides all other shell utilities. busybox was
+measured as fastest on the benchmark workload (34915ms avg vs GNU 36490ms,
+uutils 36239ms).
 
-zstd is default because:
-- Parallel decompression (`ZSTD_NBTHREADS=0` = auto)
-- Fast decompression: ~1.5 GB/s vs gzip's ~400 MB/s
-- Level 3 is a good speed/size tradeoff for build artifacts
-- Docker layer caching uses zstd when available
+The `sort` wrapper in `/usr/local/silex/bin/sort` calls a separate
+`sort-parallel` binary (GNU coreutils 9.5 sort, compiled from source) which
+supports `--parallel=$(nproc)`. This is not exposed system-wide.
 
 ---
 
-## 3. Environment Configuration
+## 5. Environment Configuration
 
 ### SILEX_* Variable Flow
 
-1. `tini` starts, sets up signal handling, then invokes `silex-entrypoint`
-2. `silex-entrypoint` reads all `SILEX_*` env vars
-3. Based on those vars, it sets `CC`, `CXX`, `LDFLAGS`, `CMAKE_GENERATOR`, `MAKEFLAGS`, `RUSTC_WRAPPER`, and `LD_PRELOAD`
-4. Prints a one-line config summary to stderr (unless `SILEX_QUIET=on`)
-5. `exec "$@"` — hands control to the user's command
-
-All SILEX_* variables have documented defaults set in the Dockerfile `ENV` block. They can be overridden by users at any layer.
+1. `tini` starts, reaps signals, invokes `silex-entrypoint`
+2. `silex-entrypoint` reads `SILEX_*` vars, sets `CC`, `CXX`, `LDFLAGS`,
+   `CMAKE_GENERATOR`, `MAKEFLAGS`, `RUSTC_WRAPPER`, `LD_PRELOAD`
+3. Prints one-line config summary to stderr (unless `SILEX_QUIET=on`)
+4. `exec "$@"` hands control to the user command
 
 ### PATH Order
 
 ```
-/usr/local/silex/bin   ← wrappers (cp, tar, sort, git)
+/usr/local/silex/bin   ← wrappers: cp (reflink), tar (pigz/pixz), sort (--parallel), git (--depth 1)
+/opt/llvm/bin          ← clang, clang++, lld
 /opt/mold/bin          ← mold
 /opt/sccache/bin       ← sccache
-/usr/bin               ← system tools
-...
+/usr/bin               ← system tools (busybox applets, xxhsum, pigz, etc.)
 ```
 
-Wrappers come first so they transparently intercept `cp`, `tar`, `sort`, and `git` calls without requiring Dockerfile changes.
+### DNS Pre-Warming
 
-### Symlink Management
-
-- `/usr/bin/ld` → `/opt/mold/bin/mold` (transparent mold adoption)
-- `/usr/bin/ld.mold` → `/opt/mold/bin/mold` (explicit reference)
-- `/usr/bin/ninja` → `/usr/lib/ninja-build/bin/ninja` (Wolfi installs to non-standard path)
-- `/usr/local/bin/apt` → `/usr/local/bin/apt-get` (apt alias)
+At build time, common host IPs are baked into `/etc/hosts` (marked
+`# silex-dns-cache`). The entrypoint refreshes them in a background subshell
+on container start, so DNS lookups for `apk.cgr.dev`, `github.com`,
+`pypi.org`, etc. are fast even before the first `apk add`.
 
 ---
 
-## 4. Compatibility Layer (apt-shim)
+## 6. Compatibility Layer
 
-### Problem
+### apt-shim
 
-Most Dockerfiles have `RUN apt-get install foo`. Wolfi uses `apk`, not `apt-get`. Package names also differ (`build-essential` → `build-base`, `libssl-dev` → `openssl-dev`).
+`/usr/local/bin/apt-get` is a POSIX sh script. On `apt-get install`:
+1. Strips apt-specific flags (`-y`, `--no-install-recommends`, etc.)
+2. Strips version specifiers (`pkg=1.2.3` → `pkg`)
+3. Looks up each package in `config/package-mapping.json` (504 mappings)
+4. Invokes `apk add --no-cache <translated-packages>` with
+   `silex-nosync.so` preloaded
 
-### Solution
+Symlinked as `/usr/local/bin/apt` for compatibility.
 
-`/usr/local/bin/apt-get` is a Python script that:
-1. Parses `apt-get install <packages>` arguments
-2. Looks up each package in `/usr/local/silex/package-mapping.json`
-3. Translates mapped names, passes through unmapped names
-4. Invokes `apk add <translated-packages>`
+### Debian Shims
 
-### Package Mapping
+Five scripts in `/usr/local/silex/shims/`, symlinked to `/usr/local/bin/`:
 
-`config/package-mapping.json` contains 504 Debian→Wolfi mappings covering:
-- Build tools (`build-essential`, `cmake`, `ninja-build`, etc.)
-- Libraries (`libssl-dev`, `libz-dev`, `libpng-dev`, etc.)
-- Languages (`python3`, `nodejs`, `golang`, etc.)
-- System tools (`wget`, `unzip`, `file`, etc.)
+| Shim | Behaviour |
+|------|-----------|
+| `adduser` | Translates Debian flags to busybox adduser |
+| `addgroup` | Translates Debian flags to busybox addgroup |
+| `lsb_release` | Returns Wolfi / rolling |
+| `dpkg-architecture` | Returns amd64 / arm64 from `uname -m` |
+| `update-alternatives` | No-op (Wolfi uses direct symlinks) |
 
-When a package isn't in the mapping, the shim warns and passes the name through to `apk add` as-is (Wolfi may have it under the same name).
-
-### Limitations
-
-- `apt-get update`, `apt-get upgrade`, `apt-get remove` are translated to their `apk` equivalents
-- `dpkg`, `apt-cache`, `debconf` are not shimmed
-- Version pinning (`apt-get install foo=1.2.3`) is not supported (strips version)
-- PPAs and external apt repositories have no equivalent
+`ID_LIKE=debian` is appended to `/etc/os-release` so scripts that check
+`/etc/os-release` see a Debian-like environment.
 
 ---
 
-## 5. Performance Characteristics
+## 7. Performance Characteristics
 
-### Where Silex Helps Most
+### Where silex Helps Most
 
-1. **C++ projects with many translation units**: mold's parallel linking makes the biggest difference on projects with 100+ `.o` files. Linking `chromium` goes from 90s (GNU ld) to 8s (mold).
+1. **C++ projects with many translation units**: mold's advantage is largest
+   on projects with large, few executables (Rust binaries, C++ monoliths)
+   where linking is the critical path.
 
-2. **Repeated builds in CI**: sccache provides object-level caching. With a warm cache, unchanged files are not recompiled. Combined with BuildKit's `--mount=type=cache`, incremental CI builds are **15-20x faster** (measured: 44s → 2.5s for nlohmann/json test suite).
+2. **Repeated builds in CI**: sccache + BuildKit cache mounts. After the
+   first build, unchanged translation units cost ~2ms (cache lookup) vs
+   ~420ms (compile). Measured: 44s → 2.5s for nlohmann/json (18x faster).
 
-3. **Python extension builds** (e.g., NumPy, PyTorch from source): mimalloc reduces allocator contention during multi-threaded compilation.
+3. **Package install time**: `apk add` takes ~1s for update + 1-3s for
+   packages. `apt-get update` alone takes 10-30s.
 
-### Where Silex Doesn't Help Much
+### Where silex Doesn't Help
 
-1. **Single-file projects**: Linking time is negligible; mold's advantage disappears.
-2. **Interpreted language projects** (pure Python, Node.js): No compilation, so compiler/linker choices don't apply.
-3. **Heavy network I/O builds** (downloading many deps): Bottleneck is network, not compilation.
+1. **Single-file amalgamations** (e.g. SQLite): clang -O2/-O3 is slower
+   than gcc on 230k-line single TUs. Set `CC=gcc` for these files.
+   `silex lint <Dockerfile> <srcdir>` detects large TUs automatically.
 
-### Measured Speedups
+2. **Pure interpreted workloads** (Python, Node): no compilation involved.
 
-Benchmark: nlohmann/json full test suite (186 build steps, 84 test executables, 32-core host).
+3. **Network-bound builds**: bottleneck is network, not compiler.
 
-| Configuration | Cold build | vs. Ubuntu GCC-13 |
-|---|---|---|
-| Ubuntu 24.04 GCC-13 + Ninja + GNU ld | ~50s | baseline |
-| Wolfi GCC-15 + Ninja + GNU ld | ~64s | 1.3x **slower** |
-| Wolfi Clang-18 + Ninja + GNU ld | ~43s | 1.14x faster |
-| Wolfi Clang-18 + Ninja + mold | ~43s | 1.14x faster |
-| silex:slim (cold sccache) | ~44s | 1.1x faster |
-| **silex:slim (warm sccache)** | **~2.5s** | **~20x faster** |
+### Measured Numbers
 
-**Key findings:**
+Build times including package install. Docker 29.2.0, Linux 6.17.0,
+x86_64, 32 cores, cold cache, 2 runs averaged.
 
-- **Compiler**: Clang-18 is 14-33% faster than GCC for template-heavy C++. Wolfi GCC-15 is paradoxically slower than Ubuntu GCC-13 because the OpenSSF hardening flags (`-ftrivial-auto-var-init=zero`, `-fstack-clash-protection`, `-fno-omit-frame-pointer`) add per-file compilation overhead.
-- **Linker**: mold is neutral here — with 32 cores, the 84 link steps are parallelized with compilation and never become the bottleneck. mold's advantage is largest on projects with a few large executables (Rust binaries, large C++ monoliths) where linking IS the critical path.
-- **sccache**: The dominant speedup for real developer workflows. Cold: ~44s. Warm: **~2.5s (18x faster)**. After the first build, any unchanged translation unit costs ~2ms (cache lookup) instead of ~420ms (compile).
+```
+Project           silex       ubuntu      speedup    alpine      speedup
+nlohmann/json     1,600ms     50,843ms    31.8x      74,438ms    46.1x
+fmtlib            1,423ms     20,170ms    14.1x
+googletest        1,172ms      7,017ms     5.9x
+abseil-cpp        1,350ms      7,814ms     5.7x
+google/re2        1,061ms      1,206ms     1.1x                  (tie)
+SQLite amalgam   12,728ms      1,268ms     0.1x                  SLOWER
+```
 
-Cold build speedups are workload-dependent and modest (10-33%). The compelling use case for silex is **incremental builds and CI caching**.
+Incremental build with warm sccache: 2.4s vs 44s cold (18x).
 
 ---
 
-## 6. Security Model
+## 8. Security
 
-### Zero CVE Base
+### Source Integrity
 
-Wolfi is rebuilt daily from source with the latest security patches. The Chainguard package repository (`apk.cgr.dev/chainguard`) provides signed packages.
+Every source tarball is verified against a SHA256 value in `sources.json`
+before compilation. Run `make verify-sources` to re-verify.
 
-All major vulnerability scanners work with Wolfi:
-- Trivy: full support
-- Grype: full support
-- Docker Scout: full support
-- Snyk: full support
-- Wiz: full support
+### No GPLv2 in silex:slim
+
+apk-tools and busybox are GPLv2. Source is available at the upstream repos
+referenced in `sources.json`. Written offer in `docs/LICENSING.md`.
+
+silex:slim contains make (GPLv3) and bash (GPLv3) but no GPLv2 components.
+silex:dev adds git (GPLv2).
 
 ### SBOM
 
-Wolfi packages include SPDX SBOM data in `/var/lib/db/sbom/`. Every installed package has a corresponding `.spdx.json` file.
-
-### Reproducibility
-
-- `SOURCE_DATE_EPOCH=1735689600` is set for reproducible builds
-- All `apk add` packages are pinned to exact versions
-- mold and sccache are downloaded at exact version numbers
-
-### Rootless Operation
-
-The image does not require `--privileged`. All operations in the entrypoint script use only filesystem writes to `/usr/bin` (for symlinks), which is writable in a standard Docker container.
-
----
-
-## 7. Future Directions
-
-### Coreutils
-
-**Decision**: busybox (Wolfi default). 4% faster than uutils and GNU on the benchmark workload. Toybox is not in the Wolfi repo.
-
-| variant | run 1 | run 2 | run 3 | avg |
-|---------|-------|-------|-------|-----|
-| **Wolfi default (busybox)** | **34677ms** | **34855ms** | **35213ms** | **34915ms** |
-| GNU coreutils 9.10 | 35187ms | 35683ms | 38600ms | 36490ms |
-| uutils 0.7.0 | 37366ms | 35551ms | 35802ms | 36239ms |
-
-sort --parallel: busybox sort does not support `--parallel`. The silex sort wrapper uses `/usr/local/silex/bin/sort-impl` — a uutils sort binary extracted at image build time — for parallel sort, without replacing busybox system-wide.
-
-Raw: `docs/benchmarks/coreutils-allocator-2026-03-24.txt`
-
-### GPU Acceleration (v0.2)
-
-`silex:full` will add CUDA toolkit support for GPU-accelerated compression (nvCOMP) and hashing. Gated on Wolfi shipping CUDA packages or an acceptable NVIDIA base.
-
-### Cross-Compilation (v1.0)
-
-`Dockerfile.cross` will add sysroots and target toolchain wrappers for x86_64↔arm64 cross-compilation. See `dockerfiles/Dockerfile.cross`.
+The Wolfi/Chainguard packages installed by users at runtime (via `apk add`)
+include SPDX JSON SBOMs at `/var/lib/db/sbom/`. silex core tools are
+source-built; their provenance is `sources.json` + the Dockerfile.

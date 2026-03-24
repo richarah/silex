@@ -15,7 +15,7 @@
 #
 # Compiler flags (all non-stage-1 C builds):
 #   -O3 -march=x86-64-v3 -flto=thin -fomit-frame-pointer -fuse-ld=mold
-#   Stage-1 clang (gcc-compiled): -O2, no LTO, uses mold for linking
+#   Stage-1 clang (gcc-compiled): -O3, no LTO, uses mold for linking
 #
 # arm64: replace -march=x86-64-v3 with -march=armv8.2-a+crypto
 # ============================================================================
@@ -182,9 +182,9 @@ RUN set -ex \
 
 # ============================================================================
 # Build stage-1 clang (with Debian gcc + our mold).
-# Flags: -O2, no LTO (gcc cannot do ThinLTO to clang bitcode).
+# Flags: -O3, no LTO (gcc cannot produce ThinLTO bitcode for LLVM's linker).
 # Projects: clang + lld. Runtimes: libc++, libc++abi, compiler-rt.
-# This clang is used to compile everything else with full -O3 optimisations.
+# The resulting clang binary lives in the final image; -O3 makes it faster.
 # ============================================================================
 RUN set -ex \
     && tar xf /src/llvm.tar.xz -C /build \
@@ -196,8 +196,8 @@ RUN set -ex \
         -DCMAKE_INSTALL_PREFIX=/opt/llvm \
         -DCMAKE_C_COMPILER=gcc \
         -DCMAKE_CXX_COMPILER=g++ \
-        -DCMAKE_C_FLAGS="-O2" \
-        -DCMAKE_CXX_FLAGS="-O2" \
+        -DCMAKE_C_FLAGS="-O3" \
+        -DCMAKE_CXX_FLAGS="-O3" \
         -DCMAKE_EXE_LINKER_FLAGS="-fuse-ld=/opt/mold/bin/mold" \
         -DCMAKE_SHARED_LINKER_FLAGS="-fuse-ld=/opt/mold/bin/mold" \
         -DLLVM_ENABLE_PROJECTS="clang;lld" \
