@@ -1,6 +1,6 @@
-# silex
-
 A Docker base image where everything is fast.
+
+# silex
 
 Change your FROM line. Keep everything else.
 
