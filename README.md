@@ -11,10 +11,15 @@ Everything else in your Dockerfile stays the same.
 
 ## Why this exists
 
-Faster tools exist for every component in a typical base
-image, and the gains compound. Distros can't ship them
-because a distro is a social contract with every computer on earth.
-Silex is a social contract with one Dockerfile.
+Because the fastest part of your container build is
+probably your code.
+
+A typical base image compiles with gcc, links with ld, builds
+with make, compresses with gzip, and installs with dpkg.
+Every one of those has a faster replacement and has for years.
+
+Changing one tool isn't worth the yak-shave. Changing
+all of them is a base image. Silex is the yak, shaved.
 
 ## What's inside
 
