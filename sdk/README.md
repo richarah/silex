@@ -331,11 +331,4 @@ stage.
 
 MIT. See LICENSE.
 
-Bundled tools (all compiled from source): clang/LLVM 18.1.8 (Apache 2.0
-+ LLVM exceptions), mold 2.40.4 (MIT), sccache 0.8.2 (Apache 2.0),
-ninja 1.12.1 (Apache 2.0), mimalloc 2.1.7 (MIT), tini 0.19.0 (MIT),
-busybox 1.37.0 (GPL-2.0), dash 0.5.12 (BSD), pigz 2.8 (zlib),
-pixz 1.0.7 (BSD), zstd 1.5.6 (BSD/GPL-2.0), xxhash 0.8.2 (BSD),
-apk-tools 2.14.4 (GPL-2.0), GNU coreutils 9.5 sort (GPL-3.0),
-fd 10.2.0 (MIT/Apache-2.0), ripgrep 14.1.1 (MIT/Unlicense),
-uv 0.4.30 (MIT/Apache-2.0).
+Bundled tool licenses: see [docs/LICENSING.md](docs/LICENSING.md).
