@@ -32,7 +32,8 @@ scripts still start services that nothing will ever connect
 to. apt still downloads the package index fresh on every
 build because it assumes something changed since last time.
 
-In a build layer, nothing changes. Silex drops assumptions that don't apply.
+Silex replaces them with tools that weren't designed
+around floppy disk throughput.
 
 ## What's inside
 
