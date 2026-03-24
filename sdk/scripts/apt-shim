@@ -1,6 +1,7 @@
 #!/bin/sh
-# Silex apt-get shim: translates apt-get/apt commands to apk
-# Installed as /usr/local/bin/apt-get (and symlinked as apt)
+# Silex apt-get shim: translates apt-get/apt/aptitude commands to apk.
+# Installed as /usr/local/bin/apt-get; symlinked as apt and aptitude.
+# See also: scripts/shims/apt-cache, apt-mark, dpkg
 # Disable with SILEX_APT_SHIM=off
 
 set -e

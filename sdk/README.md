@@ -115,6 +115,10 @@ RUN apt-get install -y cmake libssl-dev libcurl4-openssl-dev
 504 package mappings. Installs run with silex-nosync.so preloaded,
 suppressing fsync calls that are pointless inside a build layer.
 
+Also shimmed: `apt`, `aptitude`, `apt-cache` (search/show/policy),
+`apt-mark` (hold/unhold accepted, no-op), `dpkg` (-l, -s, -L,
+--configure -a, --get-selections).
+
 When the shim doesn't know a package, it tries as-is:
 
     silex apt-shim: libobscure-dev: no mapping, trying as-is
