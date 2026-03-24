@@ -14,12 +14,15 @@ Everything else in your Dockerfile stays the same.
 Because the fastest part of your container build is
 probably your code.
 
-A typical base image compiles with gcc, links with ld, builds
-with make, compresses with gzip, and installs with dpkg.
-Every one of those has a faster replacement and has for years.
+A typical base image compiles with gcc, links with ld,
+builds with make, compresses with gzip, and installs
+with dpkg. Every one of those has a faster replacement
+and has for years.
 
-Changing one tool isn't worth the yak-shave. Changing
-all of them is a base image. Silex is the yak, shaved.
+Debian can't ship them because Debian's job is to run on everything
+from Raspberry Pis to nuclear submarines.
+
+Your build layer's job is to compile C++ and exit with code 0.
 
 ## What's inside
 
