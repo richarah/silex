@@ -1,16 +1,13 @@
 # silex
 
 A Docker base image built for compilation speed.
-
-Change your FROM line. Keep everything else.
-
 ```dockerfile
 - FROM ubuntu:24.04
 + FROM silex:slim
 ```
 
-Your Dockerfile doesn't change, your build time does.
 Cold builds 2-3x faster. Warm sccache rebuilds 18x.
+Everything else in your Dockerfile stays the same.
 
 CI/CD pipelines, local development, anywhere you're waiting
 for `apt-get install build-essential` to finish its 200
