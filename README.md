@@ -1,6 +1,6 @@
 # silex
 
-A Docker base image with nothing accidental in it.
+A considered Docker base image.
 
 ```dockerfile
 - FROM ubuntu:24.04
