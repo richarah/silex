@@ -744,4 +744,4 @@ LABEL org.opencontainers.image.licenses="MIT"
 LABEL org.opencontainers.image.source="https://github.com/richarah/silex"
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/silex-entrypoint"]
-CMD ["/bin/bash"]
+CMD ["/bin/sh"]
