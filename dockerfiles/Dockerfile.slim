@@ -122,7 +122,18 @@ RUN rm -rf /usr/share/doc \
            /usr/share/gtk-doc \
            /usr/share/help
 
-# 6. Clear package cache
+# 6. Hardlink dedup: replace identical files across packages with hardlinks.
+# Groups by SHA-256; identical content → one inode. Saves space without
+# altering any file. Uses only find + sha256sum + sort + awk + ln (all present).
+RUN find /usr/lib /usr/share -xdev -type f -size +4k 2>/dev/null \
+      | sort \
+      | xargs sha256sum 2>/dev/null \
+      | sort -k1,1 \
+      | awk 'prev==$1{printf "%s\0%s\0",pf,$NF}{prev=$1;pf=$NF}' \
+      | xargs -0 -r -n2 ln -f \
+    || true
+
+# 7. Clear package cache
 RUN rm -rf /var/cache/apk/*
 
 # 7. Pre-warm DNS for commonly-hit hosts (saves 50-200ms per unique host per build)

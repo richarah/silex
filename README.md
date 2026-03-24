@@ -146,6 +146,30 @@ bash scripts/build.sh       # builds silex:slim
 bash scripts/test.sh        # 43 tests
 ```
 
+## Known limitations
+
+**SQLite and other amalgamation builds.** clang's optimiser is more
+aggressive than gcc on very large single translation units. On the SQLite
+amalgamation (230k preprocessed lines), clang -O2 is 10x slower than gcc.
+Set `CC=gcc` for these files. `silex lint` detects this automatically
+(v0.2+, requires source directory as second argument).
+
+**Wolfi package names differ from Debian.** The apt-get shim covers 449
+common packages. If `apt-get install libfoo-dev` fails with "not found in
+package map", run `apk search foo` to find the Wolfi name and file an issue.
+
+**No GPU support in slim.** nvCOMP decompression and GPU-accelerated hashing
+are in `silex:full` (not yet released). `silex:slim` is CPU-only.
+
+**Coreutils are Busybox.** Wolfi's base uses Busybox, not GNU coreutils or
+uutils. Some GNU-specific flags won't work. The sort wrapper adds
+`--parallel=$(nproc)` only if the installed sort supports it; falls back
+silently.
+
+**git is not in silex:slim.** It's in `silex:dev`. If your build stage needs
+git for FetchContent or submodules, either use `silex:dev` as the build base
+or `RUN apk add git` to install it. `silex:slim` has zero GPLv2 components.
+
 ## FAQ
 
 **Why Wolfi?**

@@ -1,118 +1,98 @@
 #!/bin/sh
-# Silex: main command dispatcher
+# silex: main command dispatcher
 # Subcommands: doctor, lint, version
 
 SILEX_VERSION="${SILEX_IMAGE_VERSION:-slim-1.1.0}"
 SILEX_BASE="${SILEX_IMAGE_BASE:-wolfi}"
 
 _usage() {
-    echo "Usage: silex <command> [args]"
-    echo ""
-    echo "Commands:"
-    echo "  doctor              Show environment status and configuration"
-    echo "  lint <Dockerfile>   Check Dockerfile for common mistakes"
-    echo "  version             Print image version"
-    echo ""
-    echo "Environment variables:"
-    echo "  SILEX_QUIET=on      Suppress entrypoint summary line"
-    echo "  SILEX_WRAPPERS=off  Disable acceleration wrappers"
-    echo "  SILEX_APT_SHIM=off  Disable apt-get shim"
-    echo "  SILEX_MALLOC=system Use system allocator instead of jemalloc"
-    echo "  SILEX_GIT_SHALLOW=off  Disable automatic shallow git clone"
+    cat <<EOF
+Usage: silex <command> [args]
+
+Commands:
+  doctor                  Show environment status and configuration
+  lint <Dockerfile> [dir] Check Dockerfile for common issues; optionally
+                          check C/C++ sources in dir for large TUs
+  version                 Print image version
+
+Environment variables:
+  SILEX_QUIET=on          Suppress entrypoint summary line
+  SILEX_WRAPPERS=off      Disable acceleration wrappers
+  SILEX_APT_SHIM=off      Disable apt-get shim
+  SILEX_MALLOC=system     Use system allocator instead of jemalloc
+  SILEX_GIT_SHALLOW=off   Disable automatic shallow git clone
+EOF
 }
 
+# ============================================================================
+# doctor
+# ============================================================================
 _doctor() {
-    # -- Version ---------------------------------------------------------------
     printf "Silex configuration\n"
-    printf "  %-12s %s\n" "version:" "$SILEX_VERSION"
-    printf "  %-12s %s\n" "base:" "$SILEX_BASE"
-    echo ""
+    printf "  %-14s %s\n" "version:" "$SILEX_VERSION"
+    printf "  %-14s %s\n" "base:" "$SILEX_BASE"
+    printf "\n"
 
     # -- Compiler --------------------------------------------------------------
     printf "Compiler\n"
     _cc="${CC:-clang}"
     _cxx="${CXX:-clang++}"
-    _cc_ver=$("$_cc" --version 2>/dev/null | head -1 || echo "not found")
-    printf "  %-12s %s (%s)\n" "CC:" "$_cc" "$_cc_ver"
-    printf "  %-12s %s\n" "CXX:" "$_cxx"
+    _cc_ver=$("$_cc" --version 2>/dev/null | head -1 || printf "not found")
+    printf "  %-14s %s\n" "CC:" "$_cc ($CC_ver)"
+    printf "  %-14s %s\n" "CXX:" "$_cxx"
+    printf "  %-14s %s\n" "CC version:" "$_cc_ver"
     _linker="${SILEX_LINKER:-mold}"
-    _mold_bin="/opt/mold/bin/mold"
-    if [ -x "$_mold_bin" ]; then
-        _mold_ver=$("$_mold_bin" --version 2>/dev/null | head -1 || echo "unknown")
-    else
-        _mold_bin="not found"
-        _mold_ver="n/a"
-    fi
-    printf "  %-12s %s (%s)\n" "linker:" "$_linker" "$_mold_bin"
-    printf "  %-12s %s\n" "mold ver:" "$_mold_ver"
-    echo ""
+    _mold_ver=$(/opt/mold/bin/mold --version 2>/dev/null | head -1 || printf "not found")
+    printf "  %-14s %s (%s)\n" "linker:" "$_linker" "$_mold_ver"
+    printf "\n"
 
     # -- Build system ----------------------------------------------------------
     printf "Build system\n"
     _gen="${CMAKE_GENERATOR:-Ninja}"
-    _ninja_ver=$(ninja --version 2>/dev/null || echo "not found")
-    printf "  %-12s %s (%s)\n" "generator:" "$_gen" "$_ninja_ver"
-    _nproc=$(nproc 2>/dev/null || echo "?")
-    _parallel="${SILEX_PARALLEL:-auto}"
-    printf "  %-12s %s (%s)\n" "parallel:" "$_nproc" "$_parallel"
-    _cache="${SILEX_CACHE:-sccache}"
-    _sccache_bin="/opt/sccache/bin/sccache"
-    if [ -x "$_sccache_bin" ]; then
-        _sccache_ver=$("$_sccache_bin" --version 2>/dev/null | head -1 || echo "unknown")
-        _sccache_dir="${SCCACHE_DIR:-/root/.cache/sccache}"
-        printf "  %-12s %s (SCCACHE_DIR=%s)\n" "cache:" "$_cache" "$_sccache_dir"
-        printf "  %-12s %s\n" "sccache:" "$_sccache_ver"
-    else
-        printf "  %-12s %s (binary not found at %s)\n" "cache:" "$_cache" "$_sccache_bin"
-    fi
-    echo ""
+    _ninja_ver=$(ninja --version 2>/dev/null || printf "not found")
+    printf "  %-14s %s (%s)\n" "generator:" "$_gen" "$_ninja_ver"
+    _nproc=$(nproc 2>/dev/null || printf "?")
+    printf "  %-14s %s (%s)\n" "parallel:" "$_nproc cores" "${SILEX_PARALLEL:-auto}"
+    _sccache_ver=$(/opt/sccache/bin/sccache --version 2>/dev/null | head -1 || printf "not found")
+    _sccache_dir="${SCCACHE_DIR:-/root/.cache/sccache}"
+    printf "  %-14s %s\n" "cache:" "${SILEX_CACHE:-sccache} ($sccache_ver)"
+    printf "  %-14s %s\n" "sccache dir:" "$_sccache_dir"
+    printf "\n"
 
     # -- Allocator -------------------------------------------------------------
     printf "Allocator\n"
     _malloc="${SILEX_MALLOC:-jemalloc}"
     case "$_malloc" in
-        jemalloc)
-            _alloc_so=$(find /usr/lib /usr/local/lib -name 'libjemalloc.so*' 2>/dev/null | sort | tail -1)
-            ;;
-        mimalloc)
-            _alloc_so=$(find /usr/lib /usr/local/lib -name 'libmimalloc.so*' 2>/dev/null | sort | tail -1)
-            ;;
-        *)
-            _alloc_so=""
-            ;;
+        jemalloc) _alloc_so=$(find /usr/lib /usr/local/lib -name 'libjemalloc.so*' 2>/dev/null | sort | tail -1) ;;
+        mimalloc) _alloc_so=$(find /usr/lib /usr/local/lib -name 'libmimalloc.so*' 2>/dev/null | sort | tail -1) ;;
+        *)        _alloc_so="" ;;
     esac
     if [ -n "$_alloc_so" ]; then
-        printf "  %-12s %s (%s)\n" "malloc:" "$_malloc" "$_alloc_so"
+        printf "  %-14s %s (%s)\n" "malloc:" "$_malloc" "$_alloc_so"
     else
-        printf "  %-12s %s (library not found)\n" "malloc:" "$_malloc"
+        printf "  %-14s %s (library not found)\n" "malloc:" "$_malloc"
     fi
-    _preload="${LD_PRELOAD:-not set}"
-    printf "  %-12s %s\n" "LD_PRELOAD:" "$_preload"
-    echo ""
+    printf "  %-14s %s\n" "LD_PRELOAD:" "${LD_PRELOAD:-not set}"
+    printf "\n"
 
     # -- Tools -----------------------------------------------------------------
     printf "Tools\n"
     for _tool in fd rg uv xxhsum pigz pixz dash; do
-        _path=$(command -v "$_tool" 2>/dev/null || echo "")
-        if [ -n "$_path" ]; then
-            _ver=$("$_tool" --version 2>/dev/null | head -1 || echo "installed")
-            printf "  %-12s %s\n" "$_tool:" "$_ver"
+        _tpath=$(command -v "$_tool" 2>/dev/null)
+        if [ -n "$_tpath" ]; then
+            _tver=$("$_tool" --version 2>/dev/null | head -1 || printf "installed")
+            printf "  %-14s %s\n" "$_tool:" "$_tver"
         else
-            printf "  %-12s not found\n" "$_tool:"
+            printf "  %-14s not found\n" "$_tool:"
         fi
     done
-    _mimalloc_so=$(find /usr/lib -name 'libmimalloc.so*' 2>/dev/null | head -1)
-    if [ -n "$_mimalloc_so" ]; then
-        printf "  %-12s %s\n" "mimalloc:" "$_mimalloc_so"
-    else
-        printf "  %-12s not found\n" "mimalloc:"
-    fi
-    echo ""
+    _mso=$(find /usr/lib -name 'libmimalloc.so*' 2>/dev/null | head -1)
+    printf "  %-14s %s\n" "mimalloc:" "${_mso:-not found}"
+    printf "\n"
 
     # -- Wrappers --------------------------------------------------------------
     printf "Wrappers\n"
-    _wrappers="${SILEX_WRAPPERS:-on}"
-    printf "  %-12s %s\n" "status:" "$_wrappers"
+    printf "  %-14s %s\n" "status:" "${SILEX_WRAPPERS:-on}"
     for _w in cp tar sort git; do
         _wp="/usr/local/silex/bin/$_w"
         if [ -x "$_wp" ]; then
@@ -120,220 +100,223 @@ _doctor() {
                 cp)   _desc="(reflink=auto)" ;;
                 tar)  _desc="(pigz/pixz aware)" ;;
                 sort) _desc="(--parallel=$_nproc)" ;;
-                git)  _gshallow="${SILEX_GIT_SHALLOW:-on}"; _desc="(shallow clone $_gshallow)" ;;
+                git)  _desc="(shallow clone ${SILEX_GIT_SHALLOW:-on})" ;;
             esac
-            printf "  %-12s %s %s\n" "$_w:" "$_wp" "$_desc"
+            printf "  %-14s %s %s\n" "$_w:" "$_wp" "$_desc"
         else
-            printf "  %-12s not found at %s\n" "$_w:" "$_wp"
+            printf "  %-14s not found\n" "$_w:"
         fi
     done
-    echo ""
+    printf "\n"
 
     # -- apt shim --------------------------------------------------------------
     printf "apt shim\n"
-    _shim="${SILEX_APT_SHIM:-on}"
-    printf "  %-12s %s\n" "status:" "$_shim"
+    printf "  %-14s %s\n" "status:" "${SILEX_APT_SHIM:-on}"
     _mapping="/usr/local/silex/package-mapping.json"
     if [ -f "$_mapping" ]; then
-        _count=$(python3 -c "
-import json
-with open('$_mapping') as f:
-    d = json.load(f)
-print(len([k for k in d if not k.startswith('_')]))
-" 2>/dev/null || echo "?")
-        printf "  %-12s %s (%s entries)\n" "mapping:" "$_mapping" "$_count"
+        # Count non-meta keys: lines matching `"word": ` where word doesn't start with _
+        _count=$(grep -c '^[[:space:]]*"[^_]' "$_mapping" 2>/dev/null || printf "?")
+        printf "  %-14s %s (%s entries)\n" "mapping:" "$_mapping" "$_count"
     else
-        printf "  %-12s not found at %s\n" "mapping:" "$_mapping"
+        printf "  %-14s not found\n" "mapping:"
     fi
-    echo ""
+    printf "\n"
+
+    # -- Debian shims ----------------------------------------------------------
+    printf "Debian shims\n"
+    for _shim in adduser addgroup lsb_release dpkg-architecture update-alternatives; do
+        if [ -x "/usr/local/bin/$_shim" ]; then
+            printf "  %-22s /usr/local/bin/%s\n" "$_shim:" "$_shim"
+        else
+            printf "  %-22s not found\n" "$_shim:"
+        fi
+    done
+    printf "\n"
 
     # -- GPU -------------------------------------------------------------------
     printf "GPU\n"
     if command -v nvidia-smi >/dev/null 2>&1; then
-        _gpu_info=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)
-        printf "  %-12s on (%s)\n" "status:" "${_gpu_info:-detected}"
+        _gpu=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)
+        printf "  %-14s on (%s)\n" "status:" "${_gpu:-detected}"
     else
-        printf "  %-12s off (no nvidia-smi found)\n" "status:"
+        printf "  %-14s off (nvidia-smi not found)\n" "status:"
     fi
-    echo ""
+    printf "\n"
 
     # -- Cache mounts ----------------------------------------------------------
-    printf "Cache mounts (add to Dockerfile RUN --mount=...):\n"
-    printf "  %-12s type=cache,target=/root/.cache/sccache\n" "sccache:"
-    printf "  %-12s type=cache,target=/root/.cache/pip\n" "pip:"
-    printf "  %-12s type=cache,target=/root/.cache/uv\n" "uv:"
-    printf "  %-12s type=cache,target=/root/.cargo/registry\n" "cargo:"
-    printf "  %-12s type=cache,target=/root/go/pkg/mod\n" "go:"
-    printf "  %-12s type=cache,target=/root/.npm\n" "npm:"
+    printf "BuildKit cache mounts (RUN --mount=type=cache,target=PATH):\n"
+    printf "  %-14s /root/.cache/sccache\n" "sccache:"
+    printf "  %-14s /root/.cache/pip\n" "pip:"
+    printf "  %-14s /root/.cache/uv\n" "uv:"
+    printf "  %-14s /root/.cargo/registry\n" "cargo:"
+    printf "  %-14s /root/go/pkg/mod\n" "go:"
+    printf "  %-14s /root/.npm\n" "npm:"
 }
 
+# ============================================================================
+# lint
+# ============================================================================
 _lint() {
-    _file="$1"
-    if [ -z "$_file" ]; then
-        echo "silex lint: usage: silex lint <Dockerfile>" >&2
+    _df="$1"
+    _srcdir="${2:-.}"
+
+    if [ -z "$_df" ]; then
+        printf "silex lint: usage: silex lint <Dockerfile> [source_dir]\n" >&2
         exit 1
     fi
-    if [ ! -f "$_file" ]; then
-        echo "silex lint: file not found: $_file" >&2
+    if [ ! -f "$_df" ]; then
+        printf "silex lint: file not found: %s\n" "$_df" >&2
         exit 1
     fi
 
-    _issues=0
-    _lineno=0
+    printf "Linting: %s\n\n" "$_df"
 
-    # Track state
-    _last_copy_line=0
-    _in_run=0
+    # Temp file accumulates issue lines; each issue's first line starts with "  ["
+    _out=$(mktemp)
 
-    echo "Linting: $_file"
-    echo ""
+    # Parse Dockerfile: join continuation lines, emit TAB-separated records:
+    #   start_lineno TAB INSTRUCTION TAB rest_of_content
+    # Comments and blank lines are skipped.
+    _instr=$(awk '
+        /^[[:space:]]*#/  { next }
+        /^[[:space:]]*$/  { next }
+        /\\[[:space:]]*$/ {
+            sub(/\\[[:space:]]*$/, " ")
+            if (!start) start = NR
+            buf = buf $0
+            next
+        }
+        {
+            if (!start) start = NR
+            buf = buf $0
+            sub(/^[[:space:]]+/, "", buf)
+            n = index(buf, " ")
+            if (n > 0) {
+                printf "%d\t%s\t%s\n", start, substr(buf,1,n-1), substr(buf,n+1)
+            } else {
+                printf "%d\t%s\t\n", start, buf
+            }
+            buf = ""; start = 0
+        }
+    ' "$_df")
 
-    python3 - "$_file" <<'PYEOF'
-import sys, re
+    # Check 1: COPY/ADD before first package install (busts cache)
+    _first_pkg=$(printf '%s\n' "$_instr" | awk -F'\t' '
+        $2 == "RUN" && ($3 ~ /apt-get[[:space:]]+install/ || $3 ~ /apk[[:space:]]+add/ ||
+                        $3 ~ /pip[[:space:]]+install/     || $3 ~ /npm[[:space:]]+install/) {
+            print $1; exit
+        }')
+    if [ -n "$_first_pkg" ]; then
+        _early=$(printf '%s\n' "$_instr" | awk -F'\t' -v p="$_first_pkg" '
+            ($2 == "COPY" || $2 == "ADD") && $1+0 < p+0 { last=$1 }
+            END { print last }')
+        [ -n "$_early" ] && printf "  [WARN] Line %s: COPY before package install — source changes bust the package cache layer.\n         Move manifest files (CMakeLists.txt, package.json, requirements.txt) first,\n         install dependencies, then COPY .\n" "$_early" >> "$_out"
+    fi
 
-filename = sys.argv[1]
-issues = 0
+    # Check 2: apt-get install without -y (hangs in non-interactive builds)
+    printf '%s\n' "$_instr" | awk -F'\t' '
+        $2 == "RUN" && $3 ~ /apt-get[[:space:]]+install/ &&
+        $3 !~ /-y/ && $3 !~ /--yes/ && $3 !~ /--assume-yes/ {
+            printf "  [WARN] Line %s: apt-get install without -y will hang in non-interactive builds\n", $1
+        }' >> "$_out"
 
-with open(filename) as f:
-    lines = f.readlines()
+    # Check 3: apt-get install without cache cleanup in same RUN
+    printf '%s\n' "$_instr" | awk -F'\t' '
+        $2 == "RUN" && $3 ~ /apt-get[[:space:]]+install/ &&
+        $3 !~ /rm[[:space:]]+-rf[[:space:]]+\/var\/lib\/apt/ &&
+        $3 !~ /apt-get[[:space:]]+(clean|autoclean)/ {
+            printf "  [WARN] Line %s: apt-get install without cache cleanup — add: && rm -rf /var/lib/apt/lists/*\n", $1
+        }' >> "$_out"
 
-copy_lines = []   # line numbers of COPY instructions
-run_blocks = []   # list of (start_line, content) for RUN instructions
+    # Check 4: package managers without BuildKit cache mounts
+    printf '%s\n' "$_instr" | awk -F'\t' '
+        $2 == "RUN" && $3 !~ /--mount=type=cache/ {
+            mgrs = ""
+            if ($3 ~ /pip[[:space:]]+install/ || $3 ~ /pip3[[:space:]]+install/) mgrs = mgrs "pip "
+            if ($3 ~ /npm[[:space:]]+install/ || $3 ~ /npm[[:space:]]+ci/)       mgrs = mgrs "npm "
+            if ($3 ~ /cargo[[:space:]]+(build|install)/)                          mgrs = mgrs "cargo "
+            if ($3 ~ /go[[:space:]]+(build|get)/ || $3 ~ /go[[:space:]]+mod[[:space:]]+download/) mgrs = mgrs "go "
+            if ($3 ~ /uv[[:space:]]+pip[[:space:]]+install/)                      mgrs = mgrs "uv "
+            if (mgrs != "")
+                printf "  [INFO] Line %s: %swithout BuildKit cache mount — add --mount=type=cache,... to speed up repeated builds\n", $1, mgrs
+        }' >> "$_out"
 
-# Parse Dockerfile into logical instructions (handle line continuations)
-instructions = []
-current = ""
-current_start = 0
-for i, line in enumerate(lines, 1):
-    stripped = line.rstrip()
-    if stripped.endswith('\\'):
-        if not current:
-            current_start = i
-        current += stripped[:-1] + ' '
-    else:
-        if current:
-            current += stripped
-            instructions.append((current_start, current.strip()))
-            current = ""
-        elif stripped.strip() and not stripped.strip().startswith('#'):
-            instructions.append((i, stripped.strip()))
+    # Check 5: make without -j (serial build)
+    printf '%s\n' "$_instr" | awk -F'\t' '
+        $2 == "RUN" && $3 ~ /\<make\>/ &&
+        $3 !~ /make[[:space:]]+-j/ && $3 !~ /MAKEFLAGS/ && $3 !~ /nproc/ {
+            if ($3 !~ /make[[:space:]]+(install|check|test)[[:space:]]/)
+                printf "  [INFO] Line %s: make without -j — use: make -j$(nproc)\n", $1
+        }' >> "$_out"
 
-for lineno, instr in instructions:
-    upper = instr.upper()
-    # Detect instruction type
-    if upper.startswith('COPY') or upper.startswith('ADD'):
-        copy_lines.append(lineno)
-    elif upper.startswith('RUN'):
-        run_content = instr[3:].strip()
-        run_blocks.append((lineno, run_content))
+    # Check 6: curl/wget piped directly to shell (security)
+    printf '%s\n' "$_instr" | awk -F'\t' '
+        $2 == "RUN" && $3 ~ /(curl|wget).*\|[[:space:]]*(ba)?sh/ {
+            printf "  [WARN] Line %s: piping download to shell — download, verify checksum, then execute\n", $1
+        }' >> "$_out"
 
-# Check 1: COPY of source code before package install (cache invalidation)
-first_pkg_install = None
-for lineno, content in run_blocks:
-    if re.search(r'apt-get\s+install|apk\s+add|pip\s+install|npm\s+install', content):
-        first_pkg_install = lineno
-        break
+    # Check 7: RUN curl/wget downloading a file — BuildKit ADD --checksum is better
+    printf '%s\n' "$_instr" | awk -F'\t' '
+        $2 == "RUN" && ($3 ~ /\<curl\>/ || $3 ~ /\<wget\>/) &&
+        $3 !~ /(curl|wget).*\|[[:space:]]*(ba)?sh/ {
+            if ($3 ~ /curl[[:space:]].*-[oO]/ || $3 ~ /curl[[:space:]].*>[[:space:]]*[^|]/ || $3 ~ /\<wget\>/) {
+                match($3, /https?:\/\/[^[:space:]"'"'"'\\]+/)
+                url = (RLENGTH > 0) ? substr($3, RSTART, RLENGTH) : "https://..."
+                printf "  [INFO] Line %s: RUN curl/wget re-downloads every build — BuildKit caches ADD by URL:\n         ADD --checksum=sha256:<hash> %s /path/to/file\n         (sha256sum the file once; BuildKit skips download if URL+hash unchanged)\n", $1, url
+            }
+        }' >> "$_out"
 
-if first_pkg_install:
-    early_copies = [l for l in copy_lines if l < first_pkg_install]
-    if early_copies:
-        print(f"  [WARN] Line {early_copies[-1]}: COPY before package install — "
-              f"source changes will bust the package install cache layer")
-        print(f"         Consider: COPY only package manifests first "
-              f"(package.json, requirements.txt, CMakeLists.txt), then install, then COPY .")
-        issues += 1
+    # Check 8: Translation unit size (v0.2+)
+    # Preprocess each C/C++ source file; warn if output exceeds 100k lines.
+    # clang -O2 is disproportionately slower than gcc on very large single TUs
+    # (e.g. SQLite amalgamation: 230k lines, clang 10x slower than gcc).
+    if command -v clang >/dev/null 2>&1; then
+        _tu_list=$(mktemp)
+        find "$_srcdir" \( -name '*.c' -o -name '*.cpp' -o -name '*.cc' -o -name '*.cxx' \) \
+            -not -path '*/build/*' -not -path '*/.git/*' 2>/dev/null > "$_tu_list"
+        while IFS= read -r _src; do
+            _lines=$(clang -E "$_src" 2>/dev/null | wc -l)
+            if [ "$_lines" -gt 100000 ]; then
+                # Format with commas: 238419 -> 238,419
+                _fmt=$(printf '%d' "$_lines" | rev | sed 's/[0-9][0-9][0-9]/&,/g' | rev | sed 's/^,//')
+                printf "  [WARN] %s preprocesses to %s lines.\n         clang is significantly slower than gcc on TUs this large.\n         consider: CC=gcc for this file, or split into smaller units.\n" \
+                    "$_src" "$_fmt" >> "$_out"
+            fi
+        done < "$_tu_list"
+        rm -f "$_tu_list"
+    fi
 
-# Check 2: apt-get install without -y
-for lineno, content in run_blocks:
-    if re.search(r'apt-get\s+install', content):
-        if not re.search(r'apt-get\s+((-\w+\s+)*)?install.*-y|apt-get\s+install\s+-y', content):
-            if '-y' not in content and '--yes' not in content and '--assume-yes' not in content:
-                print(f"  [WARN] Line {lineno}: apt-get install without -y will hang in non-interactive builds")
-                issues += 1
+    # -- Summary ---------------------------------------------------------------
+    _issues=$(grep -c '^\s*\[' "$_out" 2>/dev/null || printf 0)
+    cat "$_out"
+    rm -f "$_out"
 
-# Check 3: apt-get install without cache cleanup in same RUN
-for lineno, content in run_blocks:
-    if re.search(r'apt-get\s+install', content):
-        if not re.search(r'rm\s+-rf\s+/var/lib/apt|apt-get\s+clean|apt-get\s+autoclean', content):
-            print(f"  [WARN] Line {lineno}: apt-get install without cache cleanup — "
-                  f"add: && rm -rf /var/lib/apt/lists/*")
-            issues += 1
+    if [ "$_issues" -eq 0 ]; then
+        printf "  No issues found.\n"
+    else
+        printf "\n  %d issue(s) found.\n" "$_issues"
+    fi
 
-# Check 4: package installs without BuildKit cache mounts
-for lineno, content in run_blocks:
-    has_pip = re.search(r'pip\s+install|pip3\s+install', content)
-    has_npm = re.search(r'npm\s+install|npm\s+ci', content)
-    has_cargo = re.search(r'cargo\s+build|cargo\s+install', content)
-    has_go = re.search(r'go\s+build|go\s+get|go\s+mod\s+download', content)
-    has_mount = '--mount=type=cache' in content
-
-    if (has_pip or has_npm or has_cargo or has_go) and not has_mount:
-        managers = []
-        if has_pip: managers.append('pip')
-        if has_npm: managers.append('npm')
-        if has_cargo: managers.append('cargo')
-        if has_go: managers.append('go')
-        print(f"  [INFO] Line {lineno}: {'/'.join(managers)} without BuildKit cache mount — "
-              f"add --mount=type=cache,... to speed up repeated builds")
-        issues += 1
-
-# Check 5: make without -j (missing parallelism)
-for lineno, content in run_blocks:
-    if re.search(r'\bmake\b', content) and not re.search(r'make\s+-j|\$MAKEFLAGS|\$\(nproc\)', content):
-        # Only warn if it looks like a build step, not `make install` alone
-        if re.search(r'\bmake\b(?!\s+install|\s+check|\s+test)', content):
-            print(f"  [INFO] Line {lineno}: make without -j — "
-                  f"use: make -j$(nproc) for parallel builds")
-            issues += 1
-
-# Check 6: wget/curl piped to sh (security risk)
-for lineno, content in run_blocks:
-    if re.search(r'(wget|curl).*\|\s*(ba)?sh', content):
-        print(f"  [WARN] Line {lineno}: piping download directly to shell — "
-              f"consider downloading, verifying checksum, then executing")
-        issues += 1
-
-# Check 7: RUN curl/wget to download a file — suggest ADD --checksum instead
-# BuildKit caches ADD by URL: if URL unchanged, file is never re-downloaded.
-# RUN curl re-downloads every build.
-for lineno, content in run_blocks:
-    # Match curl -O, curl -o file, curl > file, wget, wget -O
-    if re.search(r'\b(curl|wget)\b', content):
-        # Skip if it's piped to sh (already caught above) or just a health check
-        if re.search(r'\|\s*(ba)?sh', content):
-            continue
-        # Look for patterns that download a file (not API calls)
-        if re.search(r'curl\s.*-[oO]|curl\s.*>\s*\S|wget\s', content):
-            # Extract URL if possible
-            url_match = re.search(r'https?://\S+', content)
-            url_hint = url_match.group(0).rstrip('"\'\\') if url_match else 'https://...'
-            print(f"  [INFO] Line {lineno}: RUN curl/wget downloads a file every build — "
-                  f"BuildKit caches ADD by URL; use instead:")
-            print(f"         ADD --checksum=sha256:<hash> {url_hint} /path/to/file")
-            print(f"         (get hash with: sha256sum <file> or from release page)")
-            issues += 1
-
-if issues == 0:
-    print("  No issues found.")
-else:
-    print(f"\n  {issues} issue(s) found.")
-
-sys.exit(0 if issues == 0 else 1)
-PYEOF
+    [ "$_issues" -eq 0 ]
 }
 
+# ============================================================================
+# version
+# ============================================================================
 _version() {
-    echo "$SILEX_VERSION"
+    printf "%s\n" "$SILEX_VERSION"
 }
 
-# Main dispatch
+# ============================================================================
+# dispatch
+# ============================================================================
 case "$1" in
-    doctor)      _doctor ;;
-    lint)        shift; _lint "$@" ;;
-    version)     _version ;;
+    doctor)           _doctor ;;
+    lint)             shift; _lint "$@" ;;
+    version)          _version ;;
     -h|--help|help|"") _usage ;;
     *)
-        echo "silex: unknown command '$1'" >&2
+        printf "silex: unknown command '%s'\n" "$1" >&2
         _usage >&2
         exit 1
         ;;
