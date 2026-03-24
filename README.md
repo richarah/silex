@@ -1,7 +1,6 @@
 # silex
 
 A considered Docker base image.
-
 ```dockerfile
 - FROM ubuntu:24.04
 + FROM silex:slim
@@ -9,11 +8,13 @@ A considered Docker base image.
 
 Cold builds 2-3x faster. Warm sccache rebuilds 18x.
 Everything else in your Dockerfile stays the same.
-`apt-get` still works. If it doesn't, `ENV SILEX_WRAPPERS=off` and you're on raw apk.
+If something breaks, `ENV SILEX_WRAPPERS=off` and
+you're on raw apk.
 
 ## Why this exists
 
-Because the fastest part of your container build is probably your code.
+Because the fastest part of your container build is
+probably your code.
 
 ## What's inside
 
