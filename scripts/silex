@@ -2,7 +2,7 @@
 # Silex: main command dispatcher
 # Subcommands: doctor, lint, version
 
-SILEX_VERSION="${SILEX_IMAGE_VERSION:-slim-0.1.0}"
+SILEX_VERSION="${SILEX_IMAGE_VERSION:-slim-1.1.0}"
 SILEX_BASE="${SILEX_IMAGE_BASE:-wolfi}"
 
 _usage() {
@@ -70,14 +70,43 @@ _doctor() {
     # -- Allocator -------------------------------------------------------------
     printf "Allocator\n"
     _malloc="${SILEX_MALLOC:-jemalloc}"
-    _jemalloc_so=$(find /usr/lib /usr/local/lib -name 'libjemalloc.so*' 2>/dev/null | sort | tail -1)
-    if [ -n "$_jemalloc_so" ]; then
-        printf "  %-12s %s (%s)\n" "malloc:" "$_malloc" "$_jemalloc_so"
+    case "$_malloc" in
+        jemalloc)
+            _alloc_so=$(find /usr/lib /usr/local/lib -name 'libjemalloc.so*' 2>/dev/null | sort | tail -1)
+            ;;
+        mimalloc)
+            _alloc_so=$(find /usr/lib /usr/local/lib -name 'libmimalloc.so*' 2>/dev/null | sort | tail -1)
+            ;;
+        *)
+            _alloc_so=""
+            ;;
+    esac
+    if [ -n "$_alloc_so" ]; then
+        printf "  %-12s %s (%s)\n" "malloc:" "$_malloc" "$_alloc_so"
     else
         printf "  %-12s %s (library not found)\n" "malloc:" "$_malloc"
     fi
     _preload="${LD_PRELOAD:-not set}"
     printf "  %-12s %s\n" "LD_PRELOAD:" "$_preload"
+    echo ""
+
+    # -- Tools -----------------------------------------------------------------
+    printf "Tools\n"
+    for _tool in fd rg uv xxhsum pigz pixz dash; do
+        _path=$(command -v "$_tool" 2>/dev/null || echo "")
+        if [ -n "$_path" ]; then
+            _ver=$("$_tool" --version 2>/dev/null | head -1 || echo "installed")
+            printf "  %-12s %s\n" "$_tool:" "$_ver"
+        else
+            printf "  %-12s not found\n" "$_tool:"
+        fi
+    done
+    _mimalloc_so=$(find /usr/lib -name 'libmimalloc.so*' 2>/dev/null | head -1)
+    if [ -n "$_mimalloc_so" ]; then
+        printf "  %-12s %s\n" "mimalloc:" "$_mimalloc_so"
+    else
+        printf "  %-12s not found\n" "mimalloc:"
+    fi
     echo ""
 
     # -- Wrappers --------------------------------------------------------------
@@ -132,8 +161,10 @@ print(len([k for k in d if not k.startswith('_')]))
     printf "Cache mounts (add to Dockerfile RUN --mount=...):\n"
     printf "  %-12s type=cache,target=/root/.cache/sccache\n" "sccache:"
     printf "  %-12s type=cache,target=/root/.cache/pip\n" "pip:"
+    printf "  %-12s type=cache,target=/root/.cache/uv\n" "uv:"
     printf "  %-12s type=cache,target=/root/.cargo/registry\n" "cargo:"
     printf "  %-12s type=cache,target=/root/go/pkg/mod\n" "go:"
+    printf "  %-12s type=cache,target=/root/.npm\n" "npm:"
 }
 
 _lint() {
@@ -261,6 +292,26 @@ for lineno, content in run_blocks:
         print(f"  [WARN] Line {lineno}: piping download directly to shell — "
               f"consider downloading, verifying checksum, then executing")
         issues += 1
+
+# Check 7: RUN curl/wget to download a file — suggest ADD --checksum instead
+# BuildKit caches ADD by URL: if URL unchanged, file is never re-downloaded.
+# RUN curl re-downloads every build.
+for lineno, content in run_blocks:
+    # Match curl -O, curl -o file, curl > file, wget, wget -O
+    if re.search(r'\b(curl|wget)\b', content):
+        # Skip if it's piped to sh (already caught above) or just a health check
+        if re.search(r'\|\s*(ba)?sh', content):
+            continue
+        # Look for patterns that download a file (not API calls)
+        if re.search(r'curl\s.*-[oO]|curl\s.*>\s*\S|wget\s', content):
+            # Extract URL if possible
+            url_match = re.search(r'https?://\S+', content)
+            url_hint = url_match.group(0).rstrip('"\'\\') if url_match else 'https://...'
+            print(f"  [INFO] Line {lineno}: RUN curl/wget downloads a file every build — "
+                  f"BuildKit caches ADD by URL; use instead:")
+            print(f"         ADD --checksum=sha256:<hash> {url_hint} /path/to/file")
+            print(f"         (get hash with: sha256sum <file> or from release page)")
+            issues += 1
 
 if issues == 0:
     print("  No issues found.")

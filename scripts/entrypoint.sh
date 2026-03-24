@@ -147,6 +147,20 @@ case "$COMPRESSOR" in
 esac
 
 # ============================================================================
+# DNS cache refresh
+# ============================================================================
+# Remove stale silex-dns-cache entries from previous image bake, re-resolve.
+# Runs in background so it never blocks startup. Falls back to normal DNS on miss.
+_silex_refresh_dns() {
+    sed -i '/# silex-dns-cache$/d' /etc/hosts 2>/dev/null || return
+    for _h in packages.wolfi.dev github.com objects.githubusercontent.com \
+               pypi.org registry.npmjs.org crates.io proxy.golang.org; do
+        _ip=$(getent ahosts "$_h" 2>/dev/null | awk '/STREAM/{print $1;exit}')
+        [ -n "$_ip" ] && echo "$_ip $_h  # silex-dns-cache" >> /etc/hosts
+    done
+} 2>/dev/null &
+
+# ============================================================================
 # Print configuration summary (unless SILEX_QUIET=on)
 # ============================================================================
 QUIET="${SILEX_QUIET:-off}"

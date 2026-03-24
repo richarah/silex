@@ -125,6 +125,21 @@ RUN rm -rf /usr/share/doc \
 # 6. Clear package cache
 RUN rm -rf /var/cache/apk/*
 
+# 7. Pre-warm DNS for commonly-hit hosts (saves 50-200ms per unique host per build)
+# Entries are marked so the entrypoint can refresh them on startup.
+# Falls back to normal DNS silently if any host is unresolvable at build time.
+RUN for _host in \
+        packages.wolfi.dev \
+        github.com \
+        objects.githubusercontent.com \
+        pypi.org \
+        registry.npmjs.org \
+        crates.io \
+        proxy.golang.org; do \
+        _ip=$(getent ahosts "$_host" 2>/dev/null | awk '/STREAM/{print $1;exit}'); \
+        [ -n "$_ip" ] && echo "$_ip $_host  # silex-dns-cache" >> /etc/hosts; \
+    done || true
+
 # ============================================================================
 # Set up symlinks
 # ============================================================================
@@ -217,7 +232,7 @@ ENV SILEX_LINKER=mold \
     SILEX_GIT_SHALLOW=on \
     SILEX_APT_SHIM=on \
     SILEX_USE_GPU=auto \
-    SILEX_IMAGE_VERSION=slim-0.1.0 \
+    SILEX_IMAGE_VERSION=slim-1.1.0 \
     SILEX_IMAGE_BASE=wolfi
 
 # ============================================================================
