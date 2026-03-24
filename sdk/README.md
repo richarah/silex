@@ -8,8 +8,6 @@ A considered Docker base image.
 
 Cold builds 2-3x faster. Warm sccache rebuilds 18x.
 Everything else in your Dockerfile stays the same.
-If something breaks, `ENV SILEX_WRAPPERS=off` and
-you're on raw apk.
 
 ## Why this exists
 
