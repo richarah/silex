@@ -24,8 +24,8 @@ back to raw apk. Nothing is irreversible.
 Because `dpkg --configure -a` has mass.
 
 The tools inside a typical base image were designed for
-systems that persist. A build layer doesn't. It succeeds
-or gets thrown away. But dpkg still calls fsync() after
+systems that persist. A build layer doesn't, it succeeds or it fails.
+But dpkg still calls fsync() after
 every file it unpacks, because the power might go out
 between installing libssl-dev and libcurl-dev. Postinstall
 scripts still start services that nothing will ever connect
