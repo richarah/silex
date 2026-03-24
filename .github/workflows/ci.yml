@@ -49,8 +49,8 @@ jobs:
         run: |
           SIZE_MB=$(docker inspect silex:slim --format='{{.Size}}' | awk '{printf "%.0f\n", $1/1024/1024}')
           echo "Image size: ${SIZE_MB}MB"
-          if [ "$SIZE_MB" -gt 700 ]; then
-            echo "ERROR: Image size ${SIZE_MB}MB exceeds 700MB ceiling"
+          if [ "$SIZE_MB" -gt 1500 ]; then
+            echo "ERROR: Image size ${SIZE_MB}MB exceeds 1500MB ceiling"
             exit 1
           fi
 

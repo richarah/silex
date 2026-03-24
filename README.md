@@ -59,7 +59,7 @@ of upstream rebuild schedules).
 
 | Tag | What | Size |
 |-----|------|------|
-| `silex:slim` | Everything above | ~540MB |
+| `silex:slim` | Everything above | ~900MB |
 | `silex:dev` | Adds development tooling (git, etc.) | larger |
 | `silex:runtime` | Companion for multi-stage builds, no compiler | ~30MB |
 | `silex:cross` | Adds cross-compilation support (arm64 <-> x86_64) | larger |
@@ -210,9 +210,10 @@ Maybe. The apt shim covers 504 common packages. If something breaks,
 **Can I use gcc instead of clang?**
 `ENV SILEX_CC=gcc SILEX_CXX=g++`. Install gcc with `apk add gcc`.
 
-**Why is the image ~540MB?**
-Clang is 150-200MB. The rest is build tools. `silex:runtime` is ~30MB
-for when you only need to run the output.
+**Why is the image ~900MB?**
+LLVM 18 compiled from source with GCC -O2 (no LTO) produces larger binaries
+than pre-built distribution packages. libLLVM.so alone is ~400MB stripped.
+`silex:runtime` is ~30MB for when you only need to run the output.
 
 ## License
 
