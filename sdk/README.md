@@ -18,6 +18,14 @@ a faster replacement for years. Distros can't ship them
 because a distro's job is to run on everything from Raspberry
 Pis to submarines. Your build's job is to compile code and exit with code 0.
 
+And between installing and compiling, dpkg rebuilds
+the manpage index, the font cache, and the MIME database.
+It calls fsync() after every file. On ubuntu:24.04, an
+apt-get install runs dozens of postinstall hooks before
+your compiler is even invoked.
+
+Silex ships faster tools and gets out of the way.
+
 ## What's inside
 
 | Component | Version | Replaces | Why |
