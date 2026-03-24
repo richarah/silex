@@ -22,7 +22,7 @@ But dpkg still calls fsync() after
 every file it unpacks, because the power might go out
 between installing libssl-dev and libcurl-dev. Postinstall
 scripts still start services that nothing will ever connect
-to. apt still downloads the package index fresh on every
+to, while apt still downloads the package index fresh on every
 build because it assumes something changed since last time.
 
 Silex replaces them with tools that weren't designed
