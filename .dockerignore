@@ -61,6 +61,7 @@ temp/
 examples/
 
 # Keep only what's needed for the build
+!src/
 !scripts/
 !config/
 !dockerfiles/
