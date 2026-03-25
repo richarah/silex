@@ -36,20 +36,20 @@ ARG XXHASH_VERSION=0.8.2
 ARG XXHASH_SHA256=baee0c6afd4f03165de7a4e67988d16f0f2b257b51d0e3cb91909302a26a79c4
 ARG MIMALLOC_VERSION=2.1.7
 ARG MIMALLOC_SHA256=0eed39319f139afde8515010ff59baf24de9e47ea316a315398e8027d198202d
-ARG APK_VERSION=2.14.4
-ARG APK_SHA256=c8ad16bddfae988392ad067a244cfdaf643eb7d6761b73450739585ca76f9a25
+ARG JEMALLOC_VERSION=5.3.0
+ARG JEMALLOC_SHA256=2db82d1e7119df3e71b7640219b6dfe84789bc0537983c3b7ac4f7189aecfeaa
 ARG BUSYBOX_VERSION=1.37.0
 ARG BUSYBOX_SHA256=3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4
 ARG DASH_VERSION=0.5.12
 ARG DASH_SHA256=6a474ac46e8b0b32916c4c60df694c82058d3297d8b385b74508030ca4a8f28a
+ARG APK_VERSION=2.14.4
+ARG APK_SHA256=c8ad16bddfae988392ad067a244cfdaf643eb7d6761b73450739585ca76f9a25
 ARG TINI_VERSION=0.19.0
 ARG TINI_SHA256=0fd35a7030052acd9f58948d1d900fe1e432ee37103c5561554408bdac6bbf0d
 ARG PIGZ_VERSION=2.8
 ARG PIGZ_SHA256=eb872b4f0e1f0ebe59c9f7bd8c506c4204893ba6a8492de31df416f0d5170fd0
 ARG PIXZ_VERSION=1.0.7
 ARG PIXZ_SHA256=e5e32c6eb0bf112b98e74a5da8fb63b9f2cae71800f599d97ce540e150c8ddc5
-ARG COREUTILS_VERSION=9.5
-ARG COREUTILS_SHA256=cd328edeac92f6a665de9f323c93b712af1858bc2e0d88f3f7100469470a1b8a
 ARG SCCACHE_VERSION=0.8.2
 ARG SCCACHE_SHA256=2b3e0ef8902fe7bcdcfccf393e29f4ccaafc0194cbb93681eaac238cdc9b94f8
 ARG FD_VERSION=10.2.0
@@ -77,13 +77,13 @@ ARG NINJA_VERSION NINJA_SHA256
 ARG ZSTD_VERSION ZSTD_SHA256
 ARG XXHASH_VERSION XXHASH_SHA256
 ARG MIMALLOC_VERSION MIMALLOC_SHA256
-ARG APK_VERSION APK_SHA256
+ARG JEMALLOC_VERSION JEMALLOC_SHA256
 ARG BUSYBOX_VERSION BUSYBOX_SHA256
 ARG DASH_VERSION DASH_SHA256
+ARG APK_VERSION APK_SHA256
 ARG TINI_VERSION TINI_SHA256
 ARG PIGZ_VERSION PIGZ_SHA256
 ARG PIXZ_VERSION PIXZ_SHA256
-ARG COREUTILS_VERSION COREUTILS_SHA256
 ARG TARGETARCH
 
 # Install Debian build dependencies.
@@ -131,17 +131,17 @@ RUN set -ex \
         -o /src/mimalloc.tar.gz \
     && echo "${MIMALLOC_SHA256}  /src/mimalloc.tar.gz" | sha256sum -c - \
     \
-    && curl -fsSL "https://gitlab.alpinelinux.org/alpine/apk-tools/-/archive/v${APK_VERSION}/apk-tools-v${APK_VERSION}.tar.gz" \
-        -o /src/apk-tools.tar.gz \
-    && echo "${APK_SHA256}  /src/apk-tools.tar.gz" | sha256sum -c - \
-    \
-    && curl -fsSL "https://busybox.net/downloads/busybox-${BUSYBOX_VERSION}.tar.bz2" \
+    && curl -fsSL --retry 10 --retry-all-errors --retry-delay 10 "https://busybox.net/downloads/busybox-${BUSYBOX_VERSION}.tar.bz2" \
         -o /src/busybox.tar.bz2 \
     && echo "${BUSYBOX_SHA256}  /src/busybox.tar.bz2" | sha256sum -c - \
     \
-    && curl -fsSL "http://gondor.apana.org.au/~herbert/dash/files/dash-${DASH_VERSION}.tar.gz" \
+    && curl -fsSL --retry 10 --retry-all-errors --retry-delay 10 "http://gondor.apana.org.au/~herbert/dash/files/dash-${DASH_VERSION}.tar.gz" \
         -o /src/dash.tar.gz \
     && echo "${DASH_SHA256}  /src/dash.tar.gz" | sha256sum -c - \
+    \
+    && curl -fsSL "https://gitlab.alpinelinux.org/alpine/apk-tools/-/archive/v${APK_VERSION}/apk-tools-v${APK_VERSION}.tar.gz" \
+        -o /src/apk-tools.tar.gz \
+    && echo "${APK_SHA256}  /src/apk-tools.tar.gz" | sha256sum -c - \
     \
     && curl -fsSL "https://github.com/krallin/tini/archive/refs/tags/v${TINI_VERSION}.tar.gz" \
         -o /src/tini.tar.gz \
@@ -153,11 +153,7 @@ RUN set -ex \
     \
     && curl -fsSL "https://github.com/vasi/pixz/releases/download/v${PIXZ_VERSION}/pixz-${PIXZ_VERSION}.tar.xz" \
         -o /src/pixz.tar.xz \
-    && echo "${PIXZ_SHA256}  /src/pixz.tar.xz" | sha256sum -c - \
-    \
-    && curl -fsSL "https://ftp.gnu.org/gnu/coreutils/coreutils-${COREUTILS_VERSION}.tar.xz" \
-        -o /src/coreutils.tar.xz \
-    && echo "${COREUTILS_SHA256}  /src/coreutils.tar.xz" | sha256sum -c -
+    && echo "${PIXZ_SHA256}  /src/pixz.tar.xz" | sha256sum -c -
 
 # ============================================================================
 # Build mold (with Debian gcc).
@@ -187,6 +183,7 @@ RUN set -ex \
 # The resulting clang binary lives in the final image; -O3 makes it faster.
 # ============================================================================
 RUN set -ex \
+    && export PATH="/opt/mold/bin:${PATH}" \
     && tar xf /src/llvm.tar.xz -C /build \
     && cd /build/llvm-project-${LLVM_VERSION}.src \
     && ARCH=$([ "${TARGETARCH}" = "arm64" ] && echo "AArch64" || echo "X86") \
@@ -198,8 +195,7 @@ RUN set -ex \
         -DCMAKE_CXX_COMPILER=g++ \
         -DCMAKE_C_FLAGS="-O3" \
         -DCMAKE_CXX_FLAGS="-O3" \
-        -DCMAKE_EXE_LINKER_FLAGS="-fuse-ld=/opt/mold/bin/mold" \
-        -DCMAKE_SHARED_LINKER_FLAGS="-fuse-ld=/opt/mold/bin/mold" \
+        -DLLVM_USE_LINKER=mold \
         -DLLVM_ENABLE_PROJECTS="clang;lld" \
         -DLLVM_ENABLE_RUNTIMES="compiler-rt;libcxx;libcxxabi;libunwind" \
         -DLLVM_TARGETS_TO_BUILD="${ARCH}" \
@@ -225,7 +221,7 @@ ENV CC="clang"
 ENV CXX="clang++"
 ENV CFLAGS="-O3 -fomit-frame-pointer"
 ENV CXXFLAGS="-O3 -fomit-frame-pointer"
-ENV LDFLAGS="-fuse-ld=/opt/mold/bin/mold"
+ENV LDFLAGS="--ld-path=/opt/mold/bin/mold"
 
 # Arch-specific optimisation flag. Set at build time.
 ARG MARCH_FLAG="-march=x86-64-v3"
@@ -259,11 +255,12 @@ RUN set -ex \
         -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX=/out \
-        -DZSTD_BUILD_STATIC=OFF \
+        -DZSTD_BUILD_STATIC=ON \
         -DZSTD_BUILD_PROGRAMS=ON \
         -DZSTD_BUILD_TESTS=OFF \
     && ninja -C _build -j$(nproc) \
     && ninja -C _build install \
+    && rm -f /out/lib/libzstd.a \
     && strip --strip-unneeded /out/bin/zstd \
     && rm -rf /build/zstd-${ZSTD_VERSION}
 
@@ -305,6 +302,8 @@ RUN set -ex \
         -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX=/out \
+        -DCMAKE_C_FLAGS="${CFLAGS} -Wno-strict-prototypes" \
+        -DCMAKE_EXE_LINKER_FLAGS="-Wno-unused-command-line-argument" \
     && ninja -C _build -j$(nproc) \
     && install -m755 _build/tini /out/bin/tini \
     && strip --strip-unneeded /out/bin/tini \
@@ -317,7 +316,6 @@ RUN set -ex \
     && tar xf /src/dash.tar.gz -C /build \
     && cd /build/dash-${DASH_VERSION} \
     && ./configure \
-        --bindir=/bin \
         --prefix=/out \
         CC="${CC}" \
         CFLAGS="${CFLAGS}" \
@@ -342,6 +340,25 @@ RUN set -ex \
     && install -m755 busybox /out/bin/busybox \
     && strip --strip-unneeded /out/bin/busybox \
     && rm -rf /build/busybox-${BUSYBOX_VERSION}
+
+# ============================================================================
+# Build apk package manager (static, no Lua).
+# apk 2.14.x uses a plain Makefile (no autoconf). STATIC=y links all deps in;
+# the resulting binary has no libapk.so runtime dependency.
+# Static libs required: libssl.a, libcrypto.a (libssl-dev), libz.a (zlib1g-dev).
+# ============================================================================
+RUN set -ex \
+    && tar xf /src/apk-tools.tar.gz -C /build \
+    && cd /build/apk-tools-v${APK_VERSION} \
+    && make -j$(nproc) \
+        CC="${CC}" \
+        CFLAGS="${CFLAGS}" \
+        STATIC=y \
+        LUA=no \
+        LIBDIR=/lib/apk \
+    && install -m755 src/apk.static /out/bin/apk \
+    && strip --strip-unneeded /out/bin/apk \
+    && rm -rf /build/apk-tools-v${APK_VERSION}
 
 # ============================================================================
 # Build pigz (parallel gzip).
@@ -372,45 +389,12 @@ RUN set -ex \
     && rm -rf /build/pixz-${PIXZ_VERSION}
 
 # ============================================================================
-# Build GNU coreutils — sort binary only.
-# Busybox sort lacks --parallel. This binary is installed as sort-parallel
-# and invoked only by the sort wrapper; it does not replace busybox sort.
-# Licence: GPLv3 (not GPLv2 — intentional and noted in LICENSING.md).
+# sort-parallel: GNU sort from Debian bookworm's coreutils (9.1).
+# Busybox sort does not support --parallel; GNU sort does.
+# debian:bookworm-slim ships coreutils pre-installed (dependency of make).
 # ============================================================================
-RUN set -ex \
-    && tar xf /src/coreutils.tar.xz -C /build \
-    && cd /build/coreutils-${COREUTILS_VERSION} \
-    && ./configure \
-        --prefix=/out \
-        CC="${CC}" \
-        CFLAGS="${CFLAGS}" \
-        LDFLAGS="${LDFLAGS}" \
-    && make -j$(nproc) src/sort \
-    && install -m755 src/sort /out/bin/sort-parallel \
-    && strip --strip-unneeded /out/bin/sort-parallel \
-    && rm -rf /build/coreutils-${COREUTILS_VERSION}
-
-# ============================================================================
-# Build apk-tools (the runtime package manager, pointed at Wolfi repos).
-# GPL-2.0-only. Written offer in LICENSING.md points to Alpine gitlab source.
-# ============================================================================
-RUN set -ex \
-    && tar xf /src/apk-tools.tar.gz -C /build \
-    && cd /build/apk-tools-v${APK_VERSION} \
-    && ./autogen.sh \
-    && ./configure \
-        --prefix=/out \
-        --without-lua \
-        --without-doc \
-        CC="${CC}" \
-        CFLAGS="${CFLAGS}" \
-        LDFLAGS="${LDFLAGS}" \
-    && make -j$(nproc) \
-    && make install \
-    && APK_BIN=$(find /out -name apk -type f 2>/dev/null | head -1) \
-    && strip --strip-unneeded "${APK_BIN}" \
-    && install -m755 "${APK_BIN}" /out/bin/apk \
-    && rm -rf /build/apk-tools-v${APK_VERSION}
+RUN install -m755 /usr/bin/sort /out/bin/sort-parallel \
+    && strip --strip-unneeded /out/bin/sort-parallel 2>/dev/null || true
 
 # ============================================================================
 # Build silex-nosync.so (MIT, ~20 lines C, LD_PRELOAD fsync suppressor).
@@ -424,14 +408,13 @@ RUN clang -O2 -shared -fPIC -nostartfiles \
 
 # Strip LLVM install: remove headers, static libs, cmake files, and shared libs
 # not needed for compilation.
-# Keep: clang, clang++, clang-18, lld, ld.lld, libLLVM.so, libc++.so, libc++abi.so,
-#        compiler-rt clang_rt libraries.
-# Drop: libclang-cpp.so (not needed: CLANG_LINK_CLANG_DYLIB not set; clang binary
-#        statically links clang components and only dynamically links libLLVM.so),
-#        libclang.so (C API, unused), libLTO.so, libRemarks.so, cmake/, share/.
+# Keep: clang, clang++, clang-18, lld, ld.lld, libLLVM.so, libclang-cpp.so,
+#        libc++.so, libc++abi.so, compiler-rt clang_rt libraries.
+# Drop: libclang.so (C API, unused), libLTO.so, libRemarks.so, cmake/, share/.
+# Note: libclang-cpp.so.18.1 is required by the clang executable even without
+#       CLANG_LINK_CLANG_DYLIB; do not remove it.
 RUN find /opt/llvm/include -mindepth 1 -delete 2>/dev/null || true \
     && find /opt/llvm/lib -name "*.a" -delete 2>/dev/null || true \
-    && rm -f /opt/llvm/lib/libclang-cpp.so* \
     && rm -f /opt/llvm/lib/libclang.so* \
     && rm -f /opt/llvm/lib/libLTO.so* \
     && rm -f /opt/llvm/lib/libRemarks.so* \
@@ -447,11 +430,34 @@ RUN find /opt/llvm/include -mindepth 1 -delete 2>/dev/null || true \
     && find /opt/llvm/bin -type f -exec strip --strip-unneeded {} \; 2>/dev/null || true
 
 # ============================================================================
+# Build jemalloc (shared library only, for LD_PRELOAD via SILEX_MALLOC=jemalloc).
+# Placed last in build-c to preserve LLVM build cache on incremental rebuilds.
+# ============================================================================
+RUN set -ex \
+    && curl -fsSL "https://github.com/jemalloc/jemalloc/releases/download/${JEMALLOC_VERSION}/jemalloc-${JEMALLOC_VERSION}.tar.bz2" \
+        -o /src/jemalloc.tar.bz2 \
+    && echo "${JEMALLOC_SHA256}  /src/jemalloc.tar.bz2" | sha256sum -c - \
+    && tar xf /src/jemalloc.tar.bz2 --no-same-owner -C /build \
+    && cd /build/jemalloc-${JEMALLOC_VERSION} \
+    && ./autogen.sh \
+    && ./configure \
+        --prefix=/out \
+        --enable-shared \
+        --disable-static \
+        CC="${CC}" \
+        CFLAGS="${CFLAGS}" \
+        LDFLAGS="${LDFLAGS}" \
+    && make -j$(nproc) \
+    && make install_lib_shared \
+    && strip --strip-unneeded /out/lib/libjemalloc.so* 2>/dev/null || true \
+    && rm -rf /build/jemalloc-${JEMALLOC_VERSION} /src/jemalloc.tar.bz2
+
+# ============================================================================
 # Stage: build-rust
 # Builds sccache, fd, ripgrep, uv.
 # Runs in parallel with build-c (no dependency between stages).
 # Uses Debian lld since mold is not built yet in this stage.
-# RUSTFLAGS: target-cpu for native performance, lto=thin for size and speed.
+# RUSTFLAGS: target-cpu for native performance. No lto (incompatible with embed-bitcode=no in sccache 0.8.2).
 # ============================================================================
 FROM debian:bookworm-slim AS build-rust
 
@@ -464,7 +470,8 @@ ARG TARGETARCH
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl ca-certificates xz-utils \
-    gcc lld \
+    gcc libc6-dev make cmake lld \
+    libssl-dev pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p /src /out/bin
@@ -483,7 +490,8 @@ RUN set -ex \
     && rm -rf /src/rust*
 
 ENV PATH="/opt/rust/bin:${PATH}"
-ENV RUSTFLAGS="-C target-cpu=x86-64-v3 -C lto=thin -C link-arg=-fuse-ld=lld"
+ENV RUSTFLAGS="-C target-cpu=x86-64-v3 -C link-arg=-fuse-ld=lld"
+ENV CARGO_PROFILE_RELEASE_LTO=thin
 
 # Download and verify Rust tool sources.
 RUN set -ex \
@@ -545,8 +553,12 @@ ARG TARGETARCH
 # Install only what the final image needs from Debian.
 # libssl3 + zlib1g: runtime deps for apk (TLS + compression).
 # ca-certificates: root CAs for apk fetch and user workloads.
+# gcc + libstdc++-12-dev: clang uses GCC's CRT files (crtbeginS.o etc.) and
+#   libstdc++ headers on Linux; without these clang cannot link executables.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates libssl3 zlib1g \
+    ca-certificates libssl3 zlib1g libatomic1 libarchive13 libedit2 \
+    libc6-dev linux-libc-dev gcc libstdc++-12-dev \
+    cmake ninja-build \
     && rm -rf /var/lib/apt/lists/* \
     && rm -rf /usr/share/doc /usr/share/man /usr/share/info
 
@@ -557,6 +569,90 @@ RUN dpkg --force-remove-reinstreq --purge apt apt-utils 2>/dev/null || true \
     && rm -rf /var/lib/apt /var/cache/apt /usr/lib/apt \
     && rm -f /usr/bin/apt /usr/bin/apt-get /usr/bin/apt-cache \
     && rm -rf /var/lib/dpkg/info/apt* /var/lib/dpkg/info/apt-utils*
+
+# ============================================================================
+# Align FHS with Wolfi expectations before running apk.
+# wolfi-baselayout expects /usr/sbin → bin and /usr/lib64 → lib as symlinks.
+# On Debian bookworm-slim these are real non-empty directories; apk rename(2)
+# fails with ENOTEMPTY if they are directories.
+#
+# Problem: several approaches fail in overlayfs (rootless Docker):
+#   - rm -rf dir; ln -sf: breaks shell — Debian binaries use INTERP
+#     /lib64/ld-linux-x86-64.so.2; after rm -rf /usr/lib64, /lib64 is
+#     a dangling symlink and exec of ANY dynamic binary (inc /bin/sh) fails.
+#   - rename(dir, tmp): fails with EXDEV — overlayfs forbids renaming
+#     directories that have entries in lower layers.
+#
+# Solution: compile a STATIC C helper (no INTERP, no dynamic linker needed).
+# The helper calls unlink()+rmdir() to empty each dir, then symlink().
+# After /usr/lib64 → lib is created, /lib64/ld-linux-x86-64.so.2 would
+# resolve to /usr/lib/ld-linux-x86-64.so.2 which doesn't exist. Fix by
+# creating /usr/lib/ld-linux-x86-64.so.2 → x86_64-linux-gnu/... symlink
+# so all subsequent Debian dynamic binaries still work.
+# ============================================================================
+RUN printf '%s\n' \
+    '#include <unistd.h>' \
+    '#include <sys/stat.h>' \
+    '#include <fcntl.h>' \
+    '#include <dirent.h>' \
+    '#include <string.h>' \
+    '#include <stdio.h>' \
+    '#include <limits.h>' \
+    '#include <errno.h>' \
+    'static int rmrf(const char*d){' \
+    '  DIR*dp=opendir(d);struct dirent*e;char p[4096];' \
+    '  if(!dp){return errno==ENOENT?0:(perror(d),1);}' \
+    '  while((e=readdir(dp))){' \
+    '    if(!strcmp(e->d_name,".")||!strcmp(e->d_name,".."))continue;' \
+    '    snprintf(p,sizeof p,"%s/%s",d,e->d_name);' \
+    '    if(unlink(p)!=0)rmrf(p);}' \
+    '  closedir(dp);' \
+    '  if(rmdir(d)!=0){perror(d);return 1;}return 0;}' \
+    'static int fhs(const char*d,const char*t){' \
+    '  struct stat s;' \
+    '  if(lstat(d,&s)<0||!S_ISDIR(s.st_mode))return 0;' \
+    '  if(rmrf(d))return 1;' \
+    '  if(symlink(t,d)!=0){perror(d);return 1;}return 0;}' \
+    'static void cpfile(const char*s,const char*d){' \
+    '  char b[65536];ssize_t n;' \
+    '  int r=open(s,O_RDONLY),w=open(d,O_WRONLY|O_CREAT|O_TRUNC,0644);' \
+    '  if(r<0||w<0){if(r>=0)close(r);if(w>=0)close(w);return;}' \
+    '  while((n=read(r,b,sizeof b))>0)write(w,b,n);' \
+    '  close(r);close(w);}' \
+    'static void mvtree(const char*src,const char*dst){' \
+    '  DIR*dp=opendir(src);struct dirent*e;char s[4096],d[4096];struct stat st;' \
+    '  if(!dp)return;' \
+    '  while((e=readdir(dp))){' \
+    '    if(!strcmp(e->d_name,".")||!strcmp(e->d_name,".."))continue;' \
+    '    snprintf(s,sizeof s,"%s/%s",src,e->d_name);' \
+    '    snprintf(d,sizeof d,"%s/%s",dst,e->d_name);' \
+    '    if(lstat(s,&st)!=0)continue;' \
+    '    if(S_ISDIR(st.st_mode)){mkdir(d,0755);mvtree(s,d);}' \
+    '    else{cpfile(s,d);unlink(s);}}' \
+    '  closedir(dp);rmdir(src);}' \
+    'static int fhs_mv(const char*dir,const char*newpath,const char*symtgt){' \
+    '  struct stat s;' \
+    '  if(lstat(dir,&s)<0||!S_ISDIR(s.st_mode))return 0;' \
+    '  mkdir(newpath,0755);' \
+    '  mvtree(dir,newpath);' \
+    '  if(symlink(symtgt,dir)!=0){perror(dir);return 1;}return 0;}' \
+    'int main(void){' \
+    '  struct stat s;' \
+    '  if(fhs("/usr/sbin","bin"))return 1;' \
+    '  if(fhs("/usr/lib64","lib"))return 1;' \
+    '  if(fhs_mv("/usr/lib/terminfo","/usr/share/terminfo","../share/terminfo"))return 1;' \
+    '#ifdef __x86_64__' \
+    '  if(lstat("/usr/lib/ld-linux-x86-64.so.2",&s)!=0)' \
+    '    symlink("x86_64-linux-gnu/ld-linux-x86-64.so.2","/usr/lib/ld-linux-x86-64.so.2");' \
+    '#elif defined(__aarch64__)' \
+    '  if(lstat("/usr/lib/ld-linux-aarch64.so.1",&s)!=0)' \
+    '    symlink("aarch64-linux-gnu/ld-linux-aarch64.so.1","/usr/lib/ld-linux-aarch64.so.1");' \
+    '#endif' \
+    '  return 0;}' \
+    > /tmp/fhs.c \
+    && gcc -static -o /tmp/fhs /tmp/fhs.c \
+    && /tmp/fhs \
+    && rm -f /tmp/fhs /tmp/fhs.c
 
 # ============================================================================
 # Copy compiled tools from builder stages.
@@ -579,6 +675,7 @@ COPY --from=build-c /out/bin/xxhsum     /usr/bin/xxhsum
 COPY --from=build-c /out/bin/pigz       /usr/bin/pigz
 COPY --from=build-c /out/bin/pixz       /usr/bin/pixz
 COPY --from=build-c /out/bin/ninja      /usr/bin/ninja
+COPY --from=build-c /out/bin/sort-parallel /usr/local/silex/bin/sort-parallel
 
 # Libraries.
 COPY --from=build-c /out/lib/silex-nosync.so /usr/local/silex/lib/silex-nosync.so
@@ -586,12 +683,14 @@ COPY --from=build-c /out/lib/silex-nosync.so /usr/local/silex/lib/silex-nosync.s
 # mimalloc shared library.
 COPY --from=build-c /out/lib/libmimalloc* /usr/lib/
 
-# Silex-internal binaries (wrappers call these directly).
-RUN mkdir -p /usr/local/silex/bin
-COPY --from=build-c /out/bin/sort-parallel /usr/local/silex/bin/sort-parallel
+# jemalloc shared library (for SILEX_MALLOC=jemalloc).
+COPY --from=build-c /out/lib/libjemalloc* /usr/lib/
 
-# apk package manager. Normalised to /out/bin/apk during build.
-COPY --from=build-c /out/bin/apk        /usr/bin/apk
+# Silex-internal binaries dir (wrappers call these directly).
+RUN mkdir -p /usr/local/silex/bin
+
+# apk package manager. Built statically in build-c; no shared lib runtime deps.
+COPY --from=build-c /out/bin/apk /usr/bin/apk
 
 # sccache compiler cache.
 COPY --from=build-rust /out/bin/sccache /opt/sccache/bin/sccache
@@ -627,15 +726,65 @@ RUN MAJOR="${LLVM_VERSION%%.*}" \
     && ln -sf /opt/mold/bin/mold    /usr/bin/ld.mold
 
 # ============================================================================
-# Configure apk for Wolfi (Chainguard) repositories.
-# The signing key is copied from the official wolfi-base image.
+# Configure apk for Wolfi repositories and pre-install base packages.
+# Pre-installing wolfi-baselayout and glibc at build time prevents them from
+# being reinstalled at runtime (which would overwrite our hooks).
+#
+# ldconfig handling:
+#   - wolfi-baselayout installs /etc/apk/commit_hooks.d/ldconfig-commit.sh
+#     which calls /usr/bin/ldconfig after every apk transaction.
+#   - wolfi's glibc installs a Wolfi-compiled ldconfig to /usr/bin/ldconfig;
+#     this binary crashes (stack smash) in a Debian-glibc environment.
+#   - Two-step install: first wolfi-baselayout (without glibc), override
+#     ldconfig-commit.sh with a no-op, then glibc (hook is our no-op;
+#     glibc overwrites /usr/bin/ldconfig but the hook never calls it).
+#   - At runtime: both packages are already installed; re-install does not
+#     occur and our no-op ldconfig-commit.sh is never overwritten.
 # ============================================================================
 COPY --from=cgr.dev/chainguard/wolfi-base:latest /etc/apk/keys/ /etc/apk/keys/
+COPY keys/ /etc/apk/keys/
 
-RUN mkdir -p /etc/apk /var/cache/apk /var/lib/apk /lib/apk/db \
-    && echo "https://apk.cgr.dev/chainguard" > /etc/apk/repositories \
-    && touch /lib/apk/db/installed \
-    && apk update
+RUN ARCH=$([ "${TARGETARCH}" = "arm64" ] && echo "aarch64" || echo "x86_64") \
+    && mkdir -p /etc/apk/keys /etc/apk/protected_paths.d /etc/apk/commit_hooks.d \
+               /var/cache/apk /var/lib/apk /lib/apk/db /lib/apk/exec \
+    && printf 'https://richarah.github.io/silex-packages/%s\nhttps://packages.wolfi.dev/os\n' "$ARCH" \
+         > /etc/apk/repositories \
+    && echo "$ARCH" > /etc/apk/arch \
+    && touch /etc/apk/world /lib/apk/db/installed \
+    && apk update \
+    \
+    && printf '#!/bin/sh\nexit 0\n' > /usr/bin/ldconfig \
+    && chmod +x /usr/bin/ldconfig \
+    \
+    && LD_PRELOAD=/usr/local/silex/lib/silex-nosync.so apk add wolfi-baselayout \
+    && printf '#!/bin/sh\nexit 0\n' > /etc/apk/commit_hooks.d/ldconfig-commit.sh \
+    && chmod +x /etc/apk/commit_hooks.d/ldconfig-commit.sh \
+    \
+    && printf '%s\n' \
+        '#include <unistd.h>' \
+        '#include <fcntl.h>' \
+        '#include <sys/stat.h>' \
+        'static void noop(const char*p){' \
+        '  int f=open(p,O_WRONLY|O_CREAT|O_TRUNC,0755);' \
+        '  if(f>=0){write(f,"#!/bin/sh\nexit 0\n",17);close(f);}}' \
+        'int main(void){' \
+        '#ifdef __x86_64__' \
+        '  unlink("/usr/lib/ld-linux-x86-64.so.2");' \
+        '  symlink("x86_64-linux-gnu/ld-linux-x86-64.so.2","/usr/lib/ld-linux-x86-64.so.2");' \
+        '#elif defined(__aarch64__)' \
+        '  unlink("/usr/lib/ld-linux-aarch64.so.1");' \
+        '  symlink("aarch64-linux-gnu/ld-linux-aarch64.so.1","/usr/lib/ld-linux-aarch64.so.1");' \
+        '#endif' \
+        '  noop("/etc/apk/commit_hooks.d/ldconfig-commit.sh");' \
+        '  noop("/usr/bin/ldconfig");' \
+        '  return 0;}' \
+        > /tmp/postglibc.c \
+    && gcc -static -o /tmp/postglibc /tmp/postglibc.c \
+    && rm -f /tmp/postglibc.c \
+    \
+    && LD_PRELOAD=/usr/local/silex/lib/silex-nosync.so apk add --no-scripts glibc ld-linux glibc-locale-posix \
+    && /tmp/postglibc \
+    && rm -f /tmp/postglibc
 
 # ============================================================================
 # Set ID_LIKE=debian so tools that check /etc/os-release see a Debian-like env.
@@ -669,7 +818,6 @@ RUN chmod +x /usr/local/bin/apt-get \
 # Bake common host IPs into /etc/hosts at build time; entrypoint refreshes.
 # ============================================================================
 RUN for _host in \
-        apk.cgr.dev \
         packages.wolfi.dev \
         github.com \
         objects.githubusercontent.com \
@@ -707,6 +855,10 @@ RUN find /usr /opt -xdev -type f -size +4k 2>/dev/null \
 # Environment (mirrors v1 plus v2 additions).
 # ============================================================================
 ENV PATH="/usr/local/silex/bin:/opt/llvm/bin:/opt/mold/bin:/opt/sccache/bin:$PATH"
+
+# Ensure Wolfi libraries in /usr/lib take precedence over Debian multiarch
+# paths left in the base image (e.g. /usr/lib/x86_64-linux-gnu from cmake deps).
+ENV LD_LIBRARY_PATH="/usr/lib"
 
 # Build environment: compiler, linker, generator, cache.
 ENV CC="clang"
