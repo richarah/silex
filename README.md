@@ -11,20 +11,18 @@ Everything else in your Dockerfile stays the same.
 
 ## Why this exists
 
-Because the slowest part of your container builds probably isn't your code.
+Because the slowest part of your Docker builds
+probably isn't your code.
 
 gcc, ld, make, gzip, dpkg. Every one of those has had
 a faster replacement for years. Distros can't ship them
-because a distro's job is to run on everything from Raspberry
-Pis to submarines. Your build's job is to compile code and exit with code 0.
+because a distro's job is to run on everything from
+Raspberry Pis to submarines. Your container's job is to
+compile code and exit with code 0. Changing one tool
+isn't worth the yak shave. Changing all of them is a
+base image.
 
-And between installing and compiling, dpkg rebuilds
-the manpage index, the font cache, and the MIME database.
-It calls fsync() after every file. On ubuntu:24.04, an
-apt-get install runs dozens of postinstall hooks before
-your compiler is even invoked.
-
-Silex ships faster tools and gets out of the way.
+Silex is the yak, shaved.
 
 ## What's inside
 
@@ -91,7 +89,9 @@ Override in Dockerfile or at runtime.
 
 ## Debian compatibility
 
-Silex isn't Debian, but it's fluent.
+Silex isn't Debian, but it speaks Debian. Without the
+postinstall scripts, font cache rebuilds, and fsync
+after every file.
 
 ### apt shim
 
