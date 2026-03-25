@@ -38,14 +38,14 @@ jobs:
       # Bootstrap build from source. Reproducible, no dependency on previous image.
       # arm64 via QEMU is too slow for a full LLVM build; native arm64 runner required.
       - name: Build silex:slim (bootstrap, amd64)
-        run: make bootstrap TARGETARCH=amd64
+        run: make bootstrap TARGETARCH=amd64 DOCKER_FLAGS="--progress=plain --load"
 
       - name: Tag and push silex:slim
         run: |
           IMG="${{ env.REGISTRY }}/$(echo "${{ env.IMAGE_NAME }}" | tr '[:upper:]' '[:lower:]')"
-          docker tag silex:slim "${IMG}:slim"
-          docker tag silex:slim "${IMG}:slim-${{ steps.version.outputs.VERSION }}"
-          docker tag silex:slim "${IMG}:slim-latest"
+          docker tag localhost/silex:slim "${IMG}:slim"
+          docker tag localhost/silex:slim "${IMG}:slim-${{ steps.version.outputs.VERSION }}"
+          docker tag localhost/silex:slim "${IMG}:slim-latest"
           docker push "${IMG}:slim"
           docker push "${IMG}:slim-${{ steps.version.outputs.VERSION }}"
           docker push "${IMG}:slim-latest"
@@ -53,7 +53,7 @@ jobs:
       - name: Get image size
         id: image_size
         run: |
-          SIZE_MB=$(docker inspect silex:slim --format='{{.Size}}' | awk '{printf "%.0f\n", $1/1024/1024}')
+          SIZE_MB=$(docker inspect localhost/silex:slim --format='{{.Size}}' | awk '{printf "%.0f\n", $1/1024/1024}')
           echo "SIZE_MB=${SIZE_MB}" >> $GITHUB_OUTPUT
 
       - name: Create GitHub Release
