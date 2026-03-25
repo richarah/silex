@@ -25,6 +25,8 @@ request.
 
 Your container isn't a submarine.
 
+## What's inside
+
 | Component | Version | Replaces | Why |
 |-----------|---------|----------|-----|
 | Compiler | clang 18.1.8 | gcc | 14-33% faster on template-heavy C++ |
