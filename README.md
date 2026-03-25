@@ -1,30 +1,29 @@
 # silex
 
 A considered Docker base image.
+
 ```dockerfile
 - FROM ubuntu:24.04
 + FROM silex:slim
 ```
 
 Cold builds 2-3x faster. Warm sccache rebuilds 18x.
-Everything else in your Dockerfile stays the same.
+Everything else stays the same. `SILEX_WRAPPERS=off`
+for raw apk if something doesn't.
 
 ## Why this exists
 
-Because the slowest part of your Docker builds
-probably isn't your code.
+Because the slowest part of your Docker builds probably
+isn't your code.
 
-gcc, ld, make, gzip, dpkg. Every one of those has had
-a faster replacement for years. Distros can't ship them
-because a distro's job is to run on everything from
-Raspberry Pis to submarines. Your container's job is to
-compile code and exit with code 0. Changing one tool
-isn't worth the yak shave. Changing all of them is a
-base image.
+gcc, ld, make, gzip, dpkg. Nobody chose them, they
+accreted: gcc because Debian, ld because it came with
+gcc, make because POSIX, gzip because 1993. Distros
+can't replace them because the French navy runs Debian
+on nuclear submarines and has never filed a feature
+request.
 
-Silex is the yak, shaved.
-
-## What's inside
+Your container isn't a submarine.
 
 | Component | Version | Replaces | Why |
 |-----------|---------|----------|-----|
@@ -40,6 +39,8 @@ Silex is the yak, shaved.
 | PID 1 | tini 0.19.0 | nothing | Signal reaping, zombie prevention |
 
 Also ships fd and ripgrep alongside find and grep.
+gcc, make, and bash are one `apk add` away. Nothing is
+locked in.
 
 Base: debian:bookworm-slim (glibc). Every binary compiled
 from source with pinned SHA256 tarballs, -O3, LTO. Runtime
@@ -90,8 +91,8 @@ Override in Dockerfile or at runtime.
 ## Debian compatibility
 
 Silex isn't Debian, but it speaks Debian. Without the
-postinstall scripts, font cache rebuilds, and fsync
-after every file.
+postinstall scripts, font cache rebuilds, and fsync after
+every file.
 
 ### apt shim
 
@@ -170,7 +171,11 @@ against musl won't run (glibc). Recompile from source.
 
 ## Benchmarks
 
-Toolchain install + library install + compile. silex has compilers preinstalled; ubuntu:24.04 downloads build-essential, cmake, and ninja-build from scratch each build. Docker 29.2.0, Linux 6.17.0, x86_64, 32 cores. 4 runs per measurement, highest dropped, 3-run average.
+Toolchain install + library install + compile. silex has
+compilers preinstalled; ubuntu:24.04 downloads build-essential,
+cmake, and ninja-build from scratch each build. Docker 29.2.0,
+Linux 6.17.0, x86_64, 32 cores. 4 runs per measurement,
+highest dropped, 3-run average.
 
     project           silex       ubuntu       speedup
     nlohmann/json     4,144ms     11,944ms     2.9x
@@ -183,11 +188,11 @@ Toolchain install + library install + compile. silex has compilers preinstalled;
     SQLite amalgam    9,928ms     13,670ms     1.4x
 
 The cold speedup is 2-3x. No single component dominates:
-clang over gcc, mold over ld, ninja over make, apk over apt.
-They compound.
+clang over gcc, mold over ld, ninja over make, apk over
+apt. They compound.
 
-Boost.Spirit X3 is header-only and template-heavy; both images
-bottleneck on template instantiation regardless of toolchain.
+Boost.Spirit X3 is header-only; both images bottleneck on
+template instantiation. This is the ceiling.
 
 Warm sccache rebuild: 2.4s vs 44s cold. 18x.
 
@@ -205,7 +210,7 @@ compilers. Production images shouldn't.
 
 **Make Python fast.** uv is included and helps with pip. If
 your build is slow because you're training a model in the
-Dockerfile, that's an entirely different problem.
+Dockerfile, that's between you and your choices.
 
 ## Known issues
 
@@ -220,8 +225,9 @@ are bash. Use POSIX sh or `#!/bin/bash`.
 
 **`python3` on PATH. `python` is not.** Per PEP 394.
 
-**504 common pkgs mapped, not all.** There are 68,000 in Debian, most of them irrelevant to Docker builds.
-`apk search` for the rest, or file an issue.
+**504 common pkgs mapped, not all.** There are 68,000 in
+Debian, most of them irrelevant to Docker builds. `apk search`
+for the rest, or file an issue.
 
 **No GPU in slim.** CPU only.
 
@@ -300,33 +306,29 @@ skipping the 60-minute LLVM step. Silex builds Silex.
 
 ## FAQ
 
-#### Why not Alpine?
-
+**Why not Alpine?**
 musl. Measurably slower for compilation in our benchmarks,
 despite a newer gcc. The overhead is the libc, not the
 compiler.
 
-#### Why not Wolfi?
+**Why not Wolfi?**
+Wolfi is rolling. Chainguard deletes packages after
+12 months. Pinned Dockerfiles break. Source tarballs
+with SHA256 don't.
 
-Wolfi is rolling, Chainguard deletes packages after 12 months.
-Pinned Dockerfiles break, source tarballs with SHA256 don't.
+**Will this break my Dockerfile?**
+Possibly. `SILEX_WRAPPERS=off` for raw apk. File a bug
+if the issue persists.
 
-#### Will this break my Dockerfile?
+**Are the speedups real?**
+2-3x cold, compilers preinstalled vs `apt-get install`
+each build. 18x warm sccache. Methodology and harness
+in `benchmarks/`.
 
-Possibly. `SILEX_WRAPPERS=off` for raw apk. File a bug if the issue persists.
-
-#### Are the speedups real?
-
-2-3x cold, compilers preinstalled vs `apt-get install` each
-build. 18x warm sccache. SQLite is slower. Methodology and
-harness in `benchmarks/`.
-
-#### Rust rewrite?
-
+**Rust rewrite?**
 It's a Dockerfile.
 
-#### silex?
-
+**silex?**
 Latin for flint.
 
 ## Licence
