@@ -36,6 +36,37 @@ Test with `docker run --rm silex:slim apt-get install -y <package>`.
 4. Add a test in `scripts/test.sh`.
 5. Update the tools table in README.md.
 
+## Releasing to ghcr.io
+
+The release workflow triggers on any `v*` tag and pushes
+`ghcr.io/richarah/silex:slim` to GitHub Container Registry.
+
+```sh
+git tag v2.0.0
+git push origin master v2.0.0
+```
+
+The workflow runs `make bootstrap` (cold build from debian:bookworm-slim).
+First run takes ~90-120 min. After the first image is published, CI
+switches to `make build` (self-hosted, ~15-20 min).
+
+Images pushed:
+
+```
+ghcr.io/richarah/silex:slim
+ghcr.io/richarah/silex:slim-<version>
+ghcr.io/richarah/silex:slim-latest
+```
+
+The silex-packages CI uses `ghcr.io/richarah/silex:slim` as its build
+container. Publish silex:slim before triggering a silex-packages build.
+
+The `keys/` directory contains the silex-packages public signing key
+(`*.rsa.pub`). It is committed and COPY'd into the image at
+`/etc/apk/keys/`. The matching private key lives only in the
+silex-packages repo secrets (`SILEX_PKG_RSA`). Never put a private
+key in this repo.
+
 ## Pull requests
 
 - One concern per PR.

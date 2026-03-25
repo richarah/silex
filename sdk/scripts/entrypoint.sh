@@ -35,6 +35,13 @@ case "$MALLOC" in
 esac
 
 # ============================================================================
+# Feature flags (exported so wrapper scripts and subprocesses can read them)
+# ============================================================================
+export SILEX_WRAPPERS="${SILEX_WRAPPERS:-on}"
+export SILEX_GIT_SHALLOW="${SILEX_GIT_SHALLOW:-on}"
+export SILEX_APT_SHIM="${SILEX_APT_SHIM:-on}"
+
+# ============================================================================
 # Compiler configuration
 # ============================================================================
 export CC="${SILEX_CC:-clang}"
@@ -130,7 +137,7 @@ esac
 # ============================================================================
 (
     sed -i '/# silex-dns-cache$/d' /etc/hosts 2>/dev/null || true
-    for _h in apk.cgr.dev packages.wolfi.dev github.com objects.githubusercontent.com \
+    for _h in packages.wolfi.dev github.com objects.githubusercontent.com \
                pypi.org registry.npmjs.org crates.io proxy.golang.org; do
         _ip=$(getent ahosts "$_h" 2>/dev/null | awk '/STREAM/{print $1;exit}')
         [ -n "$_ip" ] && echo "$_ip $_h  # silex-dns-cache" >> /etc/hosts
