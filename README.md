@@ -226,9 +226,8 @@ are bash. Use POSIX sh or `#!/bin/bash`.
 
 **`python3` on PATH. `python` is not.** Per PEP 394.
 
-**504 common pkgs mapped, not all.** There are 68,000 in
-Debian, most of them irrelevant to Docker builds. `apk search`
-for the rest, or file an issue if a key package is missing.
+**504 pkgs mapped via shims.** There are 68,000 in
+Debian. `apk search` for the rest, or file an issue if a key package is missing.
 
 **No GPU in slim.** CPU only.
 
