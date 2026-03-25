@@ -13,11 +13,13 @@ set -e
 RUNS=4   # 4 runs per image per project; drop highest, average remaining 3
 
 # Run command in container, print elapsed ms to stdout.
+# Returns 0 always; failed runs produce a measurement of time-to-fail
+# (typically <1s, visually distinct from successful multi-second runs).
 _time_run() {
     _img="$1"
     _cmd="$2"
     _t0=$(date +%s%3N)
-    docker run --rm "$_img" sh -c "$_cmd" >/dev/null 2>&1
+    docker run --rm "$_img" sh -c "$_cmd" >/dev/null 2>&1 || true
     _t1=$(date +%s%3N)
     printf '%d' $((_t1 - _t0))
 }
@@ -114,6 +116,24 @@ U_RE2=$(bench ubuntu ubuntu:24.04 \
     "$_U libre2-dev 2>/dev/null && printf '#include<re2/re2.h>\nint main(){re2::RE2 r(\"a+\");return re2::RE2::FullMatch(\"aaa\",r)?0:1;}' > /t.cpp && g++ -std=c++17 -O2 /t.cpp -lre2 -o /t")
 
 # ============================================================================
+# Eigen (header-only linear algebra; needs -I/usr/include/eigen3)
+# ============================================================================
+printf "\n=== eigen ===\n" >&2
+S_EIGEN=$(bench silex silex:slim \
+    'apk add -q eigen-dev && printf "#include <Eigen/Dense>\nint main(){\n  Eigen::Matrix3d m;\n  m << 1,2,3,4,5,6,7,8,9;\n  return (m*m)(0,0)>0?0:1;\n}" > /t.cpp && clang++ -std=c++17 -O2 -I/usr/include/eigen3 /t.cpp -o /t')
+U_EIGEN=$(bench ubuntu ubuntu:24.04 \
+    "$_U libeigen3-dev 2>/dev/null && printf '#include <Eigen/Dense>\nint main(){\n  Eigen::Matrix3d m;\n  m << 1,2,3,4,5,6,7,8,9;\n  return (m*m)(0,0)>0?0:1;\n}' > /t.cpp && g++ -std=c++17 -O2 -I/usr/include/eigen3 /t.cpp -o /t")
+
+# ============================================================================
+# Boost.Spirit X3 (header-only parser combinator; template-heavy compile)
+# ============================================================================
+printf "\n=== Boost.Spirit ===\n" >&2
+S_SPIRIT=$(bench silex silex:slim \
+    'apk add -q boost-dev && printf "#include <boost/spirit/home/x3.hpp>\n#include <string>\nint main(){\n  namespace x3=boost::spirit::x3;\n  std::string s=\"3.14\";\n  double d=0;\n  auto it=s.begin();\n  x3::parse(it,s.end(),x3::double_,d);\n  return d>3.0?0:1;\n}" > /t.cpp && clang++ -std=c++17 -O2 /t.cpp -o /t')
+U_SPIRIT=$(bench ubuntu ubuntu:24.04 \
+    "$_U libboost-dev 2>/dev/null && printf '#include <boost/spirit/home/x3.hpp>\n#include <string>\nint main(){\n  namespace x3=boost::spirit::x3;\n  std::string s=\"3.14\";\n  double d=0;\n  auto it=s.begin();\n  x3::parse(it,s.end(),x3::double_,d);\n  return d>3.0?0:1;\n}' > /t.cpp && g++ -std=c++17 -O2 /t.cpp -o /t")
+
+# ============================================================================
 # SQLite amalgam (compile from source; clang -O3 vs gcc -O3)
 # ============================================================================
 printf "\n=== SQLite amalgam ===\n" >&2
@@ -133,6 +153,8 @@ for _row in \
     "googletest:$S_GTEST:$U_GTEST" \
     "abseil-cpp:$S_ABSL:$U_ABSL" \
     "google/re2:$S_RE2:$U_RE2" \
+    "eigen:$S_EIGEN:$U_EIGEN" \
+    "Boost.Spirit X3:$S_SPIRIT:$U_SPIRIT" \
     "SQLite amalgam:$S_SQLITE:$U_SQLITE"; do
     _lbl="${_row%%:*}"
     _rest="${_row#*:}"
