@@ -623,7 +623,7 @@ RUN mkdir -p /etc/apk/keys /etc/apk/protected_paths.d /etc/apk/commit_hooks.d \
     && printf 'https://richarah.github.io/silex-packages/aports\nhttps://packages.wolfi.dev/os\n' \
          > /etc/apk/repositories \
     && touch /lib/apk/db/installed \
-    && apk update \
+    && apk update -q || true \
     \
     && printf '#!/bin/sh\nexit 0\n' > /usr/bin/ldconfig \
     && chmod +x /usr/bin/ldconfig \
