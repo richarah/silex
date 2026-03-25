@@ -8,7 +8,7 @@ A considered Docker base image.
 ```
 
 Cold builds 2-3x faster. Warm sccache rebuilds 18x.
-Everything else stays the same. `SILEX_WRAPPERS=off`
+Everything else stays the same, `SILEX_WRAPPERS=off`
 for raw apk if something doesn't.
 
 ## Why this exists
