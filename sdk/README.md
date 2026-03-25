@@ -22,7 +22,7 @@ gcc, make because POSIX, gzip because that's what there was in 1993.
 Distros can't replace them because a distro also has to run on hospital MRI machines,
 railway signalling systems, and nuclear submarines.
 
-Your container is not a submarine.
+Your build server is not a submarine.
 
 ## What's inside
 
