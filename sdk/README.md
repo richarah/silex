@@ -13,8 +13,7 @@ for raw apk if something doesn't.
 
 ## Why this exists
 
-Because the slowest part of your Docker builds probably
-isn't your code.
+Nobody optimises the base image.
 
 gcc, ld, make, gzip, dpkg. Faster replacements have
 existed for years. The images that ship them want you
