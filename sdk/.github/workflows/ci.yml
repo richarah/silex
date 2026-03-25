@@ -39,11 +39,14 @@ jobs:
 
       - name: Build silex:slim (self-hosted)
         if: env.SILEX_BUILD_MODE == 'self-hosted'
-        run: make build
+        run: make build DOCKER_FLAGS="--progress=plain --load"
 
       - name: Build silex:slim (bootstrap)
         if: env.SILEX_BUILD_MODE == 'bootstrap'
-        run: make bootstrap
+        run: make bootstrap DOCKER_FLAGS="--progress=plain --load"
+
+      - name: Tag image for compat tests
+        run: docker tag localhost/silex:slim silex:slim
 
       - name: Check image size
         run: |
