@@ -1,0 +1,40 @@
+silex benchmark run: 2026-03-24
+host: linux x86_64
+image: silex:slim (v1.1-pre, no sccache)
+workload: nlohmann/json v3.11.3
+cmake: 4.2.3  clang: 18.1.8  ninja: 1.13.2
+
+notes:
+  toybox not available in Wolfi repo
+  cmake not in slim image by default; installed via apk for this test
+  each full-pipeline run: tar extract + cmake configure + cmake --build -j$(nproc)
+  each alloc run: cmake --build -j$(nproc) only, ninja clean between runs
+  sccache disabled (CMAKE_C_COMPILER_LAUNCHER= CMAKE_CXX_COMPILER_LAUNCHER=)
+
+--- benchmark 1: coreutils ---
+(tar + cmake configure + build)
+
+variant                  run1     run2     run3     avg
+wolfi-default (busybox)  34677ms  34855ms  35213ms  34915ms
+gnu-coreutils-9.10       35187ms  35683ms  38600ms  36490ms
+uutils-0.7.0             37366ms  35551ms  35802ms  36239ms
+
+sort --parallel default: busybox (no --parallel support, exit 2)
+sort --parallel after gnu/uutils install: exit 0
+
+--- benchmark 2: allocators ---
+(cmake --build only, ninja clean between runs)
+
+jemalloc: /usr/lib/libjemalloc.so.2
+mimalloc: /usr/lib/libmimalloc.so.1.9
+
+variant         run1     run2     run3     avg
+system-malloc   36340ms  35055ms  36690ms  36028ms
+jemalloc        34891ms  36325ms  33132ms  34782ms
+mimalloc        32711ms  32524ms  32304ms  32513ms
+
+--- benchmark 3: sort --parallel ---
+which sort:           /usr/local/silex/bin/sort (silex wrapper)
+/usr/bin/sort:        busybox symlink
+sort --parallel=4:    exit 2 (NOT SUPPORTED, default image)
+/usr/bin/sort --par:  exit 2 (NOT SUPPORTED, default image)
