@@ -16,14 +16,13 @@ for raw apk if something doesn't.
 Because the slowest part of your Docker builds probably
 isn't your code.
 
-gcc, ld, make, gzip, dpkg. Nobody chose them, they
+gcc, ld, make, gzip, dpkg. Nobody chose them. They
 accreted: gcc because Debian, ld because it came with
 gcc, make because POSIX, gzip because 1993. Distros
 can't replace them because the French navy runs Debian
-on nuclear submarines and has never filed a feature
-request.
+on nuclear submarines and has never filed a feature request.
 
-Your container isn't a submarine.
+Your container is not a submarine.
 
 ## What's inside
 
