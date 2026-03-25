@@ -173,20 +173,21 @@ against musl won't run (glibc). Recompile from source.
 Toolchain install + library install + compile. silex has compilers preinstalled; ubuntu:24.04 downloads build-essential, cmake, and ninja-build from scratch each build. Docker 29.2.0, Linux 6.17.0, x86_64, 32 cores. 4 runs per measurement, highest dropped, 3-run average.
 
     project           silex       ubuntu       speedup
-    nlohmann/json     5,059ms     12,474ms     2.5x
-    fmtlib            3,969ms     10,790ms     2.7x
-    googletest        4,964ms     10,508ms     2.1x
-    abseil-cpp        5,508ms     14,610ms     2.7x
-    google/re2        8,991ms     12,073ms     1.3x
-    SQLite amalgam   17,749ms     11,366ms     0.6x      SLOWER
+    nlohmann/json     4,144ms     11,944ms     2.9x
+    fmtlib            3,488ms     11,178ms     3.2x
+    googletest        4,015ms     11,442ms     2.8x
+    abseil-cpp        4,408ms     10,845ms     2.5x
+    google/re2        7,562ms     12,354ms     1.6x
+    eigen             4,691ms     14,418ms     3.1x
+    Boost.Spirit X3  15,672ms     15,757ms     1.0x
+    SQLite amalgam    9,928ms     13,670ms     1.4x
 
 The cold speedup is 2-3x. No single component dominates:
 clang over gcc, mold over ld, ninja over make, apk over apt.
 They compound.
 
-SQLite is a known anti-pattern: 230k-line single translation
-unit, clang -O3 does more analysis than gcc on files that
-large. `CC=gcc`. (`silex lint` detects this.)
+Boost.Spirit X3 is header-only and template-heavy; both images
+bottleneck on template instantiation regardless of toolchain.
 
 Warm sccache rebuild: 2.4s vs 44s cold. 18x.
 
