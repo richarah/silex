@@ -74,6 +74,104 @@ ARG TARGETARCH
 
 RUN mkdir -p /src /build /out/bin /out/lib /out/share
 
+# curl is not pre-installed in silex:slim; install via apk.
+# LD_LIBRARY_PATH ensures Wolfi's /usr/lib/libcurl.so.4 is found first.
+RUN apk add curl
+ENV LD_LIBRARY_PATH="/usr/lib"
+
+# ============================================================================
+# Compile static build-time helpers for the final stage.
+# These are run during docker build (not at container runtime).
+# Compiled here in build-c where libc6-dev is available from silex:slim.
+# Use clang directly — not via CC (which is sccache clang) or CFLAGS.
+# ============================================================================
+RUN printf '%s\n' \
+    '#include <unistd.h>' \
+    '#include <sys/stat.h>' \
+    '#include <fcntl.h>' \
+    '#include <dirent.h>' \
+    '#include <string.h>' \
+    '#include <stdio.h>' \
+    '#include <limits.h>' \
+    '#include <errno.h>' \
+    'static int rmrf(const char*d){' \
+    '  DIR*dp=opendir(d);struct dirent*e;char p[4096];' \
+    '  if(!dp){return errno==ENOENT?0:(perror(d),1);}' \
+    '  while((e=readdir(dp))){' \
+    '    if(!strcmp(e->d_name,".")||!strcmp(e->d_name,".."))continue;' \
+    '    snprintf(p,sizeof p,"%s/%s",d,e->d_name);' \
+    '    if(unlink(p)!=0)rmrf(p);}' \
+    '  closedir(dp);' \
+    '  if(rmdir(d)!=0){perror(d);return 1;}return 0;}' \
+    'static int fhs(const char*d,const char*t){' \
+    '  struct stat s;' \
+    '  if(lstat(d,&s)<0||!S_ISDIR(s.st_mode))return 0;' \
+    '  if(rmrf(d))return 1;' \
+    '  if(symlink(t,d)!=0){perror(d);return 1;}return 0;}' \
+    'static void cpfile(const char*s,const char*d){' \
+    '  char b[65536];ssize_t n;' \
+    '  int r=open(s,O_RDONLY),w=open(d,O_WRONLY|O_CREAT|O_TRUNC,0644);' \
+    '  if(r<0||w<0){if(r>=0)close(r);if(w>=0)close(w);return;}' \
+    '  while((n=read(r,b,sizeof b))>0)write(w,b,n);' \
+    '  close(r);close(w);}' \
+    'static void mvtree(const char*src,const char*dst){' \
+    '  DIR*dp=opendir(src);struct dirent*e;char s[4096],d[4096];struct stat st;' \
+    '  if(!dp)return;' \
+    '  while((e=readdir(dp))){' \
+    '    if(!strcmp(e->d_name,".")||!strcmp(e->d_name,".."))continue;' \
+    '    snprintf(s,sizeof s,"%s/%s",src,e->d_name);' \
+    '    snprintf(d,sizeof d,"%s/%s",dst,e->d_name);' \
+    '    if(lstat(s,&st)!=0)continue;' \
+    '    if(S_ISDIR(st.st_mode)){mkdir(d,0755);mvtree(s,d);}' \
+    '    else{cpfile(s,d);unlink(s);}}' \
+    '  closedir(dp);rmdir(src);}' \
+    'static int fhs_mv(const char*dir,const char*newpath,const char*symtgt){' \
+    '  struct stat s;' \
+    '  if(lstat(dir,&s)<0||!S_ISDIR(s.st_mode))return 0;' \
+    '  mkdir(newpath,0755);' \
+    '  mvtree(dir,newpath);' \
+    '  if(symlink(symtgt,dir)!=0){perror(dir);return 1;}return 0;}' \
+    'int main(void){' \
+    '  struct stat s;' \
+    '  if(fhs("/usr/sbin","bin"))return 1;' \
+    '  if(fhs("/usr/lib64","lib"))return 1;' \
+    '  if(fhs_mv("/usr/lib/terminfo","/usr/share/terminfo","../share/terminfo"))return 1;' \
+    '#ifdef __x86_64__' \
+    '  if(lstat("/usr/lib/ld-linux-x86-64.so.2",&s)!=0)' \
+    '    symlink("x86_64-linux-gnu/ld-linux-x86-64.so.2","/usr/lib/ld-linux-x86-64.so.2");' \
+    '#elif defined(__aarch64__)' \
+    '  if(lstat("/usr/lib/ld-linux-aarch64.so.1",&s)!=0)' \
+    '    symlink("aarch64-linux-gnu/ld-linux-aarch64.so.1","/usr/lib/ld-linux-aarch64.so.1");' \
+    '#endif' \
+    '  return 0;}' \
+    > /src/fhs.c \
+    && printf '%s\n' \
+    '#include <unistd.h>' \
+    '#include <fcntl.h>' \
+    '#include <sys/stat.h>' \
+    'static void noop(const char*p){' \
+    '  int f=open(p,O_WRONLY|O_CREAT|O_TRUNC,0755);' \
+    '  if(f>=0){write(f,"#!/bin/sh\nexit 0\n",17);close(f);}}' \
+    'int main(void){' \
+    '#ifdef __x86_64__' \
+    '  unlink("/usr/lib/ld-linux-x86-64.so.2");' \
+    '  symlink("x86_64-linux-gnu/ld-linux-x86-64.so.2","/usr/lib/ld-linux-x86-64.so.2");' \
+    '#elif defined(__aarch64__)' \
+    '  unlink("/usr/lib/ld-linux-aarch64.so.1");' \
+    '  symlink("aarch64-linux-gnu/ld-linux-aarch64.so.1","/usr/lib/ld-linux-aarch64.so.1");' \
+    '#endif' \
+    '  {int f=open("/etc/ld.so.conf.d/libc.conf",O_WRONLY|O_CREAT|O_TRUNC,0644);' \
+    '   if(f>=0){write(f,"/usr/local/lib\n/usr/lib\n",24);close(f);}}' \
+    '  unlink("/etc/ld.so.conf.d/libc.conf.apk-new");' \
+    '  unlink("/etc/ld.so.cache");' \
+    '  noop("/etc/apk/commit_hooks.d/ldconfig-commit.sh");' \
+    '  noop("/usr/bin/ldconfig");' \
+    '  return 0;}' \
+    > /src/postglibc.c \
+    && clang -static -o /out/bin/silex-fhs /src/fhs.c \
+    && clang -static -o /out/bin/silex-postglibc /src/postglibc.c \
+    && rm /src/fhs.c /src/postglibc.c
+
 # ============================================================================
 # Compiler environment. Inherits clang + mold from silex:slim PATH.
 # ============================================================================
@@ -344,6 +442,12 @@ ARG RG_VERSION RG_SHA256
 ARG UV_VERSION UV_SHA256
 ARG TARGETARCH
 
+# curl is not pre-installed in silex:slim; install via apk.
+# LD_LIBRARY_PATH ensures Wolfi's /usr/lib/libcurl.so.4 takes precedence
+# over Debian's multiarch path (pulled in as a cmake runtime dep).
+RUN apk add curl
+ENV LD_LIBRARY_PATH="/usr/lib"
+
 RUN mkdir -p /src /out/bin
 
 # Download Rust toolchain (pinned, architecture-specific).
@@ -435,6 +539,15 @@ RUN dpkg --force-remove-reinstreq --purge apt apt-utils 2>/dev/null || true \
     && rm -rf /var/lib/dpkg/info/apt* /var/lib/dpkg/info/apt-utils*
 
 # ============================================================================
+# Align FHS with Wolfi expectations before running apk.
+# See Dockerfile.bootstrap for full explanation of the approach.
+# The static helper is compiled in build-c (where libc6-dev is available).
+# ============================================================================
+COPY --from=build-c /out/bin/silex-fhs      /tmp/fhs
+COPY --from=build-c /out/bin/silex-postglibc /tmp/postglibc
+RUN /tmp/fhs && rm /tmp/fhs
+
+# ============================================================================
 # LLVM and mold: carry forward from previous silex:slim.
 # ============================================================================
 COPY --from=silex:slim /opt/llvm/ /opt/llvm/
@@ -499,14 +612,30 @@ RUN ln -sf /opt/llvm/bin/clang   /usr/bin/clang \
     && ln -sf /opt/mold/bin/mold    /usr/bin/ld.mold
 
 # ============================================================================
-# Configure apk for Wolfi (Chainguard) repositories.
+# Configure apk for Wolfi repositories and pre-install base packages.
+# See Dockerfile.bootstrap for full explanation of the two-step install.
 # ============================================================================
 COPY --from=cgr.dev/chainguard/wolfi-base:latest /etc/apk/keys/ /etc/apk/keys/
+COPY keys/ /etc/apk/keys/
 
-RUN mkdir -p /etc/apk /var/cache/apk /var/lib/apk /lib/apk/db \
-    && echo "https://apk.cgr.dev/chainguard" > /etc/apk/repositories \
+RUN mkdir -p /etc/apk/keys /etc/apk/protected_paths.d /etc/apk/commit_hooks.d \
+               /var/cache/apk /var/lib/apk /lib/apk/db /lib/apk/exec \
+    && APKARCH=$(uname -m) \
+    && printf 'https://richarah.github.io/silex-packages/%s\nhttps://packages.wolfi.dev/os\n' "$APKARCH" \
+         > /etc/apk/repositories \
     && touch /lib/apk/db/installed \
-    && apk update
+    && apk update \
+    \
+    && printf '#!/bin/sh\nexit 0\n' > /usr/bin/ldconfig \
+    && chmod +x /usr/bin/ldconfig \
+    \
+    && LD_PRELOAD=/usr/local/silex/lib/silex-nosync.so apk add wolfi-baselayout \
+    && printf '#!/bin/sh\nexit 0\n' > /etc/apk/commit_hooks.d/ldconfig-commit.sh \
+    && chmod +x /etc/apk/commit_hooks.d/ldconfig-commit.sh \
+    \
+    && LD_PRELOAD=/usr/local/silex/lib/silex-nosync.so apk add --no-scripts glibc ld-linux glibc-locale-posix \
+    && /tmp/postglibc \
+    && rm -f /tmp/postglibc
 
 # ============================================================================
 # Set ID_LIKE=debian so tools that check /etc/os-release see a Debian-like env.
@@ -574,6 +703,10 @@ RUN find /usr /opt -xdev -type f -size +4k 2>/dev/null \
 # Environment.
 # ============================================================================
 ENV PATH="/usr/local/silex/bin:/opt/llvm/bin:/opt/mold/bin:/opt/sccache/bin:$PATH"
+
+# Ensure Wolfi libraries in /usr/lib take precedence over Debian multiarch
+# paths left in the base image (e.g. /usr/lib/x86_64-linux-gnu from cmake deps).
+ENV LD_LIBRARY_PATH="/usr/lib"
 
 ENV CC="clang"
 ENV CXX="clang++"

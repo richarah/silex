@@ -107,7 +107,6 @@ _run "ninja present" 'ninja --version'
 _run_with_output "CMAKE_GENERATOR=Ninja" "Ninja" 'echo "$CMAKE_GENERATOR"'
 
 _run "cmake uses Ninja generator" '
-apk add --no-cache cmake >/dev/null 2>&1 || true
 mkdir -p /tmp/cmake_test && cat > /tmp/cmake_test/CMakeLists.txt << "EOF"
 cmake_minimum_required(VERSION 3.10)
 project(test)
