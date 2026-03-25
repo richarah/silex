@@ -228,7 +228,7 @@ are bash. Use POSIX sh or `#!/bin/bash`.
 
 **504 common pkgs mapped, not all.** There are 68,000 in
 Debian, most of them irrelevant to Docker builds. `apk search`
-for the rest, or file an issue.
+for the rest, or file an issue if a key package is missing.
 
 **No GPU in slim.** CPU only.
 
