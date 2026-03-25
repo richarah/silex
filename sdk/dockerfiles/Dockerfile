@@ -620,8 +620,7 @@ COPY keys/ /etc/apk/keys/
 
 RUN mkdir -p /etc/apk/keys /etc/apk/protected_paths.d /etc/apk/commit_hooks.d \
                /var/cache/apk /var/lib/apk /lib/apk/db /lib/apk/exec \
-    && APKARCH=$(uname -m) \
-    && printf 'https://richarah.github.io/silex-packages/%s\nhttps://packages.wolfi.dev/os\n' "$APKARCH" \
+    && printf 'https://richarah.github.io/silex-packages/aports\nhttps://packages.wolfi.dev/os\n' \
          > /etc/apk/repositories \
     && touch /lib/apk/db/installed \
     && apk update \
