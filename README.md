@@ -16,11 +16,13 @@ for raw apk if something doesn't.
 Because the slowest part of your Docker builds probably
 isn't your code.
 
-gcc, ld, make, gzip, dpkg. Nobody chose them. They
-accreted: gcc because Debian, ld because it came with
-gcc, make because POSIX, gzip because that's what there was in 1993.
-Distros can't replace them because a distro also has to run on hospital MRI machines,
-railway signalling systems, and nuclear submarines.
+gcc, ld, make, gzip, dpkg. Faster replacements have
+existed for years. The images that ship them want you
+to rewrite your Dockerfile, learn a new package manager,
+and debug a litany of problems. The images that don't
+can't, because Debian also has to run on hospital MRI
+machines, railway signalling systems, and nuclear
+submarines.
 
 Your build server is not a submarine.
 
