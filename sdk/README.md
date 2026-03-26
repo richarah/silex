@@ -217,7 +217,7 @@ ship compilers. Production images shouldn't.
 
 **Make Python fast.** uv is included and helps with pip.
 If your build is slow because you're training a model
-in the Dockerfile, that's between you and your choices.
+in the Dockerfile, that's between you and CUDA.
 
 ## Known issues
 
