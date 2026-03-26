@@ -764,33 +764,7 @@ RUN ARCH=$([ "${TARGETARCH}" = "arm64" ] && echo "aarch64" || echo "x86_64") \
     \
     && LD_PRELOAD=/usr/local/silex/lib/silex-nosync.so apk add wolfi-baselayout \
     && printf '#!/bin/sh\nexit 0\n' > /etc/apk/commit_hooks.d/ldconfig-commit.sh \
-    && chmod +x /etc/apk/commit_hooks.d/ldconfig-commit.sh \
-    \
-    && printf '%s\n' \
-        '#include <unistd.h>' \
-        '#include <fcntl.h>' \
-        '#include <sys/stat.h>' \
-        'static void noop(const char*p){' \
-        '  int f=open(p,O_WRONLY|O_CREAT|O_TRUNC,0755);' \
-        '  if(f>=0){write(f,"#!/bin/sh\nexit 0\n",17);close(f);}}' \
-        'int main(void){' \
-        '#ifdef __x86_64__' \
-        '  unlink("/usr/lib/ld-linux-x86-64.so.2");' \
-        '  symlink("x86_64-linux-gnu/ld-linux-x86-64.so.2","/usr/lib/ld-linux-x86-64.so.2");' \
-        '#elif defined(__aarch64__)' \
-        '  unlink("/usr/lib/ld-linux-aarch64.so.1");' \
-        '  symlink("aarch64-linux-gnu/ld-linux-aarch64.so.1","/usr/lib/ld-linux-aarch64.so.1");' \
-        '#endif' \
-        '  noop("/etc/apk/commit_hooks.d/ldconfig-commit.sh");' \
-        '  noop("/usr/bin/ldconfig");' \
-        '  return 0;}' \
-        > /tmp/postglibc.c \
-    && gcc -static -o /tmp/postglibc /tmp/postglibc.c \
-    && rm -f /tmp/postglibc.c \
-    \
-    && LD_PRELOAD=/usr/local/silex/lib/silex-nosync.so apk add --no-scripts glibc ld-linux glibc-locale-posix \
-    && /tmp/postglibc \
-    && rm -f /tmp/postglibc
+    && chmod +x /etc/apk/commit_hooks.d/ldconfig-commit.sh
 
 # ============================================================================
 # Set ID_LIKE=debian so tools that check /etc/os-release see a Debian-like env.
