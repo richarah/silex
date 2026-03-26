@@ -94,7 +94,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl-dev zlib1g-dev liblzma-dev libarchive-dev \
     libncurses-dev libedit-dev libxml2-dev \
     libffi-dev libzstd-dev \
-    autoconf automake libtool pkg-config \
+    autoconf automake libtool pkg-config binutils-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Set up working directories.
@@ -231,6 +231,7 @@ RUN set -ex \
         -DLLVM_BUILD_LLVM_DYLIB=ON \
         -DLLVM_LINK_LLVM_DYLIB=ON \
         -DLLVM_ENABLE_LTO=OFF \
+        -DLLVM_BINUTILS_INCDIR=/usr/include \
         -DLLVM_INCLUDE_TESTS=OFF \
         -DLLVM_INCLUDE_BENCHMARKS=OFF \
         -DLLVM_INCLUDE_EXAMPLES=OFF \
@@ -444,14 +445,14 @@ RUN clang -O2 -shared -fPIC -nostartfiles \
 # Strip LLVM install: remove headers, static libs, cmake files, and shared libs
 # not needed for compilation.
 # Keep: clang, clang++, clang-18, lld, ld.lld, libLLVM.so, libclang-cpp.so,
-#        libc++.so, libc++abi.so, compiler-rt clang_rt libraries.
-# Drop: libclang.so (C API, unused), libLTO.so, libRemarks.so, cmake/, share/.
+#        libc++.so, libc++abi.so, compiler-rt clang_rt libraries,
+#        LLVMgold.so + libLTO.so (required by mold for ThinLTO link-time opt).
+# Drop: libclang.so (C API, unused), libRemarks.so, cmake/, share/.
 # Note: libclang-cpp.so.18.1 is required by the clang executable even without
 #       CLANG_LINK_CLANG_DYLIB; do not remove it.
 RUN find /opt/llvm/include -mindepth 1 -delete 2>/dev/null || true \
     && find /opt/llvm/lib -name "*.a" -delete 2>/dev/null || true \
     && rm -f /opt/llvm/lib/libclang.so* \
-    && rm -f /opt/llvm/lib/libLTO.so* \
     && rm -f /opt/llvm/lib/libRemarks.so* \
     && rm -rf /opt/llvm/lib/cmake/ \
     && rm -rf /opt/llvm/share/ \
