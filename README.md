@@ -319,11 +319,10 @@ gcc, ld, make, gzip, dpkg. Nobody chose them. They
 accreted: gcc because Debian, ld because it came with
 gcc, make because POSIX, gzip because that's what there
 was in 1993. Distros can't ship their replacements
-because a distro also has to run on hospital MRI
-machines, railway signalling systems, and nuclear
-submarines. The images that do ship them want you to
+because a distro also has to support everything from Pentiums to
+nuclear submarines. The images that do ship them want you to
 rewrite your Dockerfile and learn a new ecosystem.
-Your build server is not a submarine.
+Your build server is not a submarine, and your sprint ends Friday.
 
 **Why not Alpine?**
 musl. Measurably slower for compilation in our
