@@ -182,7 +182,13 @@ RUN --mount=type=cache,id=silex-c-sources,target=/dl,sharing=locked \
         || curl -fsSL "https://github.com/vasi/pixz/releases/download/v${PIXZ_VERSION}/pixz-${PIXZ_VERSION}.tar.xz" \
                -o /dl/pixz.tar.xz \
     && echo "${PIXZ_SHA256}  /dl/pixz.tar.xz" | sha256sum -c - \
-    && cp /dl/pixz.tar.xz /src/pixz.tar.xz
+    && cp /dl/pixz.tar.xz /src/pixz.tar.xz \
+    \
+    && [ -f /dl/jemalloc.tar.bz2 ] \
+        || curl -fsSL "https://github.com/jemalloc/jemalloc/releases/download/${JEMALLOC_VERSION}/jemalloc-${JEMALLOC_VERSION}.tar.bz2" \
+               -o /dl/jemalloc.tar.bz2 \
+    && echo "${JEMALLOC_SHA256}  /dl/jemalloc.tar.bz2" | sha256sum -c - \
+    && cp /dl/jemalloc.tar.bz2 /src/jemalloc.tar.bz2
 
 # ============================================================================
 # Build mold (with Debian gcc).
@@ -470,9 +476,6 @@ RUN find /opt/llvm/include -mindepth 1 -delete 2>/dev/null || true \
 # Placed last in build-c to preserve LLVM build cache on incremental rebuilds.
 # ============================================================================
 RUN set -ex \
-    && curl -fsSL "https://github.com/jemalloc/jemalloc/releases/download/${JEMALLOC_VERSION}/jemalloc-${JEMALLOC_VERSION}.tar.bz2" \
-        -o /src/jemalloc.tar.bz2 \
-    && echo "${JEMALLOC_SHA256}  /src/jemalloc.tar.bz2" | sha256sum -c - \
     && tar xf /src/jemalloc.tar.bz2 --no-same-owner -C /build \
     && cd /build/jemalloc-${JEMALLOC_VERSION} \
     && ./autogen.sh \

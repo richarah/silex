@@ -87,13 +87,36 @@ case "$_CMD" in
         # Use nosync shim to suppress redundant fsync calls during package install
         # shellcheck disable=SC2086
         if [ -f "$NOSYNC_SO" ]; then
-            exec env LD_PRELOAD="${LD_PRELOAD:+$LD_PRELOAD:}$NOSYNC_SO" apk add --no-cache ${_apk_pkgs}
+            env LD_PRELOAD="${LD_PRELOAD:+$LD_PRELOAD:}$NOSYNC_SO" apk add --no-cache ${_apk_pkgs}
         else
-            exec apk add --no-cache ${_apk_pkgs}
+            apk add --no-cache ${_apk_pkgs}
         fi
+        _rc=$?
+        # Wolfi's glibc-dev installs complete glibc headers to /usr/include/{bits,sys,gnu}/.
+        # These are glibc 2.40+ and conflict with Debian bookworm's glibc 2.36 equivalents
+        # in /usr/include/x86_64-linux-gnu/{bits,sys,gnu}/.  Clang resolves multiarch paths
+        # first, so Debian's older headers shadow Wolfi's.  Symptoms: __COLD undefined
+        # (stdio.h), __intmax_t undefined (math.h), __time64_t undefined (sys/types.h).
+        # Fix: remove the Debian multiarch glibc subdirs; Wolfi's top-level headers take over.
+        if [ -f /usr/include/bits/stdint-intn.h ] && [ -d /usr/include/x86_64-linux-gnu/bits ]; then
+            rm -rf /usr/include/x86_64-linux-gnu/bits \
+                   /usr/include/x86_64-linux-gnu/sys \
+                   /usr/include/x86_64-linux-gnu/gnu
+        fi
+        # Wolfi's features-time64.h sets __USE_TIME_BITS64=1 on x86_64, which causes
+        # Debian's bits/types.h to reference undefined __time64_t.  On x86_64 time_t is
+        # already 64-bit; suppress the redirect.
+        if [ -f /usr/include/features-time64.h ]; then
+            printf '/* silex: suppress __USE_TIME_BITS64 for Debian+Wolfi header compatibility. */\n' \
+                > /usr/include/features-time64.h
+        fi
+        exit $_rc
         ;;
     update)
-        apk update
+        # Match Debian apt-get update behaviour: warn on unavailable repos but exit 0.
+        # apk exits 1 if any repo returns 4xx; that breaks "apt-get update && apt-get install"
+        # even when the primary Wolfi repo is healthy.
+        apk update || true
         ;;
     upgrade)
         apk upgrade
