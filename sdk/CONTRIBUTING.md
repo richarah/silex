@@ -17,15 +17,10 @@ make test              # unit + compat tests
 - Verify SHA256 for every source tarball. Add to `sources.json`.
 - Every file in the final image justifies its presence.
 
-## Adding package mappings
+## Adding packages
 
-Edit `config/package-mapping.json`:
-
-```json
-"debian-package-name": "wolfi-package-name"
-```
-
-Map to `""` if there is no Wolfi equivalent (package is silently skipped).
+silex uses silex-packages, a repository of Debian packages repacked as APKs.
+To add a package, add it to `config/seeds.list` in the silex-packages repo.
 Test with `docker run --rm silex:slim apt-get install -y <package>`.
 
 ## Adding a tool

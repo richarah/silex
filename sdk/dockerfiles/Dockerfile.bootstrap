@@ -622,8 +622,8 @@ RUN dpkg --force-remove-reinstreq --purge apt apt-utils 2>/dev/null || true \
     && rm -rf /var/lib/dpkg/info/apt* /var/lib/dpkg/info/apt-utils*
 
 # ============================================================================
-# Align FHS with Wolfi expectations before running apk.
-# wolfi-baselayout expects /usr/sbin → bin and /usr/lib64 → lib as symlinks.
+# Align FHS for apk.
+# apk expects /usr/sbin → bin and /usr/lib64 → lib as symlinks.
 # On Debian bookworm-slim these are real non-empty directories; apk rename(2)
 # fails with ENOTEMPTY if they are directories.
 #
@@ -823,7 +823,7 @@ RUN chmod +x /usr/local/bin/apt-get \
 # Bake common host IPs into /etc/hosts at build time; entrypoint refreshes.
 # ============================================================================
 RUN for _host in \
-        packages.wolfi.dev \
+        richarah.github.io \
         github.com \
         objects.githubusercontent.com \
         pypi.org \
