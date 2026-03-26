@@ -137,7 +137,7 @@ esac
 # ============================================================================
 (
     sed -i '/# silex-dns-cache$/d' /etc/hosts 2>/dev/null || true
-    for _h in packages.wolfi.dev github.com objects.githubusercontent.com \
+    for _h in richarah.github.io github.com objects.githubusercontent.com \
                pypi.org registry.npmjs.org crates.io proxy.golang.org; do
         _ip=$(getent ahosts "$_h" 2>/dev/null | awk '/STREAM/{print $1;exit}')
         [ -n "$_ip" ] && echo "$_ip $_h  # silex-dns-cache" >> /etc/hosts

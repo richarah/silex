@@ -631,8 +631,7 @@ RUN chmod +x /usr/local/bin/apt-get \
 # DNS pre-warming.
 # ============================================================================
 RUN for _host in \
-        apk.cgr.dev \
-        packages.wolfi.dev \
+        richarah.github.io \
         github.com \
         objects.githubusercontent.com \
         pypi.org \

@@ -180,15 +180,10 @@ _run "apt-get install translates to apk" '
 SILEX_APT_SHIM=on apt-get install -y curl 2>&1 | grep -q "apk add"
 '
 
-_run "package mapping file present" 'test -f /usr/local/silex/package-mapping.json'
+_run "apk repositories configured" 'test -s /etc/apk/repositories'
 
-_run "package mapping has 100+ entries" '
-count=$(grep -c "^[[:space:]]*\"[^_]" /usr/local/silex/package-mapping.json 2>/dev/null)
-test "$count" -ge 100
-'
-
-_run "build-essential maps to build-base" '
-grep -q "\"build-essential\":[[:space:]]*\"build-base\"" /usr/local/silex/package-mapping.json
+_run "silex-packages repo configured" '
+grep -q "richarah.github.io/silex-packages" /etc/apk/repositories
 '
 
 # --------------------------------------------------------------------------
