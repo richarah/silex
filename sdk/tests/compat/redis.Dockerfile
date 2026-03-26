@@ -4,7 +4,7 @@
 
 FROM silex:slim
 
-RUN apt-get update && apt-get install -y build-essential tcl
+RUN apt-get update && apt-get install -y build-essential tcl curl
 
 RUN curl -fsSL https://download.redis.io/releases/redis-7.2.7.tar.gz \
         -o /tmp/redis.tar.gz && \

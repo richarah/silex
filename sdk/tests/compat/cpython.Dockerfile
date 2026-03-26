@@ -7,6 +7,7 @@ FROM silex:slim
 
 RUN apt-get update && apt-get install -y \
     build-essential \
+    curl \
     libssl-dev \
     zlib1g-dev \
     libbz2-dev \
