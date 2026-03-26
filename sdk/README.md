@@ -11,20 +11,6 @@ Cold builds 2-3x faster. Warm sccache rebuilds 18x.
 Everything else stays the same, `SILEX_WRAPPERS=off`
 for raw apk if something doesn't.
 
-## Why this exists
-
-Nobody optimises the base image.
-
-gcc, ld, make, gzip, dpkg. Faster replacements have
-existed for years. The images that ship them want you
-to rewrite your Dockerfile, learn a new package manager,
-and debug a litany of problems. The images that don't
-can't, because Debian also has to run on hospital MRI
-machines, railway signalling systems, and nuclear
-submarines.
-
-Your build server is not a submarine.
-
 ## What's inside
 
 | Component | Version | Replaces | Why |
