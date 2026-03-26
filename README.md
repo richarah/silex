@@ -36,7 +36,7 @@ distros can't ship. Here's what Silex ships instead:
 | gzip | zstd 1.5.6 | Parallel |
 | GNU coreutils | busybox 1.37.0 | Single binary. Fastest in benchmark. |
 | bash | dash 0.5.12 | /bin/sh. 4x startup. |
-| apt / dpkg | apt (fast) | No postinstall scripts. Sub-second. |
+| apt / dpkg | apk + compat layer | Debian pkgs, Debian names. Sub-second. |
 | (nothing) | tini 0.19.0 | Signal reaping, zombie prevention |
 
 Also ships fd and ripgrep alongside find and grep.
