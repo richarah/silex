@@ -18,10 +18,10 @@ COPY . /src && cd /src
 RUN cmake -B build && cmake --build build
 ```
 
-`apt-get` calls apk behind the scenes. cmake picks up
-ninja automatically. The linker, the allocator, the
-compiler cache are all invisible. You change one line
-and the build gets faster.
+`apt-get install` still works, same packages, same
+names. cmake picks up ninja automatically. The linker,
+the allocator, the compiler cache are all invisible.
+You change one line and the build gets faster.
 
 Every default tool has a faster replacement that
 distros can't ship. Here's what Silex ships instead:
@@ -36,7 +36,7 @@ distros can't ship. Here's what Silex ships instead:
 | gzip | zstd 1.5.6 | Parallel |
 | GNU coreutils | busybox 1.37.0 | Single binary. Fastest in benchmark. |
 | bash | dash 0.5.12 | /bin/sh. 4x startup. |
-| apt / dpkg | apk (+ shims) | No postinstall scripts. Sub-second. |
+| apt / dpkg | apt (fast) | No postinstall scripts. Sub-second. |
 | (nothing) | tini 0.19.0 | Signal reaping, zombie prevention |
 
 Also ships fd and ripgrep alongside find and grep.
@@ -96,24 +96,24 @@ Silex isn't Debian, but it speaks Debian. Without the
 postinstall scripts, font cache rebuilds, and fsync
 after every file.
 
-### apt shim
+### How it works
+
+Under the hood, packages are served by apk, which is
+why they install in under a second instead of thirty.
+The packages themselves use Debian names. `apt-get
+install libssl-dev` installs a package called libssl-dev.
+No translation, no mapping.
 
 ```dockerfile
 RUN apt-get install -y cmake libssl-dev libcurl4-openssl-dev
-# becomes: apk add cmake openssl-dev curl-dev
 # sub-second instead of 30 seconds.
 ```
 
-504 package mappings. Installs run with silex-nosync.so
-preloaded, suppressing fsync calls that serve no purpose
-inside a build layer.
+Installs run with silex-nosync.so preloaded, suppressing
+fsync calls that serve no purpose inside a build layer.
 
-When the shim doesn't know a package, it tries as-is:
-
-    silex apt-shim: libobscure-dev: no mapping, trying as-is
-
-`ENV SILEX_WRAPPERS=off` disables all shims and gives
-you raw apk.
+`ENV SILEX_WRAPPERS=off` disables the apt compatibility
+layer and gives you raw apk.
 
 ### Also shimmed
 
@@ -232,10 +232,6 @@ substitution are bash. Use POSIX sh or `#!/bin/bash`.
 
 **`python3` on PATH. `python` is not.** Per PEP 394.
 
-**504 pkgs mapped via shims.** There are 68,000 in
-Debian. `apk search` for the rest, or file an issue
-if a key package is missing.
-
 **No GPU in slim.** CPU only.
 
 **Coreutils are busybox.** `sort --parallel` works via
@@ -319,10 +315,12 @@ gcc, ld, make, gzip, dpkg. Nobody chose them. They
 accreted: gcc because Debian, ld because it came with
 gcc, make because POSIX, gzip because that's what there
 was in 1993. Distros can't ship their replacements
-because a distro also has to support everything from Pentiums to
-nuclear submarines. The images that do ship them want you to
+because a distro also has to run on hospital MRI
+machines, railway signalling systems, and nuclear
+submarines. The images that do ship them want you to
 rewrite your Dockerfile and learn a new ecosystem.
-Your build server is not a submarine, and your sprint ends Friday.
+Your build server is not a submarine, and your sprint
+ends Friday.
 
 **Why not Alpine?**
 musl. Measurably slower for compilation in our
