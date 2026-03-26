@@ -11,17 +11,17 @@ Cold builds 2-3x faster. Warm sccache rebuilds 18x.
 
 Your Dockerfile doesn't change:
 
-### Package installs
 ```dockerfile
-RUN apt-get install -y cmake libssl-dev libcurl4-openssl-dev
-# under a second. same packages, same names.
+# this still works
+RUN apt-get install -y libssl-dev libcurl4-openssl-dev
+COPY . /src && cd /src
+RUN cmake -B build && cmake --build build
 ```
 
-Installs run without postinstall scripts, triggers,
-or fsync. That's where the thirty seconds went.
-
-`ENV SILEX_WRAPPERS=off` disables the apt compatibility
-layer if you need raw package management.
+`apt-get install` still works, same packages, same
+names. cmake picks up ninja automatically. The linker,
+the allocator, the compiler cache are all invisible.
+You change one line and the build gets faster.
 
 Every default tool has a faster replacement that
 distros can't ship. Here's what Silex ships instead:
@@ -96,25 +96,18 @@ Silex isn't Debian, but it speaks Debian. Without the
 postinstall scripts, font cache rebuilds, and fsync
 after every file.
 
-### How it works
-
-Under the hood, packages are Debian packages rebuilt
-in apk format and served from the Silex repository.
-Same source, same names, same glibc. `apt-get install
-libssl-dev` installs libssl-dev. They install in under
-a second because apk has no postinstall scripts, no
-triggers, and no fsync.
+### Package installs
 
 ```dockerfile
 RUN apt-get install -y cmake libssl-dev libcurl4-openssl-dev
-# sub-second instead of 30 seconds.
+# under a second. same packages, same names.
 ```
 
-Installs run with silex-nosync.so preloaded, suppressing
-fsync calls that serve no purpose inside a build layer.
+Installs run without postinstall scripts, triggers,
+or fsync. That's where the thirty seconds went.
 
 `ENV SILEX_WRAPPERS=off` disables the apt compatibility
-layer and gives you raw apk.
+layer if you need raw package management.
 
 ### Also shimmed
 
@@ -218,7 +211,7 @@ ship compilers. Production images shouldn't.
 
 **Make Python fast.** uv is included and helps with pip.
 If your build is slow because you're training a model
-in the Dockerfile, that's between you and CUDA.
+in the Dockerfile, that's between you and your choices.
 
 ## Known issues
 
@@ -316,8 +309,7 @@ gcc, ld, make, gzip, dpkg. Nobody chose them. They
 accreted: gcc because Debian, ld because it came with
 gcc, make because POSIX, gzip because that's what there
 was in 1993. Distros can't ship their replacements
-because a distro also has to run on hospital MRI
-machines, railway signalling systems, and nuclear
+because a distro also has to support Pentiums and nuclear
 submarines. The images that do ship them want you to
 rewrite your Dockerfile and learn a new ecosystem.
 Your build server is not a submarine, and your sprint
@@ -325,7 +317,7 @@ ends Friday.
 
 **What's wrong with dpkg?**
 Nothing, if you're running a server for ten years.
-In a container that lives for ten seconds, dpkg
+In a container that lives for twelve seconds, dpkg
 rebuilds the font cache for a screen that doesn't
 exist, calls fsync() to protect writes that will be
 thrown away, and assembles a boot image for a
@@ -349,6 +341,9 @@ bug if the issue persists.
 2-3x cold, compilers preinstalled vs `apt-get install`
 each build. 18x warm sccache. Methodology and harness
 in `benchmarks/`.
+
+**Rust rewrite?**
+It's a Dockerfile.
 
 **silex?**
 Latin for flint.
