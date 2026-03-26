@@ -11,17 +11,17 @@ Cold builds 2-3x faster. Warm sccache rebuilds 18x.
 
 Your Dockerfile doesn't change:
 
+### Package installs
 ```dockerfile
-# this still works
-RUN apt-get install -y libssl-dev libcurl4-openssl-dev
-COPY . /src && cd /src
-RUN cmake -B build && cmake --build build
+RUN apt-get install -y cmake libssl-dev libcurl4-openssl-dev
+# under a second. same packages, same names.
 ```
 
-`apt-get install` still works, same packages, same
-names. cmake picks up ninja automatically. The linker,
-the allocator, the compiler cache are all invisible.
-You change one line and the build gets faster.
+Installs run without postinstall scripts, triggers,
+or fsync. That's where the thirty seconds went.
+
+`ENV SILEX_WRAPPERS=off` disables the apt compatibility
+layer if you need raw package management.
 
 Every default tool has a faster replacement that
 distros can't ship. Here's what Silex ships instead:
@@ -98,11 +98,12 @@ after every file.
 
 ### How it works
 
-Under the hood, packages are served by apk, which is
-why they install in under a second instead of thirty.
-The packages themselves use Debian names. `apt-get
-install libssl-dev` installs a package called libssl-dev.
-No translation, no mapping.
+Under the hood, packages are Debian packages rebuilt
+in apk format and served from the Silex repository.
+Same source, same names, same glibc. `apt-get install
+libssl-dev` installs libssl-dev. They install in under
+a second because apk has no postinstall scripts, no
+triggers, and no fsync.
 
 ```dockerfile
 RUN apt-get install -y cmake libssl-dev libcurl4-openssl-dev
