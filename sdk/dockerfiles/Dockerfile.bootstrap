@@ -102,58 +102,87 @@ RUN mkdir -p /src /build /out/bin /out/lib /out/share
 
 # ============================================================================
 # Download and verify all C/C++ source tarballs.
-# All in one RUN so the cache layer is invalidated if any version changes.
-# SHA256 is checked here; build stages cannot proceed with wrong hashes.
+# All in one RUN so the Docker layer is invalidated if any version changes.
+# BuildKit cache mount (/dl) survives layer invalidation: each tarball is
+# downloaded at most once per self-hosted runner. SHA256 always verified;
+# a stale /dl entry with wrong hash fails the build here, not silently.
 # ============================================================================
-RUN set -ex \
+RUN --mount=type=cache,id=silex-c-sources,target=/dl,sharing=locked \
+    set -ex \
     \
-    && curl -fsSL "https://github.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_VERSION}/llvm-project-${LLVM_VERSION}.src.tar.xz" \
-        -o /src/llvm.tar.xz \
-    && echo "${LLVM_SHA256}  /src/llvm.tar.xz" | sha256sum -c - \
+    && [ -f /dl/llvm.tar.xz ] \
+        || curl -fsSL "https://github.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_VERSION}/llvm-project-${LLVM_VERSION}.src.tar.xz" \
+               -o /dl/llvm.tar.xz \
+    && echo "${LLVM_SHA256}  /dl/llvm.tar.xz" | sha256sum -c - \
+    && cp /dl/llvm.tar.xz /src/llvm.tar.xz \
     \
-    && curl -fsSL "https://github.com/rui314/mold/archive/refs/tags/v${MOLD_VERSION}.tar.gz" \
-        -o /src/mold.tar.gz \
-    && echo "${MOLD_SHA256}  /src/mold.tar.gz" | sha256sum -c - \
+    && [ -f /dl/mold.tar.gz ] \
+        || curl -fsSL "https://github.com/rui314/mold/archive/refs/tags/v${MOLD_VERSION}.tar.gz" \
+               -o /dl/mold.tar.gz \
+    && echo "${MOLD_SHA256}  /dl/mold.tar.gz" | sha256sum -c - \
+    && cp /dl/mold.tar.gz /src/mold.tar.gz \
     \
-    && curl -fsSL "https://github.com/ninja-build/ninja/archive/refs/tags/v${NINJA_VERSION}.tar.gz" \
-        -o /src/ninja.tar.gz \
-    && echo "${NINJA_SHA256}  /src/ninja.tar.gz" | sha256sum -c - \
+    && [ -f /dl/ninja.tar.gz ] \
+        || curl -fsSL "https://github.com/ninja-build/ninja/archive/refs/tags/v${NINJA_VERSION}.tar.gz" \
+               -o /dl/ninja.tar.gz \
+    && echo "${NINJA_SHA256}  /dl/ninja.tar.gz" | sha256sum -c - \
+    && cp /dl/ninja.tar.gz /src/ninja.tar.gz \
     \
-    && curl -fsSL "https://github.com/facebook/zstd/releases/download/v${ZSTD_VERSION}/zstd-${ZSTD_VERSION}.tar.gz" \
-        -o /src/zstd.tar.gz \
-    && echo "${ZSTD_SHA256}  /src/zstd.tar.gz" | sha256sum -c - \
+    && [ -f /dl/zstd.tar.gz ] \
+        || curl -fsSL "https://github.com/facebook/zstd/releases/download/v${ZSTD_VERSION}/zstd-${ZSTD_VERSION}.tar.gz" \
+               -o /dl/zstd.tar.gz \
+    && echo "${ZSTD_SHA256}  /dl/zstd.tar.gz" | sha256sum -c - \
+    && cp /dl/zstd.tar.gz /src/zstd.tar.gz \
     \
-    && curl -fsSL "https://github.com/Cyan4973/xxHash/archive/refs/tags/v${XXHASH_VERSION}.tar.gz" \
-        -o /src/xxhash.tar.gz \
-    && echo "${XXHASH_SHA256}  /src/xxhash.tar.gz" | sha256sum -c - \
+    && [ -f /dl/xxhash.tar.gz ] \
+        || curl -fsSL "https://github.com/Cyan4973/xxHash/archive/refs/tags/v${XXHASH_VERSION}.tar.gz" \
+               -o /dl/xxhash.tar.gz \
+    && echo "${XXHASH_SHA256}  /dl/xxhash.tar.gz" | sha256sum -c - \
+    && cp /dl/xxhash.tar.gz /src/xxhash.tar.gz \
     \
-    && curl -fsSL "https://github.com/microsoft/mimalloc/archive/refs/tags/v${MIMALLOC_VERSION}.tar.gz" \
-        -o /src/mimalloc.tar.gz \
-    && echo "${MIMALLOC_SHA256}  /src/mimalloc.tar.gz" | sha256sum -c - \
+    && [ -f /dl/mimalloc.tar.gz ] \
+        || curl -fsSL "https://github.com/microsoft/mimalloc/archive/refs/tags/v${MIMALLOC_VERSION}.tar.gz" \
+               -o /dl/mimalloc.tar.gz \
+    && echo "${MIMALLOC_SHA256}  /dl/mimalloc.tar.gz" | sha256sum -c - \
+    && cp /dl/mimalloc.tar.gz /src/mimalloc.tar.gz \
     \
-    && curl -fsSL --retry 10 --retry-all-errors --retry-delay 10 "https://busybox.net/downloads/busybox-${BUSYBOX_VERSION}.tar.bz2" \
-        -o /src/busybox.tar.bz2 \
-    && echo "${BUSYBOX_SHA256}  /src/busybox.tar.bz2" | sha256sum -c - \
+    && [ -f /dl/busybox.tar.bz2 ] \
+        || curl -fsSL --retry 10 --retry-all-errors --retry-delay 10 \
+               "https://busybox.net/downloads/busybox-${BUSYBOX_VERSION}.tar.bz2" \
+               -o /dl/busybox.tar.bz2 \
+    && echo "${BUSYBOX_SHA256}  /dl/busybox.tar.bz2" | sha256sum -c - \
+    && cp /dl/busybox.tar.bz2 /src/busybox.tar.bz2 \
     \
-    && curl -fsSL --retry 10 --retry-all-errors --retry-delay 10 "http://gondor.apana.org.au/~herbert/dash/files/dash-${DASH_VERSION}.tar.gz" \
-        -o /src/dash.tar.gz \
-    && echo "${DASH_SHA256}  /src/dash.tar.gz" | sha256sum -c - \
+    && [ -f /dl/dash.tar.gz ] \
+        || curl -fsSL --retry 10 --retry-all-errors --retry-delay 10 \
+               "http://gondor.apana.org.au/~herbert/dash/files/dash-${DASH_VERSION}.tar.gz" \
+               -o /dl/dash.tar.gz \
+    && echo "${DASH_SHA256}  /dl/dash.tar.gz" | sha256sum -c - \
+    && cp /dl/dash.tar.gz /src/dash.tar.gz \
     \
-    && curl -fsSL "https://gitlab.alpinelinux.org/alpine/apk-tools/-/archive/v${APK_VERSION}/apk-tools-v${APK_VERSION}.tar.gz" \
-        -o /src/apk-tools.tar.gz \
-    && echo "${APK_SHA256}  /src/apk-tools.tar.gz" | sha256sum -c - \
+    && [ -f /dl/apk-tools.tar.gz ] \
+        || curl -fsSL "https://gitlab.alpinelinux.org/alpine/apk-tools/-/archive/v${APK_VERSION}/apk-tools-v${APK_VERSION}.tar.gz" \
+               -o /dl/apk-tools.tar.gz \
+    && echo "${APK_SHA256}  /dl/apk-tools.tar.gz" | sha256sum -c - \
+    && cp /dl/apk-tools.tar.gz /src/apk-tools.tar.gz \
     \
-    && curl -fsSL "https://github.com/krallin/tini/archive/refs/tags/v${TINI_VERSION}.tar.gz" \
-        -o /src/tini.tar.gz \
-    && echo "${TINI_SHA256}  /src/tini.tar.gz" | sha256sum -c - \
+    && [ -f /dl/tini.tar.gz ] \
+        || curl -fsSL "https://github.com/krallin/tini/archive/refs/tags/v${TINI_VERSION}.tar.gz" \
+               -o /dl/tini.tar.gz \
+    && echo "${TINI_SHA256}  /dl/tini.tar.gz" | sha256sum -c - \
+    && cp /dl/tini.tar.gz /src/tini.tar.gz \
     \
-    && curl -fsSL "https://zlib.net/pigz/pigz-${PIGZ_VERSION}.tar.gz" \
-        -o /src/pigz.tar.gz \
-    && echo "${PIGZ_SHA256}  /src/pigz.tar.gz" | sha256sum -c - \
+    && [ -f /dl/pigz.tar.gz ] \
+        || curl -fsSL "https://zlib.net/pigz/pigz-${PIGZ_VERSION}.tar.gz" \
+               -o /dl/pigz.tar.gz \
+    && echo "${PIGZ_SHA256}  /dl/pigz.tar.gz" | sha256sum -c - \
+    && cp /dl/pigz.tar.gz /src/pigz.tar.gz \
     \
-    && curl -fsSL "https://github.com/vasi/pixz/releases/download/v${PIXZ_VERSION}/pixz-${PIXZ_VERSION}.tar.xz" \
-        -o /src/pixz.tar.xz \
-    && echo "${PIXZ_SHA256}  /src/pixz.tar.xz" | sha256sum -c -
+    && [ -f /dl/pixz.tar.xz ] \
+        || curl -fsSL "https://github.com/vasi/pixz/releases/download/v${PIXZ_VERSION}/pixz-${PIXZ_VERSION}.tar.xz" \
+               -o /dl/pixz.tar.xz \
+    && echo "${PIXZ_SHA256}  /dl/pixz.tar.xz" | sha256sum -c - \
+    && cp /dl/pixz.tar.xz /src/pixz.tar.xz
 
 # ============================================================================
 # Build mold (with Debian gcc).
@@ -483,39 +512,51 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN mkdir -p /src /out/bin
 
 # Download Rust toolchain (pinned).
-RUN set -ex \
+RUN --mount=type=cache,id=silex-rust-toolchain,target=/dl,sharing=locked \
+    set -ex \
     && ARCH=$([ "${TARGETARCH}" = "arm64" ] && echo "aarch64" || echo "x86_64") \
     && RUST_SHA256=$([ "${TARGETARCH}" = "arm64" ] && echo "${RUST_SHA256_AARCH64}" || echo "${RUST_SHA256_X86_64}") \
-    && curl -fsSL "https://static.rust-lang.org/dist/rust-${RUST_VERSION}-${ARCH}-unknown-linux-gnu.tar.xz" \
-        -o /src/rust.tar.xz \
-    && echo "${RUST_SHA256}  /src/rust.tar.xz" | sha256sum -c - \
-    && tar xf /src/rust.tar.xz -C /src \
+    && _tarball="rust-${RUST_VERSION}-${ARCH}-unknown-linux-gnu.tar.xz" \
+    && [ -f "/dl/${_tarball}" ] \
+        || curl -fsSL "https://static.rust-lang.org/dist/${_tarball}" \
+               -o "/dl/${_tarball}" \
+    && echo "${RUST_SHA256}  /dl/${_tarball}" | sha256sum -c - \
+    && tar xf "/dl/${_tarball}" -C /src \
     && /src/rust-${RUST_VERSION}-${ARCH}-unknown-linux-gnu/install.sh \
         --prefix=/opt/rust \
         --disable-ldconfig \
-    && rm -rf /src/rust*
+    && rm -rf "/src/rust-${RUST_VERSION}-${ARCH}-unknown-linux-gnu"
 
 ENV PATH="/opt/rust/bin:${PATH}"
 ENV RUSTFLAGS="-C target-cpu=x86-64-v3 -C link-arg=-fuse-ld=lld"
 ENV CARGO_PROFILE_RELEASE_LTO=thin
 
 # Download and verify Rust tool sources.
-RUN set -ex \
-    && curl -fsSL "https://github.com/mozilla/sccache/archive/refs/tags/v${SCCACHE_VERSION}.tar.gz" \
-        -o /src/sccache.tar.gz \
-    && echo "${SCCACHE_SHA256}  /src/sccache.tar.gz" | sha256sum -c - \
+RUN --mount=type=cache,id=silex-rust-sources,target=/dl,sharing=locked \
+    set -ex \
+    && [ -f /dl/sccache.tar.gz ] \
+        || curl -fsSL "https://github.com/mozilla/sccache/archive/refs/tags/v${SCCACHE_VERSION}.tar.gz" \
+               -o /dl/sccache.tar.gz \
+    && echo "${SCCACHE_SHA256}  /dl/sccache.tar.gz" | sha256sum -c - \
+    && cp /dl/sccache.tar.gz /src/sccache.tar.gz \
     \
-    && curl -fsSL "https://github.com/sharkdp/fd/archive/refs/tags/v${FD_VERSION}.tar.gz" \
-        -o /src/fd.tar.gz \
-    && echo "${FD_SHA256}  /src/fd.tar.gz" | sha256sum -c - \
+    && [ -f /dl/fd.tar.gz ] \
+        || curl -fsSL "https://github.com/sharkdp/fd/archive/refs/tags/v${FD_VERSION}.tar.gz" \
+               -o /dl/fd.tar.gz \
+    && echo "${FD_SHA256}  /dl/fd.tar.gz" | sha256sum -c - \
+    && cp /dl/fd.tar.gz /src/fd.tar.gz \
     \
-    && curl -fsSL "https://github.com/BurntSushi/ripgrep/archive/refs/tags/${RG_VERSION}.tar.gz" \
-        -o /src/ripgrep.tar.gz \
-    && echo "${RG_SHA256}  /src/ripgrep.tar.gz" | sha256sum -c - \
+    && [ -f /dl/ripgrep.tar.gz ] \
+        || curl -fsSL "https://github.com/BurntSushi/ripgrep/archive/refs/tags/${RG_VERSION}.tar.gz" \
+               -o /dl/ripgrep.tar.gz \
+    && echo "${RG_SHA256}  /dl/ripgrep.tar.gz" | sha256sum -c - \
+    && cp /dl/ripgrep.tar.gz /src/ripgrep.tar.gz \
     \
-    && curl -fsSL "https://github.com/astral-sh/uv/archive/refs/tags/${UV_VERSION}.tar.gz" \
-        -o /src/uv.tar.gz \
-    && echo "${UV_SHA256}  /src/uv.tar.gz" | sha256sum -c -
+    && [ -f /dl/uv.tar.gz ] \
+        || curl -fsSL "https://github.com/astral-sh/uv/archive/refs/tags/${UV_VERSION}.tar.gz" \
+               -o /dl/uv.tar.gz \
+    && echo "${UV_SHA256}  /dl/uv.tar.gz" | sha256sum -c - \
+    && cp /dl/uv.tar.gz /src/uv.tar.gz
 
 RUN set -ex \
     && tar xf /src/sccache.tar.gz -C /src \
