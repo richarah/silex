@@ -2,41 +2,55 @@
 
 A considered Docker base image.
 
-```dockerfile
+```diff
 - FROM ubuntu:24.04
 + FROM silex:slim
 ```
 
 Cold builds 2-3x faster. Warm sccache rebuilds 18x.
-Everything else stays the same, `SILEX_WRAPPERS=off`
-for raw apk if something doesn't.
 
-## What's inside
+Your Dockerfile doesn't change:
 
-| Component | Version | Replaces | Why |
-|-----------|---------|----------|-----|
-| Compiler | clang 18.1.8 | gcc | 14-33% faster on template-heavy C++ |
-| Linker | mold 2.40.4 | ld/gold/lld | 5-10x faster per link step |
-| Build system | ninja 1.12.1 | make | Better job scheduling, lower overhead |
-| Compiler cache | sccache 0.8.2 | ccache | 18x faster warm rebuilds. Remote backends. |
-| Allocator | mimalloc 2.1.7 | glibc malloc | 9% faster under multi-threaded builds. LD_PRELOAD. |
-| Compression | zstd 1.5.6 | gzip | Parallel. |
-| Coreutils | busybox 1.37.0 | GNU coreutils | Single binary. Fastest in benchmark. |
-| Shell | dash 0.5.12 | bash | /bin/sh. 4x faster startup. |
-| Package mgr | apk (+ shims) | apt/dpkg | No postinstall scripts. Sub-second installs. |
-| PID 1 | tini 0.19.0 | nothing | Signal reaping, zombie prevention |
+```dockerfile
+# this still works
+RUN apt-get install -y libssl-dev libcurl4-openssl-dev
+COPY . /src && cd /src
+RUN cmake -B build && cmake --build build
+```
+
+`apt-get` calls apk behind the scenes. cmake picks up
+ninja automatically. The linker, the allocator, the
+compiler cache are all invisible. You change one line
+and the build gets faster.
+
+Every default tool has a faster replacement that
+distros can't ship. Here's what Silex ships instead:
+
+| Was | Is | Effect |
+|-----|-----|--------|
+| gcc | clang 18.1.8 | 14-33% on template-heavy C++ |
+| ld / gold / lld | mold 2.40.4 | 5-10x per link step |
+| make | ninja 1.12.1 | Better scheduling, lower overhead |
+| ccache | sccache 0.8.2 | 18x warm rebuilds. Remote backends. |
+| glibc malloc | mimalloc 2.1.7 | 9% under threaded builds. LD_PRELOAD. |
+| gzip | zstd 1.5.6 | Parallel |
+| GNU coreutils | busybox 1.37.0 | Single binary. Fastest in benchmark. |
+| bash | dash 0.5.12 | /bin/sh. 4x startup. |
+| apt / dpkg | apk (+ shims) | No postinstall scripts. Sub-second. |
+| (nothing) | tini 0.19.0 | Signal reaping, zombie prevention |
 
 Also ships fd and ripgrep alongside find and grep.
-gcc, make, and bash are one `apk add` away. Nothing is
-locked in.
+gcc, make, and bash are one `apk add` away. Nothing
+is locked in.
 
-Base: debian:bookworm-slim (glibc). Every binary compiled
-from source with pinned SHA256 tarballs, -O3, LTO. Runtime
-packages via apk from Wolfi repos.
+Base: debian:bookworm-slim (glibc). Every binary
+compiled from source with pinned SHA256 tarballs,
+-O3, LTO. Not Alpine (musl is slower for compilation).
+Not Wolfi (rolling, packages deleted after 12 months).
 
-Not Alpine (musl is slower for compilation). Not a Wolfi
-base image (building from source gives version control that
-a rolling repo can't).
+---
+
+Everything below is reference.
 
 ## Image variants
 
@@ -79,8 +93,8 @@ Override in Dockerfile or at runtime.
 ## Debian compatibility
 
 Silex isn't Debian, but it speaks Debian. Without the
-postinstall scripts, font cache rebuilds, and fsync after
-every file.
+postinstall scripts, font cache rebuilds, and fsync
+after every file.
 
 ### apt shim
 
@@ -98,7 +112,8 @@ When the shim doesn't know a package, it tries as-is:
 
     silex apt-shim: libobscure-dev: no mapping, trying as-is
 
-Disable: `ENV SILEX_WRAPPERS=off`.
+`ENV SILEX_WRAPPERS=off` disables all shims and gives
+you raw apk.
 
 ### Also shimmed
 
@@ -149,8 +164,9 @@ RUN --mount=type=cache,target=/root/.cache/sccache \
     cmake -B build && cmake --build build
 ```
 
-build-essential, cmake, ninja-build are preinstalled. Remove
-them. `--mount=type=cache` persists sccache across builds.
+build-essential, cmake, ninja-build are preinstalled.
+Remove them. `--mount=type=cache` persists sccache
+across builds.
 
 ### From alpine
 
@@ -179,8 +195,10 @@ The cold speedup is 2-3x. No single component dominates:
 clang over gcc, mold over ld, ninja over make, apk over
 apt. They compound.
 
-Boost.Spirit X3 is header-only; both images bottleneck on
-template instantiation. This is the ceiling.
+Boost.Spirit X3 is header-only: one file, no linking,
+pure template instantiation. That's compiler frontend
+work. Silex replaces everything around the compiler,
+not the compiler itself. This is the ceiling.
 
 Warm sccache rebuild: 2.4s vs 44s cold. 18x.
 
@@ -188,38 +206,40 @@ Reproduce: `benchmarks/benchmark.sh`.
 
 ## What Silex doesn't do
 
-**Fix your Dockerfile.** COPY the whole repo before installing
-deps and every source change invalidates the cache.
+**Fix your Dockerfile.** COPY the whole repo before
+installing deps and every source change invalidates
+the cache.
 
 **Replace BuildKit.** Base image, not build backend.
 
-**Run in production.** `silex:runtime`. Build images ship
-compilers. Production images shouldn't.
+**Run in production.** `silex:runtime`. Build images
+ship compilers. Production images shouldn't.
 
-**Make Python fast.** uv is included and helps with pip. If
-your build is slow because you're training a model in the
-Dockerfile, that's between you and your choices.
+**Make Python fast.** uv is included and helps with pip.
+If your build is slow because you're training a model
+in the Dockerfile, that's between you and your choices.
 
 ## Known issues
 
-**SQLite and amalgamation builds.** clang -O3 is slower than
-gcc on very large TUs. `CC=gcc`.
+**SQLite and amalgamation builds.** clang -O3 is slower
+than gcc on very large TUs. `CC=gcc`.
 
-**GCC hardcoded in CMakeLists.** `apk add gcc` or remove
-the override.
+**GCC hardcoded in CMakeLists.** `apk add gcc` or
+remove the override.
 
-**`/bin/sh` is dash.** `[[ ]]`, arrays, process substitution
-are bash. Use POSIX sh or `#!/bin/bash`.
+**`/bin/sh` is dash.** `[[ ]]`, arrays, process
+substitution are bash. Use POSIX sh or `#!/bin/bash`.
 
 **`python3` on PATH. `python` is not.** Per PEP 394.
 
 **504 pkgs mapped via shims.** There are 68,000 in
-Debian. `apk search` for the rest, or file an issue if a key package is missing.
+Debian. `apk search` for the rest, or file an issue
+if a key package is missing.
 
 **No GPU in slim.** CPU only.
 
-**Coreutils are busybox.** `sort --parallel` works via GNU
-sort wrapper. Other GNU-only flags don't.
+**Coreutils are busybox.** `sort --parallel` works via
+GNU sort wrapper. Other GNU-only flags don't.
 
 **git not in slim.** `silex:dev` or `apk add git`.
 
@@ -285,18 +305,30 @@ make build             # from previous silex:slim, ~15-20 min
 make test              # compat tests
 ```
 
-`make bootstrap` compiles everything from source. Tarballs
-verified against `sources.json`.
+`make bootstrap` compiles everything from source.
+Tarballs verified against `sources.json`.
 
-`make build` reuses the previous release's clang and mold,
-skipping the 60-minute LLVM step. Silex builds Silex.
+`make build` reuses the previous release's clang and
+mold, skipping the 60-minute LLVM step. Silex builds
+Silex.
 
 ## FAQ
 
+**Why hasn't this been done?**
+gcc, ld, make, gzip, dpkg. Nobody chose them. They
+accreted: gcc because Debian, ld because it came with
+gcc, make because POSIX, gzip because that's what there
+was in 1993. Distros can't ship their replacements
+because a distro also has to run on hospital MRI
+machines, railway signalling systems, and nuclear
+submarines. The images that do ship them want you to
+rewrite your Dockerfile and learn a new ecosystem.
+Your build server is not a submarine.
+
 **Why not Alpine?**
-musl. Measurably slower for compilation in our benchmarks,
-despite a newer gcc. The overhead is the libc, not the
-compiler.
+musl. Measurably slower for compilation in our
+benchmarks, despite a newer gcc. The overhead is
+the libc, not the compiler.
 
 **Why not Wolfi?**
 Wolfi is rolling. Chainguard deletes packages after
@@ -304,8 +336,8 @@ Wolfi is rolling. Chainguard deletes packages after
 with SHA256 don't.
 
 **Will this break my Dockerfile?**
-Possibly. `SILEX_WRAPPERS=off` for raw apk. File a bug
-if the issue persists.
+Possibly. `SILEX_WRAPPERS=off` for raw apk. File a
+bug if the issue persists.
 
 **Are the speedups real?**
 2-3x cold, compilers preinstalled vs `apt-get install`
