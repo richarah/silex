@@ -322,6 +322,14 @@ rewrite your Dockerfile and learn a new ecosystem.
 Your build server is not a submarine, and your sprint
 ends Friday.
 
+**What's wrong with dpkg?**
+Nothing, if you're running a server for ten years.
+In a container that lives for ten seconds, dpkg
+rebuilds the font cache for a screen that doesn't
+exist, calls fsync() to protect writes that will be
+thrown away, and assembles a boot image for a
+filesystem that was never meant to boot.
+
 **Why not Alpine?**
 musl. Measurably slower for compilation in our
 benchmarks, despite a newer gcc. The overhead is
@@ -340,9 +348,6 @@ bug if the issue persists.
 2-3x cold, compilers preinstalled vs `apt-get install`
 each build. 18x warm sccache. Methodology and harness
 in `benchmarks/`.
-
-**Rust rewrite?**
-It's a Dockerfile.
 
 **silex?**
 Latin for flint.
