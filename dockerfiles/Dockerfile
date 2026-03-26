@@ -589,25 +589,18 @@ RUN ln -sf /opt/llvm/bin/clang   /usr/bin/clang \
     && ln -sf /opt/mold/bin/mold    /usr/bin/ld.mold
 
 # ============================================================================
-# Configure apk for Wolfi repositories and pre-install base packages.
-# See Dockerfile.bootstrap for full explanation of the two-step install.
+# Configure apk for silex-packages repository.
+# silex-packages repacks Debian bookworm packages under their native Debian
+# names, so no package name translation is needed in the apt-get shim.
 # ============================================================================
-COPY --from=cgr.dev/chainguard/wolfi-base:latest /etc/apk/keys/ /etc/apk/keys/
 COPY keys/ /etc/apk/keys/
 
 RUN mkdir -p /etc/apk/keys /etc/apk/protected_paths.d /etc/apk/commit_hooks.d \
                /var/cache/apk /var/lib/apk /lib/apk/db /lib/apk/exec \
-    && printf 'https://richarah.github.io/silex-packages\nhttps://packages.wolfi.dev/os\n' \
+    && printf 'https://richarah.github.io/silex-packages\n' \
          > /etc/apk/repositories \
     && touch /lib/apk/db/installed \
-    && apk update -q || true \
-    \
-    && printf '#!/bin/sh\nexit 0\n' > /usr/bin/ldconfig \
-    && chmod +x /usr/bin/ldconfig \
-    \
-    && LD_PRELOAD=/usr/local/silex/lib/silex-nosync.so apk add wolfi-baselayout \
-    && printf '#!/bin/sh\nexit 0\n' > /etc/apk/commit_hooks.d/ldconfig-commit.sh \
-    && chmod +x /etc/apk/commit_hooks.d/ldconfig-commit.sh
+    && apk update -q || true
 
 # ============================================================================
 # Set ID_LIKE=debian so tools that check /etc/os-release see a Debian-like env.
@@ -622,7 +615,6 @@ COPY scripts/entrypoint.sh     /usr/local/bin/silex-entrypoint
 COPY scripts/silex             /usr/local/bin/silex
 COPY scripts/shims/            /usr/local/silex/shims/
 COPY scripts/wrappers/         /usr/local/silex/bin/
-COPY config/package-mapping.json /usr/local/silex/package-mapping.json
 
 RUN chmod +x /usr/local/bin/apt-get \
     /usr/local/bin/silex-entrypoint \

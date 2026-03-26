@@ -1,50 +1,22 @@
 #!/bin/sh
-# Silex apt-get shim: translates apt-get/apt/aptitude commands to apk.
+# Silex apt-get shim: maps apt-get/apt/aptitude commands to apk.
 # Installed as /usr/local/bin/apt-get; symlinked as apt and aptitude.
 # See also: scripts/shims/apt-cache, apt-mark, dpkg
 # Disable with SILEX_APT_SHIM=off
+#
+# silex-packages provides Debian packages under their native Debian names,
+# so no package name translation is required.
 
 set -e
 
-MAPPING=/usr/local/silex/package-mapping.json
 NOSYNC_SO=/usr/local/silex/lib/silex-nosync.so
 
-# When shim is disabled, try real apt-get (will fail on Wolfi — by design)
 if [ "$SILEX_APT_SHIM" = "off" ]; then
     echo "silex: SILEX_APT_SHIM=off — apt-get shim disabled" >&2
     exit 1
 fi
 
-# Translate a list of Debian package names to apk names via mapping JSON.
-# Unknown packages are passed through with a warning.
-# Packages mapped to "" have no apk equivalent and are silently dropped.
-# Uses awk/sed only — no Python required.
-_translate_packages() {
-    for _pkg in "$@"; do
-        case "$_pkg" in -*|'') continue ;; esac
-        # Strip version specifiers: pkg=1.2, pkg>=1.0, pkg<=2.0, pkg!=x
-        _base=$(printf '%s' "$_pkg" | sed 's/[=<>!].*//')
-        # Look for exact key match in JSON: "debname": "wolfiname"
-        # grep -F prevents regex interpretation of package name characters.
-        _line=$(grep -F "\"${_base}\":" "$MAPPING" 2>/dev/null | grep -v '"_' | head -1)
-        if [ -z "$_line" ]; then
-            # Not in mapping: pass through as-is with a warning.
-            printf 'silex apt-shim: %s: no mapping, trying as-is\n' "$_base" >&2
-            printf '%s\n' "$_base"
-        else
-            # Extract the value between the second pair of quotes.
-            _val=$(printf '%s' "$_line" | sed 's/.*: *"\([^"]*\)".*/\1/')
-            if [ -z "$_val" ]; then
-                # Mapped to "": no apk equivalent; drop silently.
-                printf 'silex apt-shim: %s: no apk equivalent, skipping\n' "$_base" >&2
-            else
-                printf '%s\n' "$_val"
-            fi
-        fi
-    done
-}
-
-# Strip common apt flags that mean nothing to apk
+# Strip common apt flags that apk does not understand.
 _strip_apt_flags() {
     for _a in "$@"; do
         case "$_a" in
@@ -62,60 +34,41 @@ _strip_apt_flags() {
     done
 }
 
-# Parse leading flags before subcommand (apt-get -y install ...)
+# Strip version specifiers from package names (pkg=1.2 -> pkg).
+_strip_versions() {
+    for _pkg in "$@"; do
+        case "$_pkg" in -*|'') continue ;; esac
+        printf '%s\n' "$_pkg" | sed 's/[=<>!].*//'
+    done
+}
+
+# Parse leading flags before the subcommand (apt-get -y install ...)
 _CMD=""
-_EXTRA_FLAGS=""
 while [ $# -gt 0 ]; do
     case "$1" in
         -y|--yes|--assume-yes|--no-install-recommends|--install-recommends|-q|--quiet|-qq) shift ;;
-        -*) shift ;;  # skip unknown flags before subcommand
-        *)  _CMD="$1"; shift; break ;;
+        -*) shift ;;
+        *) _CMD="$1"; shift; break ;;
     esac
 done
 
 case "$_CMD" in
     install|install-recommends)
-        # Collect packages, strip apt-specific flags
-        _pkgs=$(_strip_apt_flags "$@" | tr '\n' ' ')
-        if [ -z "$(echo "$_pkgs" | tr -d ' ')" ]; then
+        _pkgs=$(_strip_versions $(_strip_apt_flags "$@") | tr '\n' ' ')
+        if [ -z "$(printf '%s' "$_pkgs" | tr -d ' ')" ]; then
             echo "silex apt-shim: no packages specified" >&2
             exit 1
         fi
-        # Translate package names
-        _apk_pkgs=$(_translate_packages $_pkgs | tr '\n' ' ')
-        echo "silex apt-shim: apt-get install → apk add --no-cache ${_apk_pkgs}" >&2
-        # Use nosync shim to suppress redundant fsync calls during package install
+        echo "silex apt-shim: apk add --no-cache ${_pkgs}" >&2
         # shellcheck disable=SC2086
         if [ -f "$NOSYNC_SO" ]; then
-            env LD_PRELOAD="${LD_PRELOAD:+$LD_PRELOAD:}$NOSYNC_SO" apk add --no-cache ${_apk_pkgs}
+            env LD_PRELOAD="${LD_PRELOAD:+$LD_PRELOAD:}$NOSYNC_SO" apk add --no-cache ${_pkgs}
         else
-            apk add --no-cache ${_apk_pkgs}
+            apk add --no-cache ${_pkgs}
         fi
-        _rc=$?
-        # Wolfi's glibc-dev installs complete glibc headers to /usr/include/{bits,sys,gnu}/.
-        # These are glibc 2.40+ and conflict with Debian bookworm's glibc 2.36 equivalents
-        # in /usr/include/x86_64-linux-gnu/{bits,sys,gnu}/.  Clang resolves multiarch paths
-        # first, so Debian's older headers shadow Wolfi's.  Symptoms: __COLD undefined
-        # (stdio.h), __intmax_t undefined (math.h), __time64_t undefined (sys/types.h).
-        # Fix: remove the Debian multiarch glibc subdirs; Wolfi's top-level headers take over.
-        if [ -f /usr/include/bits/stdint-intn.h ] && [ -d /usr/include/x86_64-linux-gnu/bits ]; then
-            rm -rf /usr/include/x86_64-linux-gnu/bits \
-                   /usr/include/x86_64-linux-gnu/sys \
-                   /usr/include/x86_64-linux-gnu/gnu
-        fi
-        # Wolfi's features-time64.h sets __USE_TIME_BITS64=1 on x86_64, which causes
-        # Debian's bits/types.h to reference undefined __time64_t.  On x86_64 time_t is
-        # already 64-bit; suppress the redirect.
-        if [ -f /usr/include/features-time64.h ]; then
-            printf '/* silex: suppress __USE_TIME_BITS64 for Debian+Wolfi header compatibility. */\n' \
-                > /usr/include/features-time64.h
-        fi
-        exit $_rc
         ;;
     update)
         # Match Debian apt-get update behaviour: warn on unavailable repos but exit 0.
-        # apk exits 1 if any repo returns 4xx; that breaks "apt-get update && apt-get install"
-        # even when the primary Wolfi repo is healthy.
         apk update || true
         ;;
     upgrade)
@@ -123,12 +76,12 @@ case "$_CMD" in
         ;;
     remove|purge)
         _pkgs=$(_strip_apt_flags "$@" | tr '\n' ' ')
-        echo "silex apt-shim: apt-get remove → apk del ${_pkgs}" >&2
+        echo "silex apt-shim: apk del ${_pkgs}" >&2
         # shellcheck disable=SC2086
         exec apk del ${_pkgs}
         ;;
     autoremove|clean|autoclean|check)
-        # no-op: apk doesn't need these
+        # no-op
         ;;
     dist-upgrade|full-upgrade)
         apk upgrade

@@ -13,15 +13,11 @@ RUN apt-get update && apt-get install -y \
     cmake \
     curl \
     pkg-config \
-    libavcodec-dev \
-    libavformat-dev \
-    libswscale-dev \
     python3-dev \
     libtbb-dev \
     libjpeg-dev \
     libpng-dev \
-    libtiff-dev \
-    libgtk2.0-dev
+    libtiff-dev
 
 RUN curl -fsSL https://github.com/opencv/opencv/archive/4.10.0.tar.gz \
         -o /tmp/opencv.tar.gz && \

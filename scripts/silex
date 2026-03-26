@@ -3,7 +3,7 @@
 # Subcommands: doctor, lint, version
 
 SILEX_VERSION="${SILEX_IMAGE_VERSION:-slim-1.1.0}"
-SILEX_BASE="${SILEX_IMAGE_BASE:-wolfi}"
+SILEX_BASE="${SILEX_IMAGE_BASE:-silex-packages}"
 
 _usage() {
     cat <<EOF
@@ -113,14 +113,8 @@ _doctor() {
     # -- apt shim --------------------------------------------------------------
     printf "apt shim\n"
     printf "  %-14s %s\n" "status:" "${SILEX_APT_SHIM:-on}"
-    _mapping="/usr/local/silex/package-mapping.json"
-    if [ -f "$_mapping" ]; then
-        # Count non-meta keys: lines matching `"word": ` where word doesn't start with _
-        _count=$(grep -c '^[[:space:]]*"[^_]' "$_mapping" 2>/dev/null || printf "?")
-        printf "  %-14s %s (%s entries)\n" "mapping:" "$_mapping" "$_count"
-    else
-        printf "  %-14s not found\n" "mapping:"
-    fi
+    _repo=$(head -1 /etc/apk/repositories 2>/dev/null || printf "?")
+    printf "  %-14s %s\n" "repo:" "$_repo"
     printf "\n"
 
     # -- Debian shims ----------------------------------------------------------

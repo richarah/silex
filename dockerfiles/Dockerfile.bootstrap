@@ -777,39 +777,20 @@ RUN MAJOR="${LLVM_VERSION%%.*}" \
     && ln -sf /opt/mold/bin/mold    /usr/bin/ld.mold
 
 # ============================================================================
-# Configure apk for Wolfi repositories and pre-install base packages.
-# Pre-installing wolfi-baselayout and glibc at build time prevents them from
-# being reinstalled at runtime (which would overwrite our hooks).
-#
-# ldconfig handling:
-#   - wolfi-baselayout installs /etc/apk/commit_hooks.d/ldconfig-commit.sh
-#     which calls /usr/bin/ldconfig after every apk transaction.
-#   - wolfi's glibc installs a Wolfi-compiled ldconfig to /usr/bin/ldconfig;
-#     this binary crashes (stack smash) in a Debian-glibc environment.
-#   - Two-step install: first wolfi-baselayout (without glibc), override
-#     ldconfig-commit.sh with a no-op, then glibc (hook is our no-op;
-#     glibc overwrites /usr/bin/ldconfig but the hook never calls it).
-#   - At runtime: both packages are already installed; re-install does not
-#     occur and our no-op ldconfig-commit.sh is never overwritten.
+# Configure apk for silex-packages repository.
+# silex-packages repacks Debian bookworm packages under their native Debian
+# names, so no package name translation is needed in the apt-get shim.
 # ============================================================================
-COPY --from=cgr.dev/chainguard/wolfi-base:latest /etc/apk/keys/ /etc/apk/keys/
 COPY keys/ /etc/apk/keys/
 
 RUN ARCH=$([ "${TARGETARCH}" = "arm64" ] && echo "aarch64" || echo "x86_64") \
     && mkdir -p /etc/apk/keys /etc/apk/protected_paths.d /etc/apk/commit_hooks.d \
                /var/cache/apk /var/lib/apk /lib/apk/db /lib/apk/exec \
-    && printf 'https://richarah.github.io/silex-packages\nhttps://packages.wolfi.dev/os\n' \
+    && printf 'https://richarah.github.io/silex-packages\n' \
          > /etc/apk/repositories \
     && echo "$ARCH" > /etc/apk/arch \
     && touch /etc/apk/world /lib/apk/db/installed \
-    && apk update -q || true \
-    \
-    && printf '#!/bin/sh\nexit 0\n' > /usr/bin/ldconfig \
-    && chmod +x /usr/bin/ldconfig \
-    \
-    && LD_PRELOAD=/usr/local/silex/lib/silex-nosync.so apk add wolfi-baselayout \
-    && printf '#!/bin/sh\nexit 0\n' > /etc/apk/commit_hooks.d/ldconfig-commit.sh \
-    && chmod +x /etc/apk/commit_hooks.d/ldconfig-commit.sh
+    && apk update -q || true
 
 # ============================================================================
 # Set ID_LIKE=debian so tools that check /etc/os-release see a Debian-like env.
@@ -825,7 +806,6 @@ COPY scripts/entrypoint.sh     /usr/local/bin/silex-entrypoint
 COPY scripts/silex             /usr/local/bin/silex
 COPY scripts/shims/            /usr/local/silex/shims/
 COPY scripts/wrappers/         /usr/local/silex/bin/
-COPY config/package-mapping.json /usr/local/silex/package-mapping.json
 
 RUN chmod +x /usr/local/bin/apt-get \
     /usr/local/bin/silex-entrypoint \
