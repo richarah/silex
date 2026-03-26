@@ -219,9 +219,9 @@ RUN set -ex \
 ENV PATH="/opt/llvm/bin:/opt/mold/bin:${PATH}"
 ENV CC="clang"
 ENV CXX="clang++"
-ENV CFLAGS="-O3 -fomit-frame-pointer"
-ENV CXXFLAGS="-O3 -fomit-frame-pointer"
-ENV LDFLAGS="--ld-path=/opt/mold/bin/mold"
+ENV CFLAGS="-O3 -flto=thin -fomit-frame-pointer"
+ENV CXXFLAGS="-O3 -flto=thin -fomit-frame-pointer"
+ENV LDFLAGS="--ld-path=/opt/mold/bin/mold -flto=thin"
 
 # Arch-specific optimisation flag. Set at build time.
 ARG MARCH_FLAG="-march=x86-64-v3"

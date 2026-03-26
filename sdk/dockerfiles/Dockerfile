@@ -153,9 +153,9 @@ RUN printf '%s\n' \
 # ============================================================================
 ENV CC="clang"
 ENV CXX="clang++"
-ENV CFLAGS="-O3 -fomit-frame-pointer"
-ENV CXXFLAGS="-O3 -fomit-frame-pointer"
-ENV LDFLAGS="-fuse-ld=/opt/mold/bin/mold"
+ENV CFLAGS="-O3 -flto=thin -fomit-frame-pointer"
+ENV CXXFLAGS="-O3 -flto=thin -fomit-frame-pointer"
+ENV LDFLAGS="-fuse-ld=/opt/mold/bin/mold -flto=thin"
 
 ARG MARCH_FLAG="-march=x86-64-v3"
 ENV CFLAGS="${CFLAGS} ${MARCH_FLAG}"
