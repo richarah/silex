@@ -145,32 +145,8 @@ RUN printf '%s\n' \
     '#endif' \
     '  return 0;}' \
     > /src/fhs.c \
-    && printf '%s\n' \
-    '#include <unistd.h>' \
-    '#include <fcntl.h>' \
-    '#include <sys/stat.h>' \
-    'static void noop(const char*p){' \
-    '  int f=open(p,O_WRONLY|O_CREAT|O_TRUNC,0755);' \
-    '  if(f>=0){write(f,"#!/bin/sh\nexit 0\n",17);close(f);}}' \
-    'int main(void){' \
-    '#ifdef __x86_64__' \
-    '  unlink("/usr/lib/ld-linux-x86-64.so.2");' \
-    '  symlink("x86_64-linux-gnu/ld-linux-x86-64.so.2","/usr/lib/ld-linux-x86-64.so.2");' \
-    '#elif defined(__aarch64__)' \
-    '  unlink("/usr/lib/ld-linux-aarch64.so.1");' \
-    '  symlink("aarch64-linux-gnu/ld-linux-aarch64.so.1","/usr/lib/ld-linux-aarch64.so.1");' \
-    '#endif' \
-    '  {int f=open("/etc/ld.so.conf.d/libc.conf",O_WRONLY|O_CREAT|O_TRUNC,0644);' \
-    '   if(f>=0){write(f,"/usr/local/lib\n/usr/lib\n",24);close(f);}}' \
-    '  unlink("/etc/ld.so.conf.d/libc.conf.apk-new");' \
-    '  unlink("/etc/ld.so.cache");' \
-    '  noop("/etc/apk/commit_hooks.d/ldconfig-commit.sh");' \
-    '  noop("/usr/bin/ldconfig");' \
-    '  return 0;}' \
-    > /src/postglibc.c \
     && clang -static -o /out/bin/silex-fhs /src/fhs.c \
-    && clang -static -o /out/bin/silex-postglibc /src/postglibc.c \
-    && rm /src/fhs.c /src/postglibc.c
+    && rm /src/fhs.c
 
 # ============================================================================
 # Compiler environment. Inherits clang + mold from silex:slim PATH.
@@ -546,7 +522,6 @@ RUN dpkg --force-remove-reinstreq --purge apt apt-utils 2>/dev/null || true \
 # The static helper is compiled in build-c (where libc6-dev is available).
 # ============================================================================
 COPY --from=build-c /out/bin/silex-fhs      /tmp/fhs
-COPY --from=build-c /out/bin/silex-postglibc /tmp/postglibc
 RUN /tmp/fhs && rm /tmp/fhs
 
 # ============================================================================
@@ -632,11 +607,7 @@ RUN mkdir -p /etc/apk/keys /etc/apk/protected_paths.d /etc/apk/commit_hooks.d \
     \
     && LD_PRELOAD=/usr/local/silex/lib/silex-nosync.so apk add wolfi-baselayout \
     && printf '#!/bin/sh\nexit 0\n' > /etc/apk/commit_hooks.d/ldconfig-commit.sh \
-    && chmod +x /etc/apk/commit_hooks.d/ldconfig-commit.sh \
-    \
-    && LD_PRELOAD=/usr/local/silex/lib/silex-nosync.so apk add --no-scripts glibc ld-linux glibc-locale-posix \
-    && /tmp/postglibc \
-    && rm -f /tmp/postglibc
+    && chmod +x /etc/apk/commit_hooks.d/ldconfig-commit.sh
 
 # ============================================================================
 # Set ID_LIKE=debian so tools that check /etc/os-release see a Debian-like env.
