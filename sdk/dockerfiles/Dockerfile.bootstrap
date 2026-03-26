@@ -352,15 +352,19 @@ RUN set -ex \
 RUN set -ex \
     && tar xf /src/apk-tools.tar.gz -C /build \
     && cd /build/apk-tools-v${APK_VERSION} \
+    # strlcpy is a BSD extension absent from glibc < 2.38 (Debian bookworm = 2.36). \
+    # Provide an inline compat via -include so every TU sees it. \
+    && printf '#pragma once\n#include <string.h>\n#ifndef strlcpy\nstatic inline size_t strlcpy(char*d,const char*s,size_t n){size_t l=strlen(s);if(n){size_t c=l<n-1?l:n-1;__builtin_memcpy(d,s,c);d[c]=0;}return l;}\n#endif\n' \
+        > /build/strlcpy_compat.h \
     && make -j$(nproc) \
         CC="${CC}" \
-        CFLAGS="${CFLAGS}" \
+        CFLAGS="${CFLAGS} -include /build/strlcpy_compat.h" \
         LDFLAGS="${LDFLAGS}" \
         STATIC=y \
         LUA=no \
     && install -m755 src/apk.static /out/bin/apk \
     && strip --strip-unneeded /out/bin/apk \
-    && rm -rf /build/apk-tools-v${APK_VERSION}
+    && rm -rf /build/apk-tools-v${APK_VERSION} /build/strlcpy_compat.h
 
 # ============================================================================
 # Build pigz (parallel gzip).
