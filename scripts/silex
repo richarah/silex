@@ -287,6 +287,18 @@ _lint() {
         rm -f "$_tu_list"
     fi
 
+    # Check 9: build files without warning flags
+    _build_files=$(find "$_srcdir" \( -name 'CMakeLists.txt' -o -name 'Makefile' \) \
+        -not -path '*/build/*' -not -path '*/.git/*' 2>/dev/null)
+    if [ -n "$_build_files" ]; then
+        _has_warn=$(printf '%s\n' "$_build_files" | while IFS= read -r _bf; do
+            grep -lE '\-(Wall|Wextra|Wshadow)' "$_bf" 2>/dev/null && break
+        done)
+        if [ -z "$_has_warn" ]; then
+            printf "  [INFO] No warning flags detected in build files. Consider -Wall -Wextra -Wshadow.\n" >> "$_out"
+        fi
+    fi
+
     # -- Summary ---------------------------------------------------------------
     _issues=$(grep -c '^\s*\[' "$_out" 2>/dev/null || printf 0)
     cat "$_out"
