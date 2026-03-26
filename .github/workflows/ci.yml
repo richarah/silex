@@ -10,6 +10,9 @@ jobs:
   build-and-test:
     name: Build and Test
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
 
     steps:
       - name: Checkout
@@ -43,7 +46,7 @@ jobs:
 
       - name: Build silex:slim (bootstrap)
         if: env.SILEX_BUILD_MODE == 'bootstrap'
-        run: make bootstrap DOCKER_FLAGS="--progress=plain --load"
+        run: make bootstrap DOCKER_FLAGS="--progress=plain --cache-from type=gha --cache-to type=gha,mode=max --load"
 
       - name: Tag image for compat tests
         run: docker tag localhost/silex:slim silex:slim
@@ -67,3 +70,12 @@ jobs:
             docker run --rm -v "$PWD:/workspace" -w /workspace silex:slim \
               silex lint "$df" || true
           done
+
+      # Push silex:slim after a successful master build so the next CI run
+      # can use the self-hosted (fast) path instead of re-running bootstrap.
+      - name: Publish silex:slim to GHCR
+        if: github.ref == 'refs/heads/master' && github.event_name == 'push'
+        run: |
+          IMG="ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
+          docker tag localhost/silex:slim "${IMG}:slim"
+          docker push "${IMG}:slim"
