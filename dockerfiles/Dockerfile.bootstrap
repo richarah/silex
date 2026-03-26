@@ -42,8 +42,8 @@ ARG BUSYBOX_VERSION=1.37.0
 ARG BUSYBOX_SHA256=3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4
 ARG DASH_VERSION=0.5.12
 ARG DASH_SHA256=6a474ac46e8b0b32916c4c60df694c82058d3297d8b385b74508030ca4a8f28a
-ARG APK_VERSION=2.14.4
-ARG APK_SHA256=c8ad16bddfae988392ad067a244cfdaf643eb7d6761b73450739585ca76f9a25
+ARG APK_VERSION=3.0.5
+ARG APK_SHA256=e9d7398d5f70badea596903599bfa1e05b64d67d13c929da9f0eee85828260c6
 ARG TINI_VERSION=0.19.0
 ARG TINI_SHA256=0fd35a7030052acd9f58948d1d900fe1e432ee37103c5561554408bdac6bbf0d
 ARG PIGZ_VERSION=2.8
@@ -343,9 +343,11 @@ RUN set -ex \
 
 # ============================================================================
 # Build apk package manager (static, no Lua).
-# apk 2.14.x uses a plain Makefile (no autoconf). STATIC=y links all deps in;
+# apk 3.x uses a plain Makefile. STATIC=y links all deps in statically;
 # the resulting binary has no libapk.so runtime dependency.
-# Static libs required: libssl.a, libcrypto.a (libssl-dev), libz.a (zlib1g-dev).
+# zstd support is auto-enabled via pkg-config when libzstd-dev is present.
+# Static libs: libssl.a, libcrypto.a (libssl-dev), libz.a (zlib1g-dev),
+#              libzstd.a (libzstd-dev).
 # ============================================================================
 RUN set -ex \
     && tar xf /src/apk-tools.tar.gz -C /build \
@@ -353,9 +355,9 @@ RUN set -ex \
     && make -j$(nproc) \
         CC="${CC}" \
         CFLAGS="${CFLAGS}" \
+        LDFLAGS="${LDFLAGS}" \
         STATIC=y \
         LUA=no \
-        LIBDIR=/lib/apk \
     && install -m755 src/apk.static /out/bin/apk \
     && strip --strip-unneeded /out/bin/apk \
     && rm -rf /build/apk-tools-v${APK_VERSION}

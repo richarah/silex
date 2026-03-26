@@ -54,9 +54,9 @@
   },
 
   "apk-tools": {
-    "version": "2.14.4",
-    "url": "https://gitlab.alpinelinux.org/alpine/apk-tools/-/archive/v2.14.4/apk-tools-v2.14.4.tar.gz",
-    "sha256": "c8ad16bddfae988392ad067a244cfdaf643eb7d6761b73450739585ca76f9a25",
+    "version": "3.0.5",
+    "url": "https://gitlab.alpinelinux.org/alpine/apk-tools/-/archive/v3.0.5/apk-tools-v3.0.5.tar.gz",
+    "sha256": "e9d7398d5f70badea596903599bfa1e05b64d67d13c929da9f0eee85828260c6",
     "licence": "GPL-2.0-only",
     "notes": "GPL-2.0 only applies to apk-tools itself. Written offer in LICENSING.md."
   },

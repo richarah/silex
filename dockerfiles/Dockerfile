@@ -21,8 +21,8 @@ ARG XXHASH_VERSION=0.8.2
 ARG XXHASH_SHA256=baee0c6afd4f03165de7a4e67988d16f0f2b257b51d0e3cb91909302a26a79c4
 ARG MIMALLOC_VERSION=2.1.7
 ARG MIMALLOC_SHA256=0eed39319f139afde8515010ff59baf24de9e47ea316a315398e8027d198202d
-ARG APK_VERSION=2.14.4
-ARG APK_SHA256=c8ad16bddfae988392ad067a244cfdaf643eb7d6761b73450739585ca76f9a25
+ARG APK_VERSION=3.0.5
+ARG APK_SHA256=e9d7398d5f70badea596903599bfa1e05b64d67d13c929da9f0eee85828260c6
 ARG BUSYBOX_VERSION=1.37.0
 ARG BUSYBOX_SHA256=3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4
 ARG DASH_VERSION=0.5.12
@@ -398,24 +398,26 @@ RUN set -ex \
     && rm -rf /build/coreutils-${COREUTILS_VERSION}
 
 # ============================================================================
-# Build apk-tools.
+# Build apk-tools (static, no Lua).
+# apk 3.x uses a plain Makefile; autoconf was dropped in v3.
+# STATIC=y links all deps in; zstd support is auto-enabled via pkg-config.
+# Static libs come from Wolfi's -dev + -static packages.
 # ============================================================================
 RUN set -ex \
+    && apk add --no-cache openssl-dev openssl-libs-static \
+                          zlib-dev zlib-static \
+                          zstd-dev zstd-static \
+                          make \
     && tar xf /src/apk-tools.tar.gz -C /build \
     && cd /build/apk-tools-v${APK_VERSION} \
-    && ./autogen.sh \
-    && ./configure \
-        --prefix=/out \
-        --without-lua \
-        --without-doc \
+    && make -j$(nproc) \
         CC="${CC}" \
         CFLAGS="${CFLAGS}" \
         LDFLAGS="${LDFLAGS}" \
-    && make -j$(nproc) \
-    && make install \
-    && APK_BIN=$(find /out -name apk -type f 2>/dev/null | head -1) \
-    && strip --strip-unneeded "${APK_BIN}" \
-    && install -m755 "${APK_BIN}" /out/bin/apk \
+        STATIC=y \
+        LUA=no \
+    && install -m755 src/apk.static /out/bin/apk \
+    && strip --strip-unneeded /out/bin/apk \
     && rm -rf /build/apk-tools-v${APK_VERSION}
 
 # ============================================================================
