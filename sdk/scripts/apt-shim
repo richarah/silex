@@ -59,12 +59,12 @@ case "$_CMD" in
             echo "silex apt-shim: no packages specified" >&2
             exit 1
         fi
-        echo "silex apt-shim: apk add --no-cache --allow-untrusted --allow-untrusted ${_pkgs}" >&2
+        echo "silex apt-shim: apk add --no-cache --allow-untrusted ${_pkgs}" >&2
         # shellcheck disable=SC2086
         if [ -f "$NOSYNC_SO" ]; then
-            env LD_PRELOAD="${LD_PRELOAD:+$LD_PRELOAD:}$NOSYNC_SO" apk add --no-cache --allow-untrusted --allow-untrusted ${_pkgs}
+            env LD_PRELOAD="${LD_PRELOAD:+$LD_PRELOAD:}$NOSYNC_SO" apk add --no-cache --allow-untrusted ${_pkgs}
         else
-            apk add --no-cache --allow-untrusted --allow-untrusted ${_pkgs}
+            apk add --no-cache --allow-untrusted ${_pkgs}
         fi
         ;;
     update)
