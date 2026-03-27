@@ -76,7 +76,7 @@ RUN mkdir -p /src /build /out/bin /out/lib /out/share
 
 # curl is not pre-installed in silex:slim; install via apk.
 # LD_LIBRARY_PATH ensures Wolfi's /usr/lib/libcurl.so.4 is found first.
-RUN apk add curl
+RUN apk add --allow-untrusted curl
 ENV LD_LIBRARY_PATH="/usr/lib"
 
 # ============================================================================
@@ -199,7 +199,7 @@ RUN set -ex \
         -o /src/busybox.tar.bz2 \
     && echo "${BUSYBOX_SHA256}  /src/busybox.tar.bz2" | sha256sum -c - \
     \
-    && curl -fsSL "http://gondor.apana.org.au/~herbert/dash/files/dash-${DASH_VERSION}.tar.gz" \
+    && curl -fsSL --retry 5 --retry-delay 5 --connect-timeout 30 "http://gondor.apana.org.au/~herbert/dash/files/dash-${DASH_VERSION}.tar.gz" \
         -o /src/dash.tar.gz \
     && echo "${DASH_SHA256}  /src/dash.tar.gz" | sha256sum -c - \
     \
@@ -207,7 +207,7 @@ RUN set -ex \
         -o /src/tini.tar.gz \
     && echo "${TINI_SHA256}  /src/tini.tar.gz" | sha256sum -c - \
     \
-    && curl -fsSL "https://zlib.net/pigz/pigz-${PIGZ_VERSION}.tar.gz" \
+    && curl -fsSL --retry 5 --retry-delay 5 --connect-timeout 30 "https://zlib.net/pigz/pigz-${PIGZ_VERSION}.tar.gz" \
         -o /src/pigz.tar.gz \
     && echo "${PIGZ_SHA256}  /src/pigz.tar.gz" | sha256sum -c - \
     \
@@ -380,7 +380,7 @@ RUN set -ex \
 # Static libs come from Wolfi's -dev + -static packages.
 # ============================================================================
 RUN set -ex \
-    && apk add --no-cache openssl-dev openssl-libs-static \
+    && apk add --allow-untrusted --no-cache openssl-dev openssl-libs-static \
                           zlib-dev zlib-static \
                           zstd-dev zstd-static \
                           make \
@@ -423,7 +423,7 @@ ARG TARGETARCH
 # curl is not pre-installed in silex:slim; install via apk.
 # LD_LIBRARY_PATH ensures Wolfi's /usr/lib/libcurl.so.4 takes precedence
 # over Debian's multiarch path (pulled in as a cmake runtime dep).
-RUN apk add curl
+RUN apk add --allow-untrusted curl
 ENV LD_LIBRARY_PATH="/usr/lib"
 
 RUN mkdir -p /src /out/bin
