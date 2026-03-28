@@ -76,7 +76,7 @@ RUN mkdir -p /src /build /out/bin /out/lib /out/share
 
 # curl is not pre-installed in silex:slim; install via apk.
 # LD_LIBRARY_PATH ensures Wolfi's /usr/lib/libcurl.so.4 is found first.
-RUN apk add --allow-untrusted curl
+RUN apk update --allow-untrusted && apk add --allow-untrusted curl
 ENV LD_LIBRARY_PATH="/usr/lib"
 
 # ============================================================================
@@ -421,9 +421,8 @@ ARG UV_VERSION UV_SHA256
 ARG TARGETARCH
 
 # curl is not pre-installed in silex:slim; install via apk.
-# LD_LIBRARY_PATH ensures Wolfi's /usr/lib/libcurl.so.4 takes precedence
-# over Debian's multiarch path (pulled in as a cmake runtime dep).
-RUN apk add --allow-untrusted curl
+# Fetch repo index, then install curl for downloading Rust toolchain.
+RUN apk update --allow-untrusted && apk add --allow-untrusted curl
 ENV LD_LIBRARY_PATH="/usr/lib"
 
 RUN mkdir -p /src /out/bin
@@ -601,6 +600,28 @@ RUN mkdir -p /etc/apk/keys /etc/apk/protected_paths.d /etc/apk/commit_hooks.d \
          > /etc/apk/repositories \
     && touch /lib/apk/db/installed \
     && apk update -q || true
+
+# ============================================================================
+# Install essential runtime libraries from silex-packages.
+# These are needed by packages installed via apt-get in user Dockerfiles.
+# ============================================================================
+RUN apk add --allow-untrusted --no-cache \
+    libssl3 \
+    libcurl4 \
+    libreadline8 \
+    libsqlite3-0 \
+    libxml2 \
+    libpcre3 \
+    libpython3.11 \
+    libtinfo6 \
+    libuuid1 \
+    libtirpc3t64 \
+    tar \
+    tzdata \
+    libgprofng0 \
+    libjansson4 \
+    ncurses-bin \
+    || echo "Warning: Some packages not yet available in silex-packages"
 
 # ============================================================================
 # Set ID_LIKE=debian so tools that check /etc/os-release see a Debian-like env.
