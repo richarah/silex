@@ -8,18 +8,18 @@ on:
   workflow_dispatch:
     inputs:
       runner:
-        description: 'Runner label (ubuntu-latest or self-hosted)'
+        description: 'Runner label (self-hosted or ubuntu-latest)'
         required: false
-        default: 'ubuntu-latest'
+        default: 'self-hosted'
         type: choice
         options:
-          - ubuntu-latest
           - self-hosted
+          - ubuntu-latest
 
 jobs:
   build-and-test:
     name: Build and Test
-    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.runner || 'self-hosted' }}
     permissions:
       contents: read
       packages: write
