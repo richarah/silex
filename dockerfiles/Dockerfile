@@ -602,8 +602,14 @@ RUN mkdir -p /etc/apk/keys /etc/apk/protected_paths.d /etc/apk/commit_hooks.d \
     && apk update -q || true
 
 # ============================================================================
-# Install essential runtime libraries from silex-packages.
-# These are needed by packages installed via apt-get in user Dockerfiles.
+# Install runtime libraries from silex-packages.
+#
+# These are repacked Debian packages needed by tools installed via apt-get
+# in user Dockerfiles (e.g., build-essential, python3-dev, etc.).
+#
+# Better to include comprehensive set upfront than discover missing deps
+# through test failures. List includes all common development library
+# dependencies (SSL, compression, databases, UI, interpreters, etc.).
 # ============================================================================
 RUN apk add --allow-untrusted --no-cache \
     libssl3 \
