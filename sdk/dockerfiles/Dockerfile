@@ -612,15 +612,24 @@ RUN apk add --allow-untrusted --no-cache \
     libsqlite3-0 \
     libxml2 \
     libpcre3 \
+    libpcre16-3 \
+    libpcre32-3 \
+    libpcrecpp0v5 \
     libpython3.11 \
     libtinfo6 \
     libuuid1 \
+    libtirpc3 \
     libtirpc3t64 \
     tar \
     tzdata \
     libgprofng0 \
     libjansson4 \
+    libctf0 \
+    libctf-nobfd0 \
     ncurses-bin \
+    ncurses-base \
+    libncurses6 \
+    libncursesw6 \
     || echo "Warning: Some packages not yet available in silex-packages"
 
 # ============================================================================
