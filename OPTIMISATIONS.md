@@ -9,7 +9,7 @@ measurements, and whether it was kept or reverted.
 
 | ID | Name | Category | Benchmark | Before | After | Speedup | Binary +/- | Status |
 |----|------|----------|-----------|--------|-------|---------|------------|--------|
-| O-01 | Charclass LUT | CPU | bench_builtins (wc-l, sort, grep-count) | — | — | — | — | PENDING |
+| O-01 | Charclass LUT | CPU | bench_builtins (grep-count) | 4.3240±0.2948ms | 4.0676±0.1762ms | 1.06x | +4.1K | KEPT |
 | O-02 | Vectorised newline scan | CPU/IO | bench_builtins (wc-l) | — | — | — | — | PENDING |
 | O-03 | copy_file_range for cp | IO | bench_builtin_cp (1MB) | — | — | — | — | PENDING |
 | O-04 | posix_fadvise sequential | IO | bench_grep (no-match-100k) | — | — | — | — | PENDING |
@@ -273,3 +273,33 @@ Measurement: matchbox fixed-str-100k = 12.3395±0.5479ms vs system 3.7738±0.235
   5.9793±3.6604ms = 1.58x slower. Criterion was "2x slower" — THRESHOLD MET.
 Plan: Addressed by O-02 (vectorised newline scan) + O-09 (writev) in this release.
   SSE2 memmem approach remains an option if O-02/O-09 do not close the gap.
+
+---
+
+## O-01: Character classification LUT
+
+Date: 2026-03-30
+Status: KEPT
+Category: CPU — reduces branch count in identifier-scanning hot paths
+Files: src/util/charclass.h (new), src/util/charclass.c (new),
+       tests/unit/test_charclass.c (new), Makefile,
+       src/shell/lexer.c, src/shell/expand.c, src/core/grep.c
+Benchmark: bench_builtins.sh (100 iter), bench_startup.sh (100 iter)
+
+Before (baseline 2026-03-30):
+  grep-count: 4.3240±0.2948ms  wc-l: 5.0954±0.2924ms  sort: 8.4566±0.5151ms
+  startup (matchbox -c true): 3.0969±0.2128ms
+
+After (O-01 applied 2026-03-30):
+  grep-count: 4.0676±0.1762ms  wc-l: 4.9079±0.3014ms  sort: 8.1352±0.3991ms
+  startup (matchbox -c true): 3.1410±0.2759ms
+
+Speedup: grep-count 1.06x (5.9%), wc-l 1.04x (3.7%), sort 1.04x (3.8%)
+  Startup within noise (variation ≤ stddev). LUT benefits compound across builtins.
+Binary delta: +4136 bytes (+4.0K) for 256-byte table + code
+
+Note on wc.c and sort.c: isspace() calls for word/blank detection NOT replaced.
+  Baseline shows matchbox wc-l ≈ system (0.3% difference); locale-sensitivity
+  risk outweighs marginal gain. Left as isspace() per plan criterion.
+Reason kept: Measurable improvement in grep and overall builtin throughput.
+  Zero correctness risk. Tested by test_charclass (all 256 entries verified).

@@ -6,6 +6,7 @@
 #include "shell.h"
 #include "../util/strbuf.h"
 #include "../util/arena.h"
+#include "../util/charclass.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -278,7 +279,7 @@ static char *expand_braced(shell_ctx_t *sh, const char *body)
         p++;
     } else {
         /* Normal identifier: [A-Za-z_][A-Za-z0-9_]* */
-        while (*p && (isalnum((unsigned char)*p) || *p == '_'))
+        while (is_name_char((unsigned char)*p))
             p++;
     }
 
@@ -584,8 +585,7 @@ static long arith_primary(arith_ctx_t *ac)
                 namebuf[ni++] = ac->src[ac->pos++];
             if (ac->src[ac->pos] == '}') ac->pos++;
         } else {
-            while ((isalnum((unsigned char)ac->src[ac->pos]) ||
-                    ac->src[ac->pos] == '_') &&
+            while (is_name_char((unsigned char)ac->src[ac->pos]) &&
                    ni < sizeof(namebuf) - 1)
                 namebuf[ni++] = ac->src[ac->pos++];
         }
@@ -595,11 +595,10 @@ static long arith_primary(arith_ctx_t *ac)
     }
 
     /* Identifier without $ (direct variable name) */
-    if (isalpha((unsigned char)c) || c == '_') {
+    if (is_alpha_underscore((unsigned char)c)) {
         char namebuf[256];
         size_t ni = 0;
-        while ((isalnum((unsigned char)ac->src[ac->pos]) ||
-                ac->src[ac->pos] == '_') &&
+        while (is_name_char((unsigned char)ac->src[ac->pos]) &&
                ni < sizeof(namebuf) - 1)
             namebuf[ni++] = ac->src[ac->pos++];
         namebuf[ni] = '\0';
@@ -608,7 +607,7 @@ static long arith_primary(arith_ctx_t *ac)
     }
 
     /* Integer literal (decimal, hex, octal) */
-    if (isdigit((unsigned char)c)) {
+    if (is_digit((unsigned char)c)) {
         char *end;
         long v = strtol(ac->src + ac->pos, &end, 0);
         ac->pos = (size_t)(end - ac->src);
@@ -848,9 +847,9 @@ static void expand_into(shell_ctx_t *sh, const char *word, strbuf_t *out,
             }
 
             /* $NAME — collect identifier */
-            if (isalpha((unsigned char)*p) || *p == '_') {
+            if (is_alpha_underscore((unsigned char)*p)) {
                 const char *start = p;
-                while (isalnum((unsigned char)*p) || *p == '_')
+                while (is_name_char((unsigned char)*p))
                     p++;
                 size_t nlen = (size_t)(p - start);
                 char *name = strndup(start, nlen);
@@ -869,7 +868,7 @@ static void expand_into(shell_ctx_t *sh, const char *word, strbuf_t *out,
             }
 
             /* $1-$9 (already handled in sh_getvar via spec) */
-            if (isdigit((unsigned char)*p)) {
+            if (is_digit((unsigned char)*p)) {
                 char spec[2] = { *p, '\0' };
                 const char *v = sh_getvar(sh, spec);
                 if (v) sb_append(out, v);

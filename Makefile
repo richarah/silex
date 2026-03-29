@@ -46,7 +46,8 @@ UTIL_SRCS = \
     $(SRCDIR)/util/path.c \
     $(SRCDIR)/util/error.c \
     $(SRCDIR)/util/arena.c \
-    $(SRCDIR)/util/platform.c
+    $(SRCDIR)/util/platform.c \
+    $(SRCDIR)/util/charclass.c
 
 CORE_SRCS = \
     $(SRCDIR)/core/echo.c \
@@ -152,9 +153,19 @@ install: $(TARGET)
 	$(TARGET) --install $(DESTDIR)$(PREFIX)/bin
 
 # --- Tests --------------------------------------------------------------------
-test: $(TARGET)
+# C unit test binaries
+TEST_CHARCLASS = build/bin/test_charclass
+
+$(TEST_CHARCLASS): tests/unit/test_charclass.c $(SRCDIR)/util/charclass.c \
+                  $(SRCDIR)/util/charclass.h | $(BINDIR)
+	$(CC) $(CFLAGS_COMMON) -I$(SRCDIR) -o $@ \
+	    tests/unit/test_charclass.c $(SRCDIR)/util/charclass.c
+
+test: $(TARGET) $(TEST_CHARCLASS)
 	@echo "=== Running unit tests ==="
 	@bash tests/unit/run_tests.sh $(TARGET)
+	@echo "--- test_charclass (C) ---"
+	@$(TEST_CHARCLASS) && echo "PASS: test_charclass"
 
 check: test
 
@@ -331,11 +342,12 @@ clean:
 	rm -rf build/
 
 # --- Dependencies -------------------------------------------------------------
-$(OBJDIR)/util/strbuf.o:   $(SRCDIR)/util/strbuf.c  $(SRCDIR)/util/strbuf.h
-$(OBJDIR)/util/path.o:     $(SRCDIR)/util/path.c    $(SRCDIR)/util/path.h
-$(OBJDIR)/util/error.o:    $(SRCDIR)/util/error.c   $(SRCDIR)/util/error.h
-$(OBJDIR)/util/arena.o:    $(SRCDIR)/util/arena.c   $(SRCDIR)/util/arena.h
-$(OBJDIR)/util/platform.o: $(SRCDIR)/util/platform.c $(SRCDIR)/util/platform.h
+$(OBJDIR)/util/strbuf.o:    $(SRCDIR)/util/strbuf.c    $(SRCDIR)/util/strbuf.h
+$(OBJDIR)/util/path.o:      $(SRCDIR)/util/path.c      $(SRCDIR)/util/path.h
+$(OBJDIR)/util/error.o:     $(SRCDIR)/util/error.c     $(SRCDIR)/util/error.h
+$(OBJDIR)/util/arena.o:     $(SRCDIR)/util/arena.c     $(SRCDIR)/util/arena.h
+$(OBJDIR)/util/platform.o:  $(SRCDIR)/util/platform.c  $(SRCDIR)/util/platform.h
+$(OBJDIR)/util/charclass.o: $(SRCDIR)/util/charclass.c $(SRCDIR)/util/charclass.h
 
 UTIL_HDRS = $(SRCDIR)/util/error.h $(SRCDIR)/util/path.h $(SRCDIR)/util/strbuf.h
 

@@ -7,6 +7,7 @@
 #include "../util/error.h"
 #include "../util/path.h"
 #include "../util/strbuf.h"
+#include "../util/charclass.h"
 
 #include <ctype.h>
 #include <dirent.h>
@@ -99,7 +100,7 @@ static const char *stristr(const char *haystack, const char *needle)
 /* Check whether character is a word character for -w */
 static int is_word_char(char c)
 {
-    return isalnum((unsigned char)c) || c == '_';
+    return is_name_char((unsigned char)c);
 }
 
 /*

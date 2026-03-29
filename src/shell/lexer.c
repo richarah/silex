@@ -4,6 +4,7 @@
 
 #include "lexer.h"
 #include "../util/arena.h"
+#include "../util/charclass.h"
 
 #include <ctype.h>
 #include <stdint.h>
@@ -458,10 +459,10 @@ static int is_assignment(const char *s)
     if (!s || !*s)
         return 0;
     /* First char must be alpha or underscore */
-    if (!isalpha((unsigned char)*s) && *s != '_')
+    if (!is_alpha_underscore((unsigned char)*s))
         return 0;
     const char *p = s + 1;
-    while (*p && (isalnum((unsigned char)*p) || *p == '_'))
+    while (is_name_char((unsigned char)*p))
         p++;
     return *p == '=';
 }
