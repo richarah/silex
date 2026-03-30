@@ -15,6 +15,23 @@
 #include <unistd.h>
 #include <limits.h>
 
+/* Module search directory (libc-specific).
+ * musl and glibc builds keep modules in separate directories to prevent
+ * ABI mismatches.  The libc tag in matchbox_module_t is verified at load
+ * time in addition to this directory separation. */
+#ifdef MATCHBOX_LIBC_MUSL
+#  define MATCHBOX_MODULE_DIR "/usr/lib/matchbox/modules-musl"
+#else
+#  define MATCHBOX_MODULE_DIR "/usr/lib/matchbox/modules"
+#endif
+
+/* Expected libc tag for modules loaded by this build */
+#ifdef MATCHBOX_LIBC_MUSL
+#  define EXPECTED_LIBC "musl"
+#else
+#  define EXPECTED_LIBC "glibc"
+#endif
+
 /*
  * loader.c — secure .so loading for matchbox modules.
  *
@@ -28,6 +45,7 @@
  * After dlopen():
  *  6. dlsym() for "matchbox_module_init"
  *  7. Call init, verify API version
+ *  8. Verify libc tag matches EXPECTED_LIBC
  */
 
 /* Extract the directory component of a path into dir_buf (PATH_MAX bytes).
@@ -155,6 +173,17 @@ matchbox_module_t *module_load(const char *so_path)
         fprintf(stderr, "matchbox: module_load: '%s': API version mismatch "
                 "(module %d, runtime %d)\n",
                 so_path, mod->api_version, MATCHBOX_MODULE_API_VERSION);
+        dlclose(handle);
+        return NULL;
+    }
+
+    /* Step 11: Verify libc tag -- reject modules built against the wrong libc */
+    if (!mod->libc || strcmp(mod->libc, EXPECTED_LIBC) != 0) {
+        fprintf(stderr, "matchbox: module_load: '%s': libc mismatch "
+                "(got '%s', need '%s')\n",
+                so_path,
+                mod->libc ? mod->libc : "(null)",
+                EXPECTED_LIBC);
         dlclose(handle);
         return NULL;
     }
