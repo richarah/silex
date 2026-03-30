@@ -1,3 +1,5 @@
+/* date.c -- date builtin: print or set the system date and time */
+
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif

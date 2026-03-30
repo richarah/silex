@@ -124,9 +124,50 @@ Modules are `.so` files loaded via `dlopen()`. Security checks on every load:
 - Owned by root or the current user
 - Not world-writable
 - Module directory not world-writable
+- libc tag in `matchbox_module_t.libc` must match the runtime build (musl or glibc)
 
 The module registry caches `(tool, flag) -> so_path` mappings. The cache is
 invalidated when the module directory's mtime changes.
 
 Unsupported flags trigger module lookup before falling through to `execvp()`
 of the external tool from `$PATH`.
+
+## Code Conventions
+
+### Naming
+
+| Entity | Convention | Example |
+|--------|-----------|---------|
+| Applet entry points | `applet_NAME()` | `applet_cp()`, `applet_grep()` |
+| Internal helpers | `do_NAME()` | `do_copy_file()`, `do_sort_lines()` |
+| Parsers / accessors | `parse_NAME()`, `get_NAME()` | `parse_flags()`, `get_next_line()` |
+| Struct types | `name_t` suffix | `shell_ctx_t`, `strbuf_t`, `node_t` |
+| Macros | ALL_CAPS | `ARENA_BLOCK_SIZE`, `SHELL_MAX_CALL_DEPTH` |
+| File-level comment | `/* tool.c -- short description */` | first line of every .c file |
+
+### Return Values
+
+All public functions return `int` representing an exit code:
+- 0: success
+- 1 or greater: error (propagated as the process exit status)
+- 2: usage error (invalid arguments; print usage to stderr before returning)
+
+Shell builtins (`applet_*`) follow the same convention. Internal helpers that
+cannot fail return void. Functions that return pointers return NULL on failure
+and print to stderr before returning.
+
+### Memory
+
+- Per-command allocations use `arena_alloc()` from `src/util/arena.h`.
+- Long-lived allocations (module registry, fscache, sort lines) use `malloc()`.
+- Every `malloc()`/`realloc()` return is checked; NULL causes an error message
+  and exit(1) via `err_oom()` in `src/util/error.h`.
+- `strbuf_t` (`src/util/strbuf.h`) is used for all variable-length strings.
+  Direct `char[]` arrays with user-controlled sizes are forbidden.
+
+### Visibility
+
+All non-API symbols are compiled with `-fvisibility=hidden` in release builds.
+Symbols that must be visible across translation units are declared in their
+respective header files. Module `.so` exports must use `MATCHBOX_EXPORT`
+(defined in `matchbox_module.h`) to override hidden visibility.

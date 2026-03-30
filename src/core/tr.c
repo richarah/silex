@@ -1,3 +1,5 @@
+/* tr.c -- tr builtin: translate or delete characters */
+
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif

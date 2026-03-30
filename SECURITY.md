@@ -80,6 +80,30 @@ LDFLAGS_EXTRA = -pie
 ```
 These are not enabled by default because they conflict with `-static` linking.
 
+## Resource Exhaustion Caps
+
+matchbox enforces hard limits to prevent resource exhaustion from malicious or
+pathological inputs:
+
+| Resource | Limit | Location |
+|----------|-------|----------|
+| Shell function recursion depth | 1000 calls | `SHELL_MAX_CALL_DEPTH` in `shell.h` |
+| PATH lookup cache entries | 256 buckets (chained) | `sh->path_cache[256]` in `shell.h` |
+| Arena block size | 4096 bytes default | `ARENA_BLOCK_SIZE` in `arena.h` |
+| Pipeline stages | 255 | `exec_pipeline()` in `exec.c` |
+
+When the recursion limit is reached, the shell prints an error and returns exit
+code 1. No crash or stack overflow occurs.
+
+The PATH lookup cache is bounded by the number of distinct command names in the
+script (at most 256 buckets, chained). Cache entries are freed in `shell_free()`.
+
+## Signal Handling
+
+The shell ignores `SIGPIPE` (set to `SIG_IGN` in `shell_init`). Each child
+process restores `SIGPIPE` to `SIG_DFL` before `execv`. This matches the
+behaviour of bash and dash and prevents silent truncation of pipeline output.
+
 ## Reporting Vulnerabilities
 
 File a GitHub issue with the label `security`. For sensitive reports, email
@@ -88,6 +112,109 @@ the maintainer directly (see git log for contact). Please include:
 - Steps to reproduce
 - Expected vs actual behavior
 - Impact assessment
+
+## Static vs Dynamic Build Security
+
+The musl static build (`make release`) and the glibc dynamic build (`make release-glibc`)
+have different security profiles:
+
+| Property | musl static | glibc dynamic |
+|----------|------------|---------------|
+| LD_PRELOAD attack surface | None (static binary) | Present (same as any dynamically linked binary) |
+| ASLR | PIE: yes (-static-pie) | PIE: yes (-pie) |
+| Full RELRO | Yes (--gc-sections removes unneeded GOT entries) | Yes |
+| BIND_NOW | Yes (-z now) | Yes |
+| Non-executable stack | Yes (-z noexecstack) | Yes |
+| Stripped | Yes (make release strips -s) | Yes (make release-glibc strips -s) |
+| Dependency on host libc | None | Requires matching glibc version |
+
+For container images, the musl static build is preferred: it is fully self-contained,
+immune to LD_PRELOAD injection, and portable across any Linux kernel >= 3.17.
+
+The glibc build is suitable for development and for container base images that already
+include glibc (Debian, Ubuntu, RHEL, Alpine with glibc compatibility layer).
+
+Module libc tagging (`matchbox_module_t.libc`) prevents loading a musl-compiled .so
+into a glibc build and vice versa, avoiding subtle ABI mismatches.
+
+## Privilege Handling
+
+matchbox does not call `setuid()`, `setgid()`, `seteuid()`, or `setegid()`. It does
+not drop or acquire privileges at runtime.
+
+Specific tools that interact with ownership:
+
+- **install -o USER / -g GROUP**: calls `chown(2)` on the installed file. If the
+  process does not have `CAP_CHOWN`, the call fails and install returns exit code 1
+  with an error message. No silent skip.
+- **chmod**: calls `chmod(2)`. Fails with exit code 1 if the process lacks write
+  permission on the file. No silent skip.
+- **cp -p / mv**: preserves mode and timestamps via `chmod(2)` and `utimes(2)`.
+  Ownership preservation (`-p` chown) requires `CAP_CHOWN`; failure is non-fatal
+  (cp continues but reports the error).
+- **rm**: calls `unlink(2)` / `rmdir(2)`. Fails with exit code 1 if the process
+  lacks write permission on the containing directory.
+
+Recommendation: run matchbox as the same user as the container build process (typically
+root inside a container, or a dedicated build user). Do not run matchbox as a more
+privileged user than the build requires.
+
+## Environment Variable Handling
+
+matchbox reads the following environment variables:
+
+| Variable | Purpose | Security note |
+|----------|---------|---------------|
+| PATH | Command resolution with PATH lookup cache | Each directory is validated via `stat()` per lookup; no TOCTOU |
+| HOME | Tilde expansion (~) | Accepted as provided; no validation |
+| IFS | Word splitting in the shell | A hostile IFS affects expansion; this is expected POSIX behaviour |
+| PWD | Working directory hint | Overridden by `getcwd()` if inconsistent |
+| MATCHBOX_MODULE_PATH | Extra module search directory | Validated with same security checks as default module dir |
+| MATCHBOX_FSCACHE_TTL | Filesystem cache TTL in seconds | Validated as a non-negative integer; invalid values use the default |
+
+**LD_PRELOAD**: mitigated completely in the musl static build (static binaries ignore
+LD_PRELOAD). The glibc dynamic build is susceptible to LD_PRELOAD injection, which is
+the same risk as any other dynamically linked binary running inside the container.
+This is not a matchbox-specific vulnerability; it is a property of dynamic linking.
+
+**IFS safety**: the shell does not apply IFS splitting to literal (unquoted) command
+words; IFS only applies when `$variable` is expanded without quotes. A hostile
+`IFS='/'` could affect path splitting in scripts that use unquoted variable expansions.
+This matches the behaviour of dash, bash, and all POSIX shells.
+
+**PATH safety**: the PATH lookup cache (`path_cache[256]`, FNV-1a hashed) stores
+resolved binary paths. Cache entries are invalidated when the directory's mtime
+changes. Entries are verified with `stat()` at lookup time before `execv()`.
+
+matchbox is not a security boundary. It runs inside an already-sandboxed container
+build environment where the container runtime (Docker, containerd, etc.) provides
+the primary isolation.
+
+## Build Reproducibility
+
+The `release` and `release-glibc` targets produce reproducible output for identical
+source trees and compilers when `SOURCE_DATE_EPOCH` is set:
+
+```sh
+make release SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
+```
+
+Properties:
+
+- No `__DATE__` or `__TIME__` macros are used in `src/` (verified: `grep -r '__DATE__\|__TIME__' src/` returns no matches).
+- The `MATCHBOX_BUILD_DATE` macro is only defined when `SOURCE_DATE_EPOCH` is set,
+  so builds without it are not affected.
+- `--build-id=sha1` produces a content-based build ID: identical input produces
+  identical output on the same compiler.
+- Object files are deterministic: no embedded timestamps.
+
+To verify reproducibility:
+```sh
+B1=$(make release SOURCE_DATE_EPOCH=1700000000 2>/dev/null && sha256sum build/bin/matchbox)
+make clean
+B2=$(make release SOURCE_DATE_EPOCH=1700000000 2>/dev/null && sha256sum build/bin/matchbox)
+[ "$B1" = "$B2" ] && echo "Reproducible" || echo "NOT reproducible"
+```
 
 ## Audit Checklist
 

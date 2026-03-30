@@ -1,3 +1,5 @@
+/* install.c -- install builtin: copy files and set attributes */
+
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif

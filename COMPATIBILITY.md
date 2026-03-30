@@ -7,6 +7,31 @@ Notes = known differences.
 
 Legend: Y = supported, N = not supported, - = not applicable
 
+## Locale and Character Encoding
+
+matchbox operates in the **C/POSIX locale** for all text processing operations
+(grep, sed, sort, tr, wc). This matches the expected behaviour in container build
+environments where locale-sensitive collation or multi-byte character handling
+is not required.
+
+Implications:
+- `sort` collates by raw byte value (C locale), not locale-aware Unicode order.
+- `grep`/`sed` character classes (`[[:alpha:]]`, etc.) match ASCII only.
+- `wc -m` counts bytes, not Unicode code points.
+- `tr` operates on single bytes; multi-byte sequences are passed through unchanged.
+
+If locale-aware text processing is required, invoke the system `sort`/`grep`/etc.
+via an external command or install a locale module (v0.3.0 roadmap).
+
+## POSIX Utility Conventions
+
+All matchbox builtins implement the following POSIX utility conventions:
+- **`--`**: ends option processing; remaining arguments are operands (all tools)
+- **`-` as stdin**: tools that read file arguments accept `-` to mean standard input
+  (cat, grep, sed, sort, wc, head, tail)
+- **Combined flags**: single-character options may be combined (e.g. `-rf`, `-nv`)
+  for all tools that take single-character flags
+
 ## Shell (sh)
 
 | Feature | POSIX | GNU/bash | matchbox | Notes |
@@ -236,3 +261,49 @@ All POSIX-specified flags are supported. Common GNU extensions are
 supported. Unusual GNU flags fall through to the external tool via PATH.
 
 See source files in src/core/ for full flag details.
+
+## Exit Status Reference
+
+POSIX exit status codes for all 27 builtins. "Usage error" means invalid flags
+or missing required arguments; the tool prints a message to stderr and exits 2.
+
+| Tool | 0 (success) | 1 (general error) | 2 (usage/fatal) | Notes |
+|------|-------------|-------------------|-----------------|-------|
+| sh | last command exit status | command failed | shell option error | set -e propagates |
+| echo | always 0 | n/a | n/a | |
+| printf | formatted output written | write error | bad format | |
+| mkdir | directory created | mkdir(2) failed | bad arguments | |
+| cp | all copies succeeded | copy failed | bad arguments | -i denial is not an error |
+| mv | rename succeeded | rename/copy failed | bad arguments | cross-device uses copy+unlink |
+| rm | all removes succeeded | unlink/rmdir failed | bad arguments | rm -rf always 0 unless denied |
+| ln | link created | link(2) failed | bad arguments | |
+| chmod | mode changed | chmod(2) failed | bad arguments / bad mode | |
+| touch | timestamps updated | utimes(2) failed | bad arguments | creates file if absent |
+| install | installed successfully | copy/chown failed | bad arguments | |
+| cat | all files written | read/write error | bad arguments | |
+| head | output written | read error | bad arguments | |
+| tail | output written | read error | bad arguments | |
+| wc | counts printed | read error | bad arguments | |
+| sort | output written | read/write error | bad arguments | |
+| grep | 0 = match found | 1 = no match | 2 = read/compile error | POSIX: 0/1/2 |
+| sed | output written | script error | bad arguments / bad expression | |
+| find | traversal complete | stat/opendir error | bad arguments | |
+| xargs | all commands completed | command returned non-zero | bad arguments | |
+| basename | result printed | n/a | bad arguments | |
+| dirname | result printed | n/a | bad arguments | |
+| readlink | target printed | readlink(2) failed | bad arguments | |
+| stat | info printed | stat(2) failed | bad arguments | |
+| date | date printed | strftime failed | bad arguments | |
+| cut | output written | read error | bad arguments | |
+| tr | translation written | read/write error | bad arguments | |
+
+**grep exit codes** match POSIX strictly: 0 if any line matched, 1 if no line matched,
+2 if an error occurred (file not found, bad pattern, etc.). This differs from GNU grep
+only in that matchbox grep does not use exit code 2 for `--quiet` suppression.
+
+**Shell (sh) exit codes**: the shell exits with the exit status of the last command
+executed. With `set -e`, the shell exits immediately when any command exits non-zero
+(subject to the `in_cond` and `and_or_exempt` exceptions documented in the source).
+
+**rm -rf on non-existent paths**: returns 0 (same as GNU rm -f behaviour). The `-f`
+flag suppresses "no such file" errors.

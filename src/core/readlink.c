@@ -1,3 +1,5 @@
+/* readlink.c -- readlink builtin: print resolved symbolic link or canonical file name */
+
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
