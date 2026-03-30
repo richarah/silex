@@ -95,6 +95,9 @@ int shell_init(shell_ctx_t *sh, int argc, char **argv)
         sh->positional[0] = NULL;
     }
 
+    /* Import all environment variables (as exported shell variables) */
+    vars_import_env(&sh->vars);
+
     /* Set default shell variables */
     const char *path = getenv("PATH");
     if (path)

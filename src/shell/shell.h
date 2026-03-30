@@ -40,6 +40,7 @@ typedef struct shell_ctx {
     void       *funcs[256];  /* var_entry_t* array for func lookup */
     pid_t       last_bg_pid; /* $! */
     int         call_depth;  /* function call nesting depth (recursion guard) */
+    int         break_level; /* for break N / continue N; 0 = normal */
     /* PATH resolution cache: command name → resolved absolute path.
      * Invalidated (path_cache_hash reset) when PATH changes. */
     void       *path_cache[256];  /* path_cache_entry_t*, open-addressing by FNV-1a */

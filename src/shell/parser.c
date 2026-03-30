@@ -322,9 +322,14 @@ static node_t *parse_simple_command(parser_t *p)
     for (;;) {
         token_t t = peek(p);
 
-        if (t.type == TOK_ASSIGN && !seen_cmd_word) {
+        if (t.type == TOK_ASSIGN) {
             consume(p);
-            wl_push(&assigns, t.text);
+            if (!seen_cmd_word) {
+                wl_push(&assigns, t.text);
+            } else {
+                /* After cmd word (e.g. `local x=5`, `export X=val`): treat as arg */
+                wl_push(&words, t.text);
+            }
             continue;
         }
 
@@ -446,6 +451,15 @@ static node_t *parse_if_cmd(parser_t *p)
         if (!else_b || p->error) return NULL;
     }
 
+    /* Attach else_b to the last node in elif_chain (not the root if-node) */
+    if (elif_chain && else_b) {
+        node_t *cur = elif_chain;
+        while (cur->u.if_node.elif_chain)
+            cur = cur->u.if_node.elif_chain;
+        cur->u.if_node.else_b = else_b;
+        else_b = NULL;  /* root node gets NULL */
+    }
+
     expect(p, TOK_FI, "expected 'fi'");
     if (p->error) return NULL;
 
@@ -517,10 +531,12 @@ static node_t *parse_for_cmd(parser_t *p)
     char       *var   = var_tok.text;
     word_list_t words;
     wl_init(&words);
+    int saw_in = 0;
 
     /* Optional: IN word-list */
     skip_newlines(p);
     if (peek(p).type == TOK_IN) {
+        saw_in = 1;
         consume(p); /* IN */
         while (peek(p).type == TOK_WORD) {
             token_t w = consume(p);
@@ -544,7 +560,8 @@ static node_t *parse_for_cmd(parser_t *p)
 
     node_t *n           = alloc_node(p, N_FOR);
     n->u.for_node.var   = var;
-    n->u.for_node.words = wl_to_arena(p, &words);
+    /* NULL words means "no in clause" (iterate $@); non-NULL means explicit list */
+    n->u.for_node.words = saw_in ? wl_to_arena(p, &words) : NULL;
     n->u.for_node.body  = body;
     wl_free(&words);
     return n;
@@ -762,24 +779,26 @@ static node_t *parse_command(parser_t *p)
             /* Collect optional trailing redirects */
             redir_t  *rhead = NULL;
             redir_t **rtail = &rhead;
-            while (is_redir_op(peek(p).type) ||
-                   (peek(p).type == TOK_WORD &&
-                    try_io_number(peek(p).text, lexer_peek(p->lexer).type) >= 0)) {
+            for (;;) {
+                token_t t = peek(p);
                 int fd = -1;
-                if (peek(p).type == TOK_WORD) {
+                if (is_redir_op(t.type)) {
+                    /* direct redirect op: use default fd */
+                } else if (t.type == TOK_WORD) {
+                    /* might be io-number: consume and check next */
                     token_t w = consume(p);
                     fd = try_io_number(w.text, peek(p).type);
-                    if (fd < 0) {
-                        /* Not an io number after all — error */
-                        parser_error(p, "unexpected word after compound command");
-                        return NULL;
-                    }
+                    if (fd < 0)
+                        break; /* not an io number; stop collecting */
+                } else {
+                    break;
                 }
                 redir_t *r = parse_redirect(p, fd);
                 if (r && !p->error) {
                     *rtail = r;
                     rtail  = &r->next;
                 }
+                if (p->error) break;
             }
             if (rhead) {
                 node_t *wrap              = alloc_node(p, N_REDIR);
@@ -838,9 +857,13 @@ static node_t *parse_command(parser_t *p)
             for (;;) {
                 token_t cur = peek(p);
 
-                if (cur.type == TOK_ASSIGN && words.count == 0) {
+                if (cur.type == TOK_ASSIGN) {
                     consume(p);
-                    wl_push(&assigns, cur.text);
+                    if (words.count == 0) {
+                        wl_push(&assigns, cur.text);
+                    } else {
+                        wl_push(&words, cur.text);
+                    }
                     continue;
                 }
 
@@ -1045,7 +1068,7 @@ node_t *parser_parse(parser_t *p)
     }
     if (peek(p).type == TOK_EOF)
         return NULL;
-    return parse_and_or(p);
+    return parse_list(p);
 }
 
 /* Parse a complete program (list until EOF) */

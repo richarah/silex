@@ -649,8 +649,13 @@ static size_t dedup_lines(line_t *lines, size_t n)
     if (n == 0) return 0;
     size_t out = 1;
     for (size_t k = 1; k < n; k++) {
-        /* compare_lines returns 0 for equal keys */
-        int rc = compare_lines(&lines[k], &lines[out - 1]);
+        /* Compare by keys only, not by idx (stable-sort tiebreaker).
+         * Setting both idx to the same value neutralises the tiebreaker
+         * without duplicating the key-comparison logic. */
+        line_t a = lines[k];
+        line_t b = lines[out - 1];
+        a.idx = b.idx = 0;
+        int rc = compare_lines(&a, &b);
         if (rc != 0) {
             lines[out++] = lines[k];
         } else {

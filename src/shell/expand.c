@@ -49,6 +49,7 @@ static const char *sh_getvar(shell_ctx_t *sh, const char *name)
             snprintf(buf, sizeof(buf), "%ld", (long)getpid());
             return arena_strdup(&sh->parse_arena, buf);
         case '!':
+            if (sh->last_bg_pid == 0) return "";
             snprintf(buf, sizeof(buf), "%ld", (long)sh->last_bg_pid);
             return arena_strdup(&sh->parse_arena, buf);
         case '#':
@@ -87,10 +88,17 @@ static const char *sh_getvar(shell_ctx_t *sh, const char *name)
         }
     }
 
-    /* $1 .. $9 */
-    if (name[0] >= '1' && name[0] <= '9' && name[1] == '\0') {
-        int idx = name[0] - '0';
-        if (idx <= sh->positional_n)
+    /* $1 .. $9 and ${10}, ${11}, ... */
+    if (name[0] >= '1' && name[0] <= '9') {
+        if (name[1] == '\0') {
+            int idx = name[0] - '0';
+            if (idx <= sh->positional_n)
+                return sh->positional[idx - 1];
+            return NULL;
+        }
+        /* multi-digit: ${10}, ${11}, ... */
+        int idx = atoi(name);
+        if (idx > 0 && idx <= sh->positional_n)
             return sh->positional[idx - 1];
         return NULL;
     }
@@ -230,7 +238,8 @@ static int has_unquoted_expansion(const char *word)
         if (*p == '\\' && !in_sq) { p++; if (!*p) break; continue; }
         if (*p == '\'' && !in_dq) { in_sq = !in_sq; continue; }
         if (*p == '"'  && !in_sq) { in_dq = !in_dq; continue; }
-        if (!in_sq && (*p == '$' || *p == '`')) return 1;
+        /* Expansion is "unquoted" (subject to IFS splitting) only outside all quotes */
+        if (!in_sq && !in_dq && (*p == '$' || *p == '`')) return 1;
     }
     return 0;
 }
@@ -466,6 +475,7 @@ static char *cmd_subst(shell_ctx_t *sh, const char *cmd)
 {
     /* Create a pipe */
     int pipefd[2];
+    fflush(NULL);   /* flush all buffers before fork so child doesn't inherit pending output */
     if (pipe(pipefd) < 0) {
         perror("pipe");
         return arena_strdup(&sh->parse_arena, "");
@@ -488,7 +498,11 @@ static char *cmd_subst(shell_ctx_t *sh, const char *cmd)
         /* Run the command in a sub-shell */
         shell_ctx_t sub;
         shell_init(&sub, 0, NULL);
-        sub.vars   = sh->vars;   /* inherit vars */
+        sub.vars         = sh->vars;    /* inherit vars */
+        sub.positional   = sh->positional;
+        sub.positional_n = sh->positional_n;
+        sub.script_name  = sh->script_name;
+        memcpy(sub.funcs, sh->funcs, sizeof(sh->funcs)); /* inherit functions */
         shell_run_string(&sub, cmd);
         int ex = sub.last_exit;
         shell_free(&sub);
@@ -831,9 +845,17 @@ static void expand_into(shell_ctx_t *sh, const char *word, strbuf_t *out,
 
             /* $@ and $* — positional list */
             if (*p == '@' || *p == '*') {
-                char spec[2] = { *p, '\0' };
-                const char *v = sh_getvar(sh, spec);
-                if (v) sb_append(out, v);
+                if (*p == '@' && in_dquote) {
+                    /* "$@": each positional as a separate word; use \x01 boundary */
+                    for (int pi = 0; pi < sh->positional_n; pi++) {
+                        if (pi > 0) sb_appendc(out, '\x01');
+                        sb_append(out, sh->positional[pi]);
+                    }
+                } else {
+                    char spec[2] = { *p, '\0' };
+                    const char *v = sh_getvar(sh, spec);
+                    if (v) sb_append(out, v);
+                }
                 p++;
                 continue;
             }
@@ -942,6 +964,37 @@ expand_result_t expand_word_full(shell_ctx_t *sh, const char *word)
         arr[0] = NULL;
         res.words = arr;
         return res;
+    }
+
+    /* "$@" word-boundary split: \x01 markers inserted by expand_into for "$@" */
+    if (strchr(expanded, '\x01')) {
+        char *copy2 = strdup(expanded);
+        if (copy2) {
+            int cap2 = 4, n2 = 0;
+            char **f2 = malloc((size_t)cap2 * sizeof(char *));
+            char *tok2 = copy2, *cp2 = copy2;
+            while (*cp2) {
+                if (*cp2 == '\x01') {
+                    *cp2 = '\0';
+                    if (n2 >= cap2) { cap2 *= 2; f2 = realloc(f2, (size_t)cap2 * sizeof(char *)); }
+                    if (f2) f2[n2++] = arena_strdup(&sh->parse_arena, tok2);
+                    tok2 = cp2 + 1;
+                }
+                cp2++;
+            }
+            if (f2) {
+                if (n2 >= cap2) { cap2 *= 2; f2 = realloc(f2, (size_t)cap2 * sizeof(char *)); }
+                if (f2) f2[n2++] = arena_strdup(&sh->parse_arena, tok2);
+                char **arr = arena_alloc(&sh->parse_arena, (size_t)(n2 + 1) * sizeof(char *));
+                for (int i = 0; i < n2; i++) arr[i] = f2[i];
+                arr[n2] = NULL;
+                res.words = arr;
+                res.count = n2;
+                free(f2);
+            }
+            free(copy2);
+            if (res.words) return res;
+        }
     }
 
     /* Field splitting on IFS — only for words containing unquoted expansions.

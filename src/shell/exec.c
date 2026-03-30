@@ -177,6 +177,19 @@ static node_t *func_lookup(shell_ctx_t *sh, const char *name)
     return NULL;
 }
 
+static void func_unregister(shell_ctx_t *sh, const char *name)
+{
+    unsigned int idx = func_hash(name);
+    func_entry_t **pp = (func_entry_t **)&sh->funcs[idx];
+    while (*pp) {
+        if (strcmp((*pp)->name, name) == 0) {
+            *pp = (*pp)->next;   /* unlink (arena-allocated; not freed) */
+            return;
+        }
+        pp = &(*pp)->next;
+    }
+}
+
 /* -------------------------------------------------------------------------
  * PATH lookup cache (F-03)
  * Maps command name → resolved absolute path.
@@ -299,30 +312,57 @@ static char *path_resolve(shell_ctx_t *sh, const char *name,
 
 int exec_simple_cmd(shell_ctx_t *sh, char **words, char **assigns, redir_t *redirs)
 {
-    /* 1. Apply variable assignments */
-    if (assigns) {
-        for (int i = 0; assigns[i]; i++) {
+    /* 1. Expand + apply variable assignments.
+     * When no command follows, set in shell scope (normal assignment).
+     * When a command follows, set in environment only (env-prefix), cleaned up after. */
+    int assign_err = 0;
+    int nassigns = 0;
+    if (assigns) while (assigns[nassigns]) nassigns++;
+
+    /* Expand all assign values up front */
+    char **anames = NULL, **avals = NULL;
+    if (nassigns > 0) {
+        anames = malloc((size_t)nassigns * sizeof(char *));
+        avals  = malloc((size_t)nassigns * sizeof(char *));
+        for (int i = 0; i < nassigns; i++) {
             const char *eq = strchr(assigns[i], '=');
-            if (!eq) continue;
+            if (!eq) { anames[i] = NULL; avals[i] = NULL; continue; }
             size_t nlen = (size_t)(eq - assigns[i]);
-            char *name  = strndup(assigns[i], nlen);
-            char *val   = expand_word(sh, eq + 1);
-            if (name) {
-                vars_set(&sh->vars, name, val ? val : "");
-                free(name);
-            }
+            anames[i] = strndup(assigns[i], nlen);
+            avals[i]  = expand_word(sh, eq + 1);
         }
     }
 
-    /* If no command words, just the assignments — done */
-    if (unlikely(!words || !words[0]))
-        return 0;
+    /* If no command words, apply to shell scope */
+    if (unlikely(!words || !words[0])) {
+        for (int i = 0; i < nassigns; i++) {
+            if (!anames[i]) continue;
+            if (vars_set(&sh->vars, anames[i], avals[i] ? avals[i] : "") != 0)
+                assign_err = 1;
+            free(anames[i]);
+        }
+        free(anames); free(avals);
+        if (redirs) {
+            redirect_ctx_t rctx = {NULL, 0};
+            redirect_apply(sh, redirs, &rctx);
+            redirect_restore(&rctx);
+        }
+        return assign_err;
+    }
+
+    /* With command: set env temporarily (will be cleaned up after command) */
+    for (int i = 0; i < nassigns; i++) {
+        if (anames[i])
+            setenv(anames[i], avals[i] ? avals[i] : "", 1);
+    }
 
     /* 2. Expand all words */
     char **expanded = expand_words(sh, words);
+    int cmd_rc = 0;
     if (unlikely(!expanded || !expanded[0]))
-        return 0;
+        goto cmd_done;
 
+    {
     const char *cmd = expanded[0];
 
     /* Count argc */
@@ -336,30 +376,19 @@ int exec_simple_cmd(shell_ctx_t *sh, char **words, char **assigns, redir_t *redi
         rctx.saved = NULL;
         rctx.error = 0;
         if (redirs) redirect_apply(sh, redirs, &rctx);
-        int rc = sfn(sh, argc, expanded);
+        cmd_rc = sfn(sh, argc, expanded);
         if (redirs) redirect_restore(&rctx);
-        return rc;
+        goto cmd_done;
     }
 
-    /* 4. Check for applet (run in-process, apply redirects) */
-    const applet_t *ap = find_applet_by_name(cmd);
-    if (ap) {
-        redirect_ctx_t rctx;
-        rctx.saved = NULL;
-        rctx.error = 0;
-        if (redirs) redirect_apply(sh, redirs, &rctx);
-        int rc = ap->fn(argc, expanded);
-        if (redirs) redirect_restore(&rctx);
-        return rc;
-    }
-
-    /* 5. Check for shell function */
+    /* 4. Check for shell function (user-defined functions override applets) */
     node_t *fnbody = func_lookup(sh, cmd);
     if (fnbody) {
         if (sh->call_depth >= SHELL_MAX_CALL_DEPTH) {
             fprintf(stderr, "matchbox: sh: %s: maximum call depth (%d) exceeded\n",
                     cmd, SHELL_MAX_CALL_DEPTH);
-            return 1;
+            cmd_rc = 1;
+            goto cmd_done;
         }
 
         redirect_ctx_t rctx;
@@ -376,7 +405,7 @@ int exec_simple_cmd(shell_ctx_t *sh, char **words, char **assigns, redir_t *redi
 
         vars_push_scope(&sh->vars);
         sh->call_depth++;
-        int rc = exec_node(sh, fnbody);
+        cmd_rc = exec_node(sh, fnbody);
         sh->call_depth--;
         vars_pop_scope(&sh->vars);
 
@@ -386,8 +415,41 @@ int exec_simple_cmd(shell_ctx_t *sh, char **words, char **assigns, redir_t *redi
         if (redirs) redirect_restore(&rctx);
 
         /* Absorb FLOW_RETURN */
-        if (rc == FLOW_RETURN) rc = sh->last_exit;
-        return rc;
+        if (cmd_rc == FLOW_RETURN) cmd_rc = sh->last_exit;
+        goto cmd_done;
+    }
+
+    /* 5. Check for applet (run in-process, apply redirects) */
+    const applet_t *ap = find_applet_by_name(cmd);
+    if (ap) {
+        /* 'sh' applet may call exit(); run it in a fork so the parent survives.
+         * Also exports vars so they are visible to the sub-shell. */
+        if (strcmp(cmd, "sh") == 0) {
+            fflush(NULL);
+            pid_t apid = fork();
+            if (apid < 0) { perror("fork"); cmd_rc = 1; goto cmd_done; }
+            if (apid == 0) {
+                redirect_ctx_t rctx2 = {NULL, 0};
+                if (redirs) redirect_apply(sh, redirs, &rctx2);
+                vars_export_env(&sh->vars);
+                int aret = ap->fn(argc, expanded);
+                fflush(NULL);
+                _exit(aret);
+            }
+            int astatus;
+            while (waitpid(apid, &astatus, 0) < 0 && errno == EINTR) {}
+            if (WIFEXITED(astatus)) cmd_rc = WEXITSTATUS(astatus);
+            else if (WIFSIGNALED(astatus)) cmd_rc = 128 + WTERMSIG(astatus);
+            else cmd_rc = 1;
+            goto cmd_done;
+        }
+        redirect_ctx_t rctx;
+        rctx.saved = NULL;
+        rctx.error = 0;
+        if (redirs) redirect_apply(sh, redirs, &rctx);
+        cmd_rc = ap->fn(argc, expanded);
+        if (redirs) redirect_restore(&rctx);
+        goto cmd_done;
     }
 
     /* 6. External command: resolve PATH in parent, fork + execv */
@@ -413,13 +475,15 @@ int exec_simple_cmd(shell_ctx_t *sh, char **words, char **assigns, redir_t *redi
     if (!exec_path) {
         fprintf(stderr, "matchbox: %s: command not found\n", cmd);
         sh->last_exit = 127;
-        return 127;
+        cmd_rc = 127;
+        goto cmd_done;
     }
 
     pid_t pid = fork();
     if (unlikely(pid < 0)) {
         perror("fork");
-        return 1;
+        cmd_rc = 1;
+        goto cmd_done;
     }
 
     if (pid == 0) {
@@ -440,18 +504,30 @@ int exec_simple_cmd(shell_ctx_t *sh, char **words, char **assigns, redir_t *redi
     }
 
     /* Parent */
+    {
     int status;
     waitpid(pid, &status, 0);
-    int rc;
     if (WIFEXITED(status))
-        rc = WEXITSTATUS(status);
+        cmd_rc = WEXITSTATUS(status);
     else if (WIFSIGNALED(status))
-        rc = 128 + WTERMSIG(status);
+        cmd_rc = 128 + WTERMSIG(status);
     else
-        rc = 1;
+        cmd_rc = 1;
+    sh->last_exit = cmd_rc;
+    }
+    } /* end command dispatch block */
 
-    sh->last_exit = rc;
-    return rc;
+cmd_done:
+    /* Clean up env-prefix assigns: unsetenv + free */
+    for (int i = 0; i < nassigns; i++) {
+        if (anames[i]) {
+            unsetenv(anames[i]);
+            free(anames[i]);
+        }
+    }
+    free(anames);
+    free(avals);
+    return cmd_rc;
 }
 
 /* -------------------------------------------------------------------------
@@ -644,6 +720,7 @@ int exec_node(shell_ctx_t *sh, node_t *node)
 
     case N_SEQ: {
         rc = exec_node(sh, node->u.binary.left);
+        if (rc >= FLOW_BREAK) break;   /* propagate flow control; don't touch last_exit */
         sh->last_exit = rc;
         int seq_exempt = sh->and_or_exempt;
         sh->and_or_exempt = 0;
@@ -733,8 +810,14 @@ int exec_node(shell_ctx_t *sh, node_t *node)
             sh->in_cond = save_cond;
             if (cond != 0) break;
             rc = exec_node(sh, node->u.loop.body);
-            if (rc == FLOW_BREAK)    { rc = 0; break; }
-            if (rc == FLOW_CONTINUE) { rc = 0; continue; }
+            if (rc == FLOW_BREAK) {
+                if (sh->break_level > 0) { sh->break_level--; break; }
+                rc = 0; break;
+            }
+            if (rc == FLOW_CONTINUE) {
+                if (sh->break_level > 0) { sh->break_level--; break; }
+                rc = 0; continue;
+            }
             if (sh->opt_e && rc != 0) break;
         }
         break;
@@ -749,21 +832,43 @@ int exec_node(shell_ctx_t *sh, node_t *node)
             sh->in_cond = save_cond;
             if (cond == 0) break;
             rc = exec_node(sh, node->u.loop.body);
-            if (rc == FLOW_BREAK)    { rc = 0; break; }
-            if (rc == FLOW_CONTINUE) { rc = 0; continue; }
+            if (rc == FLOW_BREAK) {
+                if (sh->break_level > 0) { sh->break_level--; break; }
+                rc = 0; break;
+            }
+            if (rc == FLOW_CONTINUE) {
+                if (sh->break_level > 0) { sh->break_level--; break; }
+                rc = 0; continue;
+            }
             if (sh->opt_e && rc != 0) break;
         }
         break;
     }
 
     case N_FOR: {
-        char **wlist = expand_words(sh, node->u.for_node.words);
+        char **wlist;
+        if (node->u.for_node.words) {
+            wlist = expand_words(sh, node->u.for_node.words);
+        } else {
+            /* `for x; do` with no `in` clause: iterate $@ */
+            wlist = arena_alloc(&sh->parse_arena,
+                                (size_t)(sh->positional_n + 1) * sizeof(char *));
+            for (int i = 0; i < sh->positional_n; i++)
+                wlist[i] = sh->positional[i];
+            wlist[sh->positional_n] = NULL;
+        }
         rc = 0;
         for (int i = 0; wlist && wlist[i]; i++) {
             vars_set(&sh->vars, node->u.for_node.var, wlist[i]);
             rc = exec_node(sh, node->u.for_node.body);
-            if (rc == FLOW_BREAK)    { rc = 0; break; }
-            if (rc == FLOW_CONTINUE) { rc = 0; continue; }
+            if (rc == FLOW_BREAK) {
+                if (sh->break_level > 0) { sh->break_level--; break; }
+                rc = 0; break;
+            }
+            if (rc == FLOW_CONTINUE) {
+                if (sh->break_level > 0) { sh->break_level--; break; }
+                rc = 0; continue;
+            }
             if (sh->opt_e && rc != 0) break;
         }
         break;
@@ -810,7 +915,8 @@ int exec_node(shell_ctx_t *sh, node_t *node)
         break;
     }
 
-    sh->last_exit = rc;
+    if (rc < FLOW_BREAK)
+        sh->last_exit = rc;
     return rc;
 }
 
@@ -847,9 +953,11 @@ static int exec_builtin_exit(shell_ctx_t *sh, int argc, char **argv)
 
 static int exec_builtin_set(shell_ctx_t *sh, int argc, char **argv)
 {
-    for (int i = 1; i < argc; i++) {
+    int i;
+    for (i = 1; i < argc; i++) {
         const char *arg = argv[i];
-        if (arg[0] == '-') {
+        if (arg[0] == '-' && arg[1] != '\0') {
+            if (arg[1] == '-' && arg[2] == '\0') { i++; break; } /* -- */
             for (int k = 1; arg[k]; k++) {
                 switch (arg[k]) {
                 case 'e': sh->opt_e = 1; break;
@@ -858,17 +966,14 @@ static int exec_builtin_set(shell_ctx_t *sh, int argc, char **argv)
                 case 'f': sh->opt_f = 1; break;
                 case 'n': sh->opt_n = 1; break;
                 case 'o':
-                    /* -o pipefail */
-                    if (i + 1 < argc && strcmp(argv[i + 1], "pipefail") == 0) {
-                        sh->opt_pipefail = 1;
-                        i++;
+                    if (i + 1 < argc && strcmp(argv[i+1], "pipefail") == 0) {
+                        sh->opt_pipefail = 1; i++;
                     }
                     break;
-                case '-': goto set_done;
-                default:  break;
+                default: break;
                 }
             }
-        } else if (arg[0] == '+') {
+        } else if (arg[0] == '+' && arg[1] != '\0') {
             for (int k = 1; arg[k]; k++) {
                 switch (arg[k]) {
                 case 'e': sh->opt_e = 0; break;
@@ -877,20 +982,27 @@ static int exec_builtin_set(shell_ctx_t *sh, int argc, char **argv)
                 case 'f': sh->opt_f = 0; break;
                 case 'n': sh->opt_n = 0; break;
                 case 'o':
-                    if (i + 1 < argc && strcmp(argv[i + 1], "pipefail") == 0) {
-                        sh->opt_pipefail = 0;
-                        i++;
+                    if (i + 1 < argc && strcmp(argv[i+1], "pipefail") == 0) {
+                        sh->opt_pipefail = 0; i++;
                     }
                     break;
-                default:  break;
+                default: break;
                 }
             }
         } else {
-            /* set positional parameters: set -- a b c */
-            break;
+            break; /* first non-flag arg: positionals start here */
         }
     }
-set_done:
+    /* i now points to first positional arg (or argc if none given) */
+    if (i < argc) {
+        int n = argc - i;
+        char **pos = arena_alloc(&sh->parse_arena, (size_t)(n + 1) * sizeof(char *));
+        for (int j = 0; j < n; j++)
+            pos[j] = argv[i + j];
+        pos[n] = NULL;
+        sh->positional   = pos;
+        sh->positional_n = n;
+    }
     return 0;
 }
 
@@ -918,9 +1030,27 @@ static int exec_builtin_export(shell_ctx_t *sh, int argc, char **argv)
 
 static int exec_builtin_unset(shell_ctx_t *sh, int argc, char **argv)
 {
-    for (int i = 1; i < argc; i++)
-        vars_unset(&sh->vars, argv[i]);
-    return 0;
+    int func_mode = 0;
+    int i;
+    for (i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--") == 0) { i++; break; }
+        if (argv[i][0] == '-') {
+            for (const char *p = argv[i] + 1; *p; p++) {
+                if (*p == 'f') func_mode = 1;
+                else if (*p == 'v') func_mode = 0;
+            }
+        } else {
+            break;
+        }
+    }
+    int rc = 0;
+    for (; i < argc; i++) {
+        if (func_mode)
+            func_unregister(sh, argv[i]);
+        else if (vars_unset(&sh->vars, argv[i]) != 0)
+            rc = 1;
+    }
+    return rc;
 }
 
 static int exec_builtin_readonly(shell_ctx_t *sh, int argc, char **argv)
@@ -1314,15 +1444,17 @@ static int exec_builtin_source(shell_ctx_t *sh, int argc, char **argv)
 
 static int exec_builtin_break(shell_ctx_t *sh, int argc, char **argv)
 {
-    (void)argc; (void)argv;
-    (void)sh;
+    int n = (argc >= 2) ? atoi(argv[1]) : 1;
+    if (n < 1) n = 1;
+    sh->break_level = n - 1;  /* loops decrement; propagate if > 0 */
     return FLOW_BREAK;
 }
 
 static int exec_builtin_continue(shell_ctx_t *sh, int argc, char **argv)
 {
-    (void)argc; (void)argv;
-    (void)sh;
+    int n = (argc >= 2) ? atoi(argv[1]) : 1;
+    if (n < 1) n = 1;
+    sh->break_level = n - 1;
     return FLOW_CONTINUE;
 }
 

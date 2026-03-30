@@ -480,11 +480,14 @@ static token_t make_tok(lexer_t *l, tok_type_t type)
     return t;
 }
 
-static token_t make_word_tok(lexer_t *l, int quoted)
+static token_t make_word_tok(lexer_t *l, int quoted, int has_unquoted_assign)
 {
     token_t t;
-    /* Determine type */
-    if (!quoted && is_assignment(l->wordbuf)) {
+    /* Determine type:
+     * - Assignment if NAME= prefix was unquoted (value may be quoted)
+     * - Reserved word only if entirely unquoted
+     * - Otherwise a plain word */
+    if (has_unquoted_assign && is_assignment(l->wordbuf)) {
         t.type = TOK_ASSIGN;
     } else if (!quoted) {
         tok_type_t rw = check_reserved(l->wordbuf);
@@ -653,7 +656,8 @@ restart:
 
     /* Word token: collect characters */
     wordbuf_reset(l);
-    int quoted = 0;  /* 1 if any quoting was used */
+    int quoted = 0;            /* 1 if any quoting was used */
+    int has_unquoted_assign = 0; /* 1 if NAME= prefix was seen unquoted */
 
     for (;;) {
         if (c == '\'') {
@@ -723,6 +727,19 @@ restart:
                 lexer_ungetc(l, c);
                 break;
             }
+            /* Detect NAME= in unquoted context for assignment recognition:
+             * wordbuf currently holds the NAME part (before appending '=') */
+            if (c == '=' && !quoted && !has_unquoted_assign &&
+                l->wordbuf_len > 0 &&
+                is_alpha_underscore((unsigned char)l->wordbuf[0])) {
+                int all_name = 1;
+                for (size_t ni = 1; ni < l->wordbuf_len; ni++) {
+                    if (!is_name_char((unsigned char)l->wordbuf[ni])) {
+                        all_name = 0; break;
+                    }
+                }
+                if (all_name) has_unquoted_assign = 1;
+            }
             wordbuf_append(l, (char)c);
         }
 
@@ -735,7 +752,7 @@ restart:
         goto restart;
     }
 
-    token_t t = make_word_tok(l, quoted);
+    token_t t = make_word_tok(l, quoted, has_unquoted_assign);
     t.lineno  = start_lineno;
     return t;
 }

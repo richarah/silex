@@ -66,6 +66,33 @@ run_test() {
     fi
 }
 
+run_test_exitcode() {
+    local desc="$1"
+    local mb_cmd="$2"
+    local ref_cmd="$3"
+    local tool_name="${4:-}"
+
+    if [ -n "$TOOL" ] && [ -n "$tool_name" ] && [ "$tool_name" != "$TOOL" ]; then
+        return
+    fi
+
+    TOTAL=$((TOTAL + 1))
+
+    eval "$MATCHBOX $mb_cmd" > /dev/null 2>&1
+    local exit_got=$?
+    eval "$ref_cmd" > /dev/null 2>&1
+    local exit_expected=$?
+
+    if [ "$exit_got" = "$exit_expected" ]; then
+        echo "ok $TOTAL - $desc"
+        PASS=$((PASS + 1))
+    else
+        echo "not ok $TOTAL - $desc"
+        echo "  # Expected exit=$exit_expected, got exit=$exit_got"
+        FAIL=$((FAIL + 1))
+    fi
+}
+
 skip_test() {
     local desc="$1"
     TOTAL=$((TOTAL + 1))
@@ -125,7 +152,8 @@ run_test "mkdir: -p existing (no error)" \
     "mkdir"
 
 # Exit code for mkdir on existing dir without -p
-run_test "mkdir: existing dir without -p exits nonzero" \
+# (paths differ between compat and ref dirs, so only exit code is compared)
+run_test_exitcode "mkdir: existing dir without -p exits nonzero" \
     "mkdir $T/compat_mk2" \
     "mkdir $T/ref_mk2" \
     "mkdir"
@@ -144,7 +172,8 @@ run_test "cp: overwrite destination" \
     "cp $T/lines.txt $T/ref_cp1.txt" \
     "cp"
 
-run_test "cp: nonexistent source exits nonzero" \
+# Error message format differs (matchbox prefix); only exit code matters
+run_test_exitcode "cp: nonexistent source exits nonzero" \
     "cp $T/nosuchfile.txt $T/compat_cp2.txt" \
     "cp $T/nosuchfile.txt $T/ref_cp2.txt" \
     "cp"
@@ -161,7 +190,8 @@ run_test "cp: -r recursive directory" \
 run_test "cat: single file"           "cat $T/hello.txt"             "cat $T/hello.txt"          "cat"
 run_test "cat: multiple files"        "cat $T/hello.txt $T/words.txt" "cat $T/hello.txt $T/words.txt" "cat"
 run_test "cat: empty file"            "cat $T/empty.txt"             "cat $T/empty.txt"          "cat"
-run_test "cat: nonexistent exits 1"   "cat $T/nosuchfile.txt"        "cat $T/nosuchfile.txt"     "cat"
+# Error message format differs (matchbox prefix vs uutils "(os error N)"); only exit code matters
+run_test_exitcode "cat: nonexistent exits 1" "cat $T/nosuchfile.txt" "cat $T/nosuchfile.txt" "cat"
 run_test "cat: -n number lines"       "cat -n $T/lines.txt"          "cat -n $T/lines.txt"       "cat"
 run_test "cat: file with no newline"  "cat $T/nonewline.txt"         "cat $T/nonewline.txt"      "cat"
 

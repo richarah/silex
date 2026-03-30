@@ -272,18 +272,13 @@ static int cat_fd(int fd, const char *name, const struct cat_opts *opts)
                         }
                     }
                 } else {
-                    /* Plain output of accumulated line */
+                    /* Plain output of accumulated line.
+                     * Use fwrite (stdio) to stay in the same buffer as printf
+                     * so that line-number prefixes and content remain ordered. */
                     if (line_len > 0) {
-                        const char *lp = line;
-                        size_t rem2 = line_len;
-                        while (rem2 > 0) {
-                            ssize_t nw = write(STDOUT_FILENO, lp, rem2);
-                            if (nw < 0) {
-                                err_sys("cat", "write error");
-                                ret = 1; goto done;
-                            }
-                            lp  += nw;
-                            rem2 -= (size_t)nw;
+                        if (fwrite(line, 1, line_len, stdout) != line_len) {
+                            err_sys("cat", "write error");
+                            ret = 1; goto done;
                         }
                     }
                 }
@@ -356,16 +351,9 @@ static int cat_fd(int fd, const char *name, const struct cat_opts *opts)
                 }
             }
         } else {
-            const char *lp = line;
-            size_t rem2 = line_len;
-            while (rem2 > 0) {
-                ssize_t nw = write(STDOUT_FILENO, lp, rem2);
-                if (nw < 0) {
-                    err_sys("cat", "write error");
-                    ret = 1; goto done;
-                }
-                lp  += nw;
-                rem2 -= (size_t)nw;
+            if (fwrite(line, 1, line_len, stdout) != line_len) {
+                err_sys("cat", "write error");
+                ret = 1; goto done;
             }
         }
     }

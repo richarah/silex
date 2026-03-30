@@ -31,6 +31,7 @@ static int save_fd(redirect_ctx_t *ctx, int orig_fd, arena_t *arena)
 
 int redirect_apply(struct shell_ctx *sh, redir_t *redirs, redirect_ctx_t *ctx)
 {
+    fflush(NULL);   /* flush all stdio buffers before redirecting fds */
     ctx->saved = NULL;
     ctx->error = 0;
 
@@ -173,18 +174,38 @@ int redirect_apply(struct shell_ctx *sh, redir_t *redirs, redirect_ctx_t *ctx)
             } else {
                 body = body_raw;
             }
+            /* For <<-, strip leading tabs from each line */
+            char *stripped = NULL;
+            if (r->op == TOK_DLESSDASH) {
+                size_t slen = strlen(body);
+                stripped = malloc(slen + 1);
+                if (stripped) {
+                    size_t si = 0;
+                    int at_line_start = 1;
+                    for (size_t bi = 0; bi < slen; bi++) {
+                        if (at_line_start && body[bi] == '\t')
+                            continue;
+                        stripped[si++] = body[bi];
+                        at_line_start = (body[bi] == '\n');
+                    }
+                    stripped[si] = '\0';
+                    body = stripped;
+                }
+            }
             size_t blen = strlen(body);
             size_t written = 0;
             while (written < blen) {
                 ssize_t n = write(tmpfd, body + written, blen - written);
                 if (n < 0) {
                     perror("heredoc write");
+                    free(stripped);
                     close(tmpfd);
                     ctx->error = 1;
                     return -1;
                 }
                 written += (size_t)n;
             }
+            free(stripped);
             if (lseek(tmpfd, 0, SEEK_SET) < 0) {
                 perror("heredoc lseek");
                 close(tmpfd);
@@ -217,6 +238,7 @@ int redirect_apply(struct shell_ctx *sh, redir_t *redirs, redirect_ctx_t *ctx)
 
 void redirect_restore(redirect_ctx_t *ctx)
 {
+    fflush(NULL);   /* flush all stdio buffers before restoring fds */
     for (saved_fd_t *s = ctx->saved; s != NULL; s = s->next) {
         if (s->saved_fd >= 0) {
             dup2(s->saved_fd, s->orig_fd);

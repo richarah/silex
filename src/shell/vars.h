@@ -37,6 +37,7 @@ int          vars_set_local(vars_t *v, const char *name, const char *value);
 int          vars_export(vars_t *v, const char *name);
 int          vars_readonly(vars_t *v, const char *name);
 int          vars_unset(vars_t *v, const char *name);
-void         vars_export_env(vars_t *v);   /* call setenv for all exported vars */
+void         vars_export_env(vars_t *v);    /* call setenv for all exported vars */
+void         vars_import_env(vars_t *v);    /* import all environ vars as exported */
 
 #endif /* MATCHBOX_VARS_H */

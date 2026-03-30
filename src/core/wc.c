@@ -263,6 +263,9 @@ int applet_wc(int argc, char **argv)
         if (opt_c && counts[j].bytes   > maxval) maxval = counts[j].bytes;
         if (opt_m && counts[j].chars   > maxval) maxval = counts[j].chars;
         if (opt_L && counts[j].maxline > maxval) maxval = counts[j].maxline;
+        /* For multi-file output, factor in byte count for column-width even
+         * when -c was not requested (matches coreutils/uutils behaviour). */
+        if (nfiles > 1 && counts[j].bytes > maxval) maxval = counts[j].bytes;
     }
 
     if (nfiles > 1) {
@@ -271,6 +274,7 @@ int applet_wc(int argc, char **argv)
         if (opt_c && total.bytes   > maxval) maxval = total.bytes;
         if (opt_m && total.chars   > maxval) maxval = total.chars;
         if (opt_L && total.maxline > maxval) maxval = total.maxline;
+        if (total.bytes > maxval) maxval = total.bytes;
     }
 
     int width = count_digits(maxval);

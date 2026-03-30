@@ -189,3 +189,47 @@ void vars_export_env(vars_t *v)
         }
     }
 }
+
+void vars_import_env(vars_t *v)
+{
+    extern char **environ;
+    if (!environ) return;
+    for (int i = 0; environ[i]; i++) {
+        const char *entry = environ[i];
+        const char *eq = strchr(entry, '=');
+        if (!eq) continue;
+        size_t nlen = (size_t)(eq - entry);
+        char *name = strndup(entry, nlen);
+        if (!name) continue;
+        /* Only import if it has a valid shell identifier name */
+        int valid = (nlen > 0);
+        if (valid) {
+            unsigned char fc = (unsigned char)name[0];
+            if (!(fc == '_' || (fc >= 'A' && fc <= 'Z') || (fc >= 'a' && fc <= 'z')))
+                valid = 0;
+        }
+        if (valid) {
+            for (size_t j = 1; j < nlen; j++) {
+                unsigned char c = (unsigned char)name[j];
+                if (!(c == '_' || (c >= 'A' && c <= 'Z') ||
+                      (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'))) {
+                    valid = 0; break;
+                }
+            }
+        }
+        if (valid) {
+            /* Only import if not already set (don't override IFS etc.) */
+            if (!vars_get(v, name)) {
+                unsigned int idx = fnv1a(name);
+                var_entry_t *e = arena_alloc(v->arena, sizeof(var_entry_t));
+                e->name     = arena_strdup(v->arena, name);
+                e->value    = arena_strdup(v->arena, eq + 1);
+                e->exported = 1;
+                e->readonly = 0;
+                e->next     = v->scope->buckets[idx];
+                v->scope->buckets[idx] = e;
+            }
+        }
+        free(name);
+    }
+}
