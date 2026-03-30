@@ -217,18 +217,63 @@ static redir_t *parse_redirect(parser_t *p, int io_fd)
     r->op       = op_tok.type;
     r->target   = tgt.text;
     r->heredoc  = NULL;
+    r->heredoc_no_expand = 0;
     r->next     = NULL;
 
     /* For heredocs, register the pending heredoc in the lexer.
      * body_out points to r->heredoc so the lexer can fill it in when
-     * it reads the heredoc body after the next newline. */
+     * it reads the heredoc body after the next newline.
+     *
+     * If the delimiter is quoted ('EOF', "EOF", or \E\O\F), variable
+     * expansion is suppressed in the heredoc body (POSIX). Strip the
+     * quotes to get the actual delimiter string used for matching. */
     if (op_tok.type == TOK_DLESS || op_tok.type == TOK_DLESSDASH) {
+        const char *raw = tgt.text;
+        char *actual_delim = tgt.text;
+        int no_expand = 0;
+
+        if (raw[0] == '\'') {
+            /* Single-quoted: 'EOF' — strip outer single quotes */
+            size_t len = strlen(raw);
+            if (len >= 2) {
+                actual_delim = arena_alloc(p->arena, len - 1);
+                memcpy(actual_delim, raw + 1, len - 2);
+                actual_delim[len - 2] = '\0';
+            }
+            no_expand = 1;
+        } else if (raw[0] == '"') {
+            /* Double-quoted: "EOF" — strip outer double quotes */
+            size_t len = strlen(raw);
+            if (len >= 2) {
+                actual_delim = arena_alloc(p->arena, len - 1);
+                memcpy(actual_delim, raw + 1, len - 2);
+                actual_delim[len - 2] = '\0';
+            }
+            no_expand = 1;
+        } else if (raw[0] == '\\') {
+            /* Backslash-escaped: \EOF — remove backslashes */
+            size_t len = strlen(raw);
+            actual_delim = arena_alloc(p->arena, len + 1);
+            const char *src = raw;
+            char *dst = actual_delim;
+            while (*src) {
+                if (*src == '\\' && *(src + 1) != '\0')
+                    src++;
+                *dst++ = *src++;
+            }
+            *dst = '\0';
+            no_expand = 1;
+        }
+
         heredoc_pending_t *hp = arena_alloc(p->arena, sizeof(heredoc_pending_t));
-        hp->delim      = tgt.text;
+        hp->delim      = actual_delim;
         hp->strip_tabs = (op_tok.type == TOK_DLESSDASH) ? 1 : 0;
+        hp->no_expand  = no_expand;
         hp->body_out   = &r->heredoc;
         hp->next       = p->lexer->heredocs;
         p->lexer->heredocs = hp;
+
+        r->heredoc_no_expand = no_expand;
     }
 
     return r;

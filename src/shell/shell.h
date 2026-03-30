@@ -7,6 +7,7 @@
 #include "vars.h"
 #include "job.h"
 #include <signal.h>
+#include <stdint.h>
 
 /* NSIG is a Linux extension; provide a safe fallback for strict POSIX builds */
 #ifndef NSIG
@@ -27,6 +28,8 @@ typedef struct shell_ctx {
     int         opt_f;       /* set -f: no glob */
     int         opt_pipefail;
     int         opt_n;       /* set -n: no execute */
+    int         in_cond;     /* set -e exempt: inside if/while/until condition, ! operand */
+    int         and_or_exempt; /* set -e exempt: && left-side failure caused short-circuit */
     char       *script_name; /* $0 */
     char      **positional;  /* $1..$N, NULL-terminated */
     int         positional_n;
@@ -36,7 +39,14 @@ typedef struct shell_ctx {
     /* Function definitions: name -> node_t* */
     void       *funcs[256];  /* var_entry_t* array for func lookup */
     pid_t       last_bg_pid; /* $! */
+    int         call_depth;  /* function call nesting depth (recursion guard) */
+    /* PATH resolution cache: command name → resolved absolute path.
+     * Invalidated (path_cache_hash reset) when PATH changes. */
+    void       *path_cache[256];  /* path_cache_entry_t*, open-addressing by FNV-1a */
+    uint32_t    path_cache_hash;  /* FNV-1a hash of PATH string when cache was built */
 } shell_ctx_t;
+
+#define SHELL_MAX_CALL_DEPTH 1000
 
 int shell_init(shell_ctx_t *sh, int argc, char **argv);
 int shell_run_string(shell_ctx_t *sh, const char *script);

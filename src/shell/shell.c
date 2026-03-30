@@ -16,6 +16,12 @@
 #include <unistd.h>
 
 /* -------------------------------------------------------------------------
+ * SIGPIPE: the shell ignores SIGPIPE so broken-pipe errors in builtins
+ * produce EPIPE from write() rather than killing the process.
+ * External commands restore SIG_DFL before execvp (see exec.c).
+ * ------------------------------------------------------------------------- */
+
+/* -------------------------------------------------------------------------
  * Trap signal handling
  * Simple global used only to record which shell_ctx to call traps on.
  * This is the one permitted piece of global mutable state (signal delivery).
@@ -34,6 +40,18 @@ void shell_signal_handler(int sig)
 
     /* Run the trap action string */
     shell_run_string(g_trap_shell, action);
+}
+
+/* -------------------------------------------------------------------------
+ * errexit check helper: consumes the and_or_exempt flag and tests
+ * whether a non-zero rc from exec_node should trigger -e exit.
+ * Returns 1 if we should stop, 0 if we should continue.
+ * ------------------------------------------------------------------------- */
+static int errexit_should_stop(shell_ctx_t *sh, int rc)
+{
+    int exempt = sh->and_or_exempt;
+    sh->and_or_exempt = 0;
+    return sh->opt_e && rc != 0 && !sh->in_cond && !exempt;
 }
 
 /* -------------------------------------------------------------------------
@@ -99,6 +117,9 @@ int shell_init(shell_ctx_t *sh, int argc, char **argv)
     for (int i = 0; i < NSIG; i++)
         sh->traps[i].action = SHELL_TRAP_DEFAULT;
 
+    /* Ignore SIGPIPE in the shell process; children restore SIG_DFL before exec */
+    signal(SIGPIPE, SIG_IGN);
+
     /* Register as the global trap shell */
     g_trap_shell = sh;
 
@@ -128,7 +149,7 @@ int shell_run_string(shell_ctx_t *sh, const char *script)
         if (!sh->opt_n) {
             rc = exec_node(sh, node);
             sh->last_exit = rc;
-            if (sh->opt_e && rc != 0)
+            if (errexit_should_stop(sh, rc))
                 break;
         }
     }
@@ -165,7 +186,7 @@ int shell_run_file(shell_ctx_t *sh, const char *path)
         if (!sh->opt_n) {
             rc = exec_node(sh, node);
             sh->last_exit = rc;
-            if (sh->opt_e && rc != 0)
+            if (errexit_should_stop(sh, rc))
                 break;
         }
     }
@@ -208,7 +229,7 @@ int shell_run_stdin(shell_ctx_t *sh)
         if (!sh->opt_n) {
             rc = exec_node(sh, node);
             sh->last_exit = rc;
-            if (sh->opt_e && rc != 0)
+            if (errexit_should_stop(sh, rc))
                 break;
         }
 
@@ -226,8 +247,12 @@ int shell_run_stdin(shell_ctx_t *sh)
  * shell_free
  * ------------------------------------------------------------------------- */
 
+/* Declared in exec.c — free all PATH cache entries */
+void path_cache_clear(shell_ctx_t *sh);
+
 void shell_free(shell_ctx_t *sh)
 {
+    path_cache_clear(sh);
     arena_free(&sh->parse_arena);
     /* job list nodes were malloc'd */
     job_t *j = sh->jobs.head;

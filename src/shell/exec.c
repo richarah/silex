@@ -8,11 +8,13 @@
 #include "shell.h"
 #include "../applets.h"
 #include "../util/arena.h"
+#include "../util/section.h"
 #include "../util/strbuf.h"
 
 #include <errno.h>
 #include <fnmatch.h>
 #include <limits.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -176,6 +178,122 @@ static node_t *func_lookup(shell_ctx_t *sh, const char *name)
 }
 
 /* -------------------------------------------------------------------------
+ * PATH lookup cache (F-03)
+ * Maps command name → resolved absolute path.
+ * Invalidated automatically when PATH changes (FNV-1a hash comparison).
+ * Entries are malloc'd; freed by path_cache_clear() / shell_free().
+ * ------------------------------------------------------------------------- */
+
+typedef struct path_cache_entry {
+    char *name;
+    char *path;   /* malloc'd absolute path, or NULL if not found */
+    int   found;
+    struct path_cache_entry *next;
+} path_cache_entry_t;
+
+static uint32_t fnv1a_str(const char *s)
+{
+    uint32_t h = 2166136261u;
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+        h ^= *p;
+        h *= 16777619u;
+    }
+    return h;
+}
+
+void path_cache_clear(shell_ctx_t *sh)
+{
+    for (int i = 0; i < 256; i++) {
+        path_cache_entry_t *e = sh->path_cache[i];
+        while (e) {
+            path_cache_entry_t *nxt = e->next;
+            free(e->name);
+            free(e->path);
+            free(e);
+            e = nxt;
+        }
+        sh->path_cache[i] = NULL;
+    }
+    sh->path_cache_hash = 0;
+}
+
+/* Validate cache against current PATH, then look up name.
+ * Returns: pointer to entry if cached, NULL if not yet cached. */
+static path_cache_entry_t *path_cache_get(shell_ctx_t *sh, const char *name)
+{
+    const char *pathval = vars_get(&sh->vars, "PATH");
+    if (!pathval) pathval = "";
+    uint32_t h = fnv1a_str(pathval);
+    if (h != sh->path_cache_hash) {
+        path_cache_clear(sh);
+        sh->path_cache_hash = h;
+    }
+    unsigned int idx = fnv1a_str(name) & 255u;
+    for (path_cache_entry_t *e = sh->path_cache[idx]; e; e = e->next) {
+        if (strcmp(e->name, name) == 0)
+            return e;
+    }
+    return NULL;
+}
+
+static void path_cache_put(shell_ctx_t *sh, const char *name,
+                           const char *resolved)
+{
+    unsigned int idx = fnv1a_str(name) & 255u;
+    path_cache_entry_t *e = malloc(sizeof(*e));
+    if (unlikely(!e)) return;
+    e->name  = strdup(name);
+    e->path  = resolved ? strdup(resolved) : NULL;
+    e->found = resolved ? 1 : 0;
+    e->next  = sh->path_cache[idx];
+    if (unlikely(!e->name || (resolved && !e->path))) { free(e->name); free(e->path); free(e); return; }
+    sh->path_cache[idx] = e;
+}
+
+/* Search PATH dirs for an executable named `name`.
+ * Writes the full path into buf[bufsz]. Returns buf on success, NULL if not found. */
+static char *path_resolve(shell_ctx_t *sh, const char *name,
+                          char *buf, size_t bufsz)
+{
+    if (strchr(name, '/')) {
+        /* Absolute or relative path: check directly */
+        struct stat st;
+        if (stat(name, &st) == 0 && S_ISREG(st.st_mode) &&
+            (st.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH))) {
+            if (strlen(name) < bufsz) {
+                strcpy(buf, name);
+                return buf;
+            }
+        }
+        return NULL;
+    }
+
+    const char *pathval = vars_get(&sh->vars, "PATH");
+    if (!pathval || !*pathval) return NULL;
+
+    char *pathcopy = strdup(pathval);
+    if (!pathcopy) return NULL;
+
+    char *saveptr = NULL;
+    char *dir = strtok_r(pathcopy, ":", &saveptr);
+    char *result = NULL;
+    while (dir) {
+        int n = snprintf(buf, bufsz, "%s/%s", dir, name);
+        if (n > 0 && (size_t)n < bufsz) {
+            struct stat st;
+            if (stat(buf, &st) == 0 && S_ISREG(st.st_mode) &&
+                (st.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH))) {
+                result = buf;
+                break;
+            }
+        }
+        dir = strtok_r(NULL, ":", &saveptr);
+    }
+    free(pathcopy);
+    return result;
+}
+
+/* -------------------------------------------------------------------------
  * exec_simple_cmd
  * ------------------------------------------------------------------------- */
 
@@ -197,12 +315,12 @@ int exec_simple_cmd(shell_ctx_t *sh, char **words, char **assigns, redir_t *redi
     }
 
     /* If no command words, just the assignments — done */
-    if (!words || !words[0])
+    if (unlikely(!words || !words[0]))
         return 0;
 
     /* 2. Expand all words */
     char **expanded = expand_words(sh, words);
-    if (!expanded || !expanded[0])
+    if (unlikely(!expanded || !expanded[0]))
         return 0;
 
     const char *cmd = expanded[0];
@@ -238,6 +356,12 @@ int exec_simple_cmd(shell_ctx_t *sh, char **words, char **assigns, redir_t *redi
     /* 5. Check for shell function */
     node_t *fnbody = func_lookup(sh, cmd);
     if (fnbody) {
+        if (sh->call_depth >= SHELL_MAX_CALL_DEPTH) {
+            fprintf(stderr, "matchbox: sh: %s: maximum call depth (%d) exceeded\n",
+                    cmd, SHELL_MAX_CALL_DEPTH);
+            return 1;
+        }
+
         redirect_ctx_t rctx;
         rctx.saved = NULL;
         rctx.error = 0;
@@ -251,7 +375,9 @@ int exec_simple_cmd(shell_ctx_t *sh, char **words, char **assigns, redir_t *redi
         sh->positional   = expanded + 1;
 
         vars_push_scope(&sh->vars);
+        sh->call_depth++;
         int rc = exec_node(sh, fnbody);
+        sh->call_depth--;
         vars_pop_scope(&sh->vars);
 
         sh->positional   = old_pos;
@@ -264,15 +390,42 @@ int exec_simple_cmd(shell_ctx_t *sh, char **words, char **assigns, redir_t *redi
         return rc;
     }
 
-    /* 6. External command: fork + execvp */
+    /* 6. External command: resolve PATH in parent, fork + execv */
+
+    /* Resolve the command to an absolute path using the cache (F-03).
+     * Commands containing '/' bypass the cache and are used as-is. */
+    const char *exec_path;
+    char path_buf[PATH_MAX];
+
+    if (strchr(cmd, '/')) {
+        exec_path = cmd;
+    } else {
+        path_cache_entry_t *ce = path_cache_get(sh, cmd);
+        if (ce) {
+            exec_path = ce->found ? ce->path : NULL;
+        } else {
+            char *rp = path_resolve(sh, cmd, path_buf, sizeof(path_buf));
+            path_cache_put(sh, cmd, rp);
+            exec_path = rp;  /* path_buf is valid for this scope */
+        }
+    }
+
+    if (!exec_path) {
+        fprintf(stderr, "matchbox: %s: command not found\n", cmd);
+        sh->last_exit = 127;
+        return 127;
+    }
+
     pid_t pid = fork();
-    if (pid < 0) {
+    if (unlikely(pid < 0)) {
         perror("fork");
         return 1;
     }
 
     if (pid == 0) {
-        /* Child */
+        /* Child: restore SIGPIPE to default (shell set it to SIG_IGN) */
+        signal(SIGPIPE, SIG_DFL);
+
         redirect_ctx_t rctx;
         rctx.saved = NULL;
         rctx.error = 0;
@@ -281,9 +434,8 @@ int exec_simple_cmd(shell_ctx_t *sh, char **words, char **assigns, redir_t *redi
         /* Export all exported vars */
         vars_export_env(&sh->vars);
 
-        /* Set positional env for the child */
-        execvp(cmd, expanded);
-        perror(cmd);
+        execv(exec_path, expanded);
+        perror(exec_path);
         _exit(127);
     }
 
@@ -437,7 +589,7 @@ int exec_pipeline(shell_ctx_t *sh, node_t *node)
 
 int exec_node(shell_ctx_t *sh, node_t *node)
 {
-    if (!node) return 0;
+    if (unlikely(!node)) return 0;
 
     int rc = 0;
 
@@ -453,29 +605,52 @@ int exec_node(shell_ctx_t *sh, node_t *node)
         rc = exec_pipeline(sh, node);
         break;
 
-    case N_AND:
+    case N_AND: {
+        int save_cond = sh->in_cond;
+        sh->in_cond = 1;
         rc = exec_node(sh, node->u.binary.left);
-        if (rc == 0)
+        sh->in_cond = save_cond;
+        sh->and_or_exempt = 0;
+        if (rc == 0) {
             rc = exec_node(sh, node->u.binary.right);
+        } else {
+            /* Left side failed (short-circuit): exempt the list result from -e */
+            sh->and_or_exempt = 1;
+        }
         break;
+    }
 
-    case N_OR:
+    case N_OR: {
+        int save_cond = sh->in_cond;
+        sh->in_cond = 1;
         rc = exec_node(sh, node->u.binary.left);
-        if (rc != 0)
+        sh->in_cond = save_cond;
+        sh->and_or_exempt = 0;
+        if (rc != 0) {
             rc = exec_node(sh, node->u.binary.right);
+        }
+        /* If left succeeded: rc=0, no errexit risk anyway */
         break;
+    }
 
-    case N_NOT:
+    case N_NOT: {
+        int save_cond = sh->in_cond;
+        sh->in_cond = 1;
         rc = exec_node(sh, node->u.binary.left);
+        sh->in_cond = save_cond;
         rc = (rc == 0) ? 1 : 0;
         break;
+    }
 
-    case N_SEQ:
+    case N_SEQ: {
         rc = exec_node(sh, node->u.binary.left);
         sh->last_exit = rc;
-        if (sh->opt_e && rc != 0) break;
+        int seq_exempt = sh->and_or_exempt;
+        sh->and_or_exempt = 0;
+        if (unlikely(sh->opt_e && rc != 0 && !sh->in_cond && !seq_exempt)) break;
         rc = exec_node(sh, node->u.binary.right);
         break;
+    }
 
     case N_ASYNC: {
         pid_t pid = fork();
@@ -533,7 +708,10 @@ int exec_node(shell_ctx_t *sh, node_t *node)
     }
 
     case N_IF: {
+        int save_cond = sh->in_cond;
+        sh->in_cond = 1;
         int cond = exec_node(sh, node->u.if_node.cond);
+        sh->in_cond = save_cond;
         if (cond == 0) {
             rc = exec_node(sh, node->u.if_node.then_b);
         } else if (node->u.if_node.elif_chain) {
@@ -549,7 +727,10 @@ int exec_node(shell_ctx_t *sh, node_t *node)
     case N_WHILE: {
         rc = 0;
         for (;;) {
+            int save_cond = sh->in_cond;
+            sh->in_cond = 1;
             int cond = exec_node(sh, node->u.loop.cond);
+            sh->in_cond = save_cond;
             if (cond != 0) break;
             rc = exec_node(sh, node->u.loop.body);
             if (rc == FLOW_BREAK)    { rc = 0; break; }
@@ -562,7 +743,10 @@ int exec_node(shell_ctx_t *sh, node_t *node)
     case N_UNTIL: {
         rc = 0;
         for (;;) {
+            int save_cond = sh->in_cond;
+            sh->in_cond = 1;
             int cond = exec_node(sh, node->u.loop.cond);
+            sh->in_cond = save_cond;
             if (cond == 0) break;
             rc = exec_node(sh, node->u.loop.body);
             if (rc == FLOW_BREAK)    { rc = 0; break; }
@@ -764,7 +948,7 @@ static int exec_builtin_cd(shell_ctx_t *sh, int argc, char **argv)
     if (argc < 2) {
         dir = vars_get(&sh->vars, "HOME");
         if (!dir) {
-            fprintf(stderr, "cd: HOME not set\n");
+            fprintf(stderr, "matchbox: cd: HOME not set\n");
             return 1;
         }
     } else {
@@ -789,7 +973,7 @@ static int exec_builtin_shift(shell_ctx_t *sh, int argc, char **argv)
     int n = 1;
     if (argc >= 2) n = atoi(argv[1]);
     if (n < 0 || n > sh->positional_n) {
-        fprintf(stderr, "shift: %d: too many\n", n);
+        fprintf(stderr, "matchbox: shift: %d: too many\n", n);
         return 1;
     }
     sh->positional   += n;
@@ -1017,7 +1201,7 @@ static int exec_builtin_test(shell_ctx_t *sh, int argc, char **argv)
     /* Strip trailing ] for [ invocation */
     if (bracket) {
         if (argc < 2 || strcmp(argv[argc - 1], "]") != 0) {
-            fprintf(stderr, "test: missing ]\n");
+            fprintf(stderr, "matchbox: test: missing ]\n");
             return 2;
         }
         argc--;
@@ -1122,7 +1306,7 @@ static int exec_builtin_wait(shell_ctx_t *sh, int argc, char **argv)
 static int exec_builtin_source(shell_ctx_t *sh, int argc, char **argv)
 {
     if (argc < 2) {
-        fprintf(stderr, ".: filename argument required\n");
+        fprintf(stderr, "matchbox: .: filename argument required\n");
         return 1;
     }
     return shell_run_file(sh, argv[1]);
@@ -1167,7 +1351,7 @@ static int exec_builtin_umask(shell_ctx_t *sh, int argc, char **argv)
     char *end;
     unsigned long val = strtoul(argv[i], &end, 8);
     if (*end != '\0' || val > 0777) {
-        fprintf(stderr, "umask: invalid mode: %s\n", argv[i]);
+        fprintf(stderr, "matchbox: umask: invalid mode: %s\n", argv[i]);
         return 1;
     }
     umask((mode_t)val);
@@ -1223,7 +1407,7 @@ static int exec_builtin_command(shell_ctx_t *sh, int argc, char **argv)
                 free(path_copy);
             }
         }
-        if (verbose) fprintf(stderr, "command: %s: not found\n", name);
+        if (verbose) fprintf(stderr, "matchbox: command: %s: not found\n", name);
         return 1;
     }
 
@@ -1267,7 +1451,7 @@ static int exec_builtin_type(shell_ctx_t *sh, int argc, char **argv)
             }
         }
         if (!found) {
-            fprintf(stderr, "%s: not found\n", name);
+            fprintf(stderr, "matchbox: type: %s: not found\n", name);
             ret = 1;
         }
     }
@@ -1277,7 +1461,7 @@ static int exec_builtin_type(shell_ctx_t *sh, int argc, char **argv)
 static int exec_builtin_getopts(shell_ctx_t *sh, int argc, char **argv)
 {
     if (argc < 3) {
-        fprintf(stderr, "getopts: usage: getopts optstring name [arg...]\n");
+        fprintf(stderr, "matchbox: getopts: usage: getopts optstring name [arg...]\n");
         return 1;
     }
     const char *optstring = argv[1];
@@ -1350,7 +1534,7 @@ static int exec_builtin_getopts(shell_ctx_t *sh, int argc, char **argv)
     const char *p = strchr(optstring, opt);
     if (!p) {
         /* Unknown option */
-        if (!silent) fprintf(stderr, "illegal option -- %c\n", opt);
+        if (!silent) fprintf(stderr, "matchbox: getopts: illegal option -- %c\n", opt);
         vars_set(&sh->vars, varname, "?");
         vars_set(&sh->vars, "OPTARG", opt_str);
     } else {
@@ -1365,7 +1549,7 @@ static int exec_builtin_getopts(shell_ctx_t *sh, int argc, char **argv)
                 optind++;
                 optpos = 1;
                 if (optind > nargs) {
-                    if (!silent) fprintf(stderr, "option requires an argument -- %c\n", opt);
+                    if (!silent) fprintf(stderr, "matchbox: getopts: option requires an argument -- %c\n", opt);
                     vars_set(&sh->vars, varname, silent ? ":" : "?");
                     vars_set(&sh->vars, "OPTARG", opt_str);
                 } else {

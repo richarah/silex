@@ -116,11 +116,30 @@ static int cmd_install(const char *dir)
     return ret;
 }
 
+/* Architecture string for --version */
+static const char *matchbox_arch(void)
+{
+#if defined(__x86_64__)
+    return "x86_64";
+#elif defined(__aarch64__)
+    return "aarch64";
+#elif defined(__arm__)
+    return "arm";
+#elif defined(__i386__)
+    return "i386";
+#elif defined(__riscv) && (__riscv_xlen == 64)
+    return "riscv64";
+#else
+    return "unknown";
+#endif
+}
+
 /* Print help for matchbox itself */
 static void print_help(void)
 {
     printf("matchbox -- container build runtime\n\n");
     printf("Usage:\n");
+    printf("  matchbox --version             Show version\n");
     printf("  matchbox --list                List available applets\n");
     printf("  matchbox --install DIR         Install symlinks in DIR\n");
     printf("  matchbox --help                Show this help\n");
@@ -145,6 +164,14 @@ int main(int argc, char **argv)
             print_help();
             return 0;
         }
+        if (strcmp(argv[1], "--version") == 0) {
+#ifndef MATCHBOX_VERSION
+#define MATCHBOX_VERSION "unknown"
+#endif
+            printf("matchbox %s (glibc static-pie, %s, gcc %s)\n",
+                   MATCHBOX_VERSION, matchbox_arch(), __VERSION__);
+            return 0;
+        }
         if (strcmp(argv[1], "--list") == 0)
             return cmd_list();
         if (strcmp(argv[1], "--install") == 0) {
@@ -167,7 +194,7 @@ int main(int argc, char **argv)
             if (sh)
                 return sh->fn(argc, argv);
             fprintf(stderr, "matchbox: unknown applet '%s'\n", applet_name);
-            fprintf(stderr, "Run 'matchbox --list' for available applets.\n");
+            fprintf(stderr, "matchbox: run 'matchbox --list' for available applets\n");
             return 1;
         }
         /* Shift argv so applet sees argv[0] = applet name */

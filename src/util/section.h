@@ -18,10 +18,14 @@
 #  define HOT  __attribute__((section(".text.hot")))
 #  define WARM __attribute__((section(".text.warm")))
 #  define COLD __attribute__((section(".text.cold"), cold))
+#  define likely(x)   __builtin_expect(!!(x), 1)
+#  define unlikely(x) __builtin_expect(!!(x), 0)
 #else
 #  define HOT
 #  define WARM
 #  define COLD
+#  define likely(x)   (x)
+#  define unlikely(x) (x)
 #endif
 
 #endif /* MATCHBOX_SECTION_H */

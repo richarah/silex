@@ -269,6 +269,34 @@ check_exit "while false exit: 0" "$?" "0"
 "$MB" -c 'for x in a; do false; done'
 check_exit "for loop: last iteration exit propagated" "$?" "1"
 
+# ===========================================================================
+# set -e: errexit exemptions
+# ===========================================================================
+
+# set -e should NOT trigger in if condition
+got=$("$MB" -c 'set -e; if false; then echo WRONG; fi; echo PASS')
+check "set -e: if condition failure doesn't exit shell" "$got" "PASS"
+
+# set -e should NOT trigger on left side of &&
+got=$("$MB" -c 'set -e; false && true; echo PASS')
+check "set -e: left of && doesn't trigger exit" "$got" "PASS"
+
+# set -e should NOT trigger on left side of ||
+got=$("$MB" -c 'set -e; false || echo FALLBACK; echo PASS')
+check "set -e: left of || doesn't trigger exit" "$got" "$(printf 'FALLBACK\nPASS')"
+
+# set -e SHOULD trigger on a plain failing command
+"$MB" -c 'set -e; false; echo SHOULD_NOT_PRINT' 2>/dev/null
+check_exit "set -e: plain false triggers exit" "$?" "1"
+
+# set -e should NOT trigger for while condition
+got=$("$MB" -c 'set -e; while false; do echo NEVER; done; echo PASS')
+check "set -e: while condition failure doesn't exit" "$got" "PASS"
+
+# set -e should NOT trigger for negated command
+got=$("$MB" -c 'set -e; ! false; echo PASS')
+check "set -e: negated false doesn't trigger exit" "$got" "PASS"
+
 echo ""
 echo "control structure tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

@@ -59,7 +59,7 @@ int applet_sh(int argc, char **argv)
                 } else if (i + 1 < argc) {
                     cmd_string = argv[++i];
                 } else {
-                    fprintf(stderr, "sh: -c requires an argument\n");
+                    fprintf(stderr, "matchbox: sh: -c requires an argument\n");
                     return 1;
                 }
                 arg_start = i + 1;
@@ -91,7 +91,7 @@ int applet_sh(int argc, char **argv)
                 }
                 break;
             default:
-                fprintf(stderr, "sh: unknown option: -%c\n", *p);
+                fprintf(stderr, "matchbox: sh: unknown option: -%c\n", *p);
                 return 1;
             }
             if (!stop) p++;

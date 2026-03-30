@@ -191,6 +191,40 @@ check "arithmetic comparison: 2 > 9 -> 0" "$got" "0"
 got=$("$MB" -c 'X=0; echo $((X += 5)); echo $X')
 check "arithmetic assignment \$((X += 5)) modifies X" "$got" "$(printf '5\n5')"
 
+# ===========================================================================
+# Heredoc: variable expansion and no-expand (B-02)
+# ===========================================================================
+
+# Unquoted <<EOF: variables ARE expanded
+got=$("$MB" -c 'x=hello; cat <<EOF
+$x world
+EOF')
+check "heredoc <<EOF: variable expanded" "$got" "hello world"
+
+# Single-quoted <<'EOF': variables are NOT expanded
+got=$("$MB" -c "x=hello; cat <<'EOF'
+\$x is not expanded
+EOF")
+check "heredoc <<'EOF': variable not expanded" "$got" '$x is not expanded'
+
+# Double-quoted <<"EOF": variables are NOT expanded
+got=$("$MB" -c 'x=hello; cat <<"EOF"
+$x is not expanded
+EOF')
+check 'heredoc <<"EOF": variable not expanded' "$got" '$x is not expanded'
+
+# Backslash-quoted delimiter: variables are NOT expanded
+got=$("$MB" -c 'x=hello; cat <<\EOF
+$x is not expanded
+EOF')
+check 'heredoc <<\EOF: variable not expanded' "$got" '$x is not expanded'
+
+# Heredoc with multiple variables (unquoted)
+got=$("$MB" -c 'a=foo; b=bar; cat <<END
+$a $b
+END')
+check "heredoc <<END: multiple variables expanded" "$got" "foo bar"
+
 echo ""
 echo "expansion tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

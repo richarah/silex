@@ -49,6 +49,7 @@ typedef struct {
 typedef struct heredoc_pending {
     char                   *delim;
     int                     strip_tabs;  /* 1 for <<- */
+    int                     no_expand;   /* 1 if delimiter was quoted — no variable expansion */
     char                  **body_out;    /* where to store the body text */
     struct heredoc_pending *next;
 } heredoc_pending_t;

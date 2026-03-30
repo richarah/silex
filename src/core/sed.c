@@ -1245,6 +1245,13 @@ int applet_sed(int argc, char **argv)
     int    opt_E       = 0;
     int    ret         = 0;
 
+    /* Explicit 128KB stdout buffer when not a tty: reduces write() syscall
+     * count ~30x for large outputs (default glibc buffer = 4KB). */
+    if (!isatty(STDOUT_FILENO)) {
+        static char sed_out_buf[131072];
+        setvbuf(stdout, sed_out_buf, _IOFBF, sizeof(sed_out_buf));
+    }
+
     /* Script accumulation */
     strbuf_t script_buf;
     if (sb_init(&script_buf, 256) != 0) {
@@ -1407,6 +1414,11 @@ int applet_sed(int argc, char **argv)
     } else {
         for (int j = 0; j < nfiles; j++) {
             const char *fname = argv[i + j];
+            /* POSIX: "-" means stdin */
+            if (strcmp(fname, "-") == 0) {
+                fps[j] = stdin;
+                continue;
+            }
             fps[j] = fopen(fname, "r");
             if (!fps[j]) {
                 err_sys("sed", "%s", fname);
@@ -1438,7 +1450,7 @@ int applet_sed(int argc, char **argv)
                 if (r < 0 || (size_t)r >= sizeof(tmp_path)) {
                     err_msg("sed", "path too long for temp file");
                     ret = 2;
-                    fclose(fps[j]);
+                    if (fps[j] != stdin) fclose(fps[j]);
                     continue;
                 }
                 int fd = -1;
@@ -1462,7 +1474,7 @@ int applet_sed(int argc, char **argv)
                     if (fd < 0) {
                         err_sys("sed", "mkstemp: %s", tmp_path);
                         ret = 2;
-                        fclose(fps[j]);
+                        if (fps[j] != stdin) fclose(fps[j]);
                         continue;
                     }
                 }
@@ -1472,7 +1484,7 @@ int applet_sed(int argc, char **argv)
                     close(fd);
                     if (!use_tmpfile) unlink(tmp_path);
                     ret = 2;
-                    fclose(fps[j]);
+                    if (fps[j] != stdin) fclose(fps[j]);
                     continue;
                 }
             }
@@ -1490,7 +1502,7 @@ int applet_sed(int argc, char **argv)
                     fclose(out_fp);
                     if (!use_tmpfile) unlink(tmp_path);
                 }
-                fclose(fps[j]);
+                if (fps[j] != stdin) fclose(fps[j]);
                 ret = 2;
                 continue;
             }
@@ -1501,7 +1513,7 @@ int applet_sed(int argc, char **argv)
             sb_free(&st.hold_space);
             sb_free(&st.subst_buf);
 
-            fclose(fps[j]);
+            if (fps[j] != stdin) fclose(fps[j]);
 
             if (opt_i) {
 #ifdef O_TMPFILE

@@ -18,6 +18,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -68,7 +69,14 @@ typedef struct {
     char  *line;    /* NUL-terminated line text (includes \n or \0 term) */
     size_t len;     /* length not counting the terminator */
     size_t idx;     /* original index for stable sort */
+    int    from_mmap; /* 1 if line points into a mmap'd region (do not free) */
 } line_t;
+
+/* mmap region tracking for cleanup */
+#define MAX_MMAP_REGIONS 64
+typedef struct { void *base; size_t size; } mmap_region_t;
+static mmap_region_t g_mmaps[MAX_MMAP_REGIONS];
+static int g_n_mmaps = 0;
 
 /* ---- field splitting ------------------------------------------------------ */
 
@@ -518,9 +526,10 @@ static int read_lines(FILE *fp, line_t **lines, size_t *nlines, size_t *cap,
                 char *copy = malloc(buf_used);
                 if (!copy) { free(buf); err_msg("sort", "out of memory"); return 1; }
                 memcpy(copy, buf, buf_used);
-                (*lines)[*nlines].line = copy;
-                (*lines)[*nlines].len  = buf_used - 1; /* not counting NUL */
-                (*lines)[*nlines].idx  = *nlines;
+                (*lines)[*nlines].line      = copy;
+                (*lines)[*nlines].len       = buf_used - 1; /* not counting NUL */
+                (*lines)[*nlines].idx       = *nlines;
+                (*lines)[*nlines].from_mmap = 0;
                 (*nlines)++;
                 buf_used = 0;
             }
@@ -538,16 +547,75 @@ static int read_lines(FILE *fp, line_t **lines, size_t *nlines, size_t *cap,
             char *copy = malloc(buf_used);
             if (!copy) { free(buf); err_msg("sort", "out of memory"); return 1; }
             memcpy(copy, buf, buf_used);
-            (*lines)[*nlines].line = copy;
-            (*lines)[*nlines].len  = buf_used - 1;
-            (*lines)[*nlines].idx  = *nlines;
+            (*lines)[*nlines].line      = copy;
+            (*lines)[*nlines].len       = buf_used - 1;
+            (*lines)[*nlines].idx       = *nlines;
+            (*lines)[*nlines].from_mmap = 0;
             (*nlines)++;
         }
         free(buf);
         return ferror(fp) ? 1 : 0;
     }
 
-    /* Normal newline-terminated mode */
+    /* Normal newline-terminated mode.
+     * Fast path: mmap regular files > 64KB to eliminate per-line malloc.
+     * Lines point directly into the mapped region; no strdup needed.
+     * Guard: only mmap when st_size <= SIZE_MAX/2 to avoid overflow. */
+    {
+        int fd = fileno(fp);
+        struct stat st;
+        if (fd >= 0 && !zero_term &&
+            fstat(fd, &st) == 0 && S_ISREG(st.st_mode) &&
+            st.st_size > 65536 &&
+            (size_t)st.st_size <= ((size_t)-1) / 2 &&
+            g_n_mmaps < MAX_MMAP_REGIONS)
+        {
+            size_t map_size = (size_t)st.st_size;
+            void *map = mmap(NULL, map_size, PROT_READ | PROT_WRITE,
+                             MAP_PRIVATE, fd, 0);
+            if (map != MAP_FAILED) {
+                madvise(map, map_size, MADV_SEQUENTIAL);
+
+                /* Record region for munmap at cleanup */
+                g_mmaps[g_n_mmaps].base = map;
+                g_mmaps[g_n_mmaps].size = map_size;
+                g_n_mmaps++;
+
+                /* Scan lines from the mapped region */
+                char *p   = (char *)map;
+                char *end = p + map_size;
+                while (p < end) {
+                    char *nl = memchr(p, '\n', (size_t)(end - p));
+                    char *line_end = nl ? nl : end;
+                    size_t line_len = (size_t)(line_end - p);
+
+                    /* NUL-terminate in the MAP_PRIVATE copy */
+                    *line_end = '\0';
+
+                    if (*nlines == *cap) {
+                        size_t newcap = (*cap) ? (*cap) * 2 : 1024;
+                        line_t *tmp = realloc(*lines, newcap * sizeof(line_t));
+                        if (!tmp) {
+                            err_msg("sort", "out of memory");
+                            return 1;
+                        }
+                        *lines = tmp;
+                        *cap = newcap;
+                    }
+                    (*lines)[*nlines].line      = p;
+                    (*lines)[*nlines].len       = line_len;
+                    (*lines)[*nlines].idx       = *nlines;
+                    (*lines)[*nlines].from_mmap = 1;
+                    (*nlines)++;
+
+                    p = nl ? nl + 1 : end;
+                }
+                return ferror(fp) ? 1 : 0;
+            }
+            /* mmap failed: fall through to getline path */
+        }
+    }
+
     while ((len = getline(&raw, &raw_cap, fp)) != -1) {
         if (*nlines == *cap) {
             size_t newcap = (*cap) ? (*cap) * 2 : 1024;
@@ -560,9 +628,10 @@ static int read_lines(FILE *fp, line_t **lines, size_t *nlines, size_t *cap,
         if (!copy) { free(raw); err_msg("sort", "out of memory"); return 1; }
         memcpy(copy, raw, (size_t)len);
         copy[len] = '\0';
-        (*lines)[*nlines].line = copy;
-        (*lines)[*nlines].len  = (size_t)len;
-        (*lines)[*nlines].idx  = *nlines;
+        (*lines)[*nlines].line      = copy;
+        (*lines)[*nlines].len       = (size_t)len;
+        (*lines)[*nlines].idx       = *nlines;
+        (*lines)[*nlines].from_mmap = 0;
         (*nlines)++;
     }
     free(raw);
@@ -585,7 +654,8 @@ static size_t dedup_lines(line_t *lines, size_t n)
         if (rc != 0) {
             lines[out++] = lines[k];
         } else {
-            free(lines[k].line);
+            if (!lines[k].from_mmap)
+                free(lines[k].line);
         }
     }
     return out;
@@ -617,7 +687,8 @@ static int write_lines(FILE *fp, const line_t *lines, size_t n, int zero_term)
 int applet_sort(int argc, char **argv)
 {
     memset(&g_opts, 0, sizeof(g_opts));
-    g_nkeys = 0;
+    g_nkeys  = 0;
+    g_n_mmaps = 0;
     int ret = 0;
     int i;
 
@@ -788,6 +859,13 @@ int applet_sort(int argc, char **argv)
             nlines = dedup_lines(lines, nlines);
     }
 
+    /* Explicit 128KB stdout buffer when not writing to terminal: reduces write()
+     * syscall count for large sorted outputs (default glibc buf = 4KB). */
+    if (!isatty(STDOUT_FILENO)) {
+        static char sort_out_buf[131072];
+        setvbuf(stdout, sort_out_buf, _IOFBF, sizeof(sort_out_buf));
+    }
+
     /* Output: if -o, write to temp then rename */
     if (g_opts.outfile) {
         char tmppath[PATH_MAX];
@@ -892,8 +970,13 @@ int applet_sort(int argc, char **argv)
     }
 
 cleanup:
-    for (size_t k = 0; k < nlines; k++)
-        free(lines[k].line);
+    for (size_t k = 0; k < nlines; k++) {
+        if (!lines[k].from_mmap)
+            free(lines[k].line);
+    }
     free(lines);
+    for (int m = 0; m < g_n_mmaps; m++)
+        munmap(g_mmaps[m].base, g_mmaps[m].size);
+    g_n_mmaps = 0;
     return ret;
 }

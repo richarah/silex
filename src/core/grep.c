@@ -8,6 +8,7 @@
 #include "../util/path.h"
 #include "../util/strbuf.h"
 #include "../util/charclass.h"
+#include "../util/regex/regex.h"
 
 #include <ctype.h>
 #include <dirent.h>
@@ -15,7 +16,6 @@
 #include <fcntl.h>
 #include <fnmatch.h>
 #include <limits.h>
-#include <regex.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -53,8 +53,8 @@ typedef struct {
     int    npatterns;
 
     /* Compiled regexes (one per pattern, when not -F) */
-    regex_t *compiled[MAX_PATTERNS];
-    int      compiled_ok[MAX_PATTERNS]; /* 1 if compiled[i] is valid */
+    mb_regex *mb_compiled[MAX_PATTERNS];
+    int       compiled_ok[MAX_PATTERNS]; /* 1 if mb_compiled[i] is valid */
 
     /* Glob filters */
     char *include_globs[MAX_GLOBS];
@@ -139,91 +139,56 @@ static int fixed_match(const char *line, const char *pattern,
 
 /*
  * Regex match for one compiled pattern against line.
- * Respects -w (word boundaries checked manually for BRE/fixed).
+ * Respects -w (word boundaries checked manually).
  * Returns 1 if matched.
  */
-static int regex_match(const regex_t *re, const char *line, int opt_w)
+static int regex_match(const mb_regex *re, const char *line, int opt_w)
 {
-    regmatch_t m;
-    int start = 0;
-    int len   = (int)strlen(line);
+    size_t len = strlen(line);
+
+    if (!opt_w) {
+        return mb_regex_search(re, line, len, NULL);
+    }
+
+    /* -w: check word boundaries */
+    const char *p   = line;
+    size_t      rem = len;
 
     for (;;) {
-        if (regexec(re, line + start, 1, &m, start > 0 ? REG_NOTBOL : 0) != 0)
+        mb_match m;
+        if (!mb_regex_search(re, p, rem, &m))
             return 0;
-        if (!opt_w)
-            return 1;
-        int ms = start + (int)m.rm_so;
-        int me = start + (int)m.rm_eo;
+        int ms = (int)(m.start - line);
+        int me = (int)(m.end   - line);
         int before_ok = (ms == 0) || !is_word_char(line[ms - 1]);
-        int after_ok  = (me >= len) || !is_word_char(line[me]);
+        int after_ok  = (me >= (int)len) || !is_word_char(line[me]);
         if (before_ok && after_ok)
             return 1;
-        /* Advance past this match and try again */
-        start += (int)m.rm_eo;
-        if (start >= len)
-            return 0;
+        /* Advance past this match */
+        size_t advance = (size_t)(m.end - p);
+        if (advance == 0) advance = 1;
+        if (advance > rem) return 0;
+        p   += advance;
+        rem -= advance;
     }
 }
 
-/*
- * Build a word-boundary-wrapped ERE pattern from raw pattern.
- * Result is allocated with malloc; caller frees.
- */
-static char *wrap_word_bre(const char *pat)
-{
-    /* Use \b...\b in ERE; works with POSIX extended */
-    size_t plen = strlen(pat);
-    size_t total = plen + 9; /* \b + pat + \b + NUL */
-    char *out = malloc(total);
-    if (!out)
-        return NULL;
-    int r = snprintf(out, total, "\\b%s\\b", pat);
-    if (r < 0 || (size_t)r >= total) {
-        free(out);
-        return NULL;
-    }
-    return out;
-}
 
-/* Compile all patterns into compiled[]. */
+/* Compile all patterns into mb_compiled[]. */
 static int compile_patterns(grep_opts_t *g)
 {
-    int flags = REG_NOSUB;
+    int mb_flags = MB_REG_NOSUB;
     if (g->opt_E)
-        flags |= REG_EXTENDED;
+        mb_flags |= MB_REG_ERE;
     if (g->opt_i)
-        flags |= REG_ICASE;
+        mb_flags |= MB_REG_ICASE;
 
     for (int i = 0; i < g->npatterns; i++) {
-        g->compiled[i] = malloc(sizeof(regex_t));
-        if (!g->compiled[i]) {
-            err_msg("grep", "out of memory");
-            return 1;
-        }
-        const char *pat = g->patterns[i];
-        char *word_pat  = NULL;
-
-        /* -w with ERE: wrap in \b...\b and compile as ERE */
-        if (g->opt_w && g->opt_E) {
-            word_pat = wrap_word_bre(pat);
-            if (!word_pat) {
-                err_msg("grep", "out of memory");
-                free(g->compiled[i]);
-                g->compiled[i] = NULL;
-                return 1;
-            }
-            pat = word_pat;
-        }
-
-        int rc = regcomp(g->compiled[i], pat, flags);
-        free(word_pat);
-        if (rc != 0) {
-            char errbuf[256];
-            regerror(rc, g->compiled[i], errbuf, sizeof(errbuf));
-            err_msg("grep", "invalid regex '%s': %s", g->patterns[i], errbuf);
-            free(g->compiled[i]);
-            g->compiled[i] = NULL;
+        const char *err = NULL;
+        g->mb_compiled[i] = mb_regex_compile(g->patterns[i], mb_flags, &err);
+        if (!g->mb_compiled[i]) {
+            err_msg("grep", "invalid regex '%s': %s", g->patterns[i],
+                    err ? err : "unknown error");
             return 1;
         }
         g->compiled_ok[i] = 1;
@@ -244,7 +209,7 @@ static int line_matches_any(const char *line, const grep_opts_t *g)
         } else {
             if (!g->compiled_ok[i])
                 continue;
-            m = regex_match(g->compiled[i], line, g->opt_w && !g->opt_E);
+            m = regex_match(g->mb_compiled[i], line, g->opt_w);
         }
         if (m)
             return 1;
@@ -285,29 +250,29 @@ static void print_line_color_fixed(const char *line, const char *pattern,
 
 /*
  * Highlight regex matches in line with ANSI codes.
- * Uses REG_NOTBOL for matches after the first.
  */
-static void print_line_color_regex(const regex_t *re, const char *line)
+static void print_line_color_regex(const mb_regex *re, const char *line)
 {
     const char *p   = line;
-    int         off = 0;
-    regmatch_t  m;
+    size_t      rem = strlen(line);
 
     for (;;) {
-        int eflags = (off > 0) ? REG_NOTBOL : 0;
-        if (regexec(re, p, 1, &m, eflags) != 0 || m.rm_so == m.rm_eo) {
-            fputs(p, stdout);
+        mb_match m;
+        if (!mb_regex_search(re, p, rem, &m) || m.start == m.end) {
+            fwrite(p, 1, rem, stdout);
             break;
         }
-        fwrite(p, 1, (size_t)m.rm_so, stdout);
+        fwrite(p, 1, (size_t)(m.start - p), stdout);
         fputs(COL_MATCH, stdout);
-        fwrite(p + m.rm_so, 1, (size_t)(m.rm_eo - m.rm_so), stdout);
+        fwrite(m.start, 1, (size_t)(m.end - m.start), stdout);
         fputs(COL_RESET, stdout);
-        p   += m.rm_eo;
-        off += (int)m.rm_eo;
-        if (*p == '\0')
-            break;
+        size_t advance = (size_t)(m.end - p);
+        if (advance == 0) advance = 1;
+        if (advance > rem) break;
+        p   += advance;
+        rem -= advance;
     }
+    if (*p != '\0') fputs(p, stdout);
 }
 
 /*
@@ -407,7 +372,7 @@ static int grep_stream(FILE *fp, const char *filename,
 
         if (g->opt_color && !g->opt_F && g->npatterns > 0 && g->compiled_ok[0]) {
             /* Color-highlight first compiled pattern */
-            print_line_color_regex(g->compiled[0], linebuf);
+            print_line_color_regex(g->mb_compiled[0], linebuf);
         } else if (g->opt_color && g->opt_F && g->npatterns > 0) {
             print_line_color_fixed(linebuf, g->patterns[0], g->opt_i);
         } else {
@@ -517,6 +482,11 @@ static int grep_dir(const char *dirpath, const grep_opts_t *g)
 /* Grep one path (file or directory). show_fname: prepend filename. */
 static int grep_path(const char *path, int show_fname, const grep_opts_t *g)
 {
+    /* POSIX: "-" means stdin */
+    if (strcmp(path, "-") == 0) {
+        return grep_stream(stdin, "(standard input)", show_fname, g);
+    }
+
     struct stat st;
     if (lstat(path, &st) != 0) {
         if (!g->opt_s)
@@ -601,10 +571,8 @@ static void grep_opts_free(grep_opts_t *g)
 {
     for (int i = 0; i < g->npatterns; i++) {
         free(g->patterns[i]);
-        if (g->compiled_ok[i]) {
-            regfree(g->compiled[i]);
-        }
-        free(g->compiled[i]);
+        if (g->compiled_ok[i] && g->mb_compiled[i])
+            mb_regex_free(g->mb_compiled[i]);
     }
 }
 
@@ -619,6 +587,13 @@ int applet_grep(int argc, char **argv)
 
     /* --color: only if stdout is a tty */
     int color_auto = isatty(STDOUT_FILENO);
+
+    /* Explicit 128KB stdout buffer when not a tty: reduces write() count ~30x
+     * (1365 → ~45 for 100k matching lines) without buffering interactive output. */
+    if (!color_auto) {
+        static char grep_out_buf[131072];
+        setvbuf(stdout, grep_out_buf, _IOFBF, sizeof(grep_out_buf));
+    }
 
     int i;
     for (i = 1; i < argc; i++) {

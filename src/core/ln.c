@@ -387,15 +387,15 @@ int applet_ln(int argc, char **argv)
     /* Multiple sources require dst to be (or become) a directory */
     if (nsrc > 1 && !dst_is_real_dir) {
         if (dst_exists)
-            fprintf(stderr, "ln: target '%s' is not a directory\n", dst);
+            fprintf(stderr, "matchbox: ln: target '%s' is not a directory\n", dst);
         else
-            fprintf(stderr, "ln: target directory '%s': "
+            fprintf(stderr, "matchbox: ln: target directory '%s': "
                             "No such file or directory\n", dst);
         return 1;
     }
 
     if (opts.no_target && dst_is_real_dir) {
-        fprintf(stderr, "ln: cannot overwrite directory '%s'\n", dst);
+        fprintf(stderr, "matchbox: ln: cannot overwrite directory '%s'\n", dst);
         return 1;
     }
 

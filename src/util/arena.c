@@ -22,8 +22,8 @@ HOT void *arena_alloc(arena_t *a, size_t size)
     size_t align = sizeof(void *);
     size = (size + align - 1) & ~(align - 1);
 
-    /* Allocate a new block if needed */
-    if (a->head == NULL || (a->head->cap - a->head->used) < size) {
+    /* Allocate a new block if needed (slow path — uncommon) */
+    if (unlikely(a->head == NULL || (a->head->cap - a->head->used) < size)) {
         size_t block_data_size = size > ARENA_BLOCK_SIZE ? size : ARENA_BLOCK_SIZE;
 
         arena_block_t *blk = malloc(sizeof(arena_block_t));

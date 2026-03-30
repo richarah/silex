@@ -95,13 +95,13 @@ int redirect_apply(struct shell_ctx *sh, redir_t *redirs, redirect_ctx_t *ctx)
             } else {
                 /* Validate: target must be a non-negative decimal integer */
                 if (target[0] == '\0' || target[0] == '-') {
-                    fprintf(stderr, "redirect: invalid fd: %s\n", target);
+                    fprintf(stderr, "matchbox: redirect: invalid fd: %s\n", target);
                     ctx->error = 1;
                     return -1;
                 }
                 for (const char *tp = target; *tp; tp++) {
                     if (*tp < '0' || *tp > '9') {
-                        fprintf(stderr, "redirect: invalid fd: %s\n", target);
+                        fprintf(stderr, "matchbox: redirect: invalid fd: %s\n", target);
                         ctx->error = 1;
                         return -1;
                     }
@@ -122,13 +122,13 @@ int redirect_apply(struct shell_ctx *sh, redir_t *redirs, redirect_ctx_t *ctx)
             } else {
                 /* Validate: target must be a non-negative decimal integer */
                 if (target[0] == '\0' || target[0] == '-') {
-                    fprintf(stderr, "redirect: invalid fd: %s\n", target);
+                    fprintf(stderr, "matchbox: redirect: invalid fd: %s\n", target);
                     ctx->error = 1;
                     return -1;
                 }
                 for (const char *tp = target; *tp; tp++) {
                     if (*tp < '0' || *tp > '9') {
-                        fprintf(stderr, "redirect: invalid fd: %s\n", target);
+                        fprintf(stderr, "matchbox: redirect: invalid fd: %s\n", target);
                         ctx->error = 1;
                         return -1;
                     }
@@ -163,7 +163,16 @@ int redirect_apply(struct shell_ctx *sh, redir_t *redirs, redirect_ctx_t *ctx)
             }
             unlink(tmpname); /* unlink immediately; fd keeps it alive */
 
-            const char *body = r->heredoc ? r->heredoc : "";
+            /* Expand variables in heredoc body unless delimiter was quoted */
+            const char *body_raw = r->heredoc ? r->heredoc : "";
+            const char *body;
+            char *expanded = NULL;
+            if (!r->heredoc_no_expand) {
+                expanded = expand_word(sh, body_raw);
+                body = expanded ? expanded : body_raw;
+            } else {
+                body = body_raw;
+            }
             size_t blen = strlen(body);
             size_t written = 0;
             while (written < blen) {

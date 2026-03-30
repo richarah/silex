@@ -32,6 +32,7 @@ typedef struct redir {
     tok_type_t    op;
     char         *target;
     char         *heredoc;
+    int           heredoc_no_expand; /* 1 if delimiter was quoted — no variable expansion */
     struct redir *next;
 } redir_t;
 
