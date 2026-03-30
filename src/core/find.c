@@ -1,5 +1,9 @@
 /* find.c — find builtin: traverse directory trees and apply tests */
 
+/* _GNU_SOURCE enables strcasestr and FNM_CASEFOLD */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
@@ -61,11 +65,26 @@ typedef struct {
     long val;
 } cmp_t;
 
+/* Compiled fast-path for -name/-iname patterns (O-10) */
+typedef enum {
+    CGLOB_FULL = 0,  /* fallback to fnmatch */
+    CGLOB_LITERAL,   /* strcmp / strcasecmp */
+    CGLOB_SUFFIX,    /* ends-with: fixed = pattern+1 */
+    CGLOB_PREFIX,    /* starts-with: fixed = pattern (trailing * zeroed) */
+    CGLOB_CONTAINS   /* substring: fixed = pattern+1 (trailing * zeroed) */
+} cglob_type_t;
+
 typedef struct expr_node {
     pred_type_t  type;
 
     /* PRED_NAME / PRED_INAME */
     char        *pattern;
+    /* compiled fast-path; populated by compile_glob() after parse */
+    struct {
+        cglob_type_t type;
+        const char  *fixed; /* NUL-terminated fixed part within pattern buffer */
+        size_t       flen;
+    } cglob;
 
     /* PRED_TYPE */
     char         ftype; /* f/d/l/b/c/p/s */
@@ -118,12 +137,76 @@ typedef struct {
 /* Expression tree constructors                                       */
 /* ------------------------------------------------------------------ */
 
+/*
+ * compile_glob: classify a -name/-iname pattern for fast matching.
+ * Modifies n->pattern in-place ONLY for PREFIX and CONTAINS cases
+ * (zeroes the trailing '*').  Must be called after strdup'ing the pattern.
+ */
+static void compile_glob(expr_node_t *n)
+{
+    if (!n->pattern) return;
+    const char *p = n->pattern;
+    size_t len = strlen(p);
+    size_t star_count = 0, star1 = 0, star2 = 0;
+    int has_other = 0;
+    size_t i;
+
+    for (i = 0; i < len; i++) {
+        if (p[i] == '*') {
+            if (star_count == 0) star1 = i;
+            else if (star_count == 1) star2 = i;
+            star_count++;
+        } else if (p[i] == '?' || p[i] == '[') {
+            has_other = 1;
+        }
+    }
+
+    if (!star_count && !has_other) {
+        n->cglob.type  = CGLOB_LITERAL;
+        n->cglob.fixed = p;
+        n->cglob.flen  = len;
+        return;
+    }
+    if (has_other || star_count > 2) {
+        n->cglob.type = CGLOB_FULL;
+        return;
+    }
+    if (star_count == 1) {
+        if (star1 == 0) {
+            /* *.ext */
+            n->cglob.type  = CGLOB_SUFFIX;
+            n->cglob.fixed = p + 1;
+            n->cglob.flen  = len - 1;
+        } else if (star1 == len - 1) {
+            /* prefix* — zero trailing star */
+            n->pattern[len - 1] = '\0';
+            n->cglob.type  = CGLOB_PREFIX;
+            n->cglob.fixed = n->pattern;
+            n->cglob.flen  = len - 1;
+        } else {
+            n->cglob.type = CGLOB_FULL;
+        }
+        return;
+    }
+    /* star_count == 2 */
+    if (star1 == 0 && star2 == len - 1) {
+        /* *substr* — zero trailing star */
+        n->pattern[len - 1] = '\0';
+        n->cglob.type  = CGLOB_CONTAINS;
+        n->cglob.fixed = n->pattern + 1;
+        n->cglob.flen  = len - 2;
+    } else {
+        n->cglob.type = CGLOB_FULL;
+    }
+}
+
 static expr_node_t *node_new(pred_type_t type)
 {
-    (void)type;
     expr_node_t *n = calloc(1, sizeof(expr_node_t));
     if (!n)
         err_msg("find", "out of memory");
+    else
+        n->type = type;
     return n;
 }
 
@@ -239,6 +322,7 @@ static expr_node_t *parse_primary(find_args_t *fa)
         if (!n) return NULL;
         n->pattern = strdup(pat);
         if (!n->pattern) { err_msg("find", "out of memory"); node_free(n); return NULL; }
+        compile_glob(n);
         return n;
     }
 
@@ -249,6 +333,7 @@ static expr_node_t *parse_primary(find_args_t *fa)
         if (!n) return NULL;
         n->pattern = strdup(pat);
         if (!n->pattern) { err_msg("find", "out of memory"); node_free(n); return NULL; }
+        compile_glob(n);
         return n;
     }
 
@@ -546,12 +631,45 @@ static int eval_expr(expr_node_t *n, const char *path, const char *basename_ptr,
     case PRED_NOT:
         return !eval_expr(n->left, path, basename_ptr, st, depth);
 
-    case PRED_NAME:
-        return fnmatch(n->pattern, basename_ptr, 0) == 0;
+    case PRED_NAME: {
+        const char *s = basename_ptr;
+        size_t slen = strlen(s);
+        switch (n->cglob.type) {
+        case CGLOB_LITERAL:
+            return strcmp(s, n->cglob.fixed) == 0;
+        case CGLOB_SUFFIX:
+            return slen >= n->cglob.flen &&
+                   memcmp(s + slen - n->cglob.flen,
+                          n->cglob.fixed, n->cglob.flen) == 0;
+        case CGLOB_PREFIX:
+            return slen >= n->cglob.flen &&
+                   memcmp(s, n->cglob.fixed, n->cglob.flen) == 0;
+        case CGLOB_CONTAINS:
+            return strstr(s, n->cglob.fixed) != NULL;
+        default:
+            return fnmatch(n->pattern, s, 0) == 0;
+        }
+    }
 
-    case PRED_INAME:
-        /* FNM_CASEFOLD is a GNU extension; fall back to fnmatch without it */
-        return fnmatch(n->pattern, basename_ptr, 0) == 0;
+    case PRED_INAME: {
+        const char *s = basename_ptr;
+        size_t slen = strlen(s);
+        switch (n->cglob.type) {
+        case CGLOB_LITERAL:
+            return strcasecmp(s, n->cglob.fixed) == 0;
+        case CGLOB_SUFFIX:
+            return slen >= n->cglob.flen &&
+                   strncasecmp(s + slen - n->cglob.flen,
+                               n->cglob.fixed, n->cglob.flen) == 0;
+        case CGLOB_PREFIX:
+            return slen >= n->cglob.flen &&
+                   strncasecmp(s, n->cglob.fixed, n->cglob.flen) == 0;
+        case CGLOB_CONTAINS:
+            return strcasestr(s, n->cglob.fixed) != NULL;
+        default:
+            return fnmatch(n->pattern, s, FNM_CASEFOLD) == 0;
+        }
+    }
 
     case PRED_TYPE: {
         mode_t m = st->st_mode;
