@@ -288,10 +288,14 @@ debug: $(TARGET)
 # --- Legacy musl alias --------------------------------------------------------
 musl: release
 
-# --- Compile rule -------------------------------------------------------------
+# --- Compile rule (with auto-generated header dependencies) ------------------
+DEPFLAGS = -MMD -MP
+DEPS     = $(OBJS:.o=.d)
+-include $(DEPS)
+
 $(OBJDIR)/%.o: $(SRCDIR)/%.c | $(OBJDIR)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $(PERFILE_OPT) -I$(SRCDIR) -c $< -o $@
+	$(CC) $(CFLAGS) $(PERFILE_OPT) $(DEPFLAGS) -I$(SRCDIR) -c $< -o $@
 
 $(OBJDIR):
 	mkdir -p $(OBJDIR)/util $(OBJDIR)/util/regex $(OBJDIR)/core \

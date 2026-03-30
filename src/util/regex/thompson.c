@@ -110,21 +110,24 @@ static int global_gen = 0;
 /*
  * Add state 's' to list 'l', following SPLIT and JUMP transitions recursively.
  * Uses global_gen to avoid adding the same state twice.
+ * 'depth' guards against stack overflow from pathological epsilon-closure chains;
+ * the cap is MB_MAX_INSTRS (4096) since no chain can be longer than the program.
  */
-static void addstate(const mb_prog *prog, nfa_list *l, int s)
+static void addstate(const mb_prog *prog, nfa_list *l, int s, int depth)
 {
     if (s < 0 || s >= prog->len) return;
-    if (state_last[s] == l->gen) return;  /* already in list */
+    if (depth >= MB_MAX_INSTRS) return;        /* recursion depth guard */
+    if (state_last[s] == l->gen) return;       /* already in list */
     state_last[s] = l->gen;
 
     const mb_instr *in = &prog->instrs[s];
     if (in->op == I_SPLIT) {
-        addstate(prog, l, in->x);
-        addstate(prog, l, in->y);
+        addstate(prog, l, in->x, depth + 1);
+        addstate(prog, l, in->y, depth + 1);
         return;
     }
     if (in->op == I_JUMP) {
-        addstate(prog, l, in->x);
+        addstate(prog, l, in->x, depth + 1);
         return;
     }
     /* Regular state: add to list */
@@ -153,19 +156,19 @@ HOT static void step(const mb_prog *prog, int flags,
         switch (in->op) {
         case I_CHAR:
             if ((unsigned char)in->arg.c == c)
-                addstate(prog, nlist, in->x);
+                addstate(prog, nlist, in->x, 0);
             break;
         case I_ICHAR:
             if ((unsigned char)tolower(c) == (unsigned char)in->arg.c)
-                addstate(prog, nlist, in->x);
+                addstate(prog, nlist, in->x, 0);
             break;
         case I_CLASS:
             if (in->arg.cc && mb_charclass_test(in->arg.cc, c))
-                addstate(prog, nlist, in->x);
+                addstate(prog, nlist, in->x, 0);
             break;
         case I_ANY:
             if (!newline_mode || c != '\n')
-                addstate(prog, nlist, in->x);
+                addstate(prog, nlist, in->x, 0);
             break;
         case I_BOL:
         case I_EOL:
@@ -216,9 +219,9 @@ static void process_assertions(const mb_prog *prog, int flags,
         if (s < 0 || s >= prog->len) continue;
         const mb_instr *in = &prog->instrs[s];
         if (in->op == I_BOL && at_bol) {
-            addstate(prog, l, in->x);
+            addstate(prog, l, in->x, 0);
         } else if (in->op == I_EOL && at_eol) {
-            addstate(prog, l, in->x);
+            addstate(prog, l, in->x, 0);
         }
     }
 }
@@ -336,7 +339,7 @@ HOT int mb_thompson_search(const mb_prog *prog, int flags,
         clist.gen = ++global_gen;
         memset(state_last, 0, (size_t)prog->len * sizeof(int));
 
-        addstate(prog, &clist, 0);  /* entry is always 0 */
+        addstate(prog, &clist, 0, 0);  /* entry is always 0; depth starts at 0 */
 
         /* Handle BOL assertion at this position */
         int at_bol = (start == 0) || (newline_mode && start > 0 &&
@@ -448,7 +451,7 @@ no_dfa:
         clist.n   = 0;
         clist.gen = ++global_gen;
         memset(state_last, 0, (size_t)prog->len * sizeof(int));
-        addstate(prog, &clist, 0);
+        addstate(prog, &clist, 0, 0);
 
         int at_bol = (start == 0) || (newline_mode && start > 0 &&
                                        text[start - 1] == '\n');

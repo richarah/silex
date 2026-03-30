@@ -7,13 +7,19 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define SB_MIN_CAP 64
+#define SB_MIN_CAP  64
+#define SB_MAX_CAP  (64 * 1024 * 1024)  /* 64 MB hard cap — no shell string is ever larger */
 
 static int sb_grow(strbuf_t *sb, size_t needed)
 {
+    if (needed + 1 > SB_MAX_CAP)
+        return -1;  /* requested size exceeds hard cap */
+
     size_t new_cap = sb->cap ? sb->cap * 2 : SB_MIN_CAP;
     while (new_cap < needed + 1) /* +1 for NUL */
         new_cap *= 2;
+    if (new_cap > SB_MAX_CAP)
+        new_cap = SB_MAX_CAP;
 
     char *p = realloc(sb->buf, new_cap);
     if (!p)

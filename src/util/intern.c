@@ -7,6 +7,7 @@
 #include "intern.h"
 #include "section.h"
 
+#include <limits.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -55,7 +56,8 @@ static void arena_reset(void)
 
 /* ---- Hash table (open addressing, linear probing) ----------------------- */
 
-#define INTERN_INIT_CAP 4096u  /* initial slot count (power of 2) */
+#define INTERN_INIT_CAP    4096u      /* initial slot count (power of 2) */
+#define INTERN_MAX_ENTRIES 1000000u   /* hard cap: stop interning, return original ptr */
 
 typedef struct {
     const char *str;    /* NULL = empty slot; pointer into arena */
@@ -138,7 +140,16 @@ HOT const char *intern_cstrn(const char *s, size_t n)
 {
     if (!s) return "";
 
+    /* Reject strings that exceed one arena block or PATH_MAX: they can never be
+     * legitimate filesystem paths and would waste O(n) hashing time. */
+    if (n > PATH_MAX) return s;
+
     if (!g_slots && table_init() != 0) return s; /* OOM: return original */
+
+    /* Hard cap: if the table is full, return the original pointer rather than
+     * growing unboundedly.  INTERN_MAX_ENTRIES distinct path components in one
+     * process is not a realistic scenario. */
+    if (g_count >= INTERN_MAX_ENTRIES) return s;
 
     uint64_t hash = fnv1a64(s, n);
 

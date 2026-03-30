@@ -29,8 +29,9 @@
  * or removed modules and invalidate the cache accordingly.
  */
 
-#define REGISTRY_BUCKETS 64
-#define DEFAULT_MODULE_DIR "/usr/lib/matchbox/modules"
+#define REGISTRY_BUCKETS     64
+#define REGISTRY_MAX_ENTRIES 1024   /* hard cap: stop loading beyond this many modules */
+#define DEFAULT_MODULE_DIR   "/usr/lib/matchbox/modules"
 
 typedef struct reg_entry {
     char               *tool;
@@ -41,7 +42,8 @@ typedef struct reg_entry {
 } reg_entry_t;
 
 static reg_entry_t *buckets[REGISTRY_BUCKETS];
-static time_t       dir_mtime;  /* mtime of the last-checked module dir */
+static time_t       dir_mtime;     /* mtime of the last-checked module dir */
+static int          registry_count; /* total entries across all buckets */
 
 /* FNV-1a hash over a NUL-terminated string */
 static uint32_t fnv1a(const char *s)
@@ -85,6 +87,7 @@ static void registry_clear(void)
         }
         buckets[i] = NULL;
     }
+    registry_count = 0;
 }
 
 /*
@@ -149,6 +152,9 @@ void registry_register(const char *tool, const char *flag,
             return;
     }
 
+    /* Hard cap: refuse to grow beyond REGISTRY_MAX_ENTRIES */
+    if (registry_count >= REGISTRY_MAX_ENTRIES) return;
+
     reg_entry_t *e = calloc(1, sizeof(*e));
     if (!e) return;
 
@@ -164,6 +170,7 @@ void registry_register(const char *tool, const char *flag,
 
     e->next       = buckets[idx];
     buckets[idx]  = e;
+    registry_count++;
 }
 
 /*

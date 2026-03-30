@@ -42,7 +42,11 @@
 #include <unistd.h>
 
 /* Default initial capacity for the hashmap */
-#define FSCACHE_INITIAL_CAP 256
+#define FSCACHE_INITIAL_CAP  256
+
+/* Hard cap on the number of cached entries.  A container build script will
+ * never stat 100 000 distinct paths; this prevents unbounded memory growth. */
+#define FSCACHE_MAX_ENTRIES  100000
 
 /* Default TTL in seconds when MATCHBOX_FSCACHE_TTL is not set */
 #define FSCACHE_DEFAULT_TTL 5
@@ -122,6 +126,10 @@ static void cache_store(const char *path, uint64_t key, const struct stat *st)
             entry->path = intern_cstr(path);
         }
     } else {
+        /* Enforce entry count cap before allocating new entry */
+        if (g_fscache.map.count >= FSCACHE_MAX_ENTRIES)
+            return;  /* cap reached: skip caching without eviction */
+
         entry = malloc(sizeof(*entry));
         if (!entry)
             return; /* OOM: skip caching */

@@ -8,12 +8,14 @@
 #include "section.h"
 
 #include <stddef.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 COLD void arena_init(arena_t *a)
 {
-    a->head = NULL;
+    a->head        = NULL;
+    a->total_bytes = 0;
 }
 
 HOT void *arena_alloc(arena_t *a, size_t size)
@@ -26,6 +28,12 @@ HOT void *arena_alloc(arena_t *a, size_t size)
     if (unlikely(a->head == NULL || (a->head->cap - a->head->used) < size)) {
         size_t block_data_size = size > ARENA_BLOCK_SIZE ? size : ARENA_BLOCK_SIZE;
 
+        if (a->total_bytes + block_data_size > ARENA_MAX_BYTES) {
+            fprintf(stderr, "matchbox: arena: exceeded maximum size (%u MB)\n",
+                    (unsigned)(ARENA_MAX_BYTES / (1024u * 1024u)));
+            abort();
+        }
+
         arena_block_t *blk = malloc(sizeof(arena_block_t));
         if (!blk)
             abort();
@@ -36,10 +44,11 @@ HOT void *arena_alloc(arena_t *a, size_t size)
             abort();
         }
 
-        blk->cap  = block_data_size;
-        blk->used = 0;
-        blk->next = a->head;
-        a->head   = blk;
+        blk->cap          = block_data_size;
+        blk->used         = 0;
+        blk->next         = a->head;
+        a->head           = blk;
+        a->total_bytes   += block_data_size;
     }
 
     void *ptr = (void *)(a->head->base + a->head->used);
@@ -65,6 +74,8 @@ char *arena_strndup(arena_t *a, const char *s, size_t n)
 
 void arena_reset(arena_t *a)
 {
+    /* Reuse existing block capacity — do not free blocks, just reset offsets.
+     * total_bytes is preserved: it tracks allocated capacity, not current usage. */
     for (arena_block_t *blk = a->head; blk != NULL; blk = blk->next)
         blk->used = 0;
 }

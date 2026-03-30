@@ -8,7 +8,8 @@
 
 #include <stddef.h>
 
-#define ARENA_BLOCK_SIZE 65536
+#define ARENA_BLOCK_SIZE  65536
+#define ARENA_MAX_BYTES  (64 * 1024 * 1024)  /* 64 MB hard cap per arena */
 
 typedef struct arena_block {
     char              *base;
@@ -19,6 +20,7 @@ typedef struct arena_block {
 
 typedef struct {
     arena_block_t *head;
+    size_t         total_bytes;  /* total bytes allocated across all blocks */
 } arena_t;
 
 void  arena_init(arena_t *a);
