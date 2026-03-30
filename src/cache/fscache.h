@@ -19,7 +19,7 @@
  * when a path is a symlink.
  */
 typedef struct {
-    char       *path;      /* strdup'd path (for collision detection) */
+    const char *path;      /* interned path (for collision detection; owned by intern table) */
     struct stat st;        /* full cached stat result                  */
     time_t      cached_at; /* unix time of population                  */
 } fscache_entry_t;

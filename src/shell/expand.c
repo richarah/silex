@@ -7,6 +7,7 @@
 #include "../util/strbuf.h"
 #include "../util/arena.h"
 #include "../util/charclass.h"
+#include "../util/intern.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -852,9 +853,8 @@ static void expand_into(shell_ctx_t *sh, const char *word, strbuf_t *out,
                 while (is_name_char((unsigned char)*p))
                     p++;
                 size_t nlen = (size_t)(p - start);
-                char *name = strndup(start, nlen);
-                const char *v = sh_getvar(sh, name ? name : "");
-                free(name);
+                const char *name = intern_cstrn(start, nlen);
+                const char *v = sh_getvar(sh, name);
                 if (v) sb_append(out, v);
                 else if (sh->opt_u) {
                     /* set -u: error on unset var */

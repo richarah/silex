@@ -28,6 +28,7 @@
 
 #include "fscache.h"
 #include "hashmap.h"
+#include "../util/intern.h"
 
 #include <errno.h>
 #include <limits.h>
@@ -87,7 +88,7 @@ void fscache_free(void)
             hm_slot_t *s = &g_fscache.map.slots[i];
             if (s->used == 1 && s->value) {
                 fscache_entry_t *e = (fscache_entry_t *)s->value;
-                free(e->path);
+                /* e->path is interned; owned by intern table, not freed here */
                 free(e);
                 s->value = NULL;
             }
@@ -116,24 +117,14 @@ static void cache_store(const char *path, uint64_t key, const struct stat *st)
     if (entry) {
         if (strcmp(entry->path, path) != 0) {
             /* Hash collision: different path maps to same key.
-             * Replace the old entry. */
-            free(entry->path);
-            entry->path = strdup(path);
-            if (!entry->path) {
-                free(entry);
-                hm_delete(&g_fscache.map, key);
-                return;
-            }
+             * Replace the old entry (old path is interned; not freed). */
+            entry->path = intern_cstr(path);
         }
     } else {
         entry = malloc(sizeof(*entry));
         if (!entry)
             return; /* OOM: skip caching */
-        entry->path = strdup(path);
-        if (!entry->path) {
-            free(entry);
-            return;
-        }
+        entry->path = intern_cstr(path);
         hm_put(&g_fscache.map, key, entry);
     }
 
@@ -241,14 +232,14 @@ static void invalidate_one(const char *p)
 
     fscache_entry_t *e = (fscache_entry_t *)hm_get(&g_fscache.map, key);
     if (e && strcmp(e->path, p) == 0) {
-        free(e->path);
+        /* e->path is interned; owned by intern table, not freed here */
         free(e);
         hm_delete(&g_fscache.map, key);
     }
 
     fscache_entry_t *le = (fscache_entry_t *)hm_get(&g_fscache.map, lkey);
     if (le && strcmp(le->path, p) == 0) {
-        free(le->path);
+        /* le->path is interned; owned by intern table, not freed here */
         free(le);
         hm_delete(&g_fscache.map, lkey);
     }

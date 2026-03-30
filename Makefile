@@ -61,6 +61,7 @@ UTIL_SRCS = \
     $(SRCDIR)/util/arena.c \
     $(SRCDIR)/util/platform.c \
     $(SRCDIR)/util/charclass.c \
+    $(SRCDIR)/util/intern.c \
     $(LINESCAN_SRC)
 
 CORE_SRCS = \

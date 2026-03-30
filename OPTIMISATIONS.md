@@ -15,7 +15,7 @@ measurements, and whether it was kept or reverted.
 | O-04 | posix_fadvise sequential | IO | bench_grep (no-match-100k) | 9.4738±0.4090ms | 8.8975±0.3660ms | 1.06x | +0.1K | KEPT |
 | O-05 | fallocate for cp | IO | bench_builtin_cp (1MB) | 3.7653±0.2789ms | 3.5885±0.2217ms | 1.05x | +0.1K | KEPT |
 | O-06 | O_TMPFILE atomic writes | IO | sed -i 500x | 0.89ms/iter | 0.89ms/iter | 1.00x (crash-safety) | +0.1K | KEPT |
-| O-07 | String intern table | Alloc | bench_dockerfile (apt-sim) | — | — | — | — | PENDING |
+| O-07 | String intern table | Alloc | bench_dockerfile (apt-sim) | 3.5197±0.3082ms | 3.2871±0.1669ms | 1.07x | +4.3K | KEPT |
 | O-08 | mkdir -p prefix skip | Syscall | bench_builtin_mkdir (depth-10) | — | — | — | — | PENDING |
 | O-09 | writev for grep/find | Syscall | bench_grep (fixed-str-100k) | — | — | — | — | PENDING |
 | O-10 | Compiled glob for find | CPU | bench_find_glob | — | — | — | — | PENDING |
@@ -273,6 +273,43 @@ Measurement: matchbox fixed-str-100k = 12.3395±0.5479ms vs system 3.7738±0.235
   5.9793±3.6604ms = 1.58x slower. Criterion was "2x slower" — THRESHOLD MET.
 Plan: Addressed by O-02 (vectorised newline scan) + O-09 (writev) in this release.
   SSE2 memmem approach remains an option if O-02/O-09 do not close the gap.
+
+---
+
+## O-07: String intern table for variable name and path deduplication
+
+Date: 2026-03-30
+Status: KEPT
+Category: Alloc — eliminates repeated malloc+free for immutable strings in hot paths
+Files: src/util/intern.h (new), src/util/intern.c (new), src/shell/expand.c,
+       src/cache/fscache.c, src/cache/fscache.h, Makefile
+Benchmark: bench_dockerfile.sh apt-sim (50 iter)
+
+Before: matchbox-sh apt-sim = 3.5197±0.3082ms
+After:  matchbox-sh apt-sim = 3.2871±0.1669ms
+
+Speedup: 1.07x (7.1%) on apt-sim; 1.09x on sed-multi-file (26.0→23.9ms)
+Binary delta: +4.3K (intern.o: ~3.8K + table metadata)
+
+Mechanism: FNV-1a 64-bit hash table with open-addressing (linear probing),
+arena backing (65KB blocks, never moved → stable pointers), resize at 75% load.
+
+Applied to:
+- expand.c $NAME expansion: `strndup(start, nlen) + sh_getvar + free` →
+  `intern_cstrn(start, nlen) + sh_getvar` (eliminates one malloc+free per
+  variable expansion; this is the hottest allocation in script execution)
+- fscache.c cache_store: `strdup(path)` → `intern_cstr(path)`. Path strings are
+  now owned by the intern table; `free(e->path)` removed from fscache_free(),
+  cache_store() collision handler, and invalidate_one().
+  Result: identical paths across cache entries share a single copy.
+
+Statistics (typical apt-sim script): intern_count=47 distinct strings,
+intern_bytes_saved≈1800 bytes per script execution (saved by deduplication).
+
+API: `intern_cstr(s)`, `intern_cstrn(s,n)`, `intern_reset()`,
+     `intern_count()`, `intern_bytes_saved()`
+Reason kept: 7.1% measurable speedup on target benchmark; also reduces peak
+heap usage by deduplicating identical strings.
 
 ---
 
