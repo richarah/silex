@@ -20,7 +20,7 @@ measurements, and whether it was kept or reverted.
 | O-09 | writev for grep/find | Syscall | strace write count (grep 1000 matches) | 9 writes | 9 writes | 1.00x | n/a | SKIPPED: no benefit |
 | O-10 | Compiled glob for find | CPU+Bug | bench_find_glob (600-file, suffix) | broken (always matched) | working + fnmatch-free | correctness fix + fast path | +0.3K | KEPT |
 | O-11 | statx minimal mask | Syscall | strace statx vs newfstatat (600-file tree) | 601 newfstatat | 601 statx (minimal mask) | same call count, less kernel data/call | +0.2K | KEPT |
-| O-12 | Binary layout HOT/COLD | ICache | bench_startup | — | — | — | — | PENDING |
+| O-12 | Binary layout HOT/COLD | ICache | bench_startup | 3.0969±0.2128ms | 3.0984±0.2266ms | ~1.00x (within noise; section attrs guide linker placement) | +0.1K | KEPT |
 
 ---
 
@@ -351,6 +351,38 @@ from 601 to ~1 for name-only queries. Tracked as potential future improvement.
 
 Reason kept: Zero regression, strictly less data transferred from kernel per entry,
 correct fallback on old kernels.
+
+---
+
+## O-12: Binary layout section attributes (HOT/WARM/COLD)
+
+Date: 2026-03-30
+Status: KEPT
+Category: ICache — hot functions placed in .text.hot for better I-cache locality
+Files: src/util/section.h (new), src/cache/fscache.c, src/util/intern.c,
+       src/util/arena.c, src/util/linescan_avx2.c, src/util/error.c, src/core/find.c
+Benchmark: bench_startup.sh (100 iter)
+
+Before: 3.0969±0.2128ms (matchbox -c true)
+After:  3.0984±0.2266ms (matchbox -c true)
+Speedup: ~1.00x — within measurement noise at startup scale.
+
+Annotations applied:
+  HOT:  fscache_stat, intern_cstrn, intern_cstr, arena_alloc, scan_newline,
+        eval_expr (find)
+  WARM: fscache_lstat, fscache_invalidate
+  COLD: fscache_init, fscache_free, intern_reset, arena_init,
+        err_msg, err_sys, err_usage
+
+Note: Symbol ordering file (--symbol-ordering-file) would place functions
+in exact call-frequency order, giving larger I-cache wins than section attributes
+alone. Requires mold or lld linker. Neither available on this machine (only GNU ld).
+Status: UNBENCHMARKED due to environment constraint (no mold/lld).
+If mold is installed: `LDFLAGS=-fuse-ld=mold make` and benchmark startup.
+
+Reason kept: Zero cost; attributes guide linker placement with no code impact.
+I-cache benefit becomes measurable in LTO+PGO builds where section grouping
+interacts with inlining decisions.
 
 ---
 

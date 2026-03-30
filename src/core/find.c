@@ -10,6 +10,7 @@
 
 #include "../util/error.h"
 #include "../util/path.h"
+#include "../util/section.h"
 #include "../util/strbuf.h"
 
 #include <ctype.h>
@@ -613,8 +614,8 @@ static int exec_cmd_single(expr_node_t *n, const char *path)
     return (WIFEXITED(status) && WEXITSTATUS(status) == 0) ? 1 : 0;
 }
 
-static int eval_expr(expr_node_t *n, const char *path, const char *basename_ptr,
-                     const struct stat *st, int depth)
+static HOT int eval_expr(expr_node_t *n, const char *path, const char *basename_ptr,
+                         const struct stat *st, int depth)
 {
     if (!n) return 1;
 

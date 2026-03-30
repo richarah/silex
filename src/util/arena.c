@@ -5,17 +5,18 @@
 #endif
 
 #include "arena.h"
+#include "section.h"
 
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 
-void arena_init(arena_t *a)
+COLD void arena_init(arena_t *a)
 {
     a->head = NULL;
 }
 
-void *arena_alloc(arena_t *a, size_t size)
+HOT void *arena_alloc(arena_t *a, size_t size)
 {
     /* Round up to sizeof(void*) alignment */
     size_t align = sizeof(void *);

@@ -5,6 +5,7 @@
 #endif
 
 #include "intern.h"
+#include "section.h"
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -133,7 +134,7 @@ static int table_grow(void)
 
 /* ---- Public API ---------------------------------------------------------- */
 
-const char *intern_cstrn(const char *s, size_t n)
+HOT const char *intern_cstrn(const char *s, size_t n)
 {
     if (!s) return "";
 
@@ -166,13 +167,13 @@ const char *intern_cstrn(const char *s, size_t n)
     return copy;
 }
 
-const char *intern_cstr(const char *s)
+HOT const char *intern_cstr(const char *s)
 {
     if (!s) return "";
     return intern_cstrn(s, strlen(s));
 }
 
-void intern_reset(void)
+COLD void intern_reset(void)
 {
     arena_reset();
     free(g_slots);

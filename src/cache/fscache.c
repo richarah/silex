@@ -29,6 +29,7 @@
 #include "fscache.h"
 #include "hashmap.h"
 #include "../util/intern.h"
+#include "../util/section.h"
 
 #include <errno.h>
 #include <limits.h>
@@ -68,7 +69,7 @@ static uint64_t fnv1a_path(const char *path)
 /* Init / free                                                          */
 /* ------------------------------------------------------------------ */
 
-void fscache_init(void)
+COLD void fscache_init(void)
 {
     hm_init(&g_fscache.map, FSCACHE_INITIAL_CAP);
 
@@ -81,7 +82,7 @@ void fscache_init(void)
     }
 }
 
-void fscache_free(void)
+COLD void fscache_free(void)
 {
     if (g_fscache.map.slots) {
         for (size_t i = 0; i < g_fscache.map.cap; i++) {
@@ -161,7 +162,7 @@ static fscache_entry_t *cache_lookup(const char *path, uint64_t key)
 /* fscache_stat                                                         */
 /* ------------------------------------------------------------------ */
 
-int fscache_stat(const char *path, struct stat *out)
+HOT int fscache_stat(const char *path, struct stat *out)
 {
     /* Fast path: TTL disabled */
     if (g_fscache.ttl <= 0)
@@ -190,7 +191,7 @@ int fscache_stat(const char *path, struct stat *out)
 /* fscache_lstat                                                        */
 /* ------------------------------------------------------------------ */
 
-int fscache_lstat(const char *path, struct stat *out)
+WARM int fscache_lstat(const char *path, struct stat *out)
 {
     /* Fast path: TTL disabled */
     if (g_fscache.ttl <= 0)
@@ -245,7 +246,7 @@ static void invalidate_one(const char *p)
     }
 }
 
-void fscache_invalidate(const char *path)
+WARM void fscache_invalidate(const char *path)
 {
     if (!path) return;
 

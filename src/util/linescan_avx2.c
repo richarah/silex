@@ -12,12 +12,13 @@
 #endif
 
 #include "linescan.h"
+#include "section.h"
 
 #include <immintrin.h>   /* AVX2 intrinsics */
 #include <stdint.h>
 #include <string.h>
 
-const char *scan_newline(const char *buf, size_t len)
+HOT const char *scan_newline(const char *buf, size_t len)
 {
     if (len == 0)
         return buf;
