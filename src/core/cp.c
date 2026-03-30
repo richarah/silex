@@ -1,5 +1,9 @@
 /* cp.c — cp builtin: copy files and directories */
 
+/* _GNU_SOURCE enables copy_file_range() declaration in <unistd.h> (glibc >= 2.27) */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
@@ -67,27 +71,70 @@ static int copy_file_fd(int src_fd, const char *dst_path,
     }
 
     /* Copy data */
-    char buf[65536];
-    ssize_t nread;
     int ret = 0;
 
-    while ((nread = read(src_fd, buf, sizeof(buf))) > 0) {
-        const char *p = buf;
-        ssize_t remaining = nread;
-        while (remaining > 0) {
-            ssize_t nw = write(dst_fd, p, (size_t)remaining);
-            if (nw < 0) {
-                err_sys("cp", "error writing '%s'", dst_path);
+#ifdef __linux__
+    /* Try copy_file_range: kernel-to-kernel, zero user-space copy */
+    {
+        off_t file_size = src_st->st_size;
+        if (file_size > 0) {
+            off_t off_in = 0, off_out = 0;
+            int cfr_ok = 1;
+            while (off_in < file_size) {
+                ssize_t n = copy_file_range(src_fd, &off_in, dst_fd, &off_out,
+                                            (size_t)(file_size - off_in), 0);
+                if (n < 0) {
+                    if (errno == ENOSYS || errno == EXDEV || errno == EOPNOTSUPP
+                        || errno == EINVAL) {
+                        /* Kernel too old, cross-device, or unsupported fs */
+                        cfr_ok = 0;
+                        break;
+                    }
+                    err_sys("cp", "error copying '%s'", dst_path);
+                    ret = 1;
+                    goto done;
+                }
+                if (n == 0)
+                    break;
+            }
+            if (cfr_ok)
+                goto done;
+            /* Fallback: seek back to start */
+            if (lseek(src_fd, 0, SEEK_SET) < 0 ||
+                lseek(dst_fd, 0, SEEK_SET) < 0 ||
+                ftruncate(dst_fd, 0) < 0) {
+                err_sys("cp", "error seeking for fallback copy of '%s'", dst_path);
                 ret = 1;
                 goto done;
             }
-            p += nw;
-            remaining -= nw;
+        } else if (file_size == 0) {
+            goto done;  /* empty file: dst already created */
         }
     }
-    if (nread < 0) {
-        err_sys("cp", "error reading source");
-        ret = 1;
+#endif /* __linux__ */
+
+    /* Fallback: read/write loop */
+    {
+        char buf[65536];
+        ssize_t nread;
+        while ((nread = read(src_fd, buf, sizeof(buf))) > 0) {
+            const char *p = buf;
+            ssize_t remaining = nread;
+            while (remaining > 0) {
+                ssize_t nw = write(dst_fd, p, (size_t)remaining);
+                if (nw < 0) {
+                    err_sys("cp", "error writing '%s'", dst_path);
+                    ret = 1;
+                    goto done;
+                }
+                p += nw;
+                remaining -= nw;
+            }
+        }
+        if (nread < 0) {
+            err_sys("cp", "error reading source");
+            ret = 1;
+        }
     }
 
 done:
