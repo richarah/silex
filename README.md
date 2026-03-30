@@ -2,7 +2,7 @@
 
 A purpose-built container build runtime: a single static binary containing a minimal POSIX shell and common coreutils as builtins, optimised for the container build hot path.
 
-matchbox makes `RUN` steps in Dockerfiles faster by executing common commands in-process — no fork, no exec, no dynamic linking overhead.
+matchbox makes `RUN` steps in Dockerfiles faster by executing common commands in-process: no fork, no exec, no dynamic linking overhead.
 
 ## Quick start
 
