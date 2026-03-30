@@ -1409,6 +1409,7 @@ int applet_sed(int argc, char **argv)
                 ret = 2;
                 continue;
             }
+            posix_fadvise(fileno(fps[j]), 0, 0, POSIX_FADV_SEQUENTIAL);
         }
 
         for (int j = 0; j < nfiles; j++) {

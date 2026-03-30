@@ -12,7 +12,7 @@ measurements, and whether it was kept or reverted.
 | O-01 | Charclass LUT | CPU | bench_builtins (grep-count) | 4.3240±0.2948ms | 4.0676±0.1762ms | 1.06x | +4.1K | KEPT |
 | O-02 | Vectorised newline scan | CPU/IO | bench_builtins (wc-l) | 5.0954±0.2924ms | 3.6757±0.2448ms | 1.39x | +0.1K | KEPT |
 | O-03 | copy_file_range for cp | IO | bench_builtin_cp (10MB manual) | 6.0ms/10 | 5.3ms/10 | 1.08x | +0.1K | KEPT |
-| O-04 | posix_fadvise sequential | IO | bench_grep (no-match-100k) | — | — | — | — | PENDING |
+| O-04 | posix_fadvise sequential | IO | bench_grep (no-match-100k) | 9.4738±0.4090ms | 8.8975±0.3660ms | 1.06x | +0.1K | KEPT |
 | O-05 | fallocate for cp | IO | bench_builtin_cp (1MB) | — | — | — | — | PENDING |
 | O-06 | O_TMPFILE atomic writes | IO | bench_builtins (sed-subst) | — | — | — | — | PENDING |
 | O-07 | String intern table | Alloc | bench_dockerfile (apt-sim) | — | — | — | — | PENDING |
@@ -273,6 +273,28 @@ Measurement: matchbox fixed-str-100k = 12.3395±0.5479ms vs system 3.7738±0.235
   5.9793±3.6604ms = 1.58x slower. Criterion was "2x slower" — THRESHOLD MET.
 Plan: Addressed by O-02 (vectorised newline scan) + O-09 (writev) in this release.
   SSE2 memmem approach remains an option if O-02/O-09 do not close the gap.
+
+---
+
+## O-04: posix_fadvise(SEQUENTIAL) on all sequential file readers
+
+Date: 2026-03-30
+Status: KEPT
+Category: IO — hints kernel readahead scheduler
+Files: src/core/cp.c, src/core/grep.c, src/core/wc.c, src/core/sort.c,
+       src/core/cat.c, src/core/head.c, src/core/sed.c
+Benchmark: bench_grep.sh no-match-100k (50 iter, warm cache)
+
+Before: matchbox no-match-100k = 9.4738±0.4090ms
+After:  matchbox no-match-100k = 8.8975±0.3660ms
+
+Speedup: 1.065x (6.5%) on warm-cache full-file scan.
+  Cold-cache benefit would be larger (not measurable without root/drop_caches).
+Binary delta: +128 bytes
+Note: posix_fadvise is advisory; ENOSYS/ESPIPE silently ignored (return value discarded).
+  Applied to: cp (src_fd), grep (fopen), wc (fopen), sort (fopen),
+  cat (open fd), head (fopen), sed (fopen array). Tail skipped (pre-loads entire file).
+Reason kept: Simple one-liner per file, 6.5% warm-cache benefit, zero risk.
 
 ---
 

@@ -332,6 +332,7 @@ static int cp_path(const char *src, const char *dst,
         err_sys("cp", "cannot open '%s'", src);
         return 1;
     }
+    posix_fadvise(src_fd, 0, 0, POSIX_FADV_SEQUENTIAL); /* advisory; ignore errors */
 
     if (opts->verbose)
         printf("'%s' -> '%s'\n", src, dst);

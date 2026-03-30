@@ -12,6 +12,7 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <fnmatch.h>
 #include <limits.h>
 #include <regex.h>
@@ -542,6 +543,7 @@ static int grep_path(const char *path, int show_fname, const grep_opts_t *g)
             err_sys("grep", "%s", path);
         return 2;
     }
+    posix_fadvise(fileno(fp), 0, 0, POSIX_FADV_SEQUENTIAL); /* advisory */
 
     int r = grep_stream(fp, path, show_fname, g);
     fclose(fp);

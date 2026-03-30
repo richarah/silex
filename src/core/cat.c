@@ -404,6 +404,7 @@ int applet_cat(int argc, char **argv)
                 ret = 1;
                 continue;
             }
+            posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL); /* advisory */
         }
 
         if (cat_fd(fd, path, &opts) != 0)

@@ -758,6 +758,7 @@ int applet_sort(int argc, char **argv)
                     ret = 1;
                     continue;
                 }
+                posix_fadvise(fileno(fp), 0, 0, POSIX_FADV_SEQUENTIAL);
             }
             /* Assign stable indices relative to total collected so far */
             size_t before = nlines;

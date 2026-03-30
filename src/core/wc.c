@@ -8,10 +8,12 @@
 #include "../util/linescan.h"
 
 #include <ctype.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 /* Per-file statistics */
 typedef struct {
@@ -212,6 +214,7 @@ int applet_wc(int argc, char **argv)
                 ret = 1;
                 continue;
             }
+            posix_fadvise(fileno(fp), 0, 0, POSIX_FADV_SEQUENTIAL);
         }
         if (wc_count(fp, &counts[j]) != 0) {
             err_sys("wc", "read error on '%s'", fname);

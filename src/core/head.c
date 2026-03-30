@@ -7,10 +7,12 @@
 #include "../util/error.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 /*
  * Parse a count argument for -n or -c.
@@ -337,6 +339,7 @@ int applet_head(int argc, char **argv)
                 ret = 1;
                 continue;
             }
+            posix_fadvise(fileno(fp), 0, 0, POSIX_FADV_SEQUENTIAL);
         }
 
         if (head_file(fname, fp, use_bytes, count, negative) != 0)
