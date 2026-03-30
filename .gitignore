@@ -1,0 +1,34 @@
+# Build outputs
+build/
+
+# PGO instrumentation data
+*.gcda
+*.gcno
+*.profdata
+*.profraw
+pgo/
+
+# Compiled module objects
+*.so
+*.a
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Test scratch files
+/tmp/
+tests/tmp/
+
+# Stripped binaries produced manually
+matchbox-stripped
+*-stripped
+
+# Core dumps (anchored to repo root to avoid shadowing src/core/)
+/core
+core.*
+vgcore.*
