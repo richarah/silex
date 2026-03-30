@@ -74,6 +74,10 @@ static int copy_file_fd(int src_fd, const char *dst_path,
     int ret = 0;
 
 #ifdef __linux__
+    /* Pre-allocate destination file size to reduce fragmentation */
+    if (src_st->st_size > 0)
+        fallocate(dst_fd, 0, 0, src_st->st_size); /* ignore errors: not all fs support */
+
     /* Try copy_file_range: kernel-to-kernel, zero user-space copy */
     {
         off_t file_size = src_st->st_size;

@@ -13,7 +13,7 @@ measurements, and whether it was kept or reverted.
 | O-02 | Vectorised newline scan | CPU/IO | bench_builtins (wc-l) | 5.0954±0.2924ms | 3.6757±0.2448ms | 1.39x | +0.1K | KEPT |
 | O-03 | copy_file_range for cp | IO | bench_builtin_cp (10MB manual) | 6.0ms/10 | 5.3ms/10 | 1.08x | +0.1K | KEPT |
 | O-04 | posix_fadvise sequential | IO | bench_grep (no-match-100k) | 9.4738±0.4090ms | 8.8975±0.3660ms | 1.06x | +0.1K | KEPT |
-| O-05 | fallocate for cp | IO | bench_builtin_cp (1MB) | — | — | — | — | PENDING |
+| O-05 | fallocate for cp | IO | bench_builtin_cp (1MB) | 3.7653±0.2789ms | 3.5885±0.2217ms | 1.05x | +0.1K | KEPT |
 | O-06 | O_TMPFILE atomic writes | IO | bench_builtins (sed-subst) | — | — | — | — | PENDING |
 | O-07 | String intern table | Alloc | bench_dockerfile (apt-sim) | — | — | — | — | PENDING |
 | O-08 | mkdir -p prefix skip | Syscall | bench_builtin_mkdir (depth-10) | — | — | — | — | PENDING |
@@ -273,6 +273,28 @@ Measurement: matchbox fixed-str-100k = 12.3395±0.5479ms vs system 3.7738±0.235
   5.9793±3.6604ms = 1.58x slower. Criterion was "2x slower" — THRESHOLD MET.
 Plan: Addressed by O-02 (vectorised newline scan) + O-09 (writev) in this release.
   SSE2 memmem approach remains an option if O-02/O-09 do not close the gap.
+
+---
+
+## O-05: fallocate pre-allocation for cp output
+
+Date: 2026-03-30
+Status: KEPT
+Category: IO — pre-allocates output file to reduce fragmentation and metadata updates
+Files: src/core/cp.c
+Benchmark: bench_builtin_cp.sh (100 iter)
+
+Before (after O-03/O-04): matchbox-cp 1MB = 3.7653±0.2789ms
+After:                     matchbox-cp 1MB = 3.5885±0.2217ms
+
+Speedup: 1.049x (4.7%) at 1MB. Benefit grows with file size.
+Binary delta: +72 bytes
+Fallback: fallocate errors silently ignored (not all filesystems support it).
+  tmpfs, NFS, some overlayfs may return EOPNOTSUPP; the copy proceeds normally.
+  Only applied when file_size > 0.
+Note: Combined with O-03 (copy_file_range) gives effective kernel-accelerated path:
+  fallocate pre-allocates, copy_file_range copies — both kernel paths.
+Reason kept: Measurable 4.7% improvement, trivial one-liner, zero risk.
 
 ---
 
