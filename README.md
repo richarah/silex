@@ -13,16 +13,36 @@ make
 
 This installs symlinks so `cp`, `echo`, `mkdir`, etc. all invoke the matchbox binary.
 
-## Build
+## Building
 
+**Container images (musl static, smallest binary):**
 ```sh
-make          # release build (static)
-make debug    # debug build with ASan/UBSan
-make test     # run unit tests
-make install PREFIX=/usr/local
+make release          # requires musl-gcc; see release-docker on glibc hosts
+make release-docker   # builds inside Alpine via Docker (no local musl-gcc needed)
 ```
 
-Requires: C11 compiler, GNU Make. Uses `musl-gcc` if available, otherwise `gcc -static`.
+**For glibc-based images (Debian, Ubuntu, Silex):**
+```sh
+make release-glibc
+```
+
+**Development (ASan/UBSan):**
+```sh
+make debug
+make test
+```
+
+Both `release` and `release-glibc` produce `build/bin/matchbox` with identical features.
+The musl static build is stripped and self-contained; the glibc dynamic build links
+against the host libc.
+
+**Architecture note:** distributed x86-64 binaries require AVX2 (Intel Haswell 2013+
+or AMD Excavator 2015+). For older hardware:
+```sh
+make release MARCH=x86-64-v2
+```
+
+Requires: C11 compiler (gcc or clang), GNU Make, linux-headers.
 
 ## Applets (Phase 1)
 

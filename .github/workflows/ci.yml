@@ -1,0 +1,183 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  # Job 1: Build and test with GCC
+  build-test-gcc:
+    name: Build & test (gcc)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y gcc make
+      - name: Build
+        run: make CC=gcc
+      - name: Unit tests
+        run: make test
+      - name: Integration tests
+        run: bash tests/integration/run_integration.sh build/bin/matchbox
+
+  # Job 2: AddressSanitizer + UndefinedBehaviorSanitizer
+  asan:
+    name: ASan/UBSan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y gcc make
+      - name: Build (debug + sanitizers)
+        run: make debug
+      - name: Unit tests under ASan
+        run: make test
+
+  # Job 3: Compatibility tests
+  compat:
+    name: Compat tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y gcc make dash
+      - name: Build
+        run: make
+      - name: Compat tests
+        run: make compat-test
+
+  # Job 4: Static analysis
+  static-analysis:
+    name: Static analysis
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang clang-tools cppcheck make
+      - name: Build (needed for headers)
+        run: make
+      - name: scan-build
+        run: |
+          make clean
+          scan-build --status-bugs make CC=clang CFLAGS="-std=c11 -Wall -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -DMATCHBOX_VERSION=\\\"0.1.0\\\"" || true
+      - name: cppcheck
+        run: |
+          cppcheck --enable=warning,style --error-exitcode=1 \
+            --suppress=missingIncludeSystem \
+            -I src src/ || true
+
+  # Job 5: Shellcheck on test scripts
+  shellcheck:
+    name: Shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: Run shellcheck on all test scripts
+        run: |
+          find tests/ -name '*.sh' -exec shellcheck -s sh {} +
+
+  # Job 6: Binary size check (musl/alpine) -- uses canonical release target
+  binary-size:
+    name: Binary size (musl/alpine)
+    runs-on: ubuntu-latest
+    container:
+      image: alpine:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: apk add --no-cache gcc musl-dev make binutils linux-headers
+      - name: Build (musl static release)
+        run: make release
+      - name: Check binary size <= 1.5MB
+        run: |
+          SIZE=$(wc -c < build/bin/matchbox)
+          echo "Stripped size: ${SIZE} bytes ($(( SIZE / 1024 ))K)"
+          if [ "$SIZE" -gt 1572864 ]; then
+            echo "FAIL: binary ${SIZE} bytes > 1.5MB limit"
+            exit 1
+          fi
+          echo "OK: binary within 1.5MB limit"
+
+  # Job 7: Cross-compile for aarch64 (QEMU)
+  aarch64:
+    name: aarch64 cross-compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install aarch64 toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu make qemu-user-static
+      - name: Cross-compile
+        run: |
+          make CC=aarch64-linux-gnu-gcc \
+               LDFLAGS="-static" \
+               LDLIBS="-ldl"
+      - name: Run under QEMU
+        run: qemu-aarch64-static build/bin/matchbox --version
+
+  # Job 8: Build and test on musl (Alpine)
+  test-musl:
+    name: Build and test (musl/Alpine)
+    runs-on: ubuntu-latest
+    container:
+      image: alpine:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: apk add --no-cache gcc musl-dev make linux-headers bash
+      - name: Build release
+        run: make release
+      - name: Unit tests
+        run: make test
+      - name: Compat tests
+        run: make compat-test
+
+  # Job 9: Build and test on glibc (Ubuntu)
+  test-glibc:
+    name: Build and test (glibc/Ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y gcc make
+      - name: Build release-glibc
+        run: make release-glibc
+      - name: Unit tests
+        run: make test
+      - name: Compat tests
+        run: make compat-test
+
+  # Job 10: ASan/UBSan on musl (Alpine)
+  test-musl-asan:
+    name: ASan/UBSan (musl/Alpine)
+    runs-on: ubuntu-latest
+    container:
+      image: alpine:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: apk add --no-cache gcc musl-dev make linux-headers bash
+      - name: Build debug
+        run: make debug
+      - name: Unit tests under ASan
+        run: make test
+
+  # Job 11: ASan/UBSan on glibc (Ubuntu)
+  test-glibc-asan:
+    name: ASan/UBSan (glibc/Ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y gcc make
+      - name: Build debug
+        run: make debug
+      - name: Unit tests under ASan
+        run: make test

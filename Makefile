@@ -1,5 +1,9 @@
 # Makefile -- matchbox container build runtime
-# Builds a static binary; musl-gcc used if available, otherwise gcc with -static.
+# Dual build: musl-static (release) and glibc-dynamic (release-glibc).
+# Auto-detects compiler and libc; defaults to glibc if musl-gcc is absent.
+
+# --- Version ------------------------------------------------------------------
+VERSION := 0.1.0
 
 # --- Compiler selection -------------------------------------------------------
 MUSL_GCC := $(shell command -v musl-gcc 2>/dev/null)
@@ -13,24 +17,90 @@ else
     CC = gcc
 endif
 
+# --- LTO flag: thin (clang) or auto-parallel (gcc) ----------------------------
+ifneq (,$(findstring clang,$(CC)))
+    LTO_FLAG = -flto=thin
+else
+    LTO_FLAG = -flto=auto
+endif
+
+# --- Architecture baseline (overridable: make release MARCH=x86-64-v2) -------
+MARCH ?= x86-64-v3
+ARCH  := $(shell uname -m)
+
+ifeq ($(ARCH),x86_64)
+    MARCH_FLAG = -march=$(MARCH)
+else ifeq ($(ARCH),aarch64)
+    MARCH_FLAG = -march=armv8-a+simd
+else
+    MARCH_FLAG =
+endif
+
+# --- Libc detection -----------------------------------------------------------
+ifeq ($(CC),musl-gcc)
+    LIBC_DEFINE = -DMATCHBOX_LIBC_MUSL=1
+else ifneq (,$(wildcard /lib/ld-musl-*.so*))
+    LIBC_DEFINE = -DMATCHBOX_LIBC_MUSL=1
+else
+    LIBC_DEFINE = -DMATCHBOX_LIBC_GLIBC=1
+endif
+
 # --- Flags --------------------------------------------------------------------
 CFLAGS_COMMON  = -std=c11 -Wall -Wextra -Werror -pedantic \
                  -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE \
-                 -fstack-protector-strong
-CFLAGS_RELEASE = $(CFLAGS_COMMON) -O2 -flto -fPIE
-CFLAGS_DEBUG   = $(CFLAGS_COMMON) -O0 -g -fsanitize=address,undefined
+                 -DMATCHBOX_VERSION=\"$(VERSION)\" \
+                 -fstack-protector-strong \
+                 $(LIBC_DEFINE)
+
+CFLAGS_RELEASE = $(CFLAGS_COMMON) \
+                 -O2 $(LTO_FLAG) -fPIE \
+                 $(MARCH_FLAG) \
+                 -ffunction-sections \
+                 -fdata-sections \
+                 -fmerge-all-constants \
+                 -fno-unwind-tables \
+                 -fno-asynchronous-unwind-tables \
+                 -fvisibility=hidden
+
+CFLAGS_DEBUG   = $(CFLAGS_COMMON) \
+                 -O0 -g3 \
+                 -fno-omit-frame-pointer \
+                 -fsanitize=address,undefined
 
 CFLAGS ?= $(CFLAGS_RELEASE)
 
-# Static linking: musl-gcc handles this automatically; for glibc we use -static-pie
-# (-static-pie requires glibc >= 2.16, present on this machine with 2.42)
-ifdef MUSL_GCC
-    LDFLAGS_STATIC =
-else
-    LDFLAGS_STATIC = -static-pie
+# --- Reproducible builds: pass SOURCE_DATE_EPOCH as build date ----------------
+ifdef SOURCE_DATE_EPOCH
+    CFLAGS_COMMON += -Wdate-time \
+        -DMATCHBOX_BUILD_DATE=\"$(shell \
+            date -u -d @$(SOURCE_DATE_EPOCH) '+%Y-%m-%d' 2>/dev/null || \
+            date -u -r $(SOURCE_DATE_EPOCH) '+%Y-%m-%d')\"
 endif
 
-LDFLAGS ?= $(LDFLAGS_STATIC)
+# --- LDFLAGS ------------------------------------------------------------------
+LDFLAGS_MUSL  = -static-pie \
+                -Wl,--gc-sections \
+                -Wl,--as-needed \
+                -Wl,-z,relro \
+                -Wl,-z,now \
+                -Wl,-z,noexecstack \
+                -Wl,--build-id=sha1
+
+LDFLAGS_GLIBC = -pie \
+                -Wl,--gc-sections \
+                -Wl,--as-needed \
+                -Wl,-z,relro \
+                -Wl,-z,now \
+                -Wl,-z,noexecstack \
+                -Wl,--build-id=sha1
+
+ifdef MUSL_GCC
+    LDFLAGS ?= $(LDFLAGS_MUSL)
+    LINK_TYPE = static
+else
+    LDFLAGS ?= $(LDFLAGS_GLIBC)
+    LINK_TYPE = dynamic
+endif
 
 # Link with dl for module loading (dlopen)
 LDLIBS = -ldl
@@ -41,18 +111,28 @@ OBJDIR   = build/obj
 BINDIR   = build/bin
 
 # --- Sources ------------------------------------------------------------------
-# --- Architecture detection for vectorised linescan --------------------------
-ARCH := $(shell uname -m)
+# Architecture detection for vectorised linescan
 ifeq ($(ARCH),x86_64)
     LINESCAN_SRC = $(SRCDIR)/util/linescan_avx2.c
+    LINESCAN_OBJ = $(OBJDIR)/util/linescan_avx2.o
     CFLAGS_LINESCAN = -mavx2
 else ifeq ($(ARCH),aarch64)
     LINESCAN_SRC = $(SRCDIR)/util/linescan_neon.c
+    LINESCAN_OBJ = $(OBJDIR)/util/linescan_neon.o
     CFLAGS_LINESCAN =
 else
     LINESCAN_SRC = $(SRCDIR)/util/linescan_scalar.c
+    LINESCAN_OBJ = $(OBJDIR)/util/linescan_scalar.o
     CFLAGS_LINESCAN =
 endif
+
+REGEX_SRCS = \
+    $(SRCDIR)/util/regex/classify.c \
+    $(SRCDIR)/util/regex/charclass_re.c \
+    $(SRCDIR)/util/regex/compile.c \
+    $(SRCDIR)/util/regex/parse.c \
+    $(SRCDIR)/util/regex/thompson.c \
+    $(SRCDIR)/util/regex/mb_regex.c
 
 UTIL_SRCS = \
     $(SRCDIR)/util/strbuf.c \
@@ -62,7 +142,8 @@ UTIL_SRCS = \
     $(SRCDIR)/util/platform.c \
     $(SRCDIR)/util/charclass.c \
     $(SRCDIR)/util/intern.c \
-    $(LINESCAN_SRC)
+    $(LINESCAN_SRC) \
+    $(REGEX_SRCS)
 
 CORE_SRCS = \
     $(SRCDIR)/core/echo.c \
@@ -124,15 +205,53 @@ ALL_SRCS = $(UTIL_SRCS) $(CORE_SRCS) $(SHELL_SRCS) $(MODULE_SRCS) \
 # Object files: mirror source tree under $(OBJDIR)
 OBJS = $(patsubst $(SRCDIR)/%.c,$(OBJDIR)/%.o,$(ALL_SRCS))
 
+# --- Per-file optimisation overrides ------------------------------------------
+# HOT_OBJS: compiled at -O3 in release builds
+HOT_OBJS = \
+    $(OBJDIR)/shell/lexer.o \
+    $(OBJDIR)/core/cp.o \
+    $(OBJDIR)/core/grep.o \
+    $(OBJDIR)/core/sed.o \
+    $(OBJDIR)/core/sort.o \
+    $(OBJDIR)/core/wc.o \
+    $(OBJDIR)/core/find.o \
+    $(OBJDIR)/core/cat.o \
+    $(OBJDIR)/core/mkdir.o \
+    $(OBJDIR)/core/chmod.o \
+    $(OBJDIR)/util/charclass.o \
+    $(LINESCAN_OBJ) \
+    $(OBJDIR)/util/arena.o \
+    $(OBJDIR)/util/strbuf.o \
+    $(OBJDIR)/util/intern.o \
+    $(OBJDIR)/cache/fscache.o \
+    $(OBJDIR)/cache/hashmap.o \
+    $(OBJDIR)/util/regex/thompson.o \
+    $(OBJDIR)/util/regex/classify.o \
+    $(OBJDIR)/util/regex/compile.o
+
+# COLD_OBJS: compiled at -Os in release builds (rarely executed paths)
+COLD_OBJS = \
+    $(OBJDIR)/module/loader.o \
+    $(OBJDIR)/module/registry.o \
+    $(OBJDIR)/util/error.o \
+    $(OBJDIR)/util/platform.o
+
+# PERFILE_OPT is evaluated lazily at recipe time (= not :=) so it picks up
+# the target-specific RELEASE_OPT set by all/release/release-glibc.
+$(HOT_OBJS):  PERFILE_OPT = $(if $(RELEASE_OPT),-O3)
+$(COLD_OBJS): PERFILE_OPT = $(if $(RELEASE_OPT),-Os)
+
 # --- Targets ------------------------------------------------------------------
 TARGET = $(BINDIR)/matchbox
 
-.PHONY: all clean debug test install check \
+.PHONY: all clean debug release release-glibc release-docker test install check \
         test-asan compat-test shell-test security-test \
         bench integration-test fuzz fuzz-run \
         analyze cppcheck test-valgrind cross-check \
-        size-check install-hooks musl
+        size-check install-hooks musl \
+        stress-test edge-test
 
+all: RELEASE_OPT = 1
 all: $(TARGET)
 
 $(TARGET): $(OBJS) | $(BINDIR)
@@ -140,21 +259,43 @@ $(TARGET): $(OBJS) | $(BINDIR)
 	@echo "Built: $@"
 	@wc -c $@ | awk '{printf "Binary size: %s bytes (%.1fK)\n", $$1, $$1/1024}'
 
-matchbox-static: CFLAGS += -DMATCHBOX_STATIC=1
-matchbox-static: $(TARGET)
+# --- Release targets ----------------------------------------------------------
 
+release: CFLAGS = $(CFLAGS_RELEASE) -DMATCHBOX_BUILD_STATIC=1 -DMATCHBOX_LIBC_MUSL=1
+release: LDFLAGS = $(LDFLAGS_MUSL)
+release: RELEASE_OPT = 1
+release: $(TARGET)
+	strip -s $(TARGET)
+	@echo "Release (musl static): $$(wc -c < $(TARGET)) bytes"
+
+release-glibc: CFLAGS = $(CFLAGS_RELEASE) -DMATCHBOX_BUILD_DYNAMIC=1 -DMATCHBOX_LIBC_GLIBC=1
+release-glibc: LDFLAGS = $(LDFLAGS_GLIBC)
+release-glibc: RELEASE_OPT = 1
+release-glibc: $(TARGET)
+	strip -s $(TARGET)
+	@echo "Release (glibc dynamic): $$(wc -c < $(TARGET)) bytes"
+
+release-docker:
+	docker run --rm -v $(PWD):/src -w /src alpine:latest sh -c \
+	    "apk add --no-cache gcc musl-dev make linux-headers && make release"
+
+# --- Debug build (ASan/UBSan) -------------------------------------------------
 debug: CFLAGS = $(CFLAGS_DEBUG)
 debug: LDFLAGS =
 debug: LDLIBS = -ldl
 debug: $(TARGET)
 
+# --- Legacy musl alias --------------------------------------------------------
+musl: release
+
+# --- Compile rule -------------------------------------------------------------
 $(OBJDIR)/%.o: $(SRCDIR)/%.c | $(OBJDIR)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -I$(SRCDIR) -c $< -o $@
+	$(CC) $(CFLAGS) $(PERFILE_OPT) -I$(SRCDIR) -c $< -o $@
 
 $(OBJDIR):
-	mkdir -p $(OBJDIR)/util $(OBJDIR)/core $(OBJDIR)/shell \
-	         $(OBJDIR)/module $(OBJDIR)/batch $(OBJDIR)/cache
+	mkdir -p $(OBJDIR)/util $(OBJDIR)/util/regex $(OBJDIR)/core \
+	         $(OBJDIR)/shell $(OBJDIR)/module $(OBJDIR)/batch $(OBJDIR)/cache
 
 $(BINDIR):
 	mkdir -p $(BINDIR)
@@ -171,6 +312,15 @@ install: $(TARGET)
 # C unit test binaries
 TEST_CHARCLASS = build/bin/test_charclass
 TEST_LINESCAN  = build/bin/test_linescan
+TEST_REGEX     = build/bin/test_regex
+
+REGEX_TEST_SRCS = \
+    $(SRCDIR)/util/regex/classify.c \
+    $(SRCDIR)/util/regex/charclass_re.c \
+    $(SRCDIR)/util/regex/compile.c \
+    $(SRCDIR)/util/regex/parse.c \
+    $(SRCDIR)/util/regex/thompson.c \
+    $(SRCDIR)/util/regex/mb_regex.c
 
 $(TEST_CHARCLASS): tests/unit/test_charclass.c $(SRCDIR)/util/charclass.c \
                   $(SRCDIR)/util/charclass.h | $(BINDIR)
@@ -182,13 +332,20 @@ $(TEST_LINESCAN): tests/unit/test_linescan.c $(SRCDIR)/util/linescan_scalar.c \
 	$(CC) $(CFLAGS_COMMON) -I$(SRCDIR) -o $@ \
 	    tests/unit/test_linescan.c $(SRCDIR)/util/linescan_scalar.c
 
-test: $(TARGET) $(TEST_CHARCLASS) $(TEST_LINESCAN)
+$(TEST_REGEX): tests/unit/test_regex.c $(REGEX_TEST_SRCS) | $(BINDIR)
+	@mkdir -p $(OBJDIR)/util/regex
+	$(CC) $(CFLAGS_COMMON) -I$(SRCDIR) -o $@ \
+	    tests/unit/test_regex.c $(REGEX_TEST_SRCS)
+
+test: $(TARGET) $(TEST_CHARCLASS) $(TEST_LINESCAN) $(TEST_REGEX)
 	@echo "=== Running unit tests ==="
 	@bash tests/unit/run_tests.sh $(TARGET)
 	@echo "--- test_charclass (C) ---"
 	@$(TEST_CHARCLASS) && echo "PASS: test_charclass"
 	@echo "--- test_linescan (C) ---"
 	@$(TEST_LINESCAN) && echo "PASS: test_linescan"
+	@echo "--- test_regex (C) ---"
+	@$(TEST_REGEX) && echo "PASS: test_regex"
 
 check: test
 
@@ -227,6 +384,14 @@ bench: $(TARGET)
 integration-test: $(TARGET)
 	@echo "=== Running integration tests ==="
 	@bash tests/integration/run_integration.sh $(TARGET)
+
+stress-test: $(TARGET)
+	@echo "=== Running stress tests ==="
+	@bash tests/stress/run_stress.sh 100
+
+edge-test: $(TARGET)
+	@echo "=== Running edge case tests ==="
+	@bash tests/edge/run_edge.sh $(TARGET)
 
 # --- Fuzz targets -------------------------------------------------------------
 FUZZ_CC    = clang
@@ -293,7 +458,7 @@ cross-check:
 # --- Binary size check --------------------------------------------------------
 SIZE_LIMIT = 1572864
 
-size-check: $(TARGET)
+size-check: release
 	@SIZE=$$(wc -c < $(TARGET)); \
 	if [ "$$SIZE" -gt "$(SIZE_LIMIT)" ]; then \
 	    echo "FAIL: binary size $$SIZE bytes > 1.5MB limit"; \
@@ -333,26 +498,6 @@ pgo: pgo-instrument pgo-collect pgo-build
 
 .PHONY: pgo pgo-instrument pgo-collect pgo-merge pgo-build pgo-report pgo-validate
 
-# --- musl build (shipping binary) -----------------------------------------
-# Requires musl-gcc (install: apt-get install musl-tools)
-# Produces a fully static, stripped, PIE binary suitable for shipping.
-
-musl:
-	@command -v musl-gcc >/dev/null 2>&1 || \
-	    { echo "ERROR: musl-gcc not found. Install with: apt-get install musl-tools"; exit 1; }
-	$(MAKE) CC=musl-gcc \
-	        CFLAGS="$(CFLAGS_RELEASE) -fPIE" \
-	        LDFLAGS="-pie" \
-	        LDLIBS="-ldl" \
-	        TARGET=$(BINDIR)/matchbox-musl \
-	        clean all
-	strip -s $(BINDIR)/matchbox-musl
-	@wc -c $(BINDIR)/matchbox-musl | awk '{printf "musl binary size: %s bytes (%.1fK)\n", $$1, $$1/1024}'
-	@SIZE=$$(wc -c < $(BINDIR)/matchbox-musl); \
-	if [ "$$SIZE" -gt "$(SIZE_LIMIT)" ]; then \
-	    echo "FAIL: musl binary $$SIZE bytes > 1.5MB limit"; exit 1; \
-	else echo "OK: musl binary within size limit"; fi
-
 # --- Git hooks ----------------------------------------------------------------
 install-hooks:
 	mkdir -p .git/hooks
@@ -373,7 +518,7 @@ $(OBJDIR)/util/platform.o:  $(SRCDIR)/util/platform.c  $(SRCDIR)/util/platform.h
 $(OBJDIR)/util/charclass.o:      $(SRCDIR)/util/charclass.c $(SRCDIR)/util/charclass.h
 $(OBJDIR)/util/linescan_avx2.o: $(SRCDIR)/util/linescan_avx2.c $(SRCDIR)/util/linescan.h
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $(CFLAGS_LINESCAN) -I$(SRCDIR) -c $< -o $@
+	$(CC) $(CFLAGS) $(CFLAGS_LINESCAN) $(PERFILE_OPT) -I$(SRCDIR) -c $< -o $@
 $(OBJDIR)/util/linescan_neon.o:   $(SRCDIR)/util/linescan_neon.c   $(SRCDIR)/util/linescan.h
 $(OBJDIR)/util/linescan_scalar.o: $(SRCDIR)/util/linescan_scalar.c $(SRCDIR)/util/linescan.h
 
