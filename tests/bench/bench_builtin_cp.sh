@@ -1,4 +1,8 @@
 #!/bin/bash
+ulimit -v 4194304   # 4 GB virtual memory per process
+ulimit -f 1048576   # 1 GB max file size
+ulimit -t 300       # 5 min CPU time per process
+ulimit -d 2097152   # 2 GB data segment
 # tests/bench/bench_builtin_cp.sh — cp builtin benchmark
 # chmod +x tests/bench/bench_builtin_cp.sh
 #

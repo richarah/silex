@@ -1,4 +1,8 @@
 #!/bin/sh
+ulimit -v 4194304   # 4 GB virtual memory per process
+ulimit -f 1048576   # 1 GB max file size
+ulimit -t 300       # 5 min CPU time per process
+ulimit -d 2097152   # 2 GB data segment
 # bench_mkdir_deep.sh — benchmark mkdir -p where first 5 of 10 levels already exist.
 # Usage: bash bench_mkdir_deep.sh <matchbox-binary> [iterations]
 # This tests the O-08 skip-existing-prefix optimisation.

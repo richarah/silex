@@ -378,7 +378,7 @@ bench: $(TARGET)
 	@echo "=== Running benchmarks ==="
 	@for f in tests/bench/bench_*.sh; do \
 	    echo "--- $$f ---"; \
-	    bash $$f $(TARGET); \
+	    (ulimit -v 4194304; ulimit -f 1048576; ulimit -t 300; ulimit -d 2097152; bash $$f $(TARGET)); \
 	done
 
 integration-test: $(TARGET)
@@ -433,7 +433,7 @@ fuzz-run: fuzz
 	@mkdir -p corpus
 	@for f in $(FUZZ_DIR)/fuzz_*; do \
 	    echo "Fuzzing $$f ($(ITERS) iterations)..."; \
-	    $$f -max_total_time=60 -runs=$(ITERS) corpus/; \
+	    $$f -max_total_time=60 -runs=$(ITERS) -rss_limit_mb=2048 -max_len=65536 corpus/; \
 	done
 
 # --- Static analysis ----------------------------------------------------------
