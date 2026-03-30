@@ -868,6 +868,13 @@ typedef struct {
     expr_node_t *expr;
     find_args_t *fa;
     int          ret;
+    /*
+     * d_type_sufficient: 1 when the expression only needs file type/mode
+     * (statx_mask == STATX_TYPE|STATX_MODE) and we are NOT following
+     * symlinks.  In that case readdir()'s d_type can substitute for a full
+     * stat() call whenever d_type != DT_UNKNOWN.
+     */
+    int          d_type_sufficient;
 } walk_ctx_t;
 
 static void walk_dir(const char *path, int depth, walk_ctx_t *ctx);
@@ -897,6 +904,26 @@ recurse:
     }
 }
 
+/*
+ * Convert a readdir() d_type value into the st_mode type bits so that
+ * process_entry() can work without a real stat() call.
+ * Only the file-type bits (S_IFMT) are filled; permission bits stay 0.
+ * Returns 0 for DT_UNKNOWN (caller must fall back to stat).
+ */
+static mode_t dtype_to_mode(unsigned char d_type)
+{
+    switch (d_type) {
+    case DT_REG:  return S_IFREG;
+    case DT_DIR:  return S_IFDIR;
+    case DT_LNK:  return S_IFLNK;
+    case DT_BLK:  return S_IFBLK;
+    case DT_CHR:  return S_IFCHR;
+    case DT_FIFO: return S_IFIFO;
+    case DT_SOCK: return S_IFSOCK;
+    default:      return 0;
+    }
+}
+
 static void walk_dir(const char *path, int depth, walk_ctx_t *ctx)
 {
     find_args_t *fa = ctx->fa;
@@ -921,6 +948,29 @@ static void walk_dir(const char *path, int depth, walk_ctx_t *ctx)
         }
 
         struct stat st;
+
+        /*
+         * d_type optimisation (O-12):
+         * When the expression only needs file type (statx_mask has nothing
+         * beyond STATX_TYPE|STATX_MODE) and we are not following symlinks,
+         * use d_type from readdir() directly — skipping the statx() syscall
+         * entirely.  Only fall back to do_stat() when:
+         *   - d_type == DT_UNKNOWN (filesystem doesn't provide it), or
+         *   - entry is a symlink and -L is active (need to stat the target), or
+         *   - the predicate tree requires more stat fields.
+         */
+        if (ctx->d_type_sufficient &&
+            ent->d_type != DT_UNKNOWN &&
+            !(fa->follow_symlinks && ent->d_type == DT_LNK)) {
+            mode_t m = dtype_to_mode(ent->d_type);
+            if (m != 0) {
+                memset(&st, 0, sizeof(st));
+                st.st_mode = m;
+                process_entry(child, &st, depth, ctx);
+                continue;
+            }
+        }
+
         if (do_stat(child, &st, fa->statx_mask, fa->follow_symlinks) != 0) {
             err_sys("find", "'%s'", child);
             ctx->ret = 1;
@@ -997,6 +1047,15 @@ int applet_find(int argc, char **argv)
     ctx.expr = expr;
     ctx.fa   = &fa;
     ctx.ret  = 0;
+    /*
+     * O-12: d_type optimisation.
+     * When the predicate tree only needs type/mode (no size, mtime, uid…)
+     * and we are not following symlinks, readdir()'s d_type field lets us
+     * skip the statx() syscall for most entries.
+     */
+    ctx.d_type_sufficient =
+        (!fa.follow_symlinks) &&
+        ((fa.statx_mask & ~(STATX_TYPE | STATX_MODE)) == 0);
 
     for (int j = 0; j < n_starts; j++) {
         const char *start = starts[j];

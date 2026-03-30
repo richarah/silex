@@ -763,6 +763,11 @@ int applet_sort(int argc, char **argv)
                     continue;
                 }
                 posix_fadvise(fileno(fp), 0, 0, POSIX_FADV_SEQUENTIAL);
+                /* Large read buffer: reduces getline() syscall count ~30x
+                 * (default glibc 4KB → 128KB, matching GNU sort behaviour).
+                 * Must supply an explicit buffer; NULL still yields 4KB. */
+                static char sort_iobuf[131072];
+                setvbuf(fp, sort_iobuf, _IOFBF, sizeof(sort_iobuf));
             }
             /* Assign stable indices relative to total collected so far */
             size_t before = nlines;

@@ -26,6 +26,9 @@
 #define MAX_PATTERNS 256
 /* Maximum number of --include/--exclude globs each */
 #define MAX_GLOBS    64
+/* Large stdio read buffer — reduces getline() syscall count from ~136 to ~6
+ * for a 550KB file (system grep uses 96KB mmap-style reads). */
+#define GREP_STDIO_BUFSZ (1 << 17)  /* 128 KB */
 
 /* ------------------------------------------------------------------ */
 /* Option state                                                        */
@@ -544,6 +547,12 @@ static int grep_path(const char *path, int show_fname, const grep_opts_t *g)
         return 2;
     }
     posix_fadvise(fileno(fp), 0, 0, POSIX_FADV_SEQUENTIAL); /* advisory */
+    /* Enlarge stdio read buffer to reduce getline() syscall overhead.
+     * Must supply an explicit buffer — passing NULL to setvbuf() still uses
+     * glibc's internal 4KB allocation.  With a 128KB explicit buffer the
+     * read() count drops from ~136 to ~5 for a 550KB file. */
+    static char grep_iobuf[GREP_STDIO_BUFSZ];
+    setvbuf(fp, grep_iobuf, _IOFBF, sizeof(grep_iobuf));
 
     int r = grep_stream(fp, path, show_fname, g);
     fclose(fp);

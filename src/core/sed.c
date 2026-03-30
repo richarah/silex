@@ -1414,6 +1414,11 @@ int applet_sed(int argc, char **argv)
                 continue;
             }
             posix_fadvise(fileno(fps[j]), 0, 0, POSIX_FADV_SEQUENTIAL);
+            /* Large read buffer reduces getline() syscall count ~30x
+             * (default glibc 4KB buffer → 128KB).
+             * Must supply an explicit buffer; NULL still yields 4KB. */
+            static char sed_iobuf[131072];
+            setvbuf(fps[j], sed_iobuf, _IOFBF, sizeof(sed_iobuf));
         }
 
         for (int j = 0; j < nfiles; j++) {

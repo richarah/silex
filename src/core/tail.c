@@ -1,5 +1,9 @@
 /* tail.c — tail builtin: output the last part of files */
 
+/* _GNU_SOURCE for inotify_init1 etc. */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
@@ -42,12 +46,99 @@ static int parse_count(const char *s, long long *val, int *plus_mode)
 /* ---- last-N-lines using circular pointer array ----------------------------- */
 
 /*
+ * Seek-based fast path for last-N-lines on seekable regular files.
+ * Strategy: seek backward in blocks of TAIL_SEEK_CHUNK bytes from EOF,
+ * scanning for newlines, until we have found n+1 newlines (or BOF).
+ * Returns 0 on success, 1 on error, -1 if fp is not seekable (use fallback).
+ */
+#define TAIL_SEEK_CHUNK 65536
+
+static int tail_lines_seek(FILE *fp, long long n)
+{
+    if (n <= 0) return 0; /* nothing to print */
+
+    /* Get file size */
+    if (fseeko(fp, 0, SEEK_END) != 0) return -1;
+    off_t file_size = ftello(fp);
+    if (file_size < 0) return -1;
+    if (file_size == 0) return 0;
+
+    char *buf = malloc(TAIL_SEEK_CHUNK);
+    if (!buf) { err_msg("tail", "out of memory"); return 1; }
+
+    long long newlines_found = 0;
+    off_t scan_pos = file_size;
+    off_t print_from = 0; /* default: from beginning */
+
+    while (scan_pos > 0 && newlines_found <= n) {
+        off_t block_start = scan_pos - TAIL_SEEK_CHUNK;
+        if (block_start < 0) block_start = 0;
+        size_t block_size = (size_t)(scan_pos - block_start);
+
+        if (fseeko(fp, block_start, SEEK_SET) != 0) {
+            free(buf);
+            return -1;
+        }
+        size_t nr = fread(buf, 1, block_size, fp);
+        if (nr == 0 || ferror(fp)) {
+            free(buf);
+            return -1;
+        }
+
+        /* Scan backward for newlines */
+        for (ssize_t k = (ssize_t)nr - 1; k >= 0; k--) {
+            if (buf[k] == '\n') {
+                newlines_found++;
+                if (newlines_found == n + 1) {
+                    /* The byte just after this newline is where we print from */
+                    print_from = block_start + (off_t)k + 1;
+                    goto found_start;
+                }
+            }
+        }
+        scan_pos = block_start;
+    }
+    /* Reached beginning of file without finding n+1 newlines → print all */
+    print_from = 0;
+
+found_start:
+    free(buf);
+
+    /* Seek to print_from and copy to stdout */
+    if (fseeko(fp, print_from, SEEK_SET) != 0) return -1;
+
+    {
+        char outbuf[65536];
+        size_t nr;
+        while ((nr = fread(outbuf, 1, sizeof(outbuf), fp)) > 0) {
+            if (fwrite(outbuf, 1, nr, stdout) != nr) return 1;
+        }
+        if (ferror(fp)) return 1;
+    }
+    return 0;
+}
+
+/*
  * Read entire fp into a heap buffer, then find the last n newline-terminated
  * lines (or all lines if n == 0 means "all").  Writes to stdout.
  * plus_mode: skip first (n-1) lines instead of last n.
  */
 static int tail_lines(FILE *fp, long long n, int plus_mode)
 {
+    /*
+     * Fast path: for regular seekable files in last-N mode, seek backward
+     * from EOF instead of reading the whole file.
+     */
+    if (!plus_mode && n > 0) {
+        struct stat st;
+        if (fstat(fileno(fp), &st) == 0 && S_ISREG(st.st_mode)) {
+            int r = tail_lines_seek(fp, n);
+            if (r >= 0) return r;
+            /* r == -1 means seek failed; fall through to full-read path */
+            rewind(fp);
+        }
+    }
+
     /* Read entire file into memory */
     size_t used = 0, cap = 65536;
     char *data = malloc(cap);
@@ -134,6 +225,28 @@ static int tail_lines(FILE *fp, long long n, int plus_mode)
 
 static int tail_bytes(FILE *fp, long long n, int plus_mode)
 {
+    /*
+     * Fast path: for regular seekable files in last-N-bytes mode, seek
+     * directly to (file_size - n) and copy from there.
+     */
+    if (!plus_mode && n > 0) {
+        struct stat st;
+        if (fstat(fileno(fp), &st) == 0 && S_ISREG(st.st_mode)) {
+            off_t file_size = st.st_size;
+            off_t seek_pos = (n >= (long long)file_size) ? 0 : (file_size - (off_t)n);
+            if (fseeko(fp, seek_pos, SEEK_SET) == 0) {
+                char outbuf[65536];
+                size_t nr;
+                while ((nr = fread(outbuf, 1, sizeof(outbuf), fp)) > 0) {
+                    if (fwrite(outbuf, 1, nr, stdout) != nr) return 1;
+                }
+                return ferror(fp) ? 1 : 0;
+            }
+            /* Seek failed — fall through */
+            rewind(fp);
+        }
+    }
+
     size_t used = 0, cap = 65536;
     char *data = malloc(cap);
     if (!data) { err_msg("tail", "out of memory"); return 1; }

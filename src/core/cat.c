@@ -1,5 +1,9 @@
 /* cat.c — cat builtin: concatenate and print files */
 
+/* _GNU_SOURCE for splice() */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
@@ -12,6 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #define CAT_BUFSZ 65536
@@ -95,7 +100,66 @@ static int cat_fd(int fd, const char *name, const struct cat_opts *opts)
                     opts->show_ends  || opts->show_tabs;
 
     if (!line_mode) {
-        /* Fast path: raw copy */
+#ifdef __linux__
+        /*
+         * splice() fast path: when the input is a regular file, use splice()
+         * to move data via the kernel pipe (fd → internal pipe → stdout).
+         * This avoids read+write round trips through user-space entirely.
+         * Falls back to read/write on EINVAL / ENOSYS (e.g. non-splice-able fd).
+         */
+        {
+            struct stat st;
+            if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0) {
+                /* Create a kernel pipe for splice staging */
+                int pfd[2];
+                if (pipe(pfd) == 0) {
+                    off_t remaining = st.st_size;
+                    int splice_ok = 1;
+                    while (remaining > 0) {
+                        /* Move up to 64KB from file into pipe */
+                        size_t chunk = (remaining > 65536) ? 65536 : (size_t)remaining;
+                        ssize_t moved = splice(fd, NULL, pfd[1], NULL, chunk, SPLICE_F_MOVE);
+                        if (moved < 0) {
+                            if (errno == EINVAL || errno == ENOSYS) {
+                                splice_ok = 0;
+                                break;
+                            }
+                            close(pfd[0]); close(pfd[1]);
+                            err_sys("cat", "%s", name);
+                            return 1;
+                        }
+                        if (moved == 0) break;
+                        /* Move from pipe to stdout */
+                        ssize_t written = 0;
+                        while (written < moved) {
+                            ssize_t n = splice(pfd[0], NULL, STDOUT_FILENO, NULL,
+                                               (size_t)(moved - written), SPLICE_F_MOVE);
+                            if (n < 0) {
+                                if (errno == EINVAL || errno == ENOSYS) {
+                                    /* stdout not spliceable (e.g. terminal) */
+                                    splice_ok = 0;
+                                    break;
+                                }
+                                close(pfd[0]); close(pfd[1]);
+                                err_sys("cat", "write error");
+                                return 1;
+                            }
+                            if (n == 0) break;
+                            written += n;
+                        }
+                        if (!splice_ok) break;
+                        remaining -= moved;
+                    }
+                    close(pfd[0]); close(pfd[1]);
+                    if (splice_ok) return 0;
+                    /* splice failed (terminal stdout): fall through to read/write */
+                    /* Seek back to start for fallback */
+                    lseek(fd, 0, SEEK_SET);
+                }
+            }
+        }
+#endif /* __linux__ */
+        /* Fallback: read/write loop */
         while ((nread = read(fd, buf, sizeof(buf))) > 0) {
             const char *p = buf;
             ssize_t rem = nread;
