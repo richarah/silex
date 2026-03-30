@@ -6,6 +6,7 @@
 
 #include "../util/error.h"
 #include "../util/path.h"
+#include "../cache/fscache.h"
 
 #include <errno.h>
 #include <limits.h>
@@ -50,28 +51,73 @@ static int mkdir_p(const char *path, mode_t mode, int verbose)
 
     memcpy(tmp, path, len + 1);
 
-    /* Walk the path and create each component */
+    /*
+     * O-08: find deepest existing ancestor right-to-left via fscache.
+     * skip_to = byte length of the longest prefix known to exist as a
+     * directory.  Components whose prefix length is <= skip_to are
+     * skipped in the creation loop below (no stat, no mkdir needed).
+     */
+    size_t skip_to = 0;
+    {
+        char *q = tmp + len - 1;
+        while (q > tmp && *q == '/') q--;   /* strip trailing slashes */
+        while (1) {
+            /* Scan backwards to the previous '/' */
+            while (q > tmp && *q != '/') q--;
+            if (q == tmp) {
+                /* Reached start: check root "/" for absolute paths */
+                if (tmp[0] == '/') {
+                    char saved = tmp[1]; tmp[1] = '\0';
+                    struct stat st;
+                    if (fscache_stat(tmp, &st) == 0 && S_ISDIR(st.st_mode))
+                        skip_to = 1;
+                    tmp[1] = saved;
+                }
+                break;
+            }
+            /* q points to '/': temporarily null-terminate and check */
+            char saved = *q; *q = '\0';
+            struct stat st;
+            if (fscache_stat(tmp, &st) == 0 && S_ISDIR(st.st_mode)) {
+                skip_to = (size_t)(q - tmp);
+                *q = saved;
+                break;
+            }
+            *q = saved;
+            q--;  /* step before this '/' and continue backwards */
+        }
+    }
+
+    /* Create each missing component, using fscache for existence checks */
     for (char *p = tmp + (tmp[0] == '/' ? 1 : 0); ; p++) {
         if (*p == '/' || *p == '\0') {
             char saved = *p;
             *p = '\0';
 
             if (tmp[0] != '\0') {
-                struct stat st;
-                if (stat(tmp, &st) != 0) {
-                    if (errno != ENOENT) {
-                        err_sys("mkdir", "%s", tmp);
+                size_t clen = (size_t)(p - tmp);
+                if (clen > skip_to) {
+                    struct stat st;
+                    if (fscache_stat(tmp, &st) != 0) {
+                        if (errno != ENOENT) {
+                            err_sys("mkdir", "%s", tmp);
+                            return 1;
+                        }
+                        if (mkdir(tmp, mode) != 0) {
+                            if (errno != EEXIST) {
+                                err_sys("mkdir", "%s", tmp);
+                                return 1;
+                            }
+                            /* EEXIST: created by another process; OK */
+                        } else {
+                            fscache_invalidate(tmp);
+                            if (verbose)
+                                printf("mkdir: created directory '%s'\n", tmp);
+                        }
+                    } else if (!S_ISDIR(st.st_mode)) {
+                        err_msg("mkdir", "%s: Not a directory", tmp);
                         return 1;
                     }
-                    if (mkdir(tmp, mode) != 0 && errno != EEXIST) {
-                        err_sys("mkdir", "%s", tmp);
-                        return 1;
-                    }
-                    if (errno != EEXIST && verbose)
-                        printf("mkdir: created directory '%s'\n", tmp);
-                } else if (!S_ISDIR(st.st_mode)) {
-                    err_msg("mkdir", "%s: Not a directory", tmp);
-                    return 1;
                 }
             }
 
