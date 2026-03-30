@@ -1,5 +1,9 @@
 /* sort.c — sort builtin: sort lines of text files */
 
+/* _GNU_SOURCE enables O_TMPFILE in <fcntl.h> (glibc) */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
@@ -781,35 +785,94 @@ int applet_sort(int argc, char **argv)
 
     /* Output: if -o, write to temp then rename */
     if (g_opts.outfile) {
-        /* Build temp name alongside the output file */
         char tmppath[PATH_MAX];
-        int r = snprintf(tmppath, sizeof(tmppath), "%s.sort.XXXXXX", g_opts.outfile);
-        if (r < 0 || (size_t)r >= sizeof(tmppath)) {
-            err_msg("sort", "output path too long");
-            ret = 1;
-            goto cleanup;
+        int  use_tmpfile = 0;
+        int  tmpfd = -1;
+
+        /* Extract directory containing outfile for O_TMPFILE */
+        char outdir[PATH_MAX];
+        {
+            const char *sl = strrchr(g_opts.outfile, '/');
+            if (sl && sl != g_opts.outfile) {
+                size_t dlen = (size_t)(sl - g_opts.outfile);
+                if (dlen < sizeof(outdir)) {
+                    memcpy(outdir, g_opts.outfile, dlen);
+                    outdir[dlen] = '\0';
+                } else {
+                    outdir[0] = '.'; outdir[1] = '\0';
+                }
+            } else if (sl == g_opts.outfile) {
+                outdir[0] = '/'; outdir[1] = '\0';
+            } else {
+                outdir[0] = '.'; outdir[1] = '\0';
+            }
         }
-        int tmpfd = mkstemp(tmppath);
+
+#ifdef O_TMPFILE
+        /* Try O_TMPFILE: anonymous file; no orphan on crash */
+        tmpfd = open(outdir, O_TMPFILE | O_RDWR, 0600);
+        if (tmpfd >= 0) {
+            int nr = snprintf(tmppath, sizeof(tmppath),
+                              "%s.sort_%d", outdir, (int)getpid());
+            if (nr < 0 || (size_t)nr >= sizeof(tmppath)) {
+                close(tmpfd);
+                tmpfd = -1;
+            } else {
+                use_tmpfile = 1;
+            }
+        }
+#endif
         if (tmpfd < 0) {
-            err_sys("sort", "cannot create temp file '%s'", tmppath);
-            ret = 1;
-            goto cleanup;
+            int r = snprintf(tmppath, sizeof(tmppath),
+                             "%s.sort.XXXXXX", g_opts.outfile);
+            if (r < 0 || (size_t)r >= sizeof(tmppath)) {
+                err_msg("sort", "output path too long");
+                ret = 1;
+                goto cleanup;
+            }
+            tmpfd = mkstemp(tmppath);
+            if (tmpfd < 0) {
+                err_sys("sort", "cannot create temp file '%s'", tmppath);
+                ret = 1;
+                goto cleanup;
+            }
         }
         FILE *tmpfp = fdopen(tmpfd, "w");
         if (!tmpfp) {
             err_sys("sort", "fdopen failed");
             close(tmpfd);
-            unlink(tmppath);
+            if (!use_tmpfile) unlink(tmppath);
             ret = 1;
             goto cleanup;
         }
         if (write_lines(tmpfp, lines, nlines, g_opts.zero_term) != 0) {
             err_sys("sort", "write error");
             fclose(tmpfp);
-            unlink(tmppath);
+            if (!use_tmpfile) unlink(tmppath);
             ret = 1;
             goto cleanup;
         }
+#ifdef O_TMPFILE
+        if (use_tmpfile) {
+            /* Link anonymous file into filesystem before closing */
+            if (fflush(tmpfp) != 0) {
+                err_sys("sort", "fflush");
+                fclose(tmpfp);
+                ret = 1;
+                goto cleanup;
+            }
+            char procpath[64];
+            snprintf(procpath, sizeof(procpath),
+                     "/proc/self/fd/%d", fileno(tmpfp));
+            if (linkat(AT_FDCWD, procpath, AT_FDCWD, tmppath,
+                       AT_SYMLINK_FOLLOW) != 0) {
+                err_sys("sort", "linkat");
+                fclose(tmpfp);
+                ret = 1;
+                goto cleanup;
+            }
+        }
+#endif
         fclose(tmpfp);
         if (rename(tmppath, g_opts.outfile) != 0) {
             err_sys("sort", "cannot rename '%s' to '%s'", tmppath, g_opts.outfile);

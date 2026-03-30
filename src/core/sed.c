@@ -1,5 +1,9 @@
 /* sed.c — sed builtin: stream editor */
 
+/* _GNU_SOURCE enables O_TMPFILE in <fcntl.h> (glibc) */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
@@ -1418,6 +1422,7 @@ int applet_sed(int argc, char **argv)
 
             FILE *out_fp = stdout;
             char  tmp_path[PATH_MAX] = {0};
+            int   use_tmpfile = 0;
 
             if (opt_i) {
                 /* Create temp file in same directory */
@@ -1431,18 +1436,36 @@ int applet_sed(int argc, char **argv)
                     fclose(fps[j]);
                     continue;
                 }
-                int fd = mkstemp(tmp_path);
+                int fd = -1;
+#ifdef O_TMPFILE
+                /* Try O_TMPFILE: anonymous file; no orphan on crash */
+                fd = open(dir, O_TMPFILE | O_RDWR, 0600);
+                if (fd >= 0) {
+                    int nr = snprintf(tmp_path, sizeof(tmp_path),
+                                      "%s/.sed_%d_%d",
+                                      dir, (int)getpid(), j);
+                    if (nr < 0 || (size_t)nr >= sizeof(tmp_path)) {
+                        close(fd);
+                        fd = -1;
+                    } else {
+                        use_tmpfile = 1;
+                    }
+                }
+#endif
                 if (fd < 0) {
-                    err_sys("sed", "mkstemp: %s", tmp_path);
-                    ret = 2;
-                    fclose(fps[j]);
-                    continue;
+                    fd = mkstemp(tmp_path);
+                    if (fd < 0) {
+                        err_sys("sed", "mkstemp: %s", tmp_path);
+                        ret = 2;
+                        fclose(fps[j]);
+                        continue;
+                    }
                 }
                 out_fp = fdopen(fd, "w");
                 if (!out_fp) {
-                    err_sys("sed", "fdopen: %s", tmp_path);
+                    err_sys("sed", "fdopen");
                     close(fd);
-                    unlink(tmp_path);
+                    if (!use_tmpfile) unlink(tmp_path);
                     ret = 2;
                     fclose(fps[j]);
                     continue;
@@ -1458,7 +1481,10 @@ int applet_sed(int argc, char **argv)
                 sb_init(&st.hold_space,    1)   != 0 ||
                 sb_init(&st.subst_buf,     256) != 0) {
                 err_msg("sed", "out of memory");
-                if (opt_i) { fclose(out_fp); unlink(tmp_path); }
+                if (opt_i) {
+                    fclose(out_fp);
+                    if (!use_tmpfile) unlink(tmp_path);
+                }
                 fclose(fps[j]);
                 ret = 2;
                 continue;
@@ -1473,6 +1499,27 @@ int applet_sed(int argc, char **argv)
             fclose(fps[j]);
 
             if (opt_i) {
+#ifdef O_TMPFILE
+                if (use_tmpfile) {
+                    /* Link anonymous file into filesystem before closing */
+                    if (fflush(out_fp) != 0) {
+                        err_sys("sed", "fflush");
+                        fclose(out_fp);
+                        ret = 2;
+                        continue;
+                    }
+                    char procpath[64];
+                    snprintf(procpath, sizeof(procpath),
+                             "/proc/self/fd/%d", fileno(out_fp));
+                    if (linkat(AT_FDCWD, procpath, AT_FDCWD, tmp_path,
+                               AT_SYMLINK_FOLLOW) != 0) {
+                        err_sys("sed", "linkat");
+                        fclose(out_fp);
+                        ret = 2;
+                        continue;
+                    }
+                }
+#endif
                 fclose(out_fp);
                 /* Preserve permissions */
                 struct stat orig_st;
