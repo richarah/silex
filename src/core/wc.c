@@ -24,8 +24,9 @@ typedef struct {
     long long maxline; /* max line length (-L) */
 } wc_counts_t;
 
-/* Read buffer size for wc — large enough to amortise fread() overhead */
-#define WC_BUF_SIZE 65536
+/* Read buffer size for wc — 256KB matches GNU wc's read chunk size,
+ * cutting read() syscall count by 4x vs the previous 64KB buffer. */
+#define WC_BUF_SIZE 262144
 
 /*
  * Count statistics for stream fp.
