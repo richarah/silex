@@ -5,6 +5,7 @@
 #endif
 
 #include "../util/error.h"
+#include "../util/linescan.h"
 
 #include <ctype.h>
 #include <limits.h>
@@ -21,37 +22,57 @@ typedef struct {
     long long maxline; /* max line length (-L) */
 } wc_counts_t;
 
+/* Read buffer size for wc — large enough to amortise fread() overhead */
+#define WC_BUF_SIZE 65536
+
 /*
  * Count statistics for stream fp.
- * Reads character by character to track line length exactly.
+ * Uses fread() into a buffer and scan_newline() for the line-count hot path.
+ * Word and max-line-length counting still require byte-by-byte inspection
+ * of each character, but we avoid repeated getc() call overhead.
  */
 static int wc_count(FILE *fp, wc_counts_t *c)
 {
+    static char buf[WC_BUF_SIZE];  /* static: avoids large stack alloc */
     memset(c, 0, sizeof(*c));
 
     long long cur_line_len = 0;
     int in_word = 0;
-    int ch;
 
-    while ((ch = getc(fp)) != EOF) {
-        c->bytes++;
-        c->chars++;
+    for (;;) {
+        size_t nr = fread(buf, 1, sizeof(buf), fp);
+        if (nr == 0)
+            break;
 
-        if (ch == '\n') {
-            c->lines++;
-            if (cur_line_len > c->maxline)
-                c->maxline = cur_line_len;
-            cur_line_len = 0;
-        } else {
-            cur_line_len++;
-        }
+        c->bytes += (long long)nr;
+        c->chars += (long long)nr;
 
-        if (isspace((unsigned char)ch)) {
-            in_word = 0;
-        } else {
-            if (!in_word) {
-                c->words++;
-                in_word = 1;
+        const char *p   = buf;
+        const char *end = buf + nr;
+
+        while (p < end) {
+            /* Jump to the next newline using vectorised scan */
+            const char *nl = scan_newline(p, (size_t)(end - p));
+
+            /* Process bytes between p and nl (none contain '\n') */
+            while (p < nl) {
+                unsigned char ch = (unsigned char)*p++;
+                cur_line_len++;
+                if (isspace(ch)) {
+                    in_word = 0;
+                } else {
+                    if (!in_word) { c->words++; in_word = 1; }
+                }
+            }
+
+            if (p < end) {
+                /* *p == '\n' */
+                c->lines++;
+                if (cur_line_len > c->maxline)
+                    c->maxline = cur_line_len;
+                cur_line_len = 0;
+                in_word = 0;
+                p++;   /* skip the newline */
             }
         }
     }

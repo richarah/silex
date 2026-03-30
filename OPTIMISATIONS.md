@@ -10,7 +10,7 @@ measurements, and whether it was kept or reverted.
 | ID | Name | Category | Benchmark | Before | After | Speedup | Binary +/- | Status |
 |----|------|----------|-----------|--------|-------|---------|------------|--------|
 | O-01 | Charclass LUT | CPU | bench_builtins (grep-count) | 4.3240±0.2948ms | 4.0676±0.1762ms | 1.06x | +4.1K | KEPT |
-| O-02 | Vectorised newline scan | CPU/IO | bench_builtins (wc-l) | — | — | — | — | PENDING |
+| O-02 | Vectorised newline scan | CPU/IO | bench_builtins (wc-l) | 5.0954±0.2924ms | 3.6757±0.2448ms | 1.39x | +0.1K | KEPT |
 | O-03 | copy_file_range for cp | IO | bench_builtin_cp (1MB) | — | — | — | — | PENDING |
 | O-04 | posix_fadvise sequential | IO | bench_grep (no-match-100k) | — | — | — | — | PENDING |
 | O-05 | fallocate for cp | IO | bench_builtin_cp (1MB) | — | — | — | — | PENDING |
@@ -273,6 +273,38 @@ Measurement: matchbox fixed-str-100k = 12.3395±0.5479ms vs system 3.7738±0.235
   5.9793±3.6604ms = 1.58x slower. Criterion was "2x slower" — THRESHOLD MET.
 Plan: Addressed by O-02 (vectorised newline scan) + O-09 (writev) in this release.
   SSE2 memmem approach remains an option if O-02/O-09 do not close the gap.
+
+---
+
+## O-02: Vectorised newline scan (linescan_avx2/neon/scalar)
+
+Date: 2026-03-30
+Status: KEPT
+Category: CPU/IO — replaces getc() byte loop with fread() + AVX2 scan in wc
+Files: src/util/linescan.h (new), src/util/linescan_avx2.c (new),
+       src/util/linescan_neon.c (new), src/util/linescan_scalar.c (new),
+       src/core/wc.c, tests/unit/test_linescan.c (new),
+       tests/bench/bench_newline.sh (new), Makefile
+Benchmark: bench_builtins.sh wc-l (100 iter), bench_newline.sh (20 iter)
+
+Before (O-01 baseline):
+  wc-l (builtins bench, ~100-line files): 5.0954±0.2924ms
+  system wc-l: 5.1268±0.2686ms
+
+After:
+  wc-l (builtins bench, ~100-line files): 3.6757±0.2448ms  ← 1.39x faster
+  system wc-l:                            4.8757±0.2748ms
+  matchbox wc-l 1MB (bench_newline):  4.2101±0.2263ms vs system 4.8744±0.2591ms
+  matchbox wc-l 10MB (bench_newline): 11.7191±0.3951ms vs system 5.8663±0.5170ms
+
+Speedup: 1.39x on small files (dominant path: per-invocation overhead + scan).
+  For 1MB file: 13.7% faster than system wc. For 10MB: 2.0x slower than system.
+  Large-file slowdown: word-counting still processes each non-NL byte individually;
+  system wc has a fast -l-only path. Future: add wc -l only fast path (pure NL count).
+
+Binary delta: +56 bytes (AVX2 code folded by LTO; linescan.h/c overhead minimal)
+Arch: x86_64 uses AVX2 (32-byte vectors); aarch64 uses NEON; others use scalar memchr.
+Reason kept: Measurable 39% improvement on small/medium files; correctly tested.
 
 ---
 

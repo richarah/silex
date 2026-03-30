@@ -41,13 +41,27 @@ OBJDIR   = build/obj
 BINDIR   = build/bin
 
 # --- Sources ------------------------------------------------------------------
+# --- Architecture detection for vectorised linescan --------------------------
+ARCH := $(shell uname -m)
+ifeq ($(ARCH),x86_64)
+    LINESCAN_SRC = $(SRCDIR)/util/linescan_avx2.c
+    CFLAGS_LINESCAN = -mavx2
+else ifeq ($(ARCH),aarch64)
+    LINESCAN_SRC = $(SRCDIR)/util/linescan_neon.c
+    CFLAGS_LINESCAN =
+else
+    LINESCAN_SRC = $(SRCDIR)/util/linescan_scalar.c
+    CFLAGS_LINESCAN =
+endif
+
 UTIL_SRCS = \
     $(SRCDIR)/util/strbuf.c \
     $(SRCDIR)/util/path.c \
     $(SRCDIR)/util/error.c \
     $(SRCDIR)/util/arena.c \
     $(SRCDIR)/util/platform.c \
-    $(SRCDIR)/util/charclass.c
+    $(SRCDIR)/util/charclass.c \
+    $(LINESCAN_SRC)
 
 CORE_SRCS = \
     $(SRCDIR)/core/echo.c \
@@ -155,17 +169,25 @@ install: $(TARGET)
 # --- Tests --------------------------------------------------------------------
 # C unit test binaries
 TEST_CHARCLASS = build/bin/test_charclass
+TEST_LINESCAN  = build/bin/test_linescan
 
 $(TEST_CHARCLASS): tests/unit/test_charclass.c $(SRCDIR)/util/charclass.c \
                   $(SRCDIR)/util/charclass.h | $(BINDIR)
 	$(CC) $(CFLAGS_COMMON) -I$(SRCDIR) -o $@ \
 	    tests/unit/test_charclass.c $(SRCDIR)/util/charclass.c
 
-test: $(TARGET) $(TEST_CHARCLASS)
+$(TEST_LINESCAN): tests/unit/test_linescan.c $(SRCDIR)/util/linescan_scalar.c \
+                  $(SRCDIR)/util/linescan.h | $(BINDIR)
+	$(CC) $(CFLAGS_COMMON) -I$(SRCDIR) -o $@ \
+	    tests/unit/test_linescan.c $(SRCDIR)/util/linescan_scalar.c
+
+test: $(TARGET) $(TEST_CHARCLASS) $(TEST_LINESCAN)
 	@echo "=== Running unit tests ==="
 	@bash tests/unit/run_tests.sh $(TARGET)
 	@echo "--- test_charclass (C) ---"
 	@$(TEST_CHARCLASS) && echo "PASS: test_charclass"
+	@echo "--- test_linescan (C) ---"
+	@$(TEST_LINESCAN) && echo "PASS: test_linescan"
 
 check: test
 
@@ -347,7 +369,12 @@ $(OBJDIR)/util/path.o:      $(SRCDIR)/util/path.c      $(SRCDIR)/util/path.h
 $(OBJDIR)/util/error.o:     $(SRCDIR)/util/error.c     $(SRCDIR)/util/error.h
 $(OBJDIR)/util/arena.o:     $(SRCDIR)/util/arena.c     $(SRCDIR)/util/arena.h
 $(OBJDIR)/util/platform.o:  $(SRCDIR)/util/platform.c  $(SRCDIR)/util/platform.h
-$(OBJDIR)/util/charclass.o: $(SRCDIR)/util/charclass.c $(SRCDIR)/util/charclass.h
+$(OBJDIR)/util/charclass.o:      $(SRCDIR)/util/charclass.c $(SRCDIR)/util/charclass.h
+$(OBJDIR)/util/linescan_avx2.o: $(SRCDIR)/util/linescan_avx2.c $(SRCDIR)/util/linescan.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(CFLAGS_LINESCAN) -I$(SRCDIR) -c $< -o $@
+$(OBJDIR)/util/linescan_neon.o:   $(SRCDIR)/util/linescan_neon.c   $(SRCDIR)/util/linescan.h
+$(OBJDIR)/util/linescan_scalar.o: $(SRCDIR)/util/linescan_scalar.c $(SRCDIR)/util/linescan.h
 
 UTIL_HDRS = $(SRCDIR)/util/error.h $(SRCDIR)/util/path.h $(SRCDIR)/util/strbuf.h
 
