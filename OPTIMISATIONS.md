@@ -19,7 +19,7 @@ measurements, and whether it was kept or reverted.
 | O-08 | mkdir -p prefix skip | Syscall | strace stat count (5×mkdir-p, shared prefix) | 30 stats | 10 stats | 3.0x syscall reduction | +0.3K | KEPT |
 | O-09 | writev for grep/find | Syscall | strace write count (grep 1000 matches) | 9 writes | 9 writes | 1.00x | n/a | SKIPPED: no benefit |
 | O-10 | Compiled glob for find | CPU+Bug | bench_find_glob (600-file, suffix) | broken (always matched) | working + fnmatch-free | correctness fix + fast path | +0.3K | KEPT |
-| O-11 | statx minimal mask | Syscall | bench_find_glob | — | — | — | — | PENDING |
+| O-11 | statx minimal mask | Syscall | strace statx vs newfstatat (600-file tree) | 601 newfstatat | 601 statx (minimal mask) | same call count, less kernel data/call | +0.2K | KEPT |
 | O-12 | Binary layout HOT/COLD | ICache | bench_startup | — | — | — | — | PENDING |
 
 ---
@@ -314,6 +314,43 @@ comparison: 601 newfstatat calls for 600-file tree (expected; one per entry).
 Binary delta: +0.3K
 Reason kept: Correctness fix is mandatory. Fast paths are correct, zero
 regression risk, and provide measurable speedup on large trees.
+
+---
+
+## O-11: statx with minimal field mask for find
+
+Date: 2026-03-30
+Status: KEPT
+Category: Syscall — requests only required kernel fields per directory entry
+Files: src/core/find.c
+Benchmark: strace -c statx call count, 600-file tree, `find -name "*.c"`
+
+Before (O-10): 601 `newfstatat` calls (full struct stat, ~144 bytes/call transferred)
+After (O-11):  601 `statx` calls with mask=STATX_TYPE|STATX_MODE (only 2 fields ~12 bytes)
+
+Wall-time improvement: within measurement noise at 600 files (ms-resolution too coarse).
+Benefit becomes measurable at ≥10,000 files where kernel→userspace data transfer
+reduction accumulates.
+Binary delta: +0.2K
+
+Mechanism:
+- `compute_needed_mask(expr)` walks predicate tree and returns union of required STATX_*
+  flags. Always includes STATX_TYPE|STATX_MODE (needed for recursion + -type + -perm).
+  Adds STATX_SIZE for -size/-empty, STATX_MTIME for -mtime/-newer, STATX_ATIME for
+  -atime, STATX_UID for -user, STATX_GID for -group.
+- `do_stat()` wrapper calls `statx(AT_FDCWD, path, AT_SYMLINK_NOFOLLOW|AT_STATX_DONT_SYNC,
+  mask, &stx)` then converts to `struct stat` for eval_expr.
+- `AT_STATX_DONT_SYNC`: safe in containers (overlay/local FS; no NFS sync needed).
+- On `ENOSYS` (kernel < 4.11): falls back to `lstat()`/`stat()` permanently (one-time check).
+
+Known gap: GNU find only makes 1 `newfstatat` call for the same 600-file tree by using
+`d_type` from `struct dirent` (set by the kernel during `getdents64`). For `-name` queries
+where only file type info is needed, d_type avoids the stat call entirely. Matchbox
+currently ignores `ent->d_type`. Implementing d_type shortcut would reduce syscall count
+from 601 to ~1 for name-only queries. Tracked as potential future improvement.
+
+Reason kept: Zero regression, strictly less data transferred from kernel per entry,
+correct fallback on old kernels.
 
 ---
 

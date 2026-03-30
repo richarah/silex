@@ -15,6 +15,7 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <fnmatch.h>
 #include <grp.h>
 #include <limits.h>
@@ -131,6 +132,7 @@ typedef struct {
     int    mindepth;
     int    follow_symlinks; /* -L */
     int    has_action;      /* did user specify -print, -exec, -delete, etc. */
+    unsigned int statx_mask; /* O-11: minimal statx mask for this query */
 } find_args_t;
 
 /* ------------------------------------------------------------------ */
@@ -776,6 +778,88 @@ static int eval_expr(expr_node_t *n, const char *path, const char *basename_ptr,
 }
 
 /* ------------------------------------------------------------------ */
+/* O-11: statx minimal field mask                                     */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Walk the expression tree and return the union of all stat fields needed.
+ * STATX_TYPE|STATX_MODE are always included (needed for recursion, -type,
+ * -perm, -empty directory check).
+ */
+static unsigned int compute_needed_mask(const expr_node_t *n)
+{
+    if (!n)
+        return 0;
+    unsigned int mask = 0;
+    switch (n->type) {
+    case PRED_SIZE:
+        mask |= STATX_SIZE; break;
+    case PRED_MTIME: case PRED_NEWER:
+        mask |= STATX_MTIME; break;
+    case PRED_ATIME:
+        mask |= STATX_ATIME; break;
+    case PRED_USER:
+        mask |= STATX_UID; break;
+    case PRED_GROUP:
+        mask |= STATX_GID; break;
+    case PRED_EMPTY:
+        mask |= STATX_SIZE; break;
+    default:
+        break;
+    }
+    mask |= compute_needed_mask(n->left);
+    mask |= compute_needed_mask(n->right);
+    return mask | STATX_TYPE | STATX_MODE;
+}
+
+#ifdef __linux__
+/* Convert statx result to struct stat (only fields needed by eval_expr) */
+static void statx_to_stat(const struct statx *stx, struct stat *st)
+{
+    memset(st, 0, sizeof(*st));
+    st->st_mode  = stx->stx_mode;
+    st->st_uid   = (uid_t)stx->stx_uid;
+    st->st_gid   = (gid_t)stx->stx_gid;
+    st->st_size  = (off_t)stx->stx_size;
+    st->st_mtime = (time_t)stx->stx_mtime.tv_sec;
+    st->st_atime = (time_t)stx->stx_atime.tv_sec;
+}
+
+/* Try statx once; disable on ENOSYS (kernel < 4.11) */
+static int g_statx_ok = 1;
+
+static int do_stat(const char *path, struct stat *st,
+                   unsigned int mask, int follow_symlinks)
+{
+    if (g_statx_ok) {
+        struct statx stx;
+        int flags = follow_symlinks ? 0 : AT_SYMLINK_NOFOLLOW;
+        /* AT_STATX_DONT_SYNC: safe in containers (local/overlay FS) */
+        int r = statx(AT_FDCWD, path, flags | AT_STATX_DONT_SYNC, mask, &stx);
+        if (r == 0) {
+            statx_to_stat(&stx, st);
+            return 0;
+        }
+        if (errno == ENOSYS) {
+            g_statx_ok = 0;
+            /* fall through to lstat */
+        } else {
+            return r;
+        }
+    }
+    return follow_symlinks ? stat(path, st) : lstat(path, st);
+}
+#else
+/* Non-Linux: always use lstat/stat */
+static int do_stat(const char *path, struct stat *st,
+                   unsigned int mask, int follow_symlinks)
+{
+    (void)mask;
+    return follow_symlinks ? stat(path, st) : lstat(path, st);
+}
+#endif
+
+/* ------------------------------------------------------------------ */
 /* Traversal                                                          */
 /* ------------------------------------------------------------------ */
 
@@ -836,13 +920,7 @@ static void walk_dir(const char *path, int depth, walk_ctx_t *ctx)
         }
 
         struct stat st;
-        int r;
-        if (fa->follow_symlinks)
-            r = stat(child, &st);
-        else
-            r = lstat(child, &st);
-
-        if (r != 0) {
+        if (do_stat(child, &st, fa->statx_mask, fa->follow_symlinks) != 0) {
             err_sys("find", "'%s'", child);
             ctx->ret = 1;
             continue;
@@ -911,6 +989,9 @@ int applet_find(int argc, char **argv)
     /* Add default -print action if no action specified */
     /* (handled in process_entry) */
 
+    /* O-11: compute minimal statx mask from predicate tree */
+    fa.statx_mask = compute_needed_mask(expr);
+
     walk_ctx_t ctx;
     ctx.expr = expr;
     ctx.fa   = &fa;
@@ -919,7 +1000,7 @@ int applet_find(int argc, char **argv)
     for (int j = 0; j < n_starts; j++) {
         const char *start = starts[j];
         struct stat st;
-        int r = fa.follow_symlinks ? stat(start, &st) : lstat(start, &st);
+        int r = do_stat(start, &st, fa.statx_mask, fa.follow_symlinks);
         if (r != 0) {
             err_sys("find", "'%s'", start);
             ctx.ret = 1;
