@@ -1,0 +1,1098 @@
+        -:    0:Source:src/shell/parser.c
+        -:    1:#ifndef _POSIX_C_SOURCE
+        -:    2:#define _POSIX_C_SOURCE 200809L
+        -:    3:#endif
+        -:    4:
+        -:    5:#include "parser.h"
+        -:    6:#include "lexer.h"
+        -:    7:#include "../util/arena.h"
+        -:    8:
+        -:    9:#include <stdio.h>
+        -:   10:#include <string.h>
+        -:   11:#include <stdlib.h>
+        -:   12:
+        -:   13:/* -------------------------------------------------------------------------
+        -:   14: * Forward declarations
+        -:   15: * ------------------------------------------------------------------------- */
+        -:   16:
+        -:   17:static node_t *parse_list(parser_t *p);
+        -:   18:static node_t *parse_and_or(parser_t *p);
+        -:   19:static node_t *parse_pipeline(parser_t *p);
+        -:   20:static node_t *parse_command(parser_t *p);
+        -:   21:static node_t *parse_simple_command(parser_t *p);
+        -:   22:static node_t *parse_compound_command(parser_t *p);
+        -:   23:static node_t *parse_if_cmd(parser_t *p);
+        -:   24:static node_t *parse_while_cmd(parser_t *p);
+        -:   25:static node_t *parse_until_cmd(parser_t *p);
+        -:   26:static node_t *parse_for_cmd(parser_t *p);
+        -:   27:static node_t *parse_case_cmd(parser_t *p);
+        -:   28:static node_t *parse_subshell(parser_t *p);
+        -:   29:static node_t *parse_brace_group(parser_t *p);
+        -:   30:static node_t *parse_compound_list(parser_t *p);
+        -:   31:static redir_t *parse_redirect(parser_t *p, int io_fd);
+        -:   32:static void skip_newlines(parser_t *p);
+        -:   33:
+        -:   34:/* -------------------------------------------------------------------------
+        -:   35: * Init
+        -:   36: * ------------------------------------------------------------------------- */
+        -:   37:
+      477:   38:void parser_init(parser_t *p, lexer_t *l, arena_t *a)
+        -:   39:{
+      477:   40:    p->lexer = l;
+      477:   41:    p->arena = a;
+      477:   42:    p->error = 0;
+      477:   43:}
+        -:   44:
+        -:   45:/* -------------------------------------------------------------------------
+        -:   46: * Error reporting
+        -:   47: * ------------------------------------------------------------------------- */
+        -:   48:
+    #####:   49:void parser_error(parser_t *p, const char *msg)
+        -:   50:{
+    #####:   51:    token_t t = lexer_peek(p->lexer);
+    #####:   52:    fprintf(stderr, "matchbox: parse error at line %d: %s\n", t.lineno, msg);
+    #####:   53:    p->error = 1;
+    #####:   54:}
+        -:   55:
+        -:   56:/* -------------------------------------------------------------------------
+        -:   57: * Node allocation helpers
+        -:   58: * ------------------------------------------------------------------------- */
+        -:   59:
+     1858:   60:static node_t *alloc_node(parser_t *p, node_type_t type)
+        -:   61:{
+     1858:   62:    node_t *n = arena_alloc(p->arena, sizeof(node_t));
+     1858:   63:    memset(n, 0, sizeof(*n));
+     1858:   64:    n->type  = type;
+     1858:   65:    n->arena = p->arena;
+     1858:   66:    return n;
+        -:   67:}
+        -:   68:
+        -:   69:/* -------------------------------------------------------------------------
+        -:   70: * Word-array building helpers
+        -:   71: *
+        -:   72: * We maintain a dynamically-sized list of char* while parsing, then
+        -:   73: * copy it into the arena as a NULL-terminated array.
+        -:   74: * ------------------------------------------------------------------------- */
+        -:   75:
+        -:   76:typedef struct {
+        -:   77:    char  **items;
+        -:   78:    size_t  count;
+        -:   79:    size_t  cap;
+        -:   80:} word_list_t;
+        -:   81:
+     2252:   82:static void wl_init(word_list_t *wl)
+        -:   83:{
+     2252:   84:    wl->items = NULL;
+     2252:   85:    wl->count = 0;
+     2252:   86:    wl->cap   = 0;
+     2252:   87:}
+        -:   88:
+     2202:   89:static void wl_push(word_list_t *wl, char *w)
+        -:   90:{
+     2202:   91:    if (wl->count + 1 >= wl->cap) {
+     1169:   92:        size_t newcap = wl->cap ? wl->cap * 2 : 8;
+     1169:   93:        char **newbuf = realloc(wl->items, newcap * sizeof(char *));
+     1169:   94:        if (!newbuf) {
+    #####:   95:            perror("matchbox: parser word_list realloc");
+    #####:   96:            abort();
+        -:   97:        }
+     1169:   98:        wl->items = newbuf;
+     1169:   99:        wl->cap   = newcap;
+        -:  100:    }
+     2202:  101:    wl->items[wl->count++] = w;
+     2202:  102:}
+        -:  103:
+        -:  104:/* Copy word list into arena as a NULL-terminated char** */
+     2250:  105:static char **wl_to_arena(parser_t *p, word_list_t *wl)
+        -:  106:{
+     2250:  107:    size_t   n    = wl->count;
+     2250:  108:    char   **arr  = arena_alloc(p->arena, (n + 1) * sizeof(char *));
+     4452:  109:    for (size_t i = 0; i < n; i++)
+     2202:  110:        arr[i] = wl->items[i];
+     2250:  111:    arr[n] = NULL;
+     2250:  112:    return arr;
+        -:  113:}
+        -:  114:
+     2252:  115:static void wl_free(word_list_t *wl)
+        -:  116:{
+     2252:  117:    free(wl->items);
+     2252:  118:    wl->items = NULL;
+     2252:  119:    wl->count = 0;
+     2252:  120:    wl->cap   = 0;
+     2252:  121:}
+        -:  122:
+        -:  123:/* -------------------------------------------------------------------------
+        -:  124: * Token-peeking helpers
+        -:  125: * ------------------------------------------------------------------------- */
+        -:  126:
+        -:  127:/* Peek at next token (skips nothing) */
+    18370:  128:static token_t peek(parser_t *p)
+        -:  129:{
+    18370:  130:    return lexer_peek(p->lexer);
+        -:  131:}
+        -:  132:
+        -:  133:/* Consume next token */
+     4316:  134:static token_t consume(parser_t *p)
+        -:  135:{
+     4316:  136:    return lexer_next(p->lexer);
+        -:  137:}
+        -:  138:
+        -:  139:/* Consume token of expected type or set error and return it anyway */
+      392:  140:static token_t expect(parser_t *p, tok_type_t type, const char *errmsg)
+        -:  141:{
+      392:  142:    token_t t = consume(p);
+      392:  143:    if (t.type != type) {
+    #####:  144:        parser_error(p, errmsg);
+        -:  145:    }
+      392:  146:    return t;
+        -:  147:}
+        -:  148:
+        -:  149:/* Skip over optional newlines */
+     1679:  150:static void skip_newlines(parser_t *p)
+        -:  151:{
+     1793:  152:    while (peek(p).type == TOK_NEWLINE)
+      114:  153:        consume(p);
+     1679:  154:}
+        -:  155:
+        -:  156:/* -------------------------------------------------------------------------
+        -:  157: * Redirect default file descriptors
+        -:  158: * ------------------------------------------------------------------------- */
+        -:  159:
+       55:  160:static int default_fd_for_op(tok_type_t op)
+        -:  161:{
+       55:  162:    switch (op) {
+       27:  163:    case TOK_LESS:
+        -:  164:    case TOK_DLESS:
+        -:  165:    case TOK_DLESSDASH:
+        -:  166:    case TOK_LESSAND:
+        -:  167:    case TOK_LESSGREAT:
+       27:  168:        return 0;
+       28:  169:    case TOK_GREAT:
+        -:  170:    case TOK_DGREAT:
+        -:  171:    case TOK_GREATAND:
+        -:  172:    case TOK_CLOBBER:
+       28:  173:        return 1;
+    #####:  174:    default:
+    #####:  175:        return 1;
+        -:  176:    }
+        -:  177:}
+        -:  178:
+        -:  179:/* Returns 1 if the token type is a redirect operator */
+     2344:  180:static int is_redir_op(tok_type_t t)
+        -:  181:{
+     2344:  182:    switch (t) {
+      166:  183:    case TOK_LESS:
+        -:  184:    case TOK_GREAT:
+        -:  185:    case TOK_DLESS:
+        -:  186:    case TOK_DGREAT:
+        -:  187:    case TOK_LESSAND:
+        -:  188:    case TOK_GREATAND:
+        -:  189:    case TOK_LESSGREAT:
+        -:  190:    case TOK_DLESSDASH:
+        -:  191:    case TOK_CLOBBER:
+      166:  192:        return 1;
+     2178:  193:    default:
+     2178:  194:        return 0;
+        -:  195:    }
+        -:  196:}
+        -:  197:
+        -:  198:/* Parse a redirect: [IO_NUMBER] redirect_op WORD
+        -:  199: * io_fd is the fd already parsed as a digit word (-1 if not present).
+        -:  200: */
+       70:  201:static redir_t *parse_redirect(parser_t *p, int io_fd)
+        -:  202:{
+       70:  203:    token_t op_tok = peek(p);
+       70:  204:    if (!is_redir_op(op_tok.type))
+    #####:  205:        return NULL;
+       70:  206:    consume(p); /* consume the operator */
+        -:  207:
+        -:  208:    /* Target word */
+       70:  209:    token_t tgt = consume(p);
+      70*:  210:    if (tgt.type != TOK_WORD && tgt.type != TOK_ASSIGN) {
+    #####:  211:        parser_error(p, "expected word after redirect operator");
+    #####:  212:        return NULL;
+        -:  213:    }
+        -:  214:
+       70:  215:    redir_t *r  = arena_alloc(p->arena, sizeof(redir_t));
+       70:  216:    r->fd       = (io_fd >= 0) ? io_fd : default_fd_for_op(op_tok.type);
+       70:  217:    r->op       = op_tok.type;
+       70:  218:    r->target   = tgt.text;
+       70:  219:    r->heredoc  = NULL;
+       70:  220:    r->heredoc_no_expand = 0;
+       70:  221:    r->next     = NULL;
+        -:  222:
+        -:  223:    /* For heredocs, register the pending heredoc in the lexer.
+        -:  224:     * body_out points to r->heredoc so the lexer can fill it in when
+        -:  225:     * it reads the heredoc body after the next newline.
+        -:  226:     *
+        -:  227:     * If the delimiter is quoted ('EOF', "EOF", or \E\O\F), variable
+        -:  228:     * expansion is suppressed in the heredoc body (POSIX). Strip the
+        -:  229:     * quotes to get the actual delimiter string used for matching. */
+       70:  230:    if (op_tok.type == TOK_DLESS || op_tok.type == TOK_DLESSDASH) {
+       21:  231:        const char *raw = tgt.text;
+       21:  232:        char *actual_delim = tgt.text;
+       21:  233:        int no_expand = 0;
+        -:  234:
+       21:  235:        if (raw[0] == '\'') {
+        -:  236:            /* Single-quoted: 'EOF' — strip outer single quotes */
+        4:  237:            size_t len = strlen(raw);
+        4:  238:            if (len >= 2) {
+        4:  239:                actual_delim = arena_alloc(p->arena, len - 1);
+        4:  240:                memcpy(actual_delim, raw + 1, len - 2);
+        4:  241:                actual_delim[len - 2] = '\0';
+        -:  242:            }
+        4:  243:            no_expand = 1;
+       17:  244:        } else if (raw[0] == '"') {
+        -:  245:            /* Double-quoted: "EOF" — strip outer double quotes */
+        2:  246:            size_t len = strlen(raw);
+        2:  247:            if (len >= 2) {
+        2:  248:                actual_delim = arena_alloc(p->arena, len - 1);
+        2:  249:                memcpy(actual_delim, raw + 1, len - 2);
+        2:  250:                actual_delim[len - 2] = '\0';
+        -:  251:            }
+        2:  252:            no_expand = 1;
+       15:  253:        } else if (raw[0] == '\\') {
+        -:  254:            /* Backslash-escaped: \EOF — remove backslashes */
+        2:  255:            size_t len = strlen(raw);
+        2:  256:            actual_delim = arena_alloc(p->arena, len + 1);
+        2:  257:            const char *src = raw;
+        2:  258:            char *dst = actual_delim;
+        8:  259:            while (*src) {
+        6:  260:                if (*src == '\\' && *(src + 1) != '\0')
+        2:  261:                    src++;
+        6:  262:                *dst++ = *src++;
+        -:  263:            }
+        2:  264:            *dst = '\0';
+        2:  265:            no_expand = 1;
+        -:  266:        }
+        -:  267:
+       21:  268:        heredoc_pending_t *hp = arena_alloc(p->arena, sizeof(heredoc_pending_t));
+       21:  269:        hp->delim      = actual_delim;
+       21:  270:        hp->strip_tabs = (op_tok.type == TOK_DLESSDASH) ? 1 : 0;
+       21:  271:        hp->no_expand  = no_expand;
+       21:  272:        hp->body_out   = &r->heredoc;
+       21:  273:        hp->next       = p->lexer->heredocs;
+       21:  274:        p->lexer->heredocs = hp;
+        -:  275:
+       21:  276:        r->heredoc_no_expand = no_expand;
+        -:  277:    }
+        -:  278:
+       70:  279:    return r;
+        -:  280:}
+        -:  281:
+        -:  282:/* -------------------------------------------------------------------------
+        -:  283: * is_io_number: detect pure-digit word that precedes a redirect operator
+        -:  284: * e.g., "2>" → fd=2, ">&"
+        -:  285: * Returns the fd value or -1.
+        -:  286: * ------------------------------------------------------------------------- */
+      988:  287:static int try_io_number(const char *text, tok_type_t next_op)
+        -:  288:{
+      988:  289:    if (!is_redir_op(next_op))
+      949:  290:        return -1;
+       39:  291:    if (!text)
+    #####:  292:        return -1;
+        -:  293:    /* All chars must be digits */
+       54:  294:    for (const char *p = text; *p; p++) {
+       39:  295:        if (*p < '0' || *p > '9')
+       24:  296:            return -1;
+        -:  297:    }
+       15:  298:    return atoi(text);
+        -:  299:}
+        -:  300:
+        -:  301:/* -------------------------------------------------------------------------
+        -:  302: * Simple command parsing
+        -:  303: *
+        -:  304: * A simple command is a sequence of:
+        -:  305: *   - ASSIGN tokens   (NAME=VALUE, before first non-assign word)
+        -:  306: *   - WORD tokens     (command and its arguments)
+        -:  307: *   - Redirect specs  ([IO_NUMBER] redirect_op WORD)
+        -:  308: *
+        -:  309: * We allow assigns, words and redirects interleaved as POSIX permits.
+        -:  310: * ------------------------------------------------------------------------- */
+      170:  311:static node_t *parse_simple_command(parser_t *p)
+        -:  312:{
+        -:  313:    word_list_t assigns, words;
+      170:  314:    wl_init(&assigns);
+      170:  315:    wl_init(&words);
+        -:  316:
+      170:  317:    redir_t  *redir_head = NULL;
+      170:  318:    redir_t **redir_tail = &redir_head;
+        -:  319:
+      170:  320:    int seen_cmd_word = 0; /* have we seen a non-assign WORD yet */
+        -:  321:
+      184:  322:    for (;;) {
+      354:  323:        token_t t = peek(p);
+        -:  324:
+      354:  325:        if (t.type == TOK_ASSIGN) {
+      168:  326:            consume(p);
+      168:  327:            if (!seen_cmd_word) {
+      168:  328:                wl_push(&assigns, t.text);
+        -:  329:            } else {
+        -:  330:                /* After cmd word (e.g. `local x=5`, `export X=val`): treat as arg */
+    #####:  331:                wl_push(&words, t.text);
+        -:  332:            }
+      184:  333:            continue;
+        -:  334:        }
+        -:  335:
+      186:  336:        if (t.type == TOK_WORD) {
+        -:  337:            /* Check if it could be an IO number followed by a redirect */
+       14:  338:            token_t saved = consume(p);  /* consume the word */
+       14:  339:            token_t nxt   = peek(p);
+       14:  340:            int fd = try_io_number(saved.text, nxt.type);
+       14:  341:            if (fd >= 0) {
+    #####:  342:                redir_t *r = parse_redirect(p, fd);
+    #####:  343:                if (r) {
+    #####:  344:                    *redir_tail = r;
+    #####:  345:                    redir_tail  = &r->next;
+    #####:  346:                    continue;
+        -:  347:                }
+        -:  348:            }
+        -:  349:            /* Not an IO number: it's a regular word */
+       14:  350:            seen_cmd_word = 1;
+       14:  351:            wl_push(&words, saved.text);
+       14:  352:            continue;
+        -:  353:        }
+        -:  354:
+      172:  355:        if (is_redir_op(t.type)) {
+        2:  356:            redir_t *r = parse_redirect(p, -1);
+        2:  357:            if (r && !p->error) {
+        2:  358:                *redir_tail = r;
+        2:  359:                redir_tail  = &r->next;
+        -:  360:            }
+        2:  361:            continue;
+        -:  362:        }
+        -:  363:
+        -:  364:        /* POSIX: reserved words are only keywords at command-name position.
+        -:  365:         * After the command name is established, treat keyword tokens as
+        -:  366:         * plain word arguments (e.g. 'echo done', 'echo fi', 'echo then'). */
+     170*:  367:        if (seen_cmd_word && t.text != NULL) {
+    #####:  368:            consume(p);
+    #####:  369:            wl_push(&words, t.text);
+    #####:  370:            continue;
+        -:  371:        }
+        -:  372:
+        -:  373:        /* Nothing else belongs to simple command */
+      170:  374:        break;
+        -:  375:    }
+        -:  376:
+      170:  377:    if (assigns.count == 0 && words.count == 0 && redir_head == NULL) {
+    #####:  378:        wl_free(&assigns);
+    #####:  379:        wl_free(&words);
+    #####:  380:        return NULL;
+        -:  381:    }
+        -:  382:
+      170:  383:    node_t *n       = alloc_node(p, N_CMD);
+      170:  384:    n->u.cmd.words   = wl_to_arena(p, &words);
+      170:  385:    n->u.cmd.assigns = wl_to_arena(p, &assigns);
+      170:  386:    n->u.cmd.redirs  = redir_head;
+        -:  387:
+      170:  388:    wl_free(&assigns);
+      170:  389:    wl_free(&words);
+      170:  390:    return n;
+        -:  391:}
+        -:  392:
+        -:  393:/* -------------------------------------------------------------------------
+        -:  394: * Compound list: newline* list newline*
+        -:  395: * ------------------------------------------------------------------------- */
+      307:  396:static node_t *parse_compound_list(parser_t *p)
+        -:  397:{
+      307:  398:    skip_newlines(p);
+      307:  399:    node_t *n = parse_list(p);
+      307:  400:    skip_newlines(p);
+      307:  401:    return n;
+        -:  402:}
+        -:  403:
+        -:  404:/* -------------------------------------------------------------------------
+        -:  405: * if command:
+        -:  406: *   IF compound_list THEN compound_list
+        -:  407: *   (ELIF compound_list THEN compound_list)*
+        -:  408: *   (ELSE compound_list)?
+        -:  409: *   FI
+        -:  410: * ------------------------------------------------------------------------- */
+       42:  411:static node_t *parse_if_cmd(parser_t *p)
+        -:  412:{
+        -:  413:    /* IF already consumed by caller */
+       42:  414:    node_t *cond = parse_compound_list(p);
+      42*:  415:    if (!cond || p->error) return NULL;
+        -:  416:
+       42:  417:    expect(p, TOK_THEN, "expected 'then'");
+      42*:  418:    if (p->error) return NULL;
+        -:  419:
+       42:  420:    node_t *then_b = parse_compound_list(p);
+      42*:  421:    if (!then_b || p->error) return NULL;
+        -:  422:
+       42:  423:    node_t *elif_chain = NULL;
+       42:  424:    node_t *else_b     = NULL;
+        -:  425:
+        -:  426:    /* Chain of ELIF ... THEN ... */
+       48:  427:    while (peek(p).type == TOK_ELIF) {
+        6:  428:        consume(p); /* ELIF */
+        6:  429:        node_t *elif_cond = parse_compound_list(p);
+       6*:  430:        if (!elif_cond || p->error) return NULL;
+        -:  431:
+        6:  432:        expect(p, TOK_THEN, "expected 'then' after elif condition");
+       6*:  433:        if (p->error) return NULL;
+        -:  434:
+        6:  435:        node_t *elif_then = parse_compound_list(p);
+       6*:  436:        if (!elif_then || p->error) return NULL;
+        -:  437:
+        -:  438:        /* Build an if node for this elif branch */
+        6:  439:        node_t *elif_node       = alloc_node(p, N_IF);
+        6:  440:        elif_node->u.if_node.cond       = elif_cond;
+        6:  441:        elif_node->u.if_node.then_b     = elif_then;
+        6:  442:        elif_node->u.if_node.elif_chain = NULL;
+        6:  443:        elif_node->u.if_node.else_b     = NULL;
+        -:  444:
+        -:  445:        /* Attach as elif_chain; nest further elifs inside this node's else */
+        6:  446:        if (!elif_chain) {
+        6:  447:            elif_chain = elif_node;
+        -:  448:        } else {
+        -:  449:            /* Find the last node in the chain and append */
+    #####:  450:            node_t *cur = elif_chain;
+    #####:  451:            while (cur->u.if_node.elif_chain)
+    #####:  452:                cur = cur->u.if_node.elif_chain;
+    #####:  453:            cur->u.if_node.elif_chain = elif_node;
+        -:  454:        }
+        -:  455:    }
+        -:  456:
+       42:  457:    if (peek(p).type == TOK_ELSE) {
+       17:  458:        consume(p); /* ELSE */
+       17:  459:        else_b = parse_compound_list(p);
+      17*:  460:        if (!else_b || p->error) return NULL;
+        -:  461:    }
+        -:  462:
+        -:  463:    /* Attach else_b to the last node in elif_chain (not the root if-node) */
+       42:  464:    if (elif_chain && else_b) {
+        6:  465:        node_t *cur = elif_chain;
+        6:  466:        while (cur->u.if_node.elif_chain)
+    #####:  467:            cur = cur->u.if_node.elif_chain;
+        6:  468:        cur->u.if_node.else_b = else_b;
+        6:  469:        else_b = NULL;  /* root node gets NULL */
+        -:  470:    }
+        -:  471:
+       42:  472:    expect(p, TOK_FI, "expected 'fi'");
+      42*:  473:    if (p->error) return NULL;
+        -:  474:
+       42:  475:    node_t *n               = alloc_node(p, N_IF);
+       42:  476:    n->u.if_node.cond       = cond;
+       42:  477:    n->u.if_node.then_b     = then_b;
+       42:  478:    n->u.if_node.elif_chain = elif_chain;
+       42:  479:    n->u.if_node.else_b     = else_b;
+       42:  480:    return n;
+        -:  481:}
+        -:  482:
+        -:  483:/* -------------------------------------------------------------------------
+        -:  484: * while command: WHILE compound_list DO compound_list DONE
+        -:  485: * ------------------------------------------------------------------------- */
+       16:  486:static node_t *parse_while_cmd(parser_t *p)
+        -:  487:{
+        -:  488:    /* WHILE already consumed */
+       16:  489:    node_t *cond = parse_compound_list(p);
+      16*:  490:    if (!cond || p->error) return NULL;
+        -:  491:
+       16:  492:    expect(p, TOK_DO, "expected 'do' in while");
+      16*:  493:    if (p->error) return NULL;
+        -:  494:
+       16:  495:    node_t *body = parse_compound_list(p);
+      16*:  496:    if (!body || p->error) return NULL;
+        -:  497:
+       16:  498:    expect(p, TOK_DONE, "expected 'done'");
+      16*:  499:    if (p->error) return NULL;
+        -:  500:
+       16:  501:    node_t *n         = alloc_node(p, N_WHILE);
+       16:  502:    n->u.loop.cond    = cond;
+       16:  503:    n->u.loop.body    = body;
+       16:  504:    return n;
+        -:  505:}
+        -:  506:
+        -:  507:/* -------------------------------------------------------------------------
+        -:  508: * until command: UNTIL compound_list DO compound_list DONE
+        -:  509: * ------------------------------------------------------------------------- */
+        6:  510:static node_t *parse_until_cmd(parser_t *p)
+        -:  511:{
+        -:  512:    /* UNTIL already consumed */
+        6:  513:    node_t *cond = parse_compound_list(p);
+       6*:  514:    if (!cond || p->error) return NULL;
+        -:  515:
+        6:  516:    expect(p, TOK_DO, "expected 'do' in until");
+       6*:  517:    if (p->error) return NULL;
+        -:  518:
+        6:  519:    node_t *body = parse_compound_list(p);
+       6*:  520:    if (!body || p->error) return NULL;
+        -:  521:
+        6:  522:    expect(p, TOK_DONE, "expected 'done'");
+       6*:  523:    if (p->error) return NULL;
+        -:  524:
+        6:  525:    node_t *n         = alloc_node(p, N_UNTIL);
+        6:  526:    n->u.loop.cond    = cond;
+        6:  527:    n->u.loop.body    = body;
+        6:  528:    return n;
+        -:  529:}
+        -:  530:
+        -:  531:/* -------------------------------------------------------------------------
+        -:  532: * for command: FOR WORD (IN WORD*)? SEMI? DO compound_list DONE
+        -:  533: * ------------------------------------------------------------------------- */
+       36:  534:static node_t *parse_for_cmd(parser_t *p)
+        -:  535:{
+        -:  536:    /* FOR already consumed */
+       36:  537:    token_t var_tok = expect(p, TOK_WORD, "expected variable name in for");
+      36*:  538:    if (p->error) return NULL;
+        -:  539:
+       36:  540:    char       *var   = var_tok.text;
+        -:  541:    word_list_t words;
+       36:  542:    wl_init(&words);
+       36:  543:    int saw_in = 0;
+        -:  544:
+        -:  545:    /* Optional: IN word-list */
+       36:  546:    skip_newlines(p);
+       36:  547:    if (peek(p).type == TOK_IN) {
+       34:  548:        saw_in = 1;
+       34:  549:        consume(p); /* IN */
+      100:  550:        while (peek(p).type == TOK_WORD) {
+       66:  551:            token_t w = consume(p);
+       66:  552:            wl_push(&words, w.text);
+        -:  553:        }
+        -:  554:    }
+        -:  555:
+        -:  556:    /* Optional semicolon or newline before DO */
+      36*:  557:    if (peek(p).type == TOK_SEMI || peek(p).type == TOK_NEWLINE)
+       36:  558:        consume(p);
+       36:  559:    skip_newlines(p);
+        -:  560:
+       36:  561:    expect(p, TOK_DO, "expected 'do' in for");
+      36*:  562:    if (p->error) { wl_free(&words); return NULL; }
+        -:  563:
+       36:  564:    node_t *body = parse_compound_list(p);
+      36*:  565:    if (!body || p->error) { wl_free(&words); return NULL; }
+        -:  566:
+       36:  567:    expect(p, TOK_DONE, "expected 'done'");
+      36*:  568:    if (p->error) { wl_free(&words); return NULL; }
+        -:  569:
+       36:  570:    node_t *n           = alloc_node(p, N_FOR);
+       36:  571:    n->u.for_node.var   = var;
+        -:  572:    /* NULL words means "no in clause" (iterate $@); non-NULL means explicit list */
+       36:  573:    n->u.for_node.words = saw_in ? wl_to_arena(p, &words) : NULL;
+       36:  574:    n->u.for_node.body  = body;
+       36:  575:    wl_free(&words);
+       36:  576:    return n;
+        -:  577:}
+        -:  578:
+        -:  579:/* -------------------------------------------------------------------------
+        -:  580: * case command: CASE WORD IN (pattern ')' compound_list ';;')* ESAC
+        -:  581: * ------------------------------------------------------------------------- */
+       17:  582:static node_t *parse_case_cmd(parser_t *p)
+        -:  583:{
+        -:  584:    /* CASE already consumed */
+       17:  585:    token_t word_tok = consume(p);
+      17*:  586:    if (word_tok.type != TOK_WORD && word_tok.type != TOK_ASSIGN) {
+    #####:  587:        parser_error(p, "expected word in case");
+    #####:  588:        return NULL;
+        -:  589:    }
+        -:  590:
+       17:  591:    skip_newlines(p);
+       17:  592:    expect(p, TOK_IN, "expected 'in' in case");
+      17*:  593:    if (p->error) return NULL;
+        -:  594:
+       17:  595:    skip_newlines(p);
+        -:  596:
+       17:  597:    case_item_t  *item_head = NULL;
+       17:  598:    case_item_t **item_tail = &item_head;
+        -:  599:
+       55:  600:    while (peek(p).type != TOK_ESAC && peek(p).type != TOK_EOF) {
+        -:  601:        /* Collect pattern(s) separated by '|' until ')' */
+        -:  602:        word_list_t pats;
+       38:  603:        wl_init(&pats);
+        -:  604:
+        -:  605:        /* Optional leading '(' */
+       38:  606:        if (peek(p).type == TOK_LPAREN)
+    #####:  607:            consume(p);
+        -:  608:
+        -:  609:        /* At least one pattern word */
+      38*:  610:        if (peek(p).type != TOK_WORD && peek(p).type != TOK_ASSIGN) {
+    #####:  611:            parser_error(p, "expected pattern in case item");
+    #####:  612:            wl_free(&pats);
+    #####:  613:            return NULL;
+        -:  614:        }
+        -:  615:
+       16:  616:        for (;;) {
+       54:  617:            token_t pat = consume(p);
+       54:  618:            wl_push(&pats, pat.text);
+       54:  619:            if (peek(p).type == TOK_PIPE) {
+       16:  620:                consume(p); /* | */
+        -:  621:            } else {
+       38:  622:                break;
+        -:  623:            }
+        -:  624:        }
+        -:  625:
+       38:  626:        expect(p, TOK_RPAREN, "expected ')' after case pattern");
+      38*:  627:        if (p->error) { wl_free(&pats); return NULL; }
+        -:  628:
+       38:  629:        skip_newlines(p);
+        -:  630:
+        -:  631:        /* Body: compound_list until ;; or esac */
+       38:  632:        node_t *body = NULL;
+       38:  633:        if (peek(p).type != TOK_DSEMI && peek(p).type != TOK_ESAC) {
+       38:  634:            body = parse_compound_list(p);
+      38*:  635:            if (p->error) { wl_free(&pats); return NULL; }
+        -:  636:        }
+        -:  637:
+       38:  638:        if (peek(p).type == TOK_DSEMI)
+       38:  639:            consume(p);
+        -:  640:
+       38:  641:        skip_newlines(p);
+        -:  642:
+       38:  643:        case_item_t *item  = arena_alloc(p->arena, sizeof(case_item_t));
+       38:  644:        item->patterns     = wl_to_arena(p, &pats);
+       38:  645:        item->body         = body;
+       38:  646:        item->next         = NULL;
+       38:  647:        *item_tail         = item;
+       38:  648:        item_tail          = &item->next;
+       38:  649:        wl_free(&pats);
+        -:  650:    }
+        -:  651:
+       17:  652:    expect(p, TOK_ESAC, "expected 'esac'");
+      17*:  653:    if (p->error) return NULL;
+        -:  654:
+       17:  655:    node_t *n             = alloc_node(p, N_CASE);
+       17:  656:    n->u.case_node.word   = word_tok.text;
+       17:  657:    n->u.case_node.items  = item_head;
+       17:  658:    return n;
+        -:  659:}
+        -:  660:
+        -:  661:/* -------------------------------------------------------------------------
+        -:  662: * subshell: '(' compound_list ')'
+        -:  663: * ------------------------------------------------------------------------- */
+        5:  664:static node_t *parse_subshell(parser_t *p)
+        -:  665:{
+        -:  666:    /* LPAREN already consumed */
+        5:  667:    node_t *body = parse_compound_list(p);
+       5*:  668:    if (!body || p->error) return NULL;
+        -:  669:
+        5:  670:    expect(p, TOK_RPAREN, "expected ')' to close subshell");
+       5*:  671:    if (p->error) return NULL;
+        -:  672:
+        5:  673:    node_t *n               = alloc_node(p, N_SUBSHELL);
+        5:  674:    n->u.redir_node.body    = body;
+        5:  675:    n->u.redir_node.redirs  = NULL;
+        5:  676:    return n;
+        -:  677:}
+        -:  678:
+        -:  679:/* -------------------------------------------------------------------------
+        -:  680: * brace group: '{' compound_list '}'
+        -:  681: * ------------------------------------------------------------------------- */
+       71:  682:static node_t *parse_brace_group(parser_t *p)
+        -:  683:{
+        -:  684:    /* LBRACE already consumed */
+       71:  685:    node_t *body = parse_compound_list(p);
+      71*:  686:    if (!body || p->error) return NULL;
+        -:  687:
+       71:  688:    expect(p, TOK_RBRACE, "expected '}' to close brace group");
+      71*:  689:    if (p->error) return NULL;
+        -:  690:
+       71:  691:    node_t *n               = alloc_node(p, N_BRACE);
+       71:  692:    n->u.redir_node.body    = body;
+       71:  693:    n->u.redir_node.redirs  = NULL;
+       71:  694:    return n;
+        -:  695:}
+        -:  696:
+        -:  697:/* -------------------------------------------------------------------------
+        -:  698: * Compound command dispatcher
+        -:  699: * ------------------------------------------------------------------------- */
+     1345:  700:static node_t *parse_compound_command(parser_t *p)
+        -:  701:{
+     1345:  702:    token_t t = peek(p);
+     1345:  703:    switch (t.type) {
+       42:  704:    case TOK_IF:
+       42:  705:        consume(p);
+       42:  706:        return parse_if_cmd(p);
+       16:  707:    case TOK_WHILE:
+       16:  708:        consume(p);
+       16:  709:        return parse_while_cmd(p);
+        6:  710:    case TOK_UNTIL:
+        6:  711:        consume(p);
+        6:  712:        return parse_until_cmd(p);
+       36:  713:    case TOK_FOR:
+       36:  714:        consume(p);
+       36:  715:        return parse_for_cmd(p);
+       17:  716:    case TOK_CASE:
+       17:  717:        consume(p);
+       17:  718:        return parse_case_cmd(p);
+        5:  719:    case TOK_LPAREN:
+        5:  720:        consume(p);
+        5:  721:        return parse_subshell(p);
+       71:  722:    case TOK_LBRACE:
+       71:  723:        consume(p);
+       71:  724:        return parse_brace_group(p);
+     1152:  725:    default:
+     1152:  726:        return NULL;
+        -:  727:    }
+        -:  728:}
+        -:  729:
+        -:  730:/* -------------------------------------------------------------------------
+        -:  731: * Function definition: WORD '(' ')' compound_command
+        -:  732: * Detected from parse_command when we see WORD LPAREN RPAREN.
+        -:  733: * The WORD token is passed in as func_name.
+        -:  734: * ------------------------------------------------------------------------- */
+       61:  735:static node_t *parse_function_def(parser_t *p, char *func_name)
+        -:  736:{
+        -:  737:    /* '(' and ')' already consumed by caller */
+       61:  738:    skip_newlines(p);
+       61:  739:    node_t *body = parse_compound_command(p);
+       61:  740:    if (!body || p->error) {
+    #####:  741:        parser_error(p, "expected compound command as function body");
+    #####:  742:        return NULL;
+        -:  743:    }
+        -:  744:
+       61:  745:    node_t *n         = alloc_node(p, N_FUNC);
+       61:  746:    n->u.func.name    = func_name;
+       61:  747:    n->u.func.body    = body;
+       61:  748:    return n;
+        -:  749:}
+        -:  750:
+        -:  751:/* -------------------------------------------------------------------------
+        -:  752: * Command: simple_command | compound_command | function_def
+        -:  753: * Also handles trailing redirects on compound commands.
+        -:  754: * ------------------------------------------------------------------------- */
+     1284:  755:static node_t *parse_command(parser_t *p)
+        -:  756:{
+     1284:  757:    token_t t = peek(p);
+        -:  758:
+        -:  759:    /* Handle 'function NAME compound_command' syntax */
+     1284:  760:    if (t.type == TOK_FUNCTION) {
+        2:  761:        consume(p); /* FUNCTION */
+        2:  762:        token_t name_tok = expect(p, TOK_WORD, "expected function name");
+       2*:  763:        if (p->error) return NULL;
+        -:  764:
+        -:  765:        /* Optional '()' after function name */
+        2:  766:        if (peek(p).type == TOK_LPAREN) {
+    #####:  767:            consume(p); /* ( */
+    #####:  768:            expect(p, TOK_RPAREN, "expected ')' after function name");
+    #####:  769:            if (p->error) return NULL;
+        -:  770:        }
+        -:  771:
+        2:  772:        skip_newlines(p);
+        2:  773:        node_t *body = parse_compound_command(p);
+        2:  774:        if (!body || p->error) {
+    #####:  775:            parser_error(p, "expected compound command as function body");
+    #####:  776:            return NULL;
+        -:  777:        }
+        2:  778:        node_t *n      = alloc_node(p, N_FUNC);
+        2:  779:        n->u.func.name = name_tok.text;
+        2:  780:        n->u.func.body = body;
+        2:  781:        return n;
+        -:  782:    }
+        -:  783:
+        -:  784:    /* Compound command */
+        -:  785:    {
+     1282:  786:        node_t *compound = parse_compound_command(p);
+     1282:  787:        if (compound) {
+        -:  788:            /* Collect optional trailing redirects */
+      130:  789:            redir_t  *rhead = NULL;
+      130:  790:            redir_t **rtail = &rhead;
+        8:  791:            for (;;) {
+      138:  792:                token_t t = peek(p);
+      138:  793:                int fd = -1;
+      138:  794:                if (is_redir_op(t.type)) {
+        -:  795:                    /* direct redirect op: use default fd */
+      134:  796:                } else if (t.type == TOK_WORD) {
+        -:  797:                    /* might be io-number: consume and check next */
+        4:  798:                    token_t w = consume(p);
+        4:  799:                    fd = try_io_number(w.text, peek(p).type);
+        4:  800:                    if (fd < 0)
+    #####:  801:                        break; /* not an io number; stop collecting */
+        -:  802:                } else {
+      130:  803:                    break;
+        -:  804:                }
+        8:  805:                redir_t *r = parse_redirect(p, fd);
+        8:  806:                if (r && !p->error) {
+        8:  807:                    *rtail = r;
+        8:  808:                    rtail  = &r->next;
+        -:  809:                }
+       8*:  810:                if (p->error) break;
+        -:  811:            }
+      130:  812:            if (rhead) {
+        4:  813:                node_t *wrap              = alloc_node(p, N_REDIR);
+        4:  814:                wrap->u.redir_node.body   = compound;
+        4:  815:                wrap->u.redir_node.redirs = rhead;
+        4:  816:                return wrap;
+        -:  817:            }
+      126:  818:            return compound;
+        -:  819:        }
+        -:  820:    }
+        -:  821:
+        -:  822:    /* Simple command (handles function detection too) */
+     1152:  823:    t = peek(p);
+     1152:  824:    if (t.type == TOK_WORD || t.type == TOK_ASSIGN || is_redir_op(t.type)) {
+        -:  825:        /* Look ahead for WORD '(' ')' function definition */
+     1150:  826:        if (t.type == TOK_WORD) {
+        -:  827:            /* We need two more tokens of lookahead.
+        -:  828:             * Strategy: consume the word, then check for '(' ')'. */
+      980:  829:            token_t name_tok = consume(p);
+      980:  830:            token_t next1    = peek(p);
+        -:  831:
+      980:  832:            if (next1.type == TOK_LPAREN) {
+       61:  833:                consume(p); /* ( */
+       61:  834:                token_t next2 = peek(p);
+       61:  835:                if (next2.type == TOK_RPAREN) {
+       61:  836:                    consume(p); /* ) */
+        -:  837:                    /* This is a function definition */
+       61:  838:                    return parse_function_def(p, name_tok.text);
+        -:  839:                }
+        -:  840:                /* Not a function def; push back the '(' and treat as simple cmd */
+        -:  841:                /* We can't truly push back a token, so build a synthetic simple
+        -:  842:                 * command starting with name_tok, treating '(' as error or word.
+        -:  843:                 * In practice, 'name ( args )' isn't valid POSIX — treat '(' as
+        -:  844:                 * start of a subshell that is part of a pipeline; put name back
+        -:  845:                 * by constructing the simple command manually with what we have. */
+    #####:  846:                parser_error(p, "expected ')' in function definition");
+    #####:  847:                return NULL;
+        -:  848:            }
+        -:  849:
+        -:  850:            /* Not a function def: build simple command manually, having already
+        -:  851:             * consumed name_tok. */
+        -:  852:            word_list_t assigns, words;
+      919:  853:            wl_init(&assigns);
+      919:  854:            wl_init(&words);
+      919:  855:            redir_t  *redir_head = NULL;
+      919:  856:            redir_t **redir_tail = &redir_head;
+        -:  857:
+        -:  858:            /* name_tok is the first word of the command */
+      919:  859:            if (name_tok.type == TOK_ASSIGN) {
+    #####:  860:                wl_push(&assigns, name_tok.text);
+        -:  861:            } else {
+      919:  862:                wl_push(&words, name_tok.text);
+        -:  863:            }
+        -:  864:
+        -:  865:            /* Continue collecting remaining parts of the simple command */
+     1041:  866:            for (;;) {
+     1960:  867:                token_t cur = peek(p);
+        -:  868:
+     1960:  869:                if (cur.type == TOK_ASSIGN) {
+       18:  870:                    consume(p);
+       18:  871:                    if (words.count == 0) {
+    #####:  872:                        wl_push(&assigns, cur.text);
+        -:  873:                    } else {
+       18:  874:                        wl_push(&words, cur.text);
+        -:  875:                    }
+     1041:  876:                    continue;
+        -:  877:                }
+        -:  878:
+     1942:  879:                if (cur.type == TOK_WORD) {
+      970:  880:                    token_t saved = consume(p);
+      970:  881:                    token_t nxt   = peek(p);
+      970:  882:                    int fd = try_io_number(saved.text, nxt.type);
+      970:  883:                    if (fd >= 0) {
+       11:  884:                        redir_t *r = parse_redirect(p, fd);
+       11:  885:                        if (r) {
+       11:  886:                            *redir_tail = r;
+       11:  887:                            redir_tail  = &r->next;
+        -:  888:                        }
+        -:  889:                    } else {
+      959:  890:                        wl_push(&words, saved.text);
+        -:  891:                    }
+      970:  892:                    continue;
+        -:  893:                }
+        -:  894:
+      972:  895:                if (is_redir_op(cur.type)) {
+       49:  896:                    redir_t *r = parse_redirect(p, -1);
+       49:  897:                    if (r && !p->error) {
+       49:  898:                        *redir_tail = r;
+       49:  899:                        redir_tail  = &r->next;
+        -:  900:                    }
+       49:  901:                    continue;
+        -:  902:                }
+        -:  903:
+        -:  904:                /* POSIX: keywords in argument position treated as words */
+      923:  905:                if (words.count > 0 && cur.text != NULL) {
+        4:  906:                    consume(p);
+        4:  907:                    wl_push(&words, cur.text);
+        4:  908:                    continue;
+        -:  909:                }
+        -:  910:
+      919:  911:                break;
+        -:  912:            }
+        -:  913:
+      919:  914:            node_t *n        = alloc_node(p, N_CMD);
+      919:  915:            n->u.cmd.words   = wl_to_arena(p, &words);
+      919:  916:            n->u.cmd.assigns = wl_to_arena(p, &assigns);
+      919:  917:            n->u.cmd.redirs  = redir_head;
+      919:  918:            wl_free(&assigns);
+      919:  919:            wl_free(&words);
+      919:  920:            return n;
+        -:  921:        }
+        -:  922:
+        -:  923:        /* starts with ASSIGN or redirect */
+      170:  924:        return parse_simple_command(p);
+        -:  925:    }
+        -:  926:
+        2:  927:    return NULL;
+        -:  928:}
+        -:  929:
+        -:  930:/* -------------------------------------------------------------------------
+        -:  931: * pipeline: '!'? command ('|' command)*
+        -:  932: * ------------------------------------------------------------------------- */
+     1224:  933:static node_t *parse_pipeline(parser_t *p)
+        -:  934:{
+     1224:  935:    int negate = 0;
+     1224:  936:    if (peek(p).type == TOK_BANG) {
+        5:  937:        consume(p);
+        5:  938:        negate = 1;
+        -:  939:    }
+        -:  940:
+     1224:  941:    node_t *left = parse_command(p);
+     1224:  942:    if (!left || p->error) return NULL;
+        -:  943:
+     1282:  944:    while (peek(p).type == TOK_PIPE) {
+       60:  945:        consume(p); /* | */
+       60:  946:        skip_newlines(p);
+       60:  947:        node_t *right = parse_command(p);
+       60:  948:        if (!right || p->error) {
+    #####:  949:            parser_error(p, "expected command after '|'");
+    #####:  950:            return NULL;
+        -:  951:        }
+       60:  952:        node_t *pipe      = alloc_node(p, N_PIPE);
+       60:  953:        pipe->u.binary.left  = left;
+       60:  954:        pipe->u.binary.right = right;
+       60:  955:        left = pipe;
+        -:  956:    }
+        -:  957:
+     1222:  958:    if (negate) {
+        5:  959:        node_t *not_node         = alloc_node(p, N_NOT);
+        5:  960:        not_node->u.binary.left  = left;
+        5:  961:        not_node->u.binary.right = NULL;
+        5:  962:        return not_node;
+        -:  963:    }
+        -:  964:
+     1217:  965:    return left;
+        -:  966:}
+        -:  967:
+        -:  968:/* -------------------------------------------------------------------------
+        -:  969: * and_or: pipeline (('&&' | '||') pipeline)*
+        -:  970: * ------------------------------------------------------------------------- */
+     1210:  971:static node_t *parse_and_or(parser_t *p)
+        -:  972:{
+     1210:  973:    node_t *left = parse_pipeline(p);
+     1210:  974:    if (!left || p->error) return NULL;
+        -:  975:
+       14:  976:    for (;;) {
+     1222:  977:        tok_type_t t = peek(p).type;
+     1222:  978:        if (t != TOK_AND_AND && t != TOK_OR_OR)
+     1208:  979:            break;
+        -:  980:
+       14:  981:        consume(p);
+       14:  982:        skip_newlines(p);
+        -:  983:
+       14:  984:        node_t *right = parse_pipeline(p);
+       14:  985:        if (!right || p->error) {
+    #####:  986:            parser_error(p, "expected pipeline after '&&' or '||'");
+    #####:  987:            return NULL;
+        -:  988:        }
+        -:  989:
+       14:  990:        node_type_t ntype = (t == TOK_AND_AND) ? N_AND : N_OR;
+       14:  991:        node_t *n          = alloc_node(p, ntype);
+       14:  992:        n->u.binary.left   = left;
+       14:  993:        n->u.binary.right  = right;
+       14:  994:        left = n;
+        -:  995:    }
+        -:  996:
+     1208:  997:    return left;
+        -:  998:}
+        -:  999:
+        -: 1000:/* -------------------------------------------------------------------------
+        -: 1001: * list: and_or (separator and_or)*
+        -: 1002: * separator: ';' | NEWLINE | '&'
+        -: 1003: * ------------------------------------------------------------------------- */
+      786: 1004:static node_t *parse_list(parser_t *p)
+        -: 1005:{
+      786: 1006:    node_t *left = parse_and_or(p);
+     786*: 1007:    if (!left || p->error) return NULL;
+        -: 1008:
+      422: 1009:    for (;;) {
+     1208: 1010:        tok_type_t t = peek(p).type;
+        -: 1011:
+    1208*: 1012:        if (t == TOK_AMP) {
+        -: 1013:            /* Async: wrap left in N_ASYNC */
+        2: 1014:            consume(p);
+        2: 1015:            node_t *async_node           = alloc_node(p, N_ASYNC);
+        2: 1016:            async_node->u.binary.left    = left;
+        2: 1017:            async_node->u.binary.right   = NULL;
+        2: 1018:            left = async_node;
+        -: 1019:
+        2: 1020:            skip_newlines(p);
+        -: 1021:            /* More commands? */
+        2: 1022:            tok_type_t nxt = peek(p).type;
+        2: 1023:            if (nxt == TOK_EOF   || nxt == TOK_FI    || nxt == TOK_DONE  ||
+        2: 1024:                nxt == TOK_ESAC  || nxt == TOK_THEN   || nxt == TOK_ELSE  ||
+        2: 1025:                nxt == TOK_ELIF  || nxt == TOK_DO     || nxt == TOK_RPAREN ||
+        2: 1026:                nxt == TOK_RBRACE || nxt == TOK_DSEMI)
+        -: 1027:                break;
+        -: 1028:
+        2: 1029:            node_t *right = parse_and_or(p);
+       2*: 1030:            if (!right || p->error) break;
+        -: 1031:
+    #####: 1032:            node_t *seq       = alloc_node(p, N_SEQ);
+    #####: 1033:            seq->u.binary.left  = left;
+    #####: 1034:            seq->u.binary.right = right;
+    #####: 1035:            left = seq;
+    #####: 1036:            continue;
+        -: 1037:        }
+        -: 1038:
+     1206: 1039:        if (t == TOK_SEMI || t == TOK_NEWLINE) {
+      744: 1040:            consume(p);
+      744: 1041:            skip_newlines(p);
+        -: 1042:
+        -: 1043:            /* Check for list terminators */
+      744: 1044:            tok_type_t nxt = peek(p).type;
+      744: 1045:            if (nxt == TOK_EOF   || nxt == TOK_FI    || nxt == TOK_DONE  ||
+      586: 1046:                nxt == TOK_ESAC  || nxt == TOK_THEN   || nxt == TOK_ELSE  ||
+      515: 1047:                nxt == TOK_ELIF  || nxt == TOK_DO     || nxt == TOK_RPAREN ||
+      422: 1048:                nxt == TOK_RBRACE || nxt == TOK_DSEMI)
+        -: 1049:                break;
+        -: 1050:
+      422: 1051:            node_t *right = parse_and_or(p);
+      422: 1052:            if (!right || p->error) break;
+        -: 1053:
+      422: 1054:            node_t *seq        = alloc_node(p, N_SEQ);
+      422: 1055:            seq->u.binary.left  = left;
+      422: 1056:            seq->u.binary.right = right;
+      422: 1057:            left = seq;
+      422: 1058:            continue;
+        -: 1059:        }
+        -: 1060:
+      462: 1061:        break;
+        -: 1062:    }
+        -: 1063:
+      786: 1064:    return left;
+        -: 1065:}
+        -: 1066:
+        -: 1067:/* -------------------------------------------------------------------------
+        -: 1068: * Public API
+        -: 1069: * ------------------------------------------------------------------------- */
+        -: 1070:
+        -: 1071:/* Parse a single complete command (one and_or with optional separator) */
+      938: 1072:node_t *parser_parse(parser_t *p)
+        -: 1073:{
+        -: 1074:    /* Skip leading newlines and semicolons between top-level commands.
+        -: 1075:     * This allows the shell loop to call parser_parse repeatedly on input
+        -: 1076:     * like "X=hello; echo $X" — after X=hello is parsed the ';' must be
+        -: 1077:     * consumed before trying to parse the next command. */
+       86: 1078:    for (;;) {
+     1024: 1079:        tok_type_t t = peek(p).type;
+     1024: 1080:        if (t == TOK_NEWLINE || t == TOK_SEMI)
+       86: 1081:            consume(p);
+        -: 1082:        else
+        -: 1083:            break;
+        -: 1084:    }
+      938: 1085:    if (peek(p).type == TOK_EOF)
+      459: 1086:        return NULL;
+      479: 1087:    return parse_list(p);
+        -: 1088:}
+        -: 1089:
+        -: 1090:/* Parse a complete program (list until EOF) */
+    #####: 1091:node_t *parser_parse_list(parser_t *p)
+        -: 1092:{
+    #####: 1093:    skip_newlines(p);
+    #####: 1094:    if (peek(p).type == TOK_EOF)
+    #####: 1095:        return NULL;
+    #####: 1096:    return parse_list(p);
+        -: 1097:}

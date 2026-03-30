@@ -1,18 +1,4 @@
-/* parse.c — BRE/ERE → NFA via postfix/shunting-yard + Thompson construction
- *
- * Algorithm (Russ Cox method, regexp1.html):
- *   1. Tokenize regex (handles BRE/ERE syntax differences)
- *   2. Insert explicit concatenation operators
- *   3. Convert infix → postfix (shunting-yard)
- *   4. Build NFA fragments from postfix stack
- *
- * Result: a mb_prog (array of mb_instr) with entry at index 0.
- * The Thompson simulator runs mb_prog directly.
- *
- * Pattern features supported:
- *   Literals, . ^ $, [class], * + ?, | (ERE) / \| (BRE),
- *   (...) / \(...\), \n \t etc., {n,m} approximate (1+), backrefs → POSIX.
- */
+/* parse.c — BRE/ERE → NFA via postfix/shunting-yard + Thompson construction */
 
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L

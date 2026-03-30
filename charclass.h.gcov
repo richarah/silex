@@ -1,0 +1,60 @@
+        -:    0:Source:src/util/charclass.h
+        -:    1:/* charclass.h — ASCII character classification lookup table
+        -:    2: *
+        -:    3: * Provides a single 256-byte table indexed by (unsigned char) so that
+        -:    4: * identifier scanning, whitespace detection, and similar hot-path checks
+        -:    5: * reduce to a single array load + AND instead of a chain of comparisons.
+        -:    6: *
+        -:    7: * All helpers take `unsigned char` to avoid signed-extension bugs; callers
+        -:    8: * must cast: is_name_char((unsigned char)c).
+        -:    9: */
+        -:   10:#ifndef MATCHBOX_CHARCLASS_H
+        -:   11:#define MATCHBOX_CHARCLASS_H
+        -:   12:
+        -:   13:#include <stdint.h>
+        -:   14:
+        -:   15:/* Bit flags ---------------------------------------------------------------- */
+        -:   16:#define CC_ALPHA    ((uint8_t)0x01u)  /* [A-Za-z_]     — identifier start    */
+        -:   17:#define CC_ALNUM    ((uint8_t)0x02u)  /* [A-Za-z0-9_]  — identifier continue */
+        -:   18:#define CC_DIGIT    ((uint8_t)0x04u)  /* [0-9]                                */
+        -:   19:#define CC_SPACE    ((uint8_t)0x08u)  /* [ \t\r\f\v]   — non-newline space   */
+        -:   20:#define CC_NEWLINE  ((uint8_t)0x10u)  /* [\n]                                 */
+        -:   21:#define CC_QUOTE    ((uint8_t)0x20u)  /* ['"` ]                               */
+        -:   22:#define CC_GLOB     ((uint8_t)0x40u)  /* [*?[\]]                              */
+        -:   23:#define CC_DELIM    ((uint8_t)0x80u)  /* [;|&()<>]     — shell meta           */
+        -:   24:
+        -:   25:extern const uint8_t char_class[256];
+        -:   26:
+        -:   27:/* Inline helpers ----------------------------------------------------------- */
+        -:   28:
+        -:   29:/* True for [A-Za-z_] — valid identifier first character */
+      748:   30:static inline int is_alpha_underscore(unsigned char c)
+        -:   31:{
+      748:   32:    return (char_class[c] & CC_ALPHA) != 0;
+        -:   33:}
+        -:   34:
+        -:   35:/* True for [A-Za-z0-9_] — valid identifier continuation character */
+     1421:   36:static inline int is_name_char(unsigned char c)
+        -:   37:{
+     1421:   38:    return (char_class[c] & CC_ALNUM) != 0;
+        -:   39:}
+        -:   40:
+        -:   41:/* True for [0-9] */
+       81:   42:static inline int is_digit(unsigned char c)
+        -:   43:{
+       81:   44:    return (char_class[c] & CC_DIGIT) != 0;
+        -:   45:}
+        -:   46:
+        -:   47:/* True for [ \t\r\f\v] — non-newline whitespace (ASCII only) */
+        -:   48:static inline int is_shell_space(unsigned char c)
+        -:   49:{
+        -:   50:    return (char_class[c] & CC_SPACE) != 0;
+        -:   51:}
+        -:   52:
+        -:   53:/* True for any POSIX whitespace including \n */
+        -:   54:static inline int is_shell_ws(unsigned char c)
+        -:   55:{
+        -:   56:    return (char_class[c] & (CC_SPACE | CC_NEWLINE)) != 0;
+        -:   57:}
+        -:   58:
+        -:   59:#endif /* MATCHBOX_CHARCLASS_H */

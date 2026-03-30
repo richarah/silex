@@ -1,9 +1,8 @@
-/* dirname.c -- dirname builtin: strip last component from file name */
+/* dirname.c — dirname builtin: strip last component from file name */
 
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
-/* dirname.c — dirname builtin */
 
 #include "../util/error.h"
 

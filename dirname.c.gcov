@@ -1,0 +1,120 @@
+        -:    0:Source:src/core/dirname.c
+        -:    1:/* dirname.c -- dirname builtin: strip last component from file name */
+        -:    2:
+        -:    3:#ifndef _POSIX_C_SOURCE
+        -:    4:#define _POSIX_C_SOURCE 200809L
+        -:    5:#endif
+        -:    6:/* dirname.c — dirname builtin */
+        -:    7:
+        -:    8:#include "../util/error.h"
+        -:    9:
+        -:   10:#include <stdio.h>
+        -:   11:#include <string.h>
+        -:   12:
+        -:   13:/*
+        -:   14: * Compute the dirname of PATH and write it into OUT (must be at least
+        -:   15: * PATH_MAX bytes).  Follows POSIX dirname(3) semantics:
+        -:   16: *   - If path contains no '/', return "."
+        -:   17: *   - Strip trailing slashes, then strip last component, then strip
+        -:   18: *     trailing slashes from what remains.
+        -:   19: *   - If nothing remains, return "/".
+        -:   20: */
+       10:   21:static void do_dirname(const char *path, char *out, size_t outsz)
+        -:   22:{
+       10:   23:    size_t len = strlen(path);
+        -:   24:
+        -:   25:    /* Empty string -> "." */
+       10:   26:    if (len == 0) {
+    #####:   27:        out[0] = '.';
+    #####:   28:        out[1] = '\0';
+       4*:   29:        return;
+        -:   30:    }
+        -:   31:
+        -:   32:    char tmp[4096];
+       10:   33:    if (len >= sizeof(tmp))
+    #####:   34:        len = sizeof(tmp) - 1;
+       10:   35:    memcpy(tmp, path, len);
+       10:   36:    tmp[len] = '\0';
+        -:   37:
+        -:   38:    /* Strip trailing slashes (keep at least one character) */
+       12:   39:    while (len > 1 && tmp[len - 1] == '/') {
+        2:   40:        tmp[--len] = '\0';
+        -:   41:    }
+        -:   42:
+        -:   43:    /* Find last '/' */
+       10:   44:    char *last_slash = strrchr(tmp, '/');
+        -:   45:
+       10:   46:    if (!last_slash) {
+        -:   47:        /* No slash at all: dirname is "." */
+        2:   48:        if (outsz > 1) {
+        2:   49:            out[0] = '.';
+        2:   50:            out[1] = '\0';
+        -:   51:        }
+        2:   52:        return;
+        -:   53:    }
+        -:   54:
+        -:   55:    /* Truncate at last slash */
+        8:   56:    *last_slash = '\0';
+        8:   57:    len = (size_t)(last_slash - tmp);
+        -:   58:
+        -:   59:    /* Strip trailing slashes from what remains */
+        8:   60:    while (len > 1 && tmp[len - 1] == '/') {
+    #####:   61:        tmp[--len] = '\0';
+        -:   62:    }
+        -:   63:
+        -:   64:    /* If nothing left (was something like "/foo"), result is "/" */
+        8:   65:    if (len == 0) {
+        2:   66:        out[0] = '/';
+        2:   67:        out[1] = '\0';
+        2:   68:        return;
+        -:   69:    }
+        -:   70:
+        6:   71:    if (len >= outsz)
+    #####:   72:        len = outsz - 1;
+        6:   73:    memcpy(out, tmp, len);
+        6:   74:    out[len] = '\0';
+        -:   75:}
+        -:   76:
+       10:   77:int applet_dirname(int argc, char **argv)
+        -:   78:{
+       10:   79:    int opt_z = 0; /* -z: NUL-terminated output */
+        -:   80:    int i;
+        -:   81:
+      10*:   82:    for (i = 1; i < argc; i++) {
+       10:   83:        const char *arg = argv[i];
+        -:   84:
+      10*:   85:        if (strcmp(arg, "--") == 0) { i++; break; }
+      10*:   86:        if (strcmp(arg, "--zero") == 0) { opt_z = 1; continue; }
+        -:   87:
+      10*:   88:        if (arg[0] != '-' || arg[1] == '\0')
+        -:   89:            break;
+        -:   90:
+    #####:   91:        const char *p = arg + 1;
+    #####:   92:        while (*p) {
+    #####:   93:            switch (*p) {
+    #####:   94:            case 'z': opt_z = 1; break;
+    #####:   95:            default:
+    #####:   96:                err_msg("dirname", "unrecognized option '-%c'", *p);
+    #####:   97:                err_usage("dirname", "[-z] NAME...");
+    #####:   98:                return 1;
+        -:   99:            }
+    #####:  100:            p++;
+        -:  101:        }
+        -:  102:    }
+        -:  103:
+       10:  104:    if (i >= argc) {
+    #####:  105:        err_usage("dirname", "[-z] NAME...");
+    #####:  106:        return 1;
+        -:  107:    }
+        -:  108:
+        -:  109:    char out[4096];
+      10*:  110:    char term = opt_z ? '\0' : '\n';
+        -:  111:
+       20:  112:    for (; i < argc; i++) {
+       10:  113:        do_dirname(argv[i], out, sizeof(out));
+       10:  114:        fputs(out, stdout);
+       10:  115:        putchar(term);
+        -:  116:    }
+        -:  117:
+       10:  118:    return 0;
+        -:  119:}

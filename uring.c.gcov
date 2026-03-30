@@ -1,0 +1,353 @@
+        -:    0:Source:src/batch/uring.c
+        -:    1:#ifndef _POSIX_C_SOURCE
+        -:    2:#define _POSIX_C_SOURCE 200809L
+        -:    3:#endif
+        -:    4:
+        -:    5:/*
+        -:    6: * uring.c — batch operation execution with optional io_uring acceleration.
+        -:    7: *
+        -:    8: * When io_uring is available (g_uring_available == 1) we attempt to submit
+        -:    9: * all operations as a single SQE batch, falling back to sequential execution
+        -:   10: * if setup fails or the operations are not independent.
+        -:   11: *
+        -:   12: * For operations that are not natively expressible as io_uring SQEs (e.g.
+        -:   13: * mkdir, chmod) we fall through to the sequential fallback.  The io_uring
+        -:   14: * path currently accelerates only BATCH_RM_FILE (via IORING_OP_UNLINKAT)
+        -:   15: * and BATCH_TOUCH (via IORING_OP_STATX to probe + separate utimensat).
+        -:   16: *
+        -:   17: * The implementation uses raw syscalls (SYS_io_uring_setup / _enter /
+        -:   18: * _register) and shared-memory mapped rings to avoid any dependency on
+        -:   19: * liburing.
+        -:   20: *
+        -:   21: * Correctness guarantee: if io_uring is unavailable, or if any part of the
+        -:   22: * ring setup fails, we fall back to fallback_exec_seq() which is always
+        -:   23: * correct.
+        -:   24: */
+        -:   25:
+        -:   26:#include "uring.h"
+        -:   27:#include "detect.h"
+        -:   28:#include "fallback.h"
+        -:   29:#include "../util/platform.h"
+        -:   30:
+        -:   31:#include <errno.h>
+        -:   32:#include <fcntl.h>
+        -:   33:#include <stdint.h>
+        -:   34:#include <stdio.h>
+        -:   35:#include <stdlib.h>
+        -:   36:#include <string.h>
+        -:   37:#include <sys/mman.h>
+        -:   38:#include <sys/syscall.h>
+        -:   39:#include <unistd.h>
+        -:   40:
+        -:   41:/* syscall(2) is not declared in strict POSIX mode; declare it explicitly */
+        -:   42:extern long syscall(long number, ...);
+        -:   43:
+        -:   44:/* ------------------------------------------------------------------ */
+        -:   45:/* Allocation helpers                                                   */
+        -:   46:/* ------------------------------------------------------------------ */
+        -:   47:
+    #####:   48:batch_op_t *batch_op_new(batch_op_type_t type, const char *path, unsigned mode)
+        -:   49:{
+    #####:   50:    batch_op_t *op = calloc(1, sizeof(*op));
+    #####:   51:    if (!op) return NULL;
+        -:   52:
+    #####:   53:    op->path = strdup(path);
+    #####:   54:    if (!op->path) {
+    #####:   55:        free(op);
+    #####:   56:        return NULL;
+        -:   57:    }
+    #####:   58:    op->type = type;
+    #####:   59:    op->mode = mode;
+    #####:   60:    op->next = NULL;
+    #####:   61:    return op;
+        -:   62:}
+        -:   63:
+    #####:   64:void batch_op_free(batch_op_t *op)
+        -:   65:{
+    #####:   66:    if (!op) return;
+    #####:   67:    free(op->path);
+    #####:   68:    free(op);
+        -:   69:}
+        -:   70:
+        -:   71:/* ------------------------------------------------------------------ */
+        -:   72:/* io_uring kernel ABI (minimal, stable subset)                        */
+        -:   73:/* ------------------------------------------------------------------ */
+        -:   74:
+        -:   75:/*
+        -:   76: * We define only the fields we use.  The full structs are much larger;
+        -:   77: * we allocate them by size and access members via offsets returned by
+        -:   78: * io_uring_setup, which avoids depending on linux/io_uring.h.
+        -:   79: */
+        -:   80:
+        -:   81:#ifndef SYS_io_uring_setup
+        -:   82:#  if defined(__x86_64__) || defined(__aarch64__) || \
+        -:   83:      defined(__arm__) || defined(__riscv)
+        -:   84:#    define SYS_io_uring_setup  425
+        -:   85:#    define SYS_io_uring_enter  426
+        -:   86:#  else
+        -:   87:#    define SYS_io_uring_setup  (-1L)
+        -:   88:#    define SYS_io_uring_enter  (-1L)
+        -:   89:#  endif
+        -:   90:#endif
+        -:   91:
+        -:   92:/* Submission queue entry opcodes we use */
+        -:   93:#define IORING_OP_NOP         0
+        -:   94:#define IORING_OP_UNLINKAT   36  /* available since 5.11 */
+        -:   95:
+        -:   96:/* io_uring_enter flags */
+        -:   97:#define IORING_ENTER_GETEVENTS (1u << 0)
+        -:   98:
+        -:   99:/* io_uring_setup flags */
+        -:  100:#ifndef IORING_SETUP_SQPOLL
+        -:  101:#define IORING_SETUP_SQPOLL    (1u << 1)
+        -:  102:#endif
+        -:  103:
+        -:  104:/*
+        -:  105: * Minimal io_uring_params.  Kernel fills in sq_off / cq_off on return.
+        -:  106: * We only read sq_entries, cq_entries, and the offset arrays.
+        -:  107: */
+        -:  108:#define IORING_PARAMS_SIZE  120   /* actual struct is larger; we only map what we need */
+        -:  109:
+        -:  110:struct mb_io_uring_params {
+        -:  111:    uint32_t sq_entries;
+        -:  112:    uint32_t cq_entries;
+        -:  113:    uint32_t flags;
+        -:  114:    uint32_t sq_thread_cpu;
+        -:  115:    uint32_t sq_thread_idle;
+        -:  116:    uint32_t features;
+        -:  117:    uint32_t wq_fd;
+        -:  118:    uint32_t resv[3];
+        -:  119:    /* sq_off */
+        -:  120:    struct {
+        -:  121:        uint32_t head, tail, ring_mask, ring_entries, flags, dropped, array;
+        -:  122:        uint32_t resv1;
+        -:  123:        uint64_t user_addr;
+        -:  124:    } sq_off;
+        -:  125:    /* cq_off */
+        -:  126:    struct {
+        -:  127:        uint32_t head, tail, ring_mask, ring_entries, overflow, cqes;
+        -:  128:        uint32_t flags;
+        -:  129:        uint32_t resv1;
+        -:  130:        uint64_t user_addr;
+        -:  131:    } cq_off;
+        -:  132:};
+        -:  133:
+        -:  134:/* Minimal SQE: 64 bytes */
+        -:  135:struct mb_io_uring_sqe {
+        -:  136:    uint8_t  opcode;
+        -:  137:    uint8_t  flags;
+        -:  138:    uint16_t ioprio;
+        -:  139:    int32_t  fd;
+        -:  140:    union { uint64_t off; uint64_t addr2; };
+        -:  141:    union { uint64_t addr; uint64_t splice_off_in; };
+        -:  142:    uint32_t len;
+        -:  143:    union { uint32_t rw_flags; uint32_t fsync_flags;
+        -:  144:            uint16_t poll_events; uint32_t poll32_events;
+        -:  145:            uint32_t sync_range_flags; uint32_t msg_flags;
+        -:  146:            uint32_t timeout_flags; uint32_t accept_flags;
+        -:  147:            uint32_t cancel_flags; uint32_t open_flags;
+        -:  148:            uint32_t statx_flags; uint32_t fadvise_advice;
+        -:  149:            uint32_t splice_flags; uint32_t rename_flags;
+        -:  150:            uint32_t unlink_flags; uint32_t hardlink_flags;
+        -:  151:            uint32_t xattr_flags; uint32_t msg_ring_flags;
+        -:  152:            uint32_t uring_cmd_flags; };
+        -:  153:    uint64_t user_data;
+        -:  154:    union { uint16_t buf_index; uint16_t buf_group; };
+        -:  155:    uint16_t personality;
+        -:  156:    union { int32_t splice_fd_in; uint32_t file_index;
+        -:  157:            uint32_t optlen; struct { uint16_t addr_len; uint16_t __pad3[1]; }; };
+        -:  158:    union { struct { uint64_t addr3; uint64_t __pad2[1]; };
+        -:  159:            uint64_t optval;
+        -:  160:            uint8_t  cmd_pad[16]; }; /* 16-byte pad; mirrors cmd[] in kernel ABI */
+        -:  161:};
+        -:  162:
+        -:  163:/* Minimal CQE: 16 bytes */
+        -:  164:struct mb_io_uring_cqe {
+        -:  165:    uint64_t user_data;
+        -:  166:    int32_t  res;
+        -:  167:    uint32_t flags;
+        -:  168:};
+        -:  169:
+        -:  170:/* ------------------------------------------------------------------ */
+        -:  171:/* io_uring batch for BATCH_RM_FILE operations                         */
+        -:  172:/* ------------------------------------------------------------------ */
+        -:  173:
+        -:  174:/*
+        -:  175: * Try to execute all BATCH_RM_FILE ops via io_uring UNLINKAT.
+        -:  176: * Returns 0 on success, -1 on setup error (caller falls back to sequential).
+        -:  177: * On partial success, returns 0 but some files may not have been removed.
+        -:  178: */
+    #####:  179:static int uring_exec_unlinks(batch_op_t *ops, int count)
+        -:  180:{
+        -:  181:#if SYS_io_uring_setup == (-1L)
+        -:  182:    (void)ops; (void)count;
+        -:  183:    return -1;
+        -:  184:#else
+        -:  185:    struct mb_io_uring_params params;
+    #####:  186:    memset(&params, 0, sizeof(params));
+        -:  187:
+        -:  188:    /* Enable SQPOLL when running as root (avoids syscall per submission) */
+    #####:  189:    if (getuid() == 0)
+    #####:  190:        params.flags |= IORING_SETUP_SQPOLL;
+        -:  191:
+    #####:  192:    uint32_t entries = (uint32_t)count;
+        -:  193:    /* Round up to next power of two (kernel requires this) */
+    #####:  194:    uint32_t sq_size = 1;
+    #####:  195:    while (sq_size < entries) sq_size <<= 1;
+        -:  196:    /* Cap at 256 to limit memory and prevent runaway queue depth */
+    #####:  197:    if (sq_size > 256) sq_size = 256;
+        -:  198:
+    #####:  199:    long ring_fd = syscall((long)SYS_io_uring_setup, (long)sq_size, &params);
+    #####:  200:    if (ring_fd < 0)
+    #####:  201:        return -1;
+        -:  202:
+        -:  203:    /* Map the SQ ring */
+    #####:  204:    size_t sq_ring_sz = params.sq_off.array
+    #####:  205:                      + params.sq_entries * sizeof(uint32_t);
+    #####:  206:    void *sq_ptr = mmap(NULL, sq_ring_sz,
+        -:  207:                        PROT_READ | PROT_WRITE,
+        -:  208:                        MAP_SHARED | MAP_POPULATE,
+        -:  209:                        (int)ring_fd, 0 /* IORING_OFF_SQ_RING = 0 */);
+    #####:  210:    if (sq_ptr == MAP_FAILED) {
+    #####:  211:        close((int)ring_fd);
+    #####:  212:        return -1;
+        -:  213:    }
+        -:  214:
+        -:  215:    /* Map the SQE array (offset 0x10000000) */
+    #####:  216:    size_t sqe_sz  = params.sq_entries * sizeof(struct mb_io_uring_sqe);
+    #####:  217:    void  *sqe_ptr = mmap(NULL, sqe_sz,
+        -:  218:                          PROT_READ | PROT_WRITE,
+        -:  219:                          MAP_SHARED | MAP_POPULATE,
+        -:  220:                          (int)ring_fd, 0x10000000LL /* IORING_OFF_SQES */);
+    #####:  221:    if (sqe_ptr == MAP_FAILED) {
+    #####:  222:        munmap(sq_ptr, sq_ring_sz);
+    #####:  223:        close((int)ring_fd);
+    #####:  224:        return -1;
+        -:  225:    }
+        -:  226:
+        -:  227:    /* Map the CQ ring */
+    #####:  228:    size_t cq_ring_sz = params.cq_off.cqes
+    #####:  229:                      + params.cq_entries * sizeof(struct mb_io_uring_cqe);
+    #####:  230:    void *cq_ptr = mmap(NULL, cq_ring_sz,
+        -:  231:                        PROT_READ | PROT_WRITE,
+        -:  232:                        MAP_SHARED | MAP_POPULATE,
+        -:  233:                        (int)ring_fd, 0x8000000LL /* IORING_OFF_CQ_RING */);
+    #####:  234:    if (cq_ptr == MAP_FAILED) {
+    #####:  235:        munmap(sqe_ptr, sqe_sz);
+    #####:  236:        munmap(sq_ptr, sq_ring_sz);
+    #####:  237:        close((int)ring_fd);
+    #####:  238:        return -1;
+        -:  239:    }
+        -:  240:
+        -:  241:    /* Pointers into the SQ ring */
+    #####:  242:    uint32_t *sq_tail  = (uint32_t *)((char *)sq_ptr + params.sq_off.tail);
+    #####:  243:    uint32_t *sq_array = (uint32_t *)((char *)sq_ptr + params.sq_off.array);
+    #####:  244:    uint32_t  sq_mask  = *(uint32_t *)((char *)sq_ptr + params.sq_off.ring_mask);
+        -:  245:
+        -:  246:    /* Fill SQEs */
+    #####:  247:    struct mb_io_uring_sqe *sqes = (struct mb_io_uring_sqe *)sqe_ptr;
+    #####:  248:    uint32_t tail = *sq_tail;
+    #####:  249:    int idx = 0;
+        -:  250:
+    #####:  251:    for (batch_op_t *op = ops; op; op = op->next) {
+    #####:  252:        if (op->type != BATCH_RM_FILE) continue;
+        -:  253:
+    #####:  254:        uint32_t slot = tail & sq_mask;
+    #####:  255:        struct mb_io_uring_sqe *sqe = &sqes[slot];
+    #####:  256:        memset(sqe, 0, sizeof(*sqe));
+        -:  257:
+    #####:  258:        sqe->opcode       = IORING_OP_UNLINKAT;
+    #####:  259:        sqe->fd           = AT_FDCWD;
+    #####:  260:        sqe->addr         = (uint64_t)(uintptr_t)op->path;
+    #####:  261:        sqe->len          = 0;
+    #####:  262:        sqe->unlink_flags = 0;
+    #####:  263:        sqe->user_data    = (uint64_t)(uintptr_t)op;
+        -:  264:
+    #####:  265:        sq_array[slot] = slot;
+    #####:  266:        tail++;
+    #####:  267:        idx++;
+        -:  268:    }
+        -:  269:
+        -:  270:    /* Memory barrier before updating tail */
+    #####:  271:    __atomic_store_n(sq_tail, tail, __ATOMIC_RELEASE);
+        -:  272:
+        -:  273:    /* Submit and wait for completions */
+    #####:  274:    long submitted = syscall((long)SYS_io_uring_enter,
+        -:  275:                             (long)ring_fd,
+        -:  276:                             (long)idx,
+        -:  277:                             (long)idx,
+        -:  278:                             (long)IORING_ENTER_GETEVENTS,
+        -:  279:                             (long)NULL,
+        -:  280:                             (long)0);
+        -:  281:
+        -:  282:    /* Harvest CQEs (best-effort; errors reported to stderr) */
+    #####:  283:    if (submitted > 0) {
+    #####:  284:        uint32_t *cq_head  = (uint32_t *)((char *)cq_ptr + params.cq_off.head);
+    #####:  285:        uint32_t *cq_tail_r = (uint32_t *)((char *)cq_ptr + params.cq_off.tail);
+    #####:  286:        uint32_t  cq_mask  = *(uint32_t *)((char *)cq_ptr + params.cq_off.ring_mask);
+    #####:  287:        struct mb_io_uring_cqe *cqes_arr =
+    #####:  288:            (struct mb_io_uring_cqe *)((char *)cq_ptr + params.cq_off.cqes);
+        -:  289:
+    #####:  290:        uint32_t head = __atomic_load_n(cq_head, __ATOMIC_ACQUIRE);
+    #####:  291:        uint32_t ctail = __atomic_load_n(cq_tail_r, __ATOMIC_ACQUIRE);
+        -:  292:
+    #####:  293:        while (head != ctail) {
+    #####:  294:            struct mb_io_uring_cqe *cqe = &cqes_arr[head & cq_mask];
+    #####:  295:            if (cqe->res < 0) {
+    #####:  296:                batch_op_t *failed = (batch_op_t *)(uintptr_t)cqe->user_data;
+    #####:  297:                fprintf(stderr, "matchbox: batch rm '%s': %s\n",
+        -:  298:                        failed ? failed->path : "?",
+    #####:  299:                        strerror(-(int)cqe->res));
+        -:  300:            }
+    #####:  301:            head++;
+        -:  302:        }
+    #####:  303:        __atomic_store_n(cq_head, head, __ATOMIC_RELEASE);
+        -:  304:    }
+        -:  305:
+    #####:  306:    munmap(cq_ptr, cq_ring_sz);
+    #####:  307:    munmap(sqe_ptr, sqe_sz);
+    #####:  308:    munmap(sq_ptr, sq_ring_sz);
+    #####:  309:    close((int)ring_fd);
+        -:  310:
+    #####:  311:    return (submitted < 0) ? -1 : 0;
+        -:  312:#endif /* SYS_io_uring_setup */
+        -:  313:}
+        -:  314:
+        -:  315:/* ------------------------------------------------------------------ */
+        -:  316:/* Public batch_exec                                                    */
+        -:  317:/* ------------------------------------------------------------------ */
+        -:  318:
+    #####:  319:int batch_exec(batch_op_t *ops)
+        -:  320:{
+    #####:  321:    if (!ops)
+    #####:  322:        return 0;
+        -:  323:
+        -:  324:    /* If io_uring is not available, always use sequential fallback */
+    #####:  325:    if (!g_uring_available)
+    #####:  326:        return fallback_exec_seq(ops);
+        -:  327:
+        -:  328:    /* Check whether all ops can be run independently */
+    #####:  329:    if (!batch_ops_independent(ops))
+    #####:  330:        return fallback_exec_seq(ops);
+        -:  331:
+        -:  332:    /*
+        -:  333:     * For homogeneous BATCH_RM_FILE lists, attempt an io_uring batch.
+        -:  334:     * All other operation types go through the sequential fallback.
+        -:  335:     */
+    #####:  336:    int all_rm    = 1;
+    #####:  337:    int rm_count  = 0;
+        -:  338:
+    #####:  339:    for (batch_op_t *op = ops; op; op = op->next) {
+    #####:  340:        if (op->type != BATCH_RM_FILE) { all_rm = 0; break; }
+    #####:  341:        rm_count++;
+        -:  342:    }
+        -:  343:
+    #####:  344:    if (all_rm && rm_count > 0) {
+    #####:  345:        int r = uring_exec_unlinks(ops, rm_count);
+    #####:  346:        if (r == 0)
+    #####:  347:            return 0;
+        -:  348:        /* io_uring setup failed: fall through to sequential */
+        -:  349:    }
+        -:  350:
+    #####:  351:    return fallback_exec_seq(ops);
+        -:  352:}

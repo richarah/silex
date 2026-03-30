@@ -1,0 +1,490 @@
+        -:    0:Source:src/core/cp.c
+        -:    1:/* cp.c — cp builtin: copy files and directories */
+        -:    2:
+        -:    3:/* _GNU_SOURCE enables copy_file_range() declaration in <unistd.h> (glibc >= 2.27) */
+        -:    4:#ifndef _GNU_SOURCE
+        -:    5:#define _GNU_SOURCE
+        -:    6:#endif
+        -:    7:#ifndef _POSIX_C_SOURCE
+        -:    8:#define _POSIX_C_SOURCE 200809L
+        -:    9:#endif
+        -:   10:
+        -:   11:#include "../util/error.h"
+        -:   12:#include "../util/path.h"
+        -:   13:
+        -:   14:#include <dirent.h>
+        -:   15:#include <errno.h>
+        -:   16:#include <fcntl.h>
+        -:   17:#include <limits.h>
+        -:   18:#include <stdio.h>
+        -:   19:#include <stdlib.h>
+        -:   20:#include <string.h>
+        -:   21:#include <sys/stat.h>
+        -:   22:#include <sys/time.h>
+        -:   23:#include <time.h>
+        -:   24:#include <unistd.h>
+        -:   25:#include <utime.h>
+        -:   26:
+        -:   27:/* Flags */
+        -:   28:struct cp_opts {
+        -:   29:    int recursive;    /* -r/-R */
+        -:   30:    int preserve;     /* -p */
+        -:   31:    int force;        /* -f */
+        -:   32:    int interactive;  /* -i */
+        -:   33:    int no_clobber;   /* -n */
+        -:   34:    int update;       /* -u */
+        -:   35:    int verbose;      /* -v */
+        -:   36:    int no_target;    /* -T: treat destination as file */
+        -:   37:    int follow_all;   /* -L: follow all symlinks */
+        -:   38:    int follow_cmd;   /* -H: follow command-line symlinks */
+        -:   39:    /* -P (default): don't follow symlinks in source tree */
+        -:   40:};
+        -:   41:
+        -:   42:/* Copy one regular file from src_fd to dst_path.
+        -:   43: * src_st: stat of source (for -p preserve).
+        -:   44: * Returns 0 on success, 1 on error. */
+       21:   45:static int copy_file_fd(int src_fd, const char *dst_path,
+        -:   46:                         const struct stat *src_st, const struct cp_opts *opts)
+        -:   47:{
+       21:   48:    int dst_fd;
+       21:   49:    int flags = O_WRONLY | O_CREAT;
+        -:   50:
+       21:   51:    if (opts->no_clobber)
+        -:   52:        flags |= O_EXCL;
+       20:   53:    else if (!opts->force)
+       19:   54:        flags |= O_TRUNC;
+        -:   55:
+       21:   56:    mode_t create_mode = opts->preserve ? src_st->st_mode : (src_st->st_mode & 0777);
+        -:   57:
+       21:   58:    dst_fd = open(dst_path, flags, create_mode);
+       21:   59:    if (dst_fd < 0) {
+        1:   60:        if (errno == EEXIST && opts->no_clobber)
+        -:   61:            return 0; /* silently skip */
+    #####:   62:        if (errno == EEXIST && opts->force) {
+        -:   63:            /* Remove and retry */
+    #####:   64:            unlink(dst_path);
+    #####:   65:            dst_fd = open(dst_path, O_WRONLY | O_CREAT | O_TRUNC, create_mode);
+        -:   66:        }
+    #####:   67:        if (dst_fd < 0) {
+    #####:   68:            err_sys("cp", "cannot create regular file '%s'", dst_path);
+    #####:   69:            return 1;
+        -:   70:        }
+        -:   71:    }
+        -:   72:
+        -:   73:    /* Copy data */
+       20:   74:    int ret = 0;
+        -:   75:
+        -:   76:#ifdef __linux__
+        -:   77:    /* Pre-allocate destination file size to reduce fragmentation */
+       20:   78:    if (src_st->st_size > 0)
+       18:   79:        fallocate(dst_fd, 0, 0, src_st->st_size); /* ignore errors: not all fs support */
+        -:   80:
+        -:   81:    /* Try copy_file_range: kernel-to-kernel, zero user-space copy */
+        -:   82:    {
+       20:   83:        off_t file_size = src_st->st_size;
+       20:   84:        if (file_size > 0) {
+       18:   85:            off_t off_in = 0, off_out = 0;
+       18:   86:            int cfr_ok = 1;
+       34:   87:            while (off_in < file_size) {
+       36:   88:                ssize_t n = copy_file_range(src_fd, &off_in, dst_fd, &off_out,
+       18:   89:                                            (size_t)(file_size - off_in), 0);
+       18:   90:                if (n < 0) {
+       2*:   91:                    if (errno == ENOSYS || errno == EXDEV || errno == EOPNOTSUPP
+    #####:   92:                        || errno == EINVAL) {
+        -:   93:                        /* Kernel too old, cross-device, or unsupported fs */
+        -:   94:                        cfr_ok = 0;
+        -:   95:                        break;
+        -:   96:                    }
+    #####:   97:                    err_sys("cp", "error copying '%s'", dst_path);
+    #####:   98:                    ret = 1;
+      16*:   99:                    goto done;
+        -:  100:                }
+       16:  101:                if (n == 0)
+        -:  102:                    break;
+        -:  103:            }
+       16:  104:            if (cfr_ok)
+       16:  105:                goto done;
+        -:  106:            /* Fallback: seek back to start */
+        4:  107:            if (lseek(src_fd, 0, SEEK_SET) < 0 ||
+        4:  108:                lseek(dst_fd, 0, SEEK_SET) < 0 ||
+        2:  109:                ftruncate(dst_fd, 0) < 0) {
+    #####:  110:                err_sys("cp", "error seeking for fallback copy of '%s'", dst_path);
+    #####:  111:                ret = 1;
+    #####:  112:                goto done;
+        -:  113:            }
+        2:  114:        } else if (file_size == 0) {
+        2:  115:            goto done;  /* empty file: dst already created */
+        -:  116:        }
+        -:  117:    }
+        -:  118:#endif /* __linux__ */
+        -:  119:
+        -:  120:    /* Fallback: read/write loop */
+        -:  121:    {
+        -:  122:        char buf[65536];
+        -:  123:        ssize_t nread;
+        4:  124:        while ((nread = read(src_fd, buf, sizeof(buf))) > 0) {
+        -:  125:            const char *p = buf;
+        -:  126:            ssize_t remaining = nread;
+        4:  127:            while (remaining > 0) {
+        2:  128:                ssize_t nw = write(dst_fd, p, (size_t)remaining);
+        2:  129:                if (nw < 0) {
+    #####:  130:                    err_sys("cp", "error writing '%s'", dst_path);
+    #####:  131:                    ret = 1;
+    #####:  132:                    goto done;
+        -:  133:                }
+        2:  134:                p += nw;
+        2:  135:                remaining -= nw;
+        -:  136:            }
+        -:  137:        }
+        2:  138:        if (nread < 0) {
+    #####:  139:            err_sys("cp", "error reading source");
+    #####:  140:            ret = 1;
+        -:  141:        }
+        -:  142:    }
+        -:  143:
+        -:  144:done:
+        -:  145:    /* Preserve attributes if -p */
+      20*:  146:    if (ret == 0 && opts->preserve) {
+        -:  147:        /* Permissions already set at open(); set timestamps */
+        1:  148:        struct timespec times[2];
+        1:  149:        times[0] = src_st->st_atim;
+        1:  150:        times[1] = src_st->st_mtim;
+        1:  151:        futimens(dst_fd, times); /* best effort; ignore errors */
+        -:  152:        /* Ownership: only succeeds if we have privilege */
+        1:  153:        if (fchown(dst_fd, src_st->st_uid, src_st->st_gid) != 0) {
+        -:  154:            /* non-fatal: continue without changing ownership */
+        1:  155:        }
+        -:  156:    }
+        -:  157:
+       20:  158:    close(dst_fd);
+       20:  159:    return ret;
+        -:  160:}
+        -:  161:
+        -:  162:/* Forward declaration for recursive use */
+        -:  163:static int cp_path(const char *src, const char *dst,
+        -:  164:                   int follow_src_symlink, const struct cp_opts *opts);
+        -:  165:
+        -:  166:/* Recursively copy directory src into dst (dst must already exist or be created).
+        -:  167: * dst_is_new: if 1, dst was just created (preserve its attrs from src). */
+        4:  168:static int copy_dir(const char *src, const char *dst, const struct cp_opts *opts)
+        -:  169:{
+        4:  170:    DIR *dir = opendir(src);
+        4:  171:    if (!dir) {
+    #####:  172:        err_sys("cp", "cannot open directory '%s'", src);
+    #####:  173:        return 1;
+        -:  174:    }
+        -:  175:
+        -:  176:    /* Create destination directory if it doesn't exist */
+        4:  177:    struct stat src_st;
+        4:  178:    if (stat(src, &src_st) != 0) {
+    #####:  179:        err_sys("cp", "cannot stat '%s'", src);
+    #####:  180:        closedir(dir);
+    #####:  181:        return 1;
+        -:  182:    }
+        -:  183:
+        4:  184:    struct stat dst_st;
+        4:  185:    if (stat(dst, &dst_st) != 0) {
+        4:  186:        if (errno != ENOENT) {
+    #####:  187:            err_sys("cp", "cannot stat '%s'", dst);
+    #####:  188:            closedir(dir);
+    #####:  189:            return 1;
+        -:  190:        }
+        -:  191:        /* Create it */
+        4:  192:        if (mkdir(dst, src_st.st_mode | 0700) != 0) {
+    #####:  193:            err_sys("cp", "cannot create directory '%s'", dst);
+    #####:  194:            closedir(dir);
+    #####:  195:            return 1;
+        -:  196:        }
+        -:  197:    }
+        -:  198:
+        -:  199:    int ret = 0;
+        -:  200:    struct dirent *ent;
+        -:  201:
+       17:  202:    while ((ent = readdir(dir)) != NULL) {
+       13:  203:        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0)
+        8:  204:            continue;
+        -:  205:
+        5:  206:        char src_child[PATH_MAX], dst_child[PATH_MAX];
+      10*:  207:        if (!path_join(src, ent->d_name, src_child) ||
+        5:  208:            !path_join(dst, ent->d_name, dst_child)) {
+    #####:  209:            err_msg("cp", "path too long");
+    #####:  210:            ret = 1;
+    #####:  211:            continue;
+        -:  212:        }
+        -:  213:
+        -:  214:        /* In recursive copy, -P means don't follow symlinks in source tree */
+        5:  215:        int follow = opts->follow_all; /* -L follows all; -H/-P don't in tree */
+        5:  216:        if (cp_path(src_child, dst_child, follow, opts) != 0)
+    #####:  217:            ret = 1;
+        -:  218:    }
+        -:  219:
+        4:  220:    closedir(dir);
+        -:  221:
+        -:  222:    /* If -p, apply permissions/timestamps to dst after all children are copied */
+        4:  223:    if (opts->preserve) {
+    #####:  224:        struct timespec times[2];
+    #####:  225:        times[0] = src_st.st_atim;
+    #####:  226:        times[1] = src_st.st_mtim;
+    #####:  227:        utimensat(AT_FDCWD, dst, times, 0); /* best effort */
+    #####:  228:        chmod(dst, src_st.st_mode);          /* best effort */
+        -:  229:    }
+        -:  230:
+        -:  231:    return ret;
+        -:  232:}
+        -:  233:
+        -:  234:/*
+        -:  235: * Copy src to dst.
+        -:  236: * follow_src_symlink: if 1, follow a symlink at the top-level src.
+        -:  237: * Returns 0 on success, 1 on error.
+        -:  238: */
+       31:  239:static int cp_path(const char *src, const char *dst,
+        -:  240:                   int follow_src_symlink, const struct cp_opts *opts)
+        -:  241:{
+       31:  242:    struct stat src_st;
+       31:  243:    int stat_ret;
+        -:  244:
+       31:  245:    if (follow_src_symlink)
+    #####:  246:        stat_ret = stat(src, &src_st);
+        -:  247:    else
+       31:  248:        stat_ret = lstat(src, &src_st);
+        -:  249:
+       31:  250:    if (stat_ret != 0) {
+        3:  251:        err_sys("cp", "cannot stat '%s'", src);
+        3:  252:        return 1;
+        -:  253:    }
+        -:  254:
+        -:  255:    /* Handle symlinks in source: if not following, copy the link itself */
+       28:  256:    if (S_ISLNK(src_st.st_mode)) {
+        -:  257:        /* -P or -H (in recursive tree): copy symlink */
+        1:  258:        char link_target[PATH_MAX];
+        1:  259:        ssize_t n = readlink(src, link_target, sizeof(link_target) - 1);
+        1:  260:        if (n < 0) {
+    #####:  261:            err_sys("cp", "cannot read symlink '%s'", src);
+    #####:  262:            return 1;
+        -:  263:        }
+        1:  264:        link_target[n] = '\0';
+        -:  265:
+        -:  266:        /* Remove existing dst if needed */
+        -:  267:        {
+        1:  268:            struct stat _tmp;
+        1:  269:            lstat(dst, &_tmp);
+        -:  270:        }
+        1:  271:        unlink(dst); /* ignore errors */
+        -:  272:
+        1:  273:        if (symlink(link_target, dst) != 0) {
+    #####:  274:            err_sys("cp", "cannot create symlink '%s'", dst);
+    #####:  275:            return 1;
+        -:  276:        }
+        1:  277:        if (opts->verbose)
+    #####:  278:            printf("'%s' -> '%s'\n", src, dst);
+        1:  279:        return 0;
+        -:  280:    }
+        -:  281:
+        -:  282:    /* Directory */
+       27:  283:    if (S_ISDIR(src_st.st_mode)) {
+        5:  284:        if (!opts->recursive) {
+        1:  285:            fprintf(stderr, "matchbox: cp: -r not specified; omitting directory '%s'\n", src);
+        1:  286:            return 1;
+        -:  287:        }
+        -:  288:
+        -:  289:        /* Check that we're not copying a directory into itself */
+        4:  290:        struct stat dst_st;
+        4:  291:        if (stat(dst, &dst_st) == 0) {
+    #####:  292:            if (dst_st.st_ino == src_st.st_ino &&
+    #####:  293:                dst_st.st_dev == src_st.st_dev) {
+    #####:  294:                err_msg("cp", "'%s' and '%s' are the same file", src, dst);
+    #####:  295:                return 1;
+        -:  296:            }
+        -:  297:        }
+        -:  298:
+        4:  299:        if (opts->verbose)
+    #####:  300:            printf("'%s' -> '%s'\n", src, dst);
+        4:  301:        return copy_dir(src, dst, opts);
+        -:  302:    }
+        -:  303:
+        -:  304:    /* Regular file */
+       22:  305:    if (!S_ISREG(src_st.st_mode)) {
+        -:  306:        /* Special files (device, socket, fifo): skip with warning */
+    #####:  307:        err_msg("cp", "cannot copy special file '%s'", src);
+    #####:  308:        return 1;
+        -:  309:    }
+        -:  310:
+        -:  311:    /* Check for update mode: skip if dest is newer than src */
+       22:  312:    if (opts->update) {
+        1:  313:        struct stat dst_st;
+        1:  314:        if (stat(dst, &dst_st) == 0) {
+       1*:  315:            if (dst_st.st_mtim.tv_sec > src_st.st_mtim.tv_sec ||
+    #####:  316:                (dst_st.st_mtim.tv_sec == src_st.st_mtim.tv_sec &&
+    #####:  317:                 dst_st.st_mtim.tv_nsec >= src_st.st_mtim.tv_nsec))
+        1:  318:                return 0;
+        -:  319:        }
+        -:  320:    }
+        -:  321:
+        -:  322:    /* Interactive: ask if dest exists */
+       21:  323:    if (opts->interactive) {
+    #####:  324:        struct stat dst_st;
+    #####:  325:        if (stat(dst, &dst_st) == 0) {
+    #####:  326:            fprintf(stderr, "matchbox: cp: overwrite '%s'? ", dst);
+    #####:  327:            char resp[8];
+    #####:  328:            if (fgets(resp, sizeof(resp), stdin) == NULL || resp[0] != 'y')
+    #####:  329:                return 0;
+        -:  330:        }
+        -:  331:    }
+        -:  332:
+        -:  333:    /* Open source */
+       21:  334:    int src_fd = open(src, O_RDONLY);
+       21:  335:    if (src_fd < 0) {
+    #####:  336:        err_sys("cp", "cannot open '%s'", src);
+    #####:  337:        return 1;
+        -:  338:    }
+       21:  339:    posix_fadvise(src_fd, 0, 0, POSIX_FADV_SEQUENTIAL); /* advisory; ignore errors */
+        -:  340:
+       21:  341:    if (opts->verbose)
+        1:  342:        printf("'%s' -> '%s'\n", src, dst);
+        -:  343:
+       21:  344:    int ret = copy_file_fd(src_fd, dst, &src_st, opts);
+       21:  345:    close(src_fd);
+       21:  346:    return ret;
+        -:  347:}
+        -:  348:
+        -:  349:/*
+        -:  350: * Determine the actual destination path for a source file.
+        -:  351: * If dst is an existing directory (and -T not set), returns dst/basename(src).
+        -:  352: * Otherwise returns dst as-is.
+        -:  353: * Result written to result (PATH_MAX bytes).
+        -:  354: */
+       26:  355:static char *resolve_dest(const char *src, const char *dst,
+        -:  356:                           int dst_is_dir, int no_target,
+        -:  357:                           char result[PATH_MAX])
+        -:  358:{
+       26:  359:    if (!no_target && dst_is_dir) {
+        4:  360:        const char *base = path_basename(src);
+        4:  361:        if (!path_join(dst, base, result))
+        -:  362:            return NULL;
+        -:  363:        return result;
+        -:  364:    }
+       22:  365:    size_t len = strlen(dst);
+       22:  366:    if (len >= PATH_MAX)
+        -:  367:        return NULL;
+       22:  368:    memcpy(result, dst, len + 1);
+       22:  369:    return result;
+        -:  370:}
+        -:  371:
+       26:  372:int applet_cp(int argc, char **argv)
+        -:  373:{
+       26:  374:    struct cp_opts opts = {0};
+        -:  375:    /* Default: -P (don't follow symlinks in source) */
+       26:  376:    int ret = 0;
+       26:  377:    int i;
+        -:  378:
+       35:  379:    for (i = 1; i < argc; i++) {
+       35:  380:        const char *arg = argv[i];
+        -:  381:
+       35:  382:        if (strcmp(arg, "--") == 0) { i++; break; }
+        -:  383:
+        -:  384:        /* Long options */
+      34*:  385:        if (strcmp(arg, "--recursive") == 0)      { opts.recursive = 1; continue; }
+      34*:  386:        if (strcmp(arg, "--preserve") == 0)        { opts.preserve = 1; continue; }
+      34*:  387:        if (strcmp(arg, "--force") == 0)           { opts.force = 1; continue; }
+      34*:  388:        if (strcmp(arg, "--interactive") == 0)     { opts.interactive = 1; continue; }
+      34*:  389:        if (strcmp(arg, "--no-clobber") == 0)      { opts.no_clobber = 1; continue; }
+      34*:  390:        if (strcmp(arg, "--update") == 0)          { opts.update = 1; continue; }
+      34*:  391:        if (strcmp(arg, "--verbose") == 0)         { opts.verbose = 1; continue; }
+      34*:  392:        if (strcmp(arg, "--no-target-directory") == 0) { opts.no_target = 1; continue; }
+      34*:  393:        if (strcmp(arg, "--dereference") == 0)     { opts.follow_all = 1; continue; }
+      34*:  394:        if (strcmp(arg, "--no-dereference") == 0)  { opts.follow_all = 0; opts.follow_cmd = 0; continue; }
+      34*:  395:        if (strncmp(arg, "--preserve=", 11) == 0)  { opts.preserve = 1; continue; }
+        -:  396:
+       34:  397:        if (arg[0] != '-' || arg[1] == '\0')
+        -:  398:            break;
+        -:  399:
+        -:  400:        /* Short flags */
+        9:  401:        const char *p = arg + 1;
+        9:  402:        int unknown_flag = 0;
+       18:  403:        while (*p && !unknown_flag) {
+        9:  404:            switch (*p) {
+        3:  405:            case 'r': case 'R': opts.recursive = 1; break;
+        1:  406:            case 'p': opts.preserve = 1; break;
+        1:  407:            case 'f': opts.force = 1; opts.interactive = 0; break;
+    #####:  408:            case 'i': opts.interactive = 1; opts.force = 0; break;
+        1:  409:            case 'n': opts.no_clobber = 1; break;
+        1:  410:            case 'u': opts.update = 1; break;
+        1:  411:            case 'v': opts.verbose = 1; break;
+        1:  412:            case 'T': opts.no_target = 1; break;
+    #####:  413:            case 'L': opts.follow_all = 1; opts.follow_cmd = 0; break;
+    #####:  414:            case 'H': opts.follow_cmd = 1; opts.follow_all = 0; break;
+    #####:  415:            case 'P': opts.follow_all = 0; opts.follow_cmd = 0; break;
+    #####:  416:            case 'a':
+        -:  417:                /* -a = -rpP */
+    #####:  418:                opts.recursive = 1;
+    #####:  419:                opts.preserve = 1;
+    #####:  420:                opts.follow_all = 0;
+    #####:  421:                opts.follow_cmd = 0;
+    #####:  422:                break;
+    #####:  423:            case 'd':
+        -:  424:                /* -d = --no-dereference --preserve=links */
+    #####:  425:                opts.follow_all = 0;
+    #####:  426:                opts.follow_cmd = 0;
+    #####:  427:                break;
+    #####:  428:            default:
+        -:  429:                /* Unknown flag: in Phase 1 we fall through to PATH (Phase 4 does module) */
+    #####:  430:                fprintf(stderr, "matchbox: cp: unrecognized option '-%c'\n", *p);
+    #####:  431:                fprintf(stderr, "matchbox: cp: unsupported flag -%c. "
+    #####:  432:                        "Install matchbox-gnu-cp module or GNU coreutils.\n", *p);
+    #####:  433:                return 1;
+        -:  434:            }
+        9:  435:            p++;
+        -:  436:        }
+        -:  437:        if (unknown_flag)
+        -:  438:            return 1;
+        -:  439:    }
+        -:  440:
+        -:  441:    /* Need at least src and dst */
+       26:  442:    int noperands = argc - i;
+       26:  443:    if (noperands < 2) {
+    #####:  444:        err_usage("cp", "[-rRpfivLHPantuT] SOURCE... DEST");
+    #####:  445:        return 1;
+        -:  446:    }
+        -:  447:
+       26:  448:    const char *dst = argv[argc - 1];
+       26:  449:    int nsrc = noperands - 1;
+        -:  450:
+        -:  451:    /* Determine if dst is an existing directory */
+       26:  452:    struct stat dst_st;
+       26:  453:    int dst_exists = (stat(dst, &dst_st) == 0);
+       26:  454:    int dst_is_dir = dst_exists && S_ISDIR(dst_st.st_mode);
+        -:  455:
+        -:  456:    /* Multiple sources: dst must be directory */
+       26:  457:    if (nsrc > 1 && !dst_is_dir) {
+        1:  458:        if (dst_exists)
+    #####:  459:            fprintf(stderr, "matchbox: cp: target '%s' is not a directory\n", dst);
+        -:  460:        else
+        1:  461:            fprintf(stderr, "matchbox: cp: target directory '%s': No such file or directory\n", dst);
+        1:  462:        return 1;
+        -:  463:    }
+        -:  464:
+        -:  465:    /* -T: dst must NOT be an existing directory (or we'd put things inside) */
+       25:  466:    if (opts.no_target && dst_is_dir) {
+    #####:  467:        fprintf(stderr, "matchbox: cp: cannot overwrite directory '%s' with non-directory\n", dst);
+    #####:  468:        return 1;
+        -:  469:    }
+        -:  470:
+       51:  471:    for (int j = i; j < argc - 1; j++) {
+       26:  472:        const char *src = argv[j];
+        -:  473:
+       26:  474:        char real_dst[PATH_MAX];
+      26*:  475:        if (!resolve_dest(src, dst, dst_is_dir, opts.no_target, real_dst)) {
+    #####:  476:            err_msg("cp", "path too long");
+    #####:  477:            ret = 1;
+    #####:  478:            continue;
+        -:  479:        }
+        -:  480:
+        -:  481:        /* Follow symlink at command line for -H */
+       26:  482:        int follow_top = opts.follow_all || opts.follow_cmd;
+        -:  483:
+       26:  484:        if (cp_path(src, real_dst, follow_top, &opts) != 0)
+        4:  485:            ret = 1;
+        -:  486:    }
+        -:  487:
+        -:  488:    return ret;
+        -:  489:}

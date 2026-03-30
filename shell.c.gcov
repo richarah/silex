@@ -1,0 +1,280 @@
+        -:    0:Source:src/shell/shell.c
+        -:    1:#ifndef _POSIX_C_SOURCE
+        -:    2:#define _POSIX_C_SOURCE 200809L
+        -:    3:#endif
+        -:    4:
+        -:    5:#include "shell.h"
+        -:    6:#include "exec.h"
+        -:    7:#include "expand.h"
+        -:    8:#include "../util/arena.h"
+        -:    9:#include "../util/strbuf.h"
+        -:   10:
+        -:   11:#include <errno.h>
+        -:   12:#include <signal.h>
+        -:   13:#include <stdio.h>
+        -:   14:#include <stdlib.h>
+        -:   15:#include <string.h>
+        -:   16:#include <unistd.h>
+        -:   17:
+        -:   18:/* -------------------------------------------------------------------------
+        -:   19: * SIGPIPE: the shell ignores SIGPIPE so broken-pipe errors in builtins
+        -:   20: * produce EPIPE from write() rather than killing the process.
+        -:   21: * External commands restore SIG_DFL before execvp (see exec.c).
+        -:   22: * ------------------------------------------------------------------------- */
+        -:   23:
+        -:   24:/* -------------------------------------------------------------------------
+        -:   25: * Trap signal handling
+        -:   26: * Simple global used only to record which shell_ctx to call traps on.
+        -:   27: * This is the one permitted piece of global mutable state (signal delivery).
+        -:   28: * ------------------------------------------------------------------------- */
+        -:   29:
+        -:   30:static shell_ctx_t *g_trap_shell = NULL;
+        -:   31:
+        8:   32:void shell_signal_handler(int sig)
+        -:   33:{
+       8*:   34:    if (!g_trap_shell) return;
+       8*:   35:    if (sig < 0 || sig >= NSIG) return;
+        -:   36:
+        8:   37:    const char *action = g_trap_shell->traps[sig].action;
+       8*:   38:    if (!action) return;                  /* SIG_DFL */
+       8*:   39:    if (action[0] == '\0') return;        /* SIG_IGN (SHELL_TRAP_IGNORE) */
+        -:   40:
+        -:   41:    /* Run the trap action string */
+        8:   42:    shell_run_string(g_trap_shell, action);
+        -:   43:}
+        -:   44:
+        -:   45:/* -------------------------------------------------------------------------
+        -:   46: * errexit check helper: consumes the and_or_exempt flag and tests
+        -:   47: * whether a non-zero rc from exec_node should trigger -e exit.
+        -:   48: * Returns 1 if we should stop, 0 if we should continue.
+        -:   49: * ------------------------------------------------------------------------- */
+      469:   50:static int errexit_should_stop(shell_ctx_t *sh, int rc)
+        -:   51:{
+      469:   52:    int exempt = sh->and_or_exempt;
+      469:   53:    sh->and_or_exempt = 0;
+      469:   54:    return sh->opt_e && rc != 0 && !sh->in_cond && !exempt;
+        -:   55:}
+        -:   56:
+        -:   57:/* -------------------------------------------------------------------------
+        -:   58: * shell_init
+        -:   59: * ------------------------------------------------------------------------- */
+        -:   60:
+      463:   61:int shell_init(shell_ctx_t *sh, int argc, char **argv)
+        -:   62:{
+      463:   63:    memset(sh, 0, sizeof(*sh));
+        -:   64:
+      463:   65:    arena_init(&sh->parse_arena);
+      463:   66:    vars_init(&sh->vars, &sh->parse_arena);
+      463:   67:    job_list_init(&sh->jobs);
+        -:   68:
+      463:   69:    sh->last_exit    = 0;
+      463:   70:    sh->last_bg_pid  = 0;
+      463:   71:    sh->opt_e        = 0;
+      463:   72:    sh->opt_u        = 0;
+      463:   73:    sh->opt_x        = 0;
+      463:   74:    sh->opt_f        = 0;
+      463:   75:    sh->opt_pipefail = 0;
+      463:   76:    sh->opt_n        = 0;
+        -:   77:
+        -:   78:    /* $0 */
+      463:   79:    if (argc > 0 && argv && argv[0])
+      463:   80:        sh->script_name = arena_strdup(&sh->parse_arena, argv[0]);
+        -:   81:    else
+    #####:   82:        sh->script_name = arena_strdup(&sh->parse_arena, "matchbox");
+        -:   83:
+        -:   84:    /* $1..$N */
+     463*:   85:    if (argc > 1 && argv) {
+    #####:   86:        sh->positional_n = argc - 1;
+    #####:   87:        sh->positional   = arena_alloc(&sh->parse_arena,
+    #####:   88:                               (size_t)(argc) * sizeof(char *));
+    #####:   89:        for (int i = 1; i < argc; i++)
+    #####:   90:            sh->positional[i - 1] = arena_strdup(&sh->parse_arena, argv[i]);
+    #####:   91:        sh->positional[argc - 1] = NULL;
+        -:   92:    } else {
+      463:   93:        sh->positional_n = 0;
+      463:   94:        sh->positional   = arena_alloc(&sh->parse_arena, sizeof(char *));
+      463:   95:        sh->positional[0] = NULL;
+        -:   96:    }
+        -:   97:
+        -:   98:    /* Import all environment variables (as exported shell variables) */
+      463:   99:    vars_import_env(&sh->vars);
+        -:  100:
+        -:  101:    /* Set default shell variables */
+      463:  102:    const char *path = getenv("PATH");
+      463:  103:    if (path)
+      463:  104:        vars_set(&sh->vars, "PATH", path);
+        -:  105:    else
+    #####:  106:        vars_set(&sh->vars, "PATH", "/usr/local/bin:/usr/bin:/bin");
+        -:  107:
+      463:  108:    vars_set(&sh->vars, "IFS", " \t\n");
+        -:  109:
+      463:  110:    const char *home = getenv("HOME");
+      463:  111:    if (home) vars_set(&sh->vars, "HOME", home);
+        -:  112:
+      463:  113:    const char *user = getenv("USER");
+      463:  114:    if (user) vars_set(&sh->vars, "USER", user);
+        -:  115:
+      463:  116:    const char *pwd = getenv("PWD");
+      463:  117:    if (pwd) vars_set(&sh->vars, "PWD", pwd);
+        -:  118:
+        -:  119:    /* Initialise all traps to default */
+    30558:  120:    for (int i = 0; i < NSIG; i++)
+    30095:  121:        sh->traps[i].action = SHELL_TRAP_DEFAULT;
+        -:  122:
+        -:  123:    /* MATCHBOX_TRACE: tracing/debugging mode */
+      463:  124:    const char *trace_env = getenv("MATCHBOX_TRACE");
+      463:  125:    if (trace_env) {
+    #####:  126:        sh->trace_level = atoi(trace_env);
+    #####:  127:        if (sh->trace_level < 0) sh->trace_level = 0;
+    #####:  128:        if (sh->trace_level > 2) sh->trace_level = 2;
+        -:  129:    }
+        -:  130:
+        -:  131:    /* Ignore SIGPIPE in the shell process; children restore SIG_DFL before exec */
+      463:  132:    signal(SIGPIPE, SIG_IGN);
+        -:  133:
+        -:  134:    /* Register as the global trap shell */
+      463:  135:    g_trap_shell = sh;
+        -:  136:
+      463:  137:    return 0;
+        -:  138:}
+        -:  139:
+        -:  140:/* -------------------------------------------------------------------------
+        -:  141: * shell_run_string
+        -:  142: * ------------------------------------------------------------------------- */
+        -:  143:
+      441:  144:int shell_run_string(shell_ctx_t *sh, const char *script)
+        -:  145:{
+     441*:  146:    if (!script) return 0;
+        -:  147:
+        -:  148:    lexer_t  lex;
+        -:  149:    parser_t par;
+        -:  150:
+      441:  151:    lexer_init_str(&lex, script, &sh->parse_arena);
+      441:  152:    parser_init(&par, &lex, &sh->parse_arena);
+        -:  153:
+      441:  154:    int rc = 0;
+      425:  155:    for (;;) {
+      866:  156:        node_t *node = parser_parse(&par);
+      866:  157:        if (!node) break;
+     443*:  158:        if (par.error) break;
+        -:  159:
+      443:  160:        if (!sh->opt_n) {
+      443:  161:            rc = exec_node(sh, node);
+      433:  162:            sh->last_exit = rc;
+      433:  163:            if (errexit_should_stop(sh, rc))
+        8:  164:                break;
+        -:  165:        }
+        -:  166:    }
+        -:  167:
+      431:  168:    lexer_free(&lex);
+      431:  169:    return sh->last_exit;
+        -:  170:}
+        -:  171:
+        -:  172:/* -------------------------------------------------------------------------
+        -:  173: * shell_run_file
+        -:  174: * ------------------------------------------------------------------------- */
+        -:  175:
+       36:  176:int shell_run_file(shell_ctx_t *sh, const char *path)
+        -:  177:{
+       36:  178:    FILE *fp = fopen(path, "r");
+       36:  179:    if (!fp) {
+    #####:  180:        perror(path);
+    #####:  181:        sh->last_exit = 1;
+    #####:  182:        return 1;
+        -:  183:    }
+        -:  184:
+        -:  185:    lexer_t  lex;
+        -:  186:    parser_t par;
+        -:  187:
+       36:  188:    lexer_init_fp(&lex, fp, &sh->parse_arena);
+       36:  189:    parser_init(&par, &lex, &sh->parse_arena);
+        -:  190:
+       36:  191:    int rc = 0;
+       36:  192:    for (;;) {
+       72:  193:        node_t *node = parser_parse(&par);
+       72:  194:        if (!node) break;
+      36*:  195:        if (par.error) break;
+        -:  196:
+       36:  197:        if (!sh->opt_n) {
+       36:  198:            rc = exec_node(sh, node);
+       36:  199:            sh->last_exit = rc;
+       36:  200:            if (errexit_should_stop(sh, rc))
+    #####:  201:                break;
+        -:  202:        }
+        -:  203:    }
+        -:  204:
+       36:  205:    lexer_free(&lex);
+       36:  206:    fclose(fp);
+       36:  207:    return sh->last_exit;
+        -:  208:}
+        -:  209:
+        -:  210:/* -------------------------------------------------------------------------
+        -:  211: * shell_run_stdin
+        -:  212: * ------------------------------------------------------------------------- */
+        -:  213:
+    #####:  214:int shell_run_stdin(shell_ctx_t *sh)
+        -:  215:{
+    #####:  216:    int interactive = isatty(STDIN_FILENO);
+        -:  217:
+        -:  218:    lexer_t  lex;
+        -:  219:    parser_t par;
+        -:  220:
+    #####:  221:    lexer_init_fp(&lex, stdin, &sh->parse_arena);
+    #####:  222:    parser_init(&par, &lex, &sh->parse_arena);
+        -:  223:
+    #####:  224:    int rc = 0;
+    #####:  225:    for (;;) {
+    #####:  226:        if (interactive) {
+    #####:  227:            const char *ps1 = vars_get(&sh->vars, "PS1");
+    #####:  228:            if (!ps1) ps1 = "$ ";
+    #####:  229:            fputs(ps1, stdout);
+    #####:  230:            fflush(stdout);
+        -:  231:        }
+        -:  232:
+    #####:  233:        node_t *node = parser_parse(&par);
+    #####:  234:        if (!node) break;
+    #####:  235:        if (par.error) {
+    #####:  236:            par.error = 0;
+    #####:  237:            continue;
+        -:  238:        }
+        -:  239:
+    #####:  240:        if (!sh->opt_n) {
+    #####:  241:            rc = exec_node(sh, node);
+    #####:  242:            sh->last_exit = rc;
+    #####:  243:            if (errexit_should_stop(sh, rc))
+    #####:  244:                break;
+        -:  245:        }
+        -:  246:
+        -:  247:        /* Non-interactive: stop on EOF */
+        -:  248:        if (!interactive) {
+        -:  249:            /* parser_parse returns NULL on EOF; loop will break naturally */
+        -:  250:        }
+        -:  251:    }
+        -:  252:
+    #####:  253:    lexer_free(&lex);
+    #####:  254:    return sh->last_exit;
+        -:  255:}
+        -:  256:
+        -:  257:/* -------------------------------------------------------------------------
+        -:  258: * shell_free
+        -:  259: * ------------------------------------------------------------------------- */
+        -:  260:
+        -:  261:/* Declared in exec.c — free all PATH cache entries */
+        -:  262:void path_cache_clear(shell_ctx_t *sh);
+        -:  263:
+      453:  264:void shell_free(shell_ctx_t *sh)
+        -:  265:{
+      453:  266:    path_cache_clear(sh);
+      453:  267:    arena_free(&sh->parse_arena);
+        -:  268:    /* job list nodes were malloc'd */
+      453:  269:    job_t *j = sh->jobs.head;
+      455:  270:    while (j) {
+        2:  271:        job_t *next = j->next;
+        2:  272:        free(j);
+        2:  273:        j = next;
+        -:  274:    }
+      453:  275:    sh->jobs.head = NULL;
+        -:  276:
+      453:  277:    if (g_trap_shell == sh)
+      453:  278:        g_trap_shell = NULL;
+      453:  279:}

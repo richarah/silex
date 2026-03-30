@@ -1017,3 +1017,106 @@ was repeated on every iteration.
 **Effect**: GCC places the fast path in the fall-through branch, reducing predicted
 branch mispredictions in tight loops. Estimated 1–3% improvement in shell-heavy
 workloads on modern out-of-order CPUs. Not measurable in isolation due to noise.
+
+---
+
+## v0.2.0 Phase Additions — 2026-03-30
+
+### A-01: `waitpid` EINTR Retry
+
+**Category**: Correctness / robustness
+**Files**: `src/shell/exec.c`
+
+**Problem**: The external-command waitpid at `exec.c:521` was not retrying on `EINTR`.
+When a signal fired during `waitpid()`, it returned `-1`/`EINTR` with `status` undefined.
+The subsequent `WIFEXITED(status)` check used garbage data, setting `cmd_rc = 1`. This
+caused the next command in a sequence to see a wrong `last_exit` value, and in some
+sequences caused early termination.
+
+**Fix**: Changed `waitpid(pid, &status, 0)` to
+`while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}`.
+
+**Effect**: Correct `cmd_rc` after signals. Required to make trap tests with
+`kill -USR1 $$; kill -USR2 $$; echo done` work correctly.
+
+---
+
+### A-02: Full POSIX Arithmetic Operator Set
+
+**Category**: Correctness / POSIX compliance
+**Files**: `src/shell/expand.c`
+
+**Added**:
+- Bitshift operators `<<` and `>>` (`arith_shift`)
+- Bitwise AND, XOR, OR, NOT: `&`, `^`, `|`, `~`
+- Compound assignment: `+=`, `-=`, `*=`, `/=`, `%=`, `<<=`, `>>=`, `&=`, `|=`, `^=`
+- Logical AND/OR with short-circuit: `&&`, `||`
+
+Precedence chain: `primary → mul → add → shift → cmp → bitand → bitxor → bitor → logical_and → logical_or → expr`.
+
+**Effect**: All POSIX shell arithmetic expressions now evaluate correctly.
+Fixes `$((x << 2))`, `$((x += 1))`, `$((a & b))`, etc.
+
+---
+
+### D-02: grep Extended Options
+
+**Category**: Compatibility
+**Files**: `src/core/grep.c`
+
+**Added**: `-m N` (max matches), `-o` (only matching), `-A N` / `-B N` / `-C N` (context lines).
+
+Implementation:
+- Before-context: ring buffer (`char *before_buf[B]`, `malloc`/`free` per slot)
+- After-context: integer countdown counter
+- Context group separator: `--` line printed between non-adjacent groups
+- `-o`: iterates `mb_regex_search()` calls to find all non-overlapping matches on each line
+- `-m`: exits match loop early once `match_count >= max_matches`
+
+---
+
+### D-03: sort `-M` Month Sort
+
+**Category**: Compatibility
+**Files**: `src/core/sort.c`
+
+Parses 3-char month name prefixes (Jan–Dec, case-insensitive) into 1–12.
+Unknown prefixes map to 0 (sort before January). Applied in `key_compare_strings()`.
+
+---
+
+### D-04: xargs Extended Options
+
+**Category**: Compatibility
+**Files**: `src/core/xargs.c`
+
+**Added**: `-a FILE` (read input from FILE instead of stdin), `-L N` (max input lines per command, maps to `-n`), `-s BYTES` (max command-line size, caps `arg_max`).
+
+---
+
+### G-01: MATCHBOX_TRACE Observability
+
+**Category**: Debuggability
+**Files**: `src/shell/shell.h`, `src/shell/shell.c`, `src/shell/exec.c`
+
+**Added**: `trace_level` field in `shell_ctx_t`. Initialized from `MATCHBOX_TRACE` env var.
+
+- Level 1: prints `+ cmd arg…` to stderr before each command (equivalent to `set -x`)
+- Level 2: additionally prints `[builtin]` tag for builtin commands
+
+Complements the shell's `set -x` option (which sets `opt_x` flag on the same path).
+
+---
+
+### H-01: MATCHBOX_FORCE_FALLBACKS
+
+**Category**: Testability / portability
+**Files**: `src/util/platform.c`
+
+**Added**: Environment variable `MATCHBOX_FORCE_FALLBACKS`. When set (any value),
+`platform_detect()` returns immediately with `g_uring_available = 0` and
+`g_inotify_available = 0`. This forces all code to use the portable fallback paths
+(no io_uring, no inotify) without recompiling.
+
+Used in CI to verify that the fallback paths work correctly on kernels that do not
+support io_uring (e.g. old kernels, heavily sandboxed containers, aarch64 QEMU).

@@ -1,0 +1,979 @@
+        -:    0:Source:src/core/grep.c
+        -:    1:/* grep.c — grep builtin: search files for patterns */
+        -:    2:
+        -:    3:#ifndef _POSIX_C_SOURCE
+        -:    4:#define _POSIX_C_SOURCE 200809L
+        -:    5:#endif
+        -:    6:
+        -:    7:#include "../util/error.h"
+        -:    8:#include "../util/path.h"
+        -:    9:#include "../util/strbuf.h"
+        -:   10:#include "../util/charclass.h"
+        -:   11:#include "../util/regex/regex.h"
+        -:   12:
+        -:   13:#include <ctype.h>
+        -:   14:#include <dirent.h>
+        -:   15:#include <errno.h>
+        -:   16:#include <fcntl.h>
+        -:   17:#include <fnmatch.h>
+        -:   18:#include <limits.h>
+        -:   19:#include <stdio.h>
+        -:   20:#include <stdlib.h>
+        -:   21:#include <string.h>
+        -:   22:#include <sys/stat.h>
+        -:   23:#include <unistd.h>
+        -:   24:
+        -:   25:/* Maximum number of -e patterns or -f pattern files */
+        -:   26:#define MAX_PATTERNS 256
+        -:   27:/* Maximum number of --include/--exclude globs each */
+        -:   28:#define MAX_GLOBS    64
+        -:   29:/* Large stdio read buffer — reduces getline() syscall count from ~136 to ~6
+        -:   30: * for a 550KB file (system grep uses 96KB mmap-style reads). */
+        -:   31:#define GREP_STDIO_BUFSZ (1 << 17)  /* 128 KB */
+        -:   32:
+        -:   33:/* ------------------------------------------------------------------ */
+        -:   34:/* Option state                                                        */
+        -:   35:/* ------------------------------------------------------------------ */
+        -:   36:
+        -:   37:typedef struct {
+        -:   38:    int opt_E;           /* -E: extended (ERE) */
+        -:   39:    int opt_F;           /* -F: fixed string */
+        -:   40:    int opt_c;           /* -c: count matches */
+        -:   41:    int opt_i;           /* -i: case insensitive */
+        -:   42:    int opt_l;           /* -l: list filenames only */
+        -:   43:    int opt_n;           /* -n: print line numbers */
+        -:   44:    int opt_q;           /* -q: quiet */
+        -:   45:    int opt_s;           /* -s: suppress file errors */
+        -:   46:    int opt_v;           /* -v: invert match */
+        -:   47:    int opt_w;           /* -w: word boundaries */
+        -:   48:    int opt_r;           /* -r/-R: recursive */
+        -:   49:    int opt_color;       /* --color: ANSI highlight */
+        -:   50:    int opt_o;           /* -o: only matching portion */
+        -:   51:    int max_matches;     /* -m N: stop after N matches (0 = unlimited) */
+        -:   52:    int context_A;       /* -A N: N lines of after-context */
+        -:   53:    int context_B;       /* -B N: N lines of before-context */
+        -:   54:
+        -:   55:    /* Patterns */
+        -:   56:    char  *patterns[MAX_PATTERNS];
+        -:   57:    int    npatterns;
+        -:   58:
+        -:   59:    /* Compiled regexes (one per pattern, when not -F) */
+        -:   60:    mb_regex *mb_compiled[MAX_PATTERNS];
+        -:   61:    int       compiled_ok[MAX_PATTERNS]; /* 1 if mb_compiled[i] is valid */
+        -:   62:
+        -:   63:    /* Glob filters */
+        -:   64:    char *include_globs[MAX_GLOBS];
+        -:   65:    int   n_include;
+        -:   66:    char *exclude_globs[MAX_GLOBS];
+        -:   67:    int   n_exclude;
+        -:   68:} grep_opts_t;
+        -:   69:
+        -:   70:/* ------------------------------------------------------------------ */
+        -:   71:/* Global state shared across recursive traversal                     */
+        -:   72:/* ------------------------------------------------------------------ */
+        -:   73:
+        -:   74:static int g_matched_any = 0; /* set to 1 if any match ever found */
+        -:   75:
+        -:   76:/* ------------------------------------------------------------------ */
+        -:   77:/* Helpers                                                             */
+        -:   78:/* ------------------------------------------------------------------ */
+        -:   79:
+        -:   80:/*
+        -:   81: * Case-fold search: locate needle in haystack (case insensitive).
+        -:   82: * Returns pointer to first match, or NULL.
+        -:   83: *
+        -:   84: * Precomputes the lowercase first character of needle so the outer loop
+        -:   85: * can reject non-matching positions with a single comparison.
+        -:   86: */
+    #####:   87:static const char *stristr(const char *haystack, const char *needle)
+        -:   88:{
+    #####:   89:    size_t nlen = strlen(needle);
+    #####:   90:    if (nlen == 0)
+        -:   91:        return haystack;
+    #####:   92:    int fc = tolower((unsigned char)*needle);  /* first char, precomputed */
+    #####:   93:    for (; *haystack; haystack++) {
+    #####:   94:        if (tolower((unsigned char)*haystack) == fc) {
+        -:   95:            size_t i;
+    #####:   96:            for (i = 1; i < nlen; i++) {
+    #####:   97:                if (tolower((unsigned char)haystack[i]) !=
+    #####:   98:                    tolower((unsigned char)needle[i]))
+        -:   99:                    break;
+        -:  100:            }
+    #####:  101:            if (i == nlen)
+        -:  102:                return haystack;
+        -:  103:        }
+        -:  104:    }
+        -:  105:    return NULL;
+        -:  106:}
+        -:  107:
+        -:  108:/* Check whether character is a word character for -w */
+    #####:  109:static int is_word_char(char c)
+        -:  110:{
+    #####:  111:    return is_name_char((unsigned char)c);
+        -:  112:}
+        -:  113:
+        -:  114:/*
+        -:  115: * Fixed-string match for one pattern against line.
+        -:  116: * Respects -i (case fold) and -w (word boundary).
+        -:  117: * Returns 1 if matched.
+        -:  118: */
+    #####:  119:static int fixed_match(const char *line, const char *pattern,
+        -:  120:                       int opt_i, int opt_w)
+        -:  121:{
+    #####:  122:    size_t plen = strlen(pattern);
+    #####:  123:    if (plen == 0)
+        -:  124:        return 1;
+        -:  125:
+        -:  126:    const char *p = line;
+    #####:  127:    for (;;) {
+    #####:  128:        const char *found = opt_i ? stristr(p, pattern) : strstr(p, pattern);
+    #####:  129:        if (!found)
+        -:  130:            return 0;
+    #####:  131:        if (opt_w) {
+        -:  132:            /* Check boundaries */
+    #####:  133:            int before_ok = (found == line) || !is_word_char(*(found - 1));
+    #####:  134:            int after_ok  = !is_word_char(*(found + plen));
+    #####:  135:            if (!before_ok || !after_ok) {
+    #####:  136:                p = found + 1;
+    #####:  137:                continue;
+        -:  138:            }
+        -:  139:        }
+        -:  140:        return 1;
+        -:  141:    }
+        -:  142:}
+        -:  143:
+        -:  144:/*
+        -:  145: * Regex match for one compiled pattern against line.
+        -:  146: * Respects -w (word boundaries checked manually).
+        -:  147: * Returns 1 if matched.
+        -:  148: */
+      102:  149:static int regex_match(const mb_regex *re, const char *line, int opt_w)
+        -:  150:{
+      102:  151:    size_t len = strlen(line);
+        -:  152:
+      102:  153:    if (!opt_w) {
+      102:  154:        return mb_regex_search(re, line, len, NULL);
+        -:  155:    }
+        -:  156:
+        -:  157:    /* -w: check word boundaries */
+        -:  158:    const char *p   = line;
+        -:  159:    size_t      rem = len;
+        -:  160:
+    #####:  161:    for (;;) {
+    #####:  162:        mb_match m;
+    #####:  163:        if (!mb_regex_search(re, p, rem, &m))
+    #####:  164:            return 0;
+    #####:  165:        int ms = (int)(m.start - line);
+    #####:  166:        int me = (int)(m.end   - line);
+    #####:  167:        int before_ok = (ms == 0) || !is_word_char(line[ms - 1]);
+    #####:  168:        int after_ok  = (me >= (int)len) || !is_word_char(line[me]);
+    #####:  169:        if (before_ok && after_ok)
+        -:  170:            return 1;
+        -:  171:        /* Advance past this match */
+    #####:  172:        size_t advance = (size_t)(m.end - p);
+    #####:  173:        if (advance == 0) advance = 1;
+    #####:  174:        if (advance > rem) return 0;
+    #####:  175:        p   += advance;
+    #####:  176:        rem -= advance;
+        -:  177:    }
+        -:  178:}
+        -:  179:
+        -:  180:
+        -:  181:/* Compile all patterns into mb_compiled[]. */
+       28:  182:static int compile_patterns(grep_opts_t *g)
+        -:  183:{
+       28:  184:    int mb_flags = MB_REG_NOSUB;
+       28:  185:    if (g->opt_E)
+    #####:  186:        mb_flags |= MB_REG_ERE;
+       28:  187:    if (g->opt_i)
+        2:  188:        mb_flags |= MB_REG_ICASE;
+        -:  189:
+       56:  190:    for (int i = 0; i < g->npatterns; i++) {
+       28:  191:        const char *err = NULL;
+       28:  192:        g->mb_compiled[i] = mb_regex_compile(g->patterns[i], mb_flags, &err);
+       28:  193:        if (!g->mb_compiled[i]) {
+    #####:  194:            err_msg("grep", "invalid regex '%s': %s", g->patterns[i],
+    #####:  195:                    err ? err : "unknown error");
+    #####:  196:            return 1;
+        -:  197:        }
+       28:  198:        g->compiled_ok[i] = 1;
+        -:  199:    }
+        -:  200:    return 0;
+        -:  201:}
+        -:  202:
+        -:  203:/*
+        -:  204: * Test line against all patterns.
+        -:  205: * Returns 1 if ANY pattern matches (before -v inversion).
+        -:  206: */
+      102:  207:static int line_matches_any(const char *line, const grep_opts_t *g)
+        -:  208:{
+      166:  209:    for (int i = 0; i < g->npatterns; i++) {
+      102:  210:        int m;
+      102:  211:        if (g->opt_F) {
+    #####:  212:            m = fixed_match(line, g->patterns[i], g->opt_i, g->opt_w);
+        -:  213:        } else {
+     102*:  214:            if (!g->compiled_ok[i])
+    #####:  215:                continue;
+      102:  216:            m = regex_match(g->mb_compiled[i], line, g->opt_w);
+        -:  217:        }
+      102:  218:        if (m)
+        -:  219:            return 1;
+        -:  220:    }
+        -:  221:    return 0;
+        -:  222:}
+        -:  223:
+        -:  224:/* ANSI color codes */
+        -:  225:#define COL_MATCH   "\033[01;31m"
+        -:  226:#define COL_FNAME   "\033[35m"
+        -:  227:#define COL_LINENO  "\033[32m"
+        -:  228:#define COL_SEP     "\033[36m"
+        -:  229:#define COL_RESET   "\033[0m"
+        -:  230:
+        -:  231:/*
+        -:  232: * Highlight a single fixed-string match in line with ANSI codes.
+        -:  233: * Prints the line (with prefix already printed).
+        -:  234: */
+    #####:  235:static void print_line_color_fixed(const char *line, const char *pattern,
+        -:  236:                                   int opt_i)
+        -:  237:{
+    #####:  238:    size_t plen = strlen(pattern);
+    #####:  239:    const char *p = line;
+    #####:  240:    for (;;) {
+    #####:  241:        const char *found = opt_i ? stristr(p, pattern) : strstr(p, pattern);
+    #####:  242:        if (!found) {
+    #####:  243:            fputs(p, stdout);
+    #####:  244:            break;
+        -:  245:        }
+        -:  246:        /* Print up to match */
+    #####:  247:        fwrite(p, 1, (size_t)(found - p), stdout);
+    #####:  248:        fputs(COL_MATCH, stdout);
+    #####:  249:        fwrite(found, 1, plen, stdout);
+    #####:  250:        fputs(COL_RESET, stdout);
+    #####:  251:        p = found + plen;
+        -:  252:    }
+    #####:  253:}
+        -:  254:
+        -:  255:/*
+        -:  256: * Highlight regex matches in line with ANSI codes.
+        -:  257: */
+    #####:  258:static void print_line_color_regex(const mb_regex *re, const char *line)
+        -:  259:{
+    #####:  260:    const char *p   = line;
+    #####:  261:    size_t      rem = strlen(line);
+        -:  262:
+    #####:  263:    for (;;) {
+    #####:  264:        mb_match m;
+    #####:  265:        if (!mb_regex_search(re, p, rem, &m) || m.start == m.end) {
+    #####:  266:            fwrite(p, 1, rem, stdout);
+    #####:  267:            break;
+        -:  268:        }
+    #####:  269:        fwrite(p, 1, (size_t)(m.start - p), stdout);
+    #####:  270:        fputs(COL_MATCH, stdout);
+    #####:  271:        fwrite(m.start, 1, (size_t)(m.end - m.start), stdout);
+    #####:  272:        fputs(COL_RESET, stdout);
+    #####:  273:        size_t advance = (size_t)(m.end - p);
+    #####:  274:        if (advance == 0) advance = 1;
+    #####:  275:        if (advance > rem) break;
+    #####:  276:        p   += advance;
+    #####:  277:        rem -= advance;
+        -:  278:    }
+    #####:  279:    if (*p != '\0') fputs(p, stdout);
+    #####:  280:}
+        -:  281:
+        -:  282:/* Print the line prefix (filename + linenum) into strbuf out */
+       30:  283:static int grep_print_prefix(strbuf_t *out, const char *filename,
+        -:  284:                              int show_fname, long linenum,
+        -:  285:                              const grep_opts_t *g, int is_context)
+        -:  286:{
+       30:  287:    if (show_fname && filename) {
+    #####:  288:        if (g->opt_color) {
+    #####:  289:            if (sb_append(out, COL_FNAME)  != 0) return -1;
+    #####:  290:            if (sb_append(out, filename)    != 0) return -1;
+    #####:  291:            if (sb_append(out, COL_RESET)   != 0) return -1;
+    #####:  292:            if (sb_appendc(out, is_context ? '-' : ':') != 0) return -1;
+        -:  293:        } else {
+    #####:  294:            if (sb_append(out, filename) != 0) return -1;
+    #####:  295:            if (sb_appendc(out, is_context ? '-' : ':') != 0) return -1;
+        -:  296:        }
+        -:  297:    }
+       30:  298:    if (g->opt_n) {
+        6:  299:        if (g->opt_color) {
+    #####:  300:            if (sb_appendf(out, COL_LINENO "%ld" COL_RESET "%c",
+        -:  301:                           linenum, is_context ? '-' : ':') != 0) return -1;
+        -:  302:        } else {
+       12:  303:            if (sb_appendf(out, "%ld%c", linenum,
+        -:  304:                           is_context ? '-' : ':') != 0) return -1;
+        -:  305:        }
+        -:  306:    }
+        -:  307:    return 0;
+        -:  308:}
+        -:  309:
+        -:  310:/* Print matched portions of line (for -o flag) */
+    #####:  311:static void grep_print_only_match(const char *line, const grep_opts_t *g,
+        -:  312:                                  const char *prefix)
+        -:  313:{
+    #####:  314:    if (g->opt_F) {
+    #####:  315:        if (g->npatterns == 0) return;
+    #####:  316:        size_t plen = strlen(g->patterns[0]);
+    #####:  317:        const char *p = line;
+    #####:  318:        for (;;) {
+    #####:  319:            const char *found = g->opt_i ? stristr(p, g->patterns[0])
+    #####:  320:                                          : strstr(p, g->patterns[0]);
+    #####:  321:            if (!found) break;
+    #####:  322:            printf("%s", prefix);
+    #####:  323:            fwrite(found, 1, plen, stdout);
+    #####:  324:            putchar('\n');
+    #####:  325:            p = found + (plen > 0 ? plen : 1);
+        -:  326:        }
+        -:  327:    } else {
+    #####:  328:        if (g->npatterns == 0 || !g->compiled_ok[0]) return;
+    #####:  329:        const char *p   = line;
+    #####:  330:        size_t      rem = strlen(line);
+    #####:  331:        for (;;) {
+    #####:  332:            mb_match m;
+    #####:  333:            if (!mb_regex_search(g->mb_compiled[0], p, rem, &m)) break;
+    #####:  334:            size_t mlen = (size_t)(m.end - m.start);
+    #####:  335:            printf("%s", prefix);
+    #####:  336:            fwrite(m.start, 1, mlen, stdout);
+    #####:  337:            putchar('\n');
+    #####:  338:            size_t advance = (size_t)(m.end - p);
+    #####:  339:            if (advance == 0) advance = 1;
+    #####:  340:            if (advance > rem) break;
+    #####:  341:            p   += advance;
+    #####:  342:            rem -= advance;
+        -:  343:        }
+        -:  344:    }
+        -:  345:}
+        -:  346:
+        -:  347:/*
+        -:  348: * Search one open FILE stream for matches.
+        -:  349: * filename: displayed name (NULL if reading from stdin with no label).
+        -:  350: * show_fname: prepend filename to output lines.
+        -:  351: * Returns 0 if matches found, 1 if none, 2 on read error.
+        -:  352: */
+       28:  353:static int grep_stream(FILE *fp, const char *filename,
+        -:  354:                       int show_fname, const grep_opts_t *g)
+        -:  355:{
+       28:  356:    char    *linebuf = NULL;
+       28:  357:    size_t   linecap = 0;
+       28:  358:    ssize_t  linelen;
+       28:  359:    long     linenum  = 0;
+       28:  360:    long     count    = 0;
+       28:  361:    int      binary   = 0;
+       28:  362:    int      result   = 1; /* assume no match */
+        -:  363:
+        -:  364:    /* Context support */
+       28:  365:    int ctx_B = g->context_B;
+       28:  366:    int ctx_A = g->context_A;
+       28:  367:    int after_left  = 0;
+       28:  368:    long last_printed = -1;
+        -:  369:
+       28:  370:    char  **before_buf  = NULL;
+       28:  371:    long   *before_lnum = NULL;
+       28:  372:    int     before_pos  = 0;
+       28:  373:    int     before_full = 0;
+       28:  374:    if (ctx_B > 0) {
+    #####:  375:        before_buf  = calloc((size_t)ctx_B, sizeof(char *));
+    #####:  376:        before_lnum = calloc((size_t)ctx_B, sizeof(long));
+    #####:  377:        if (!before_buf || !before_lnum) {
+    #####:  378:            free(before_buf); free(before_lnum);
+    #####:  379:            err_msg("grep", "out of memory");
+    #####:  380:            return 2;
+        -:  381:        }
+        -:  382:    }
+        -:  383:
+        -:  384:    /* Use a strbuf to build output lines */
+       28:  385:    strbuf_t out;
+       28:  386:    if (sb_init(&out, 256) != 0) {
+    #####:  387:        free(before_buf); free(before_lnum);
+    #####:  388:        err_msg("grep", "out of memory");
+    #####:  389:        return 2;
+        -:  390:    }
+        -:  391:
+      130:  392:    while ((linelen = getline(&linebuf, &linecap, fp)) >= 0) {
+      102:  393:        linenum++;
+        -:  394:
+        -:  395:        /* Binary detection: check for NUL bytes */
+      102:  396:        if (!binary) {
+      742:  397:            for (ssize_t k = 0; k < linelen; k++) {
+      640:  398:                if (linebuf[k] == '\0') { binary = 1; break; }
+        -:  399:            }
+        -:  400:        }
+      102:  401:        if (binary) break;
+        -:  402:
+        -:  403:        /* Strip trailing newline for matching */
+      102:  404:        if (linelen > 0 && linebuf[linelen - 1] == '\n') {
+      102:  405:            linebuf[linelen - 1] = '\0';
+      102:  406:            linelen--;
+        -:  407:        }
+        -:  408:
+      102:  409:        int matched = line_matches_any(linebuf, g);
+      102:  410:        if (g->opt_v) matched = !matched;
+        -:  411:
+      102:  412:        if (!matched) {
+        -:  413:            /* Print as after-context if needed */
+      66*:  414:            if (after_left > 0 && !g->opt_c && !g->opt_q && !g->opt_l) {
+    #####:  415:                sb_reset(&out);
+    #####:  416:                if (grep_print_prefix(&out, filename, show_fname,
+    #####:  417:                                       linenum, g, 1) < 0) goto oom;
+    #####:  418:                fputs(sb_str(&out), stdout);
+    #####:  419:                fputs(linebuf, stdout);
+    #####:  420:                putchar('\n');
+    #####:  421:                last_printed = linenum;
+    #####:  422:                after_left--;
+        -:  423:            }
+        -:  424:            /* Store in before-context ring buffer */
+       66:  425:            if (ctx_B > 0) {
+    #####:  426:                free(before_buf[before_pos]);
+    #####:  427:                before_buf[before_pos]  = strdup(linebuf);
+    #####:  428:                before_lnum[before_pos] = linenum;
+    #####:  429:                before_pos = (before_pos + 1) % ctx_B;
+    #####:  430:                if (!before_full && before_pos == 0) before_full = 1;
+        -:  431:            }
+       66:  432:            continue;
+        -:  433:        }
+        -:  434:
+       36:  435:        count++;
+       36:  436:        result = 0;
+       36:  437:        g_matched_any = 1;
+        -:  438:
+        -:  439:        /* -m: stop after max_matches */
+      36*:  440:        if (g->max_matches > 0 && count > g->max_matches) {
+    #####:  441:            count--;
+    #####:  442:            result = (count > 0) ? 0 : 1;
+    #####:  443:            goto done;
+        -:  444:        }
+        -:  445:
+      36*:  446:        if (g->opt_q) goto done;
+       36:  447:        if (g->opt_l) {
+    #####:  448:            printf("%s\n", filename ? filename : "(stdin)");
+    #####:  449:            goto done;
+        -:  450:        }
+       36:  451:        if (g->opt_c) {
+        6:  452:            if (ctx_B > 0) {
+    #####:  453:                free(before_buf[before_pos]);
+    #####:  454:                before_buf[before_pos]  = strdup(linebuf);
+    #####:  455:                before_lnum[before_pos] = linenum;
+    #####:  456:                before_pos = (before_pos + 1) % ctx_B;
+    #####:  457:                if (!before_full && before_pos == 0) before_full = 1;
+        -:  458:            }
+        6:  459:            continue;
+        -:  460:        }
+        -:  461:
+        -:  462:        /* Print separator between context groups */
+      30*:  463:        if ((ctx_A > 0 || ctx_B > 0) && last_printed >= 0 &&
+        -:  464:            last_printed < linenum - 1) {
+    #####:  465:            puts("--");
+        -:  466:        }
+        -:  467:
+        -:  468:        /* Print before-context lines */
+    #####:  469:        if (ctx_B > 0) {
+    #####:  470:            int n_avail = before_full ? ctx_B : before_pos;
+    #####:  471:            int start   = before_full ? before_pos : 0;
+    #####:  472:            for (int k = 0; k < n_avail; k++) {
+    #####:  473:                int idx = (start + k) % ctx_B;
+    #####:  474:                if (!before_buf[idx] || before_lnum[idx] <= last_printed) continue;
+    #####:  475:                sb_reset(&out);
+    #####:  476:                if (grep_print_prefix(&out, filename, show_fname,
+    #####:  477:                                       before_lnum[idx], g, 1) < 0) goto oom;
+    #####:  478:                fputs(sb_str(&out), stdout);
+    #####:  479:                fputs(before_buf[idx], stdout);
+    #####:  480:                putchar('\n');
+    #####:  481:                last_printed = before_lnum[idx];
+        -:  482:            }
+    #####:  483:            for (int k = 0; k < ctx_B; k++) {
+    #####:  484:                free(before_buf[k]); before_buf[k] = NULL; before_lnum[k] = 0;
+        -:  485:            }
+        -:  486:            before_pos = 0; before_full = 0;
+        -:  487:        }
+        -:  488:
+        -:  489:        /* Build prefix for this matched line */
+       30:  490:        sb_reset(&out);
+       30:  491:        if (grep_print_prefix(&out, filename, show_fname, linenum, g, 0) < 0)
+    #####:  492:            goto oom;
+       30:  493:        const char *prefix_str = sb_str(&out);
+        -:  494:
+       30:  495:        if (g->opt_o) {
+    #####:  496:            grep_print_only_match(linebuf, g, prefix_str);
+        -:  497:        } else {
+       30:  498:            fputs(prefix_str, stdout);
+      30*:  499:            if (g->opt_color && !g->opt_F && g->npatterns > 0 && g->compiled_ok[0]) {
+    #####:  500:                print_line_color_regex(g->mb_compiled[0], linebuf);
+      30*:  501:            } else if (g->opt_color && g->opt_F && g->npatterns > 0) {
+    #####:  502:                print_line_color_fixed(linebuf, g->patterns[0], g->opt_i);
+        -:  503:            } else {
+       30:  504:                fputs(linebuf, stdout);
+        -:  505:            }
+       30:  506:            putchar('\n');
+        -:  507:        }
+       30:  508:        last_printed = linenum;
+       30:  509:        after_left   = ctx_A;
+        -:  510:
+       30:  511:        if (ctx_B > 0) {
+    #####:  512:            free(before_buf[before_pos]);
+    #####:  513:            before_buf[before_pos]  = strdup(linebuf);
+    #####:  514:            before_lnum[before_pos] = linenum;
+    #####:  515:            before_pos = (before_pos + 1) % ctx_B;
+    #####:  516:            if (!before_full && before_pos == 0) before_full = 1;
+        -:  517:        }
+        -:  518:    }
+        -:  519:
+       28:  520:    if (ferror(fp)) {
+    #####:  521:        if (!g->opt_s && filename)
+    #####:  522:            err_sys("grep", "%s", filename);
+    #####:  523:        goto cleanup_err;
+        -:  524:    }
+        -:  525:
+       28:  526:    if (binary) {
+    #####:  527:        if (!g->opt_q && !g->opt_l) {
+    #####:  528:            printf("Binary file %s matches\n",
+        -:  529:                   filename ? filename : "(stdin)");
+    #####:  530:        } else if (g->opt_l && filename) {
+    #####:  531:            printf("%s\n", filename);
+        -:  532:        }
+    #####:  533:        result = 0;
+    #####:  534:        g_matched_any = 1;
+        -:  535:    }
+        -:  536:
+       28:  537:    if (g->opt_c) {
+        2:  538:        if (show_fname && filename)
+    #####:  539:            printf("%s:%ld\n", filename, count);
+        -:  540:        else
+        2:  541:            printf("%ld\n", count);
+        2:  542:        if (count > 0)
+        2:  543:            result = 0;
+        -:  544:    }
+        -:  545:
+      26*:  546:done:
+       28:  547:    if (ctx_B > 0) {
+    #####:  548:        for (int k = 0; k < ctx_B; k++) free(before_buf[k]);
+    #####:  549:        free(before_buf); free(before_lnum);
+        -:  550:    }
+       28:  551:    sb_free(&out);
+       28:  552:    free(linebuf);
+       28:  553:    return result;
+        -:  554:
+    #####:  555:oom:
+    #####:  556:    err_msg("grep", "out of memory building output line");
+    #####:  557:cleanup_err:
+    #####:  558:    if (ctx_B > 0) {
+    #####:  559:        for (int k = 0; k < ctx_B; k++) free(before_buf[k]);
+    #####:  560:        free(before_buf); free(before_lnum);
+        -:  561:    }
+    #####:  562:    sb_free(&out);
+    #####:  563:    free(linebuf);
+    #####:  564:    return 2;
+        -:  565:}
+        -:  566:
+        -:  567:/* Check if filename matches any exclude glob or fails include globs. */
+       16:  568:static int glob_excluded(const char *basename, const grep_opts_t *g)
+        -:  569:{
+      16*:  570:    for (int i = 0; i < g->n_exclude; i++) {
+    #####:  571:        if (fnmatch(g->exclude_globs[i], basename, 0) == 0)
+        -:  572:            return 1;
+        -:  573:    }
+       16:  574:    if (g->n_include > 0) {
+    #####:  575:        int ok = 0;
+    #####:  576:        for (int i = 0; i < g->n_include; i++) {
+    #####:  577:            if (fnmatch(g->include_globs[i], basename, 0) == 0) {
+        -:  578:                ok = 1;
+        -:  579:                break;
+        -:  580:            }
+        -:  581:        }
+    #####:  582:        if (!ok)
+        -:  583:            return 1;
+        -:  584:    }
+        -:  585:    return 0;
+        -:  586:}
+        -:  587:
+        -:  588:/* Forward declaration for recursive use */
+        -:  589:static int grep_path(const char *path, int show_fname, const grep_opts_t *g);
+        -:  590:
+        -:  591:/* Recursively grep a directory. */
+    #####:  592:static int grep_dir(const char *dirpath, const grep_opts_t *g)
+        -:  593:{
+    #####:  594:    DIR *dir = opendir(dirpath);
+    #####:  595:    if (!dir) {
+    #####:  596:        if (!g->opt_s)
+    #####:  597:            err_sys("grep", "%s", dirpath);
+    #####:  598:        return 2;
+        -:  599:    }
+        -:  600:
+        -:  601:    int result = 1;
+        -:  602:    struct dirent *ent;
+        -:  603:
+    #####:  604:    while ((ent = readdir(dir)) != NULL) {
+    #####:  605:        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0)
+    #####:  606:            continue;
+        -:  607:
+    #####:  608:        char child[PATH_MAX];
+    #####:  609:        if (!path_join(dirpath, ent->d_name, child)) {
+    #####:  610:            err_msg("grep", "path too long: %s/%s", dirpath, ent->d_name);
+    #####:  611:            continue;
+        -:  612:        }
+        -:  613:
+    #####:  614:        int r = grep_path(child, 1, g);
+    #####:  615:        if (r == 0)
+    #####:  616:            result = 0;
+        -:  617:    }
+        -:  618:
+    #####:  619:    closedir(dir);
+    #####:  620:    return result;
+        -:  621:}
+        -:  622:
+        -:  623:/* Grep one path (file or directory). show_fname: prepend filename. */
+       16:  624:static int grep_path(const char *path, int show_fname, const grep_opts_t *g)
+        -:  625:{
+        -:  626:    /* POSIX: "-" means stdin */
+       16:  627:    if (strcmp(path, "-") == 0) {
+    #####:  628:        return grep_stream(stdin, "(standard input)", show_fname, g);
+        -:  629:    }
+        -:  630:
+       16:  631:    struct stat st;
+       16:  632:    if (lstat(path, &st) != 0) {
+    #####:  633:        if (!g->opt_s)
+    #####:  634:            err_sys("grep", "%s", path);
+    #####:  635:        return 2;
+        -:  636:    }
+        -:  637:
+       16:  638:    if (S_ISDIR(st.st_mode)) {
+    #####:  639:        if (!g->opt_r) {
+    #####:  640:            if (!g->opt_s)
+    #####:  641:                err_msg("grep", "%s: is a directory", path);
+    #####:  642:            return 2;
+        -:  643:        }
+    #####:  644:        return grep_dir(path, g);
+        -:  645:    }
+        -:  646:
+       16:  647:    if (!S_ISREG(st.st_mode))
+        -:  648:        return 1; /* skip special files */
+        -:  649:
+        -:  650:    /* Apply glob filters on basename */
+       16:  651:    if (glob_excluded(path_basename(path), g))
+        -:  652:        return 1;
+        -:  653:
+       16:  654:    FILE *fp = fopen(path, "r");
+       16:  655:    if (!fp) {
+    #####:  656:        if (!g->opt_s)
+    #####:  657:            err_sys("grep", "%s", path);
+    #####:  658:        return 2;
+        -:  659:    }
+       16:  660:    posix_fadvise(fileno(fp), 0, 0, POSIX_FADV_SEQUENTIAL); /* advisory */
+        -:  661:    /* Enlarge stdio read buffer to reduce getline() syscall overhead.
+        -:  662:     * Must supply an explicit buffer — passing NULL to setvbuf() still uses
+        -:  663:     * glibc's internal 4KB allocation.  With a 128KB explicit buffer the
+        -:  664:     * read() count drops from ~136 to ~5 for a 550KB file. */
+       16:  665:    static char grep_iobuf[GREP_STDIO_BUFSZ];
+       16:  666:    setvbuf(fp, grep_iobuf, _IOFBF, sizeof(grep_iobuf));
+        -:  667:
+       16:  668:    int r = grep_stream(fp, path, show_fname, g);
+       16:  669:    fclose(fp);
+       16:  670:    return r;
+        -:  671:}
+        -:  672:
+        -:  673:/* Load patterns from a file (-f FILE). */
+    #####:  674:static int load_pattern_file(const char *fname, grep_opts_t *g)
+        -:  675:{
+    #####:  676:    FILE *fp = fopen(fname, "r");
+    #####:  677:    if (!fp) {
+    #####:  678:        err_sys("grep", "%s", fname);
+    #####:  679:        return 1;
+        -:  680:    }
+        -:  681:
+    #####:  682:    char   *line    = NULL;
+    #####:  683:    size_t  cap     = 0;
+    #####:  684:    ssize_t len;
+        -:  685:
+    #####:  686:    while ((len = getline(&line, &cap, fp)) >= 0) {
+    #####:  687:        if (len > 0 && line[len - 1] == '\n')
+    #####:  688:            line[len - 1] = '\0';
+    #####:  689:        if (g->npatterns >= MAX_PATTERNS) {
+    #####:  690:            err_msg("grep", "too many patterns (max %d)", MAX_PATTERNS);
+    #####:  691:            free(line);
+    #####:  692:            fclose(fp);
+    #####:  693:            return 1;
+        -:  694:        }
+    #####:  695:        g->patterns[g->npatterns] = strdup(line);
+    #####:  696:        if (!g->patterns[g->npatterns]) {
+    #####:  697:            err_msg("grep", "out of memory");
+    #####:  698:            free(line);
+    #####:  699:            fclose(fp);
+    #####:  700:            return 1;
+        -:  701:        }
+    #####:  702:        g->npatterns++;
+        -:  703:    }
+        -:  704:
+    #####:  705:    free(line);
+    #####:  706:    fclose(fp);
+    #####:  707:    return 0;
+        -:  708:}
+        -:  709:
+        -:  710:/* Free all resources in grep_opts_t */
+       28:  711:static void grep_opts_free(grep_opts_t *g)
+        -:  712:{
+       56:  713:    for (int i = 0; i < g->npatterns; i++) {
+       28:  714:        free(g->patterns[i]);
+       28:  715:        if (g->compiled_ok[i] && g->mb_compiled[i])
+       28:  716:            mb_regex_free(g->mb_compiled[i]);
+        -:  717:    }
+       28:  718:}
+        -:  719:
+        -:  720:/* ------------------------------------------------------------------ */
+        -:  721:/* Main applet entry                                                   */
+        -:  722:/* ------------------------------------------------------------------ */
+        -:  723:
+       28:  724:int applet_grep(int argc, char **argv)
+        -:  725:{
+       28:  726:    grep_opts_t g;
+       28:  727:    memset(&g, 0, sizeof(g));
+        -:  728:
+        -:  729:    /* --color: only if stdout is a tty */
+       28:  730:    int color_auto = isatty(STDOUT_FILENO);
+        -:  731:
+        -:  732:    /* Explicit 128KB stdout buffer when not a tty: reduces write() count ~30x
+        -:  733:     * (1365 → ~45 for 100k matching lines) without buffering interactive output. */
+       28:  734:    if (!color_auto) {
+       28:  735:        static char grep_out_buf[131072];
+       28:  736:        setvbuf(stdout, grep_out_buf, _IOFBF, sizeof(grep_out_buf));
+        -:  737:    }
+        -:  738:
+        -:  739:    int i;
+       36:  740:    for (i = 1; i < argc; i++) {
+       36:  741:        const char *arg = argv[i];
+        -:  742:
+      36*:  743:        if (strcmp(arg, "--") == 0) { i++; break; }
+        -:  744:
+        -:  745:        /* Long options */
+      36*:  746:        if (strcmp(arg, "--extended-regexp") == 0)   { g.opt_E = 1; continue; }
+      36*:  747:        if (strcmp(arg, "--fixed-strings")   == 0)   { g.opt_F = 1; continue; }
+      36*:  748:        if (strcmp(arg, "--count")           == 0)   { g.opt_c = 1; continue; }
+      36*:  749:        if (strcmp(arg, "--ignore-case")     == 0)   { g.opt_i = 1; continue; }
+      36*:  750:        if (strcmp(arg, "--files-with-matches") == 0){ g.opt_l = 1; continue; }
+      36*:  751:        if (strcmp(arg, "--line-number")     == 0)   { g.opt_n = 1; continue; }
+      36*:  752:        if (strcmp(arg, "--quiet")           == 0 ||
+      36*:  753:            strcmp(arg, "--silent")          == 0)   { g.opt_q = 1; continue; }
+      36*:  754:        if (strcmp(arg, "--no-messages")     == 0)   { g.opt_s = 1; continue; }
+      36*:  755:        if (strcmp(arg, "--invert-match")    == 0)   { g.opt_v = 1; continue; }
+      36*:  756:        if (strcmp(arg, "--word-regexp")     == 0)   { g.opt_w = 1; continue; }
+      36*:  757:        if (strcmp(arg, "--recursive")       == 0)   { g.opt_r = 1; continue; }
+      36*:  758:        if (strcmp(arg, "--color")           == 0 ||
+       36:  759:            strcmp(arg, "--colour")          == 0 ||
+       36:  760:            strcmp(arg, "--color=always")    == 0 ||
+      36*:  761:            strcmp(arg, "--colour=always")   == 0)   { g.opt_color = 1; continue; }
+      36*:  762:        if (strcmp(arg, "--color=auto")      == 0 ||
+      36*:  763:            strcmp(arg, "--colour=auto")     == 0)   { g.opt_color = color_auto; continue; }
+      36*:  764:        if (strcmp(arg, "--color=never")     == 0 ||
+      36*:  765:            strcmp(arg, "--colour=never")    == 0)   { g.opt_color = 0; continue; }
+        -:  766:
+      36*:  767:        if (strncmp(arg, "--include=", 10) == 0) {
+    #####:  768:            if (g.n_include >= MAX_GLOBS) { err_msg("grep", "too many --include globs"); return 2; }
+    #####:  769:            g.include_globs[g.n_include++] = (char *)(arg + 10);
+    #####:  770:            continue;
+        -:  771:        }
+      36*:  772:        if (strcmp(arg, "--include") == 0) {
+    #####:  773:            if (++i >= argc) { err_msg("grep", "--include requires argument"); return 2; }
+    #####:  774:            if (g.n_include >= MAX_GLOBS) { err_msg("grep", "too many --include globs"); return 2; }
+    #####:  775:            g.include_globs[g.n_include++] = argv[i];
+    #####:  776:            continue;
+        -:  777:        }
+      36*:  778:        if (strncmp(arg, "--exclude=", 10) == 0) {
+    #####:  779:            if (g.n_exclude >= MAX_GLOBS) { err_msg("grep", "too many --exclude globs"); return 2; }
+    #####:  780:            g.exclude_globs[g.n_exclude++] = (char *)(arg + 10);
+    #####:  781:            continue;
+        -:  782:        }
+      36*:  783:        if (strcmp(arg, "--exclude") == 0) {
+    #####:  784:            if (++i >= argc) { err_msg("grep", "--exclude requires argument"); return 2; }
+    #####:  785:            if (g.n_exclude >= MAX_GLOBS) { err_msg("grep", "too many --exclude globs"); return 2; }
+    #####:  786:            g.exclude_globs[g.n_exclude++] = argv[i];
+    #####:  787:            continue;
+        -:  788:        }
+        -:  789:
+       36:  790:        if (strcmp(arg, "--regexp") == 0 || strcmp(arg, "-e") == 0) {
+        -:  791:            /* handled in short-flag section below; but long form: */
+    #####:  792:            if (strcmp(arg, "--regexp") == 0) {
+    #####:  793:                if (++i >= argc) { err_msg("grep", "--regexp requires argument"); return 2; }
+    #####:  794:                if (g.npatterns >= MAX_PATTERNS) { err_msg("grep", "too many patterns"); return 2; }
+    #####:  795:                g.patterns[g.npatterns] = strdup(argv[i]);
+    #####:  796:                if (!g.patterns[g.npatterns]) { err_msg("grep", "out of memory"); return 2; }
+    #####:  797:                g.npatterns++;
+    #####:  798:                continue;
+        -:  799:            }
+        -:  800:        }
+      36*:  801:        if (strcmp(arg, "--file") == 0) {
+    #####:  802:            if (++i >= argc) { err_msg("grep", "--file requires argument"); return 2; }
+    #####:  803:            if (load_pattern_file(argv[i], &g) != 0) return 2;
+    #####:  804:            continue;
+        -:  805:        }
+        -:  806:
+       36:  807:        if (arg[0] != '-' || arg[1] == '\0')
+        -:  808:            break;
+        -:  809:
+        -:  810:        /* Short options */
+        8:  811:        const char *p = arg + 1;
+        8:  812:        int stop = 0;
+       16:  813:        while (*p && !stop) {
+        8:  814:            switch (*p) {
+    #####:  815:            case 'E': g.opt_E = 1; break;
+    #####:  816:            case 'F': g.opt_F = 1; break;
+        2:  817:            case 'c': g.opt_c = 1; break;
+        2:  818:            case 'i': g.opt_i = 1; break;
+    #####:  819:            case 'l': g.opt_l = 1; break;
+        2:  820:            case 'n': g.opt_n = 1; break;
+    #####:  821:            case 'q': g.opt_q = 1; break;
+    #####:  822:            case 's': g.opt_s = 1; break;
+        2:  823:            case 'v': g.opt_v = 1; break;
+    #####:  824:            case 'w': g.opt_w = 1; break;
+    #####:  825:            case 'r': case 'R': g.opt_r = 1; break;
+    #####:  826:            case 'o': g.opt_o = 1; break;
+    #####:  827:            case 'm': {
+    #####:  828:                const char *val;
+    #####:  829:                if (p[1]) { val = p + 1; stop = 1; }
+        -:  830:                else {
+    #####:  831:                    if (++i >= argc) {
+    #####:  832:                        err_msg("grep", "-m requires argument"); return 2;
+        -:  833:                    }
+    #####:  834:                    val = argv[i];
+        -:  835:                }
+    #####:  836:                g.max_matches = atoi(val);
+    #####:  837:                stop = 1;
+    #####:  838:                break;
+        -:  839:            }
+    #####:  840:            case 'A': {
+    #####:  841:                const char *val;
+    #####:  842:                if (p[1]) { val = p + 1; stop = 1; }
+        -:  843:                else {
+    #####:  844:                    if (++i >= argc) {
+    #####:  845:                        err_msg("grep", "-A requires argument"); return 2;
+        -:  846:                    }
+    #####:  847:                    val = argv[i];
+        -:  848:                }
+    #####:  849:                g.context_A = atoi(val);
+    #####:  850:                stop = 1;
+    #####:  851:                break;
+        -:  852:            }
+    #####:  853:            case 'B': {
+    #####:  854:                const char *val;
+    #####:  855:                if (p[1]) { val = p + 1; stop = 1; }
+        -:  856:                else {
+    #####:  857:                    if (++i >= argc) {
+    #####:  858:                        err_msg("grep", "-B requires argument"); return 2;
+        -:  859:                    }
+    #####:  860:                    val = argv[i];
+        -:  861:                }
+    #####:  862:                g.context_B = atoi(val);
+    #####:  863:                stop = 1;
+    #####:  864:                break;
+        -:  865:            }
+    #####:  866:            case 'C': {
+    #####:  867:                const char *val;
+    #####:  868:                if (p[1]) { val = p + 1; stop = 1; }
+        -:  869:                else {
+    #####:  870:                    if (++i >= argc) {
+    #####:  871:                        err_msg("grep", "-C requires argument"); return 2;
+        -:  872:                    }
+    #####:  873:                    val = argv[i];
+        -:  874:                }
+    #####:  875:                g.context_A = g.context_B = atoi(val);
+    #####:  876:                stop = 1;
+    #####:  877:                break;
+        -:  878:            }
+    #####:  879:            case 'e': {
+    #####:  880:                const char *pat;
+    #####:  881:                if (p[1]) {
+    #####:  882:                    pat = p + 1;
+    #####:  883:                    p += strlen(p) - 1;
+        -:  884:                } else {
+    #####:  885:                    if (++i >= argc) {
+    #####:  886:                        err_msg("grep", "-e requires argument");
+    #####:  887:                        return 2;
+        -:  888:                    }
+    #####:  889:                    pat = argv[i];
+        -:  890:                }
+    #####:  891:                if (g.npatterns >= MAX_PATTERNS) {
+    #####:  892:                    err_msg("grep", "too many patterns");
+    #####:  893:                    return 2;
+        -:  894:                }
+    #####:  895:                g.patterns[g.npatterns] = strdup(pat);
+    #####:  896:                if (!g.patterns[g.npatterns]) {
+    #####:  897:                    err_msg("grep", "out of memory");
+    #####:  898:                    return 2;
+        -:  899:                }
+    #####:  900:                g.npatterns++;
+    #####:  901:                stop = 1;
+    #####:  902:                break;
+        -:  903:            }
+    #####:  904:            case 'f': {
+    #####:  905:                const char *fname;
+    #####:  906:                if (p[1]) {
+    #####:  907:                    fname = p + 1;
+    #####:  908:                    p += strlen(p) - 1;
+        -:  909:                } else {
+    #####:  910:                    if (++i >= argc) {
+    #####:  911:                        err_msg("grep", "-f requires argument");
+    #####:  912:                        return 2;
+        -:  913:                    }
+    #####:  914:                    fname = argv[i];
+        -:  915:                }
+    #####:  916:                if (load_pattern_file(fname, &g) != 0)
+        -:  917:                    return 2;
+        -:  918:                stop = 1;
+        -:  919:                break;
+        -:  920:            }
+    #####:  921:            default:
+    #####:  922:                err_msg("grep", "unrecognized option '-%c'", *p);
+    #####:  923:                return 2;
+        -:  924:            }
+        8:  925:            p++;
+        -:  926:        }
+        -:  927:    }
+        -:  928:
+        -:  929:    /* If no -e/-f patterns, first non-option arg is the pattern */
+       28:  930:    if (g.npatterns == 0) {
+       28:  931:        if (i >= argc) {
+    #####:  932:            err_usage("grep", "[-EFciln qsvwrR] [-e PAT] [-f FILE] PATTERN [FILE...]");
+    #####:  933:            return 2;
+        -:  934:        }
+       28:  935:        g.patterns[0] = strdup(argv[i]);
+       28:  936:        if (!g.patterns[0]) {
+    #####:  937:            err_msg("grep", "out of memory");
+    #####:  938:            return 2;
+        -:  939:        }
+       28:  940:        g.npatterns = 1;
+       28:  941:        i++;
+        -:  942:    }
+        -:  943:
+        -:  944:    /* Compile regex patterns unless -F */
+       28:  945:    if (!g.opt_F) {
+       28:  946:        if (compile_patterns(&g) != 0) {
+    #####:  947:            grep_opts_free(&g);
+    #####:  948:            return 2;
+        -:  949:        }
+        -:  950:    }
+        -:  951:
+       28:  952:    int final_result = 1; /* no match yet */
+       28:  953:    int nfiles = argc - i;
+        -:  954:
+       28:  955:    if (nfiles == 0) {
+        -:  956:        /* Read from stdin */
+       12:  957:        int r = grep_stream(stdin, NULL, 0, &g);
+       12:  958:        if (r == 0)
+        -:  959:            final_result = 0;
+        2:  960:        else if (r == 2)
+    #####:  961:            final_result = 2;
+        -:  962:    } else {
+       16:  963:        int show_fname = (nfiles > 1) || g.opt_r;
+       32:  964:        for (int j = i; j < argc; j++) {
+       16:  965:            int r = grep_path(argv[j], show_fname, &g);
+       16:  966:            if (r == 0)
+        -:  967:                final_result = 0;
+        4:  968:            else if (r == 2 && final_result != 0)
+    #####:  969:                final_result = 2;
+        -:  970:        }
+        -:  971:    }
+        -:  972:
+       28:  973:    grep_opts_free(&g);
+        -:  974:
+      28*:  975:    if (g.opt_q && g_matched_any)
+    #####:  976:        return 0;
+        -:  977:    return final_result;
+        -:  978:}

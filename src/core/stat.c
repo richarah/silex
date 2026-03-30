@@ -1,9 +1,8 @@
-/* stat.c -- stat builtin: display file or file system status */
+/* stat.c — stat builtin: display file or file system status */
 
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
-/* stat.c — stat builtin */
 
 #include "../util/error.h"
 #include "../util/strbuf.h"

@@ -1,0 +1,79 @@
+        -:    0:Source:src/shell/job.c
+        -:    1:#ifndef _POSIX_C_SOURCE
+        -:    2:#define _POSIX_C_SOURCE 200809L
+        -:    3:#endif
+        -:    4:
+        -:    5:#include "job.h"
+        -:    6:
+        -:    7:#include <stdlib.h>
+        -:    8:#include <sys/wait.h>
+        -:    9:
+      463:   10:void job_list_init(job_list_t *jl)
+        -:   11:{
+      463:   12:    jl->head = NULL;
+      463:   13:}
+        -:   14:
+        2:   15:job_t *job_add(job_list_t *jl, pid_t pid)
+        -:   16:{
+        2:   17:    job_t *j = malloc(sizeof(job_t));
+        2:   18:    if (!j)
+    #####:   19:        return NULL;
+        2:   20:    j->pid    = pid;
+        2:   21:    j->status = 0;
+        2:   22:    j->done   = 0;
+        2:   23:    j->next   = jl->head;
+        2:   24:    jl->head  = j;
+        2:   25:    return j;
+        -:   26:}
+        -:   27:
+        2:   28:int job_wait(job_list_t *jl, pid_t pid)
+        -:   29:{
+        2:   30:    int status = 0;
+        -:   31:    pid_t ret;
+        -:   32:
+        -:   33:    do {
+        2:   34:        ret = waitpid(pid, &status, 0);
+        2:   35:    } while (ret == -1);  /* retry on EINTR */
+        -:   36:
+        -:   37:    /* Update the matching job entry */
+       2*:   38:    for (job_t *j = jl->head; j != NULL; j = j->next) {
+        2:   39:        if (j->pid == pid) {
+        2:   40:            j->status = status;
+        2:   41:            j->done   = 1;
+        2:   42:            break;
+        -:   43:        }
+        -:   44:    }
+        -:   45:
+        2:   46:    if (WIFEXITED(status))
+        2:   47:        return WEXITSTATUS(status);
+    #####:   48:    if (WIFSIGNALED(status))
+    #####:   49:        return 128 + WTERMSIG(status);
+    #####:   50:    return 1;
+        -:   51:}
+        -:   52:
+    #####:   53:void job_reap(job_list_t *jl)
+        -:   54:{
+        -:   55:    int status;
+        -:   56:    pid_t pid;
+        -:   57:
+        -:   58:    for (;;) {
+    #####:   59:        pid = waitpid(-1, &status, WNOHANG);
+    #####:   60:        if (pid <= 0)
+    #####:   61:            break;
+        -:   62:
+    #####:   63:        for (job_t *j = jl->head; j != NULL; j = j->next) {
+    #####:   64:            if (j->pid == pid) {
+    #####:   65:                j->status = status;
+    #####:   66:                j->done   = 1;
+    #####:   67:                break;
+        -:   68:            }
+        -:   69:        }
+        -:   70:    }
+    #####:   71:}
+        -:   72:
+    #####:   73:pid_t job_last_bg(job_list_t *jl)
+        -:   74:{
+    #####:   75:    if (!jl->head)
+    #####:   76:        return 0;
+    #####:   77:    return jl->head->pid;
+        -:   78:}

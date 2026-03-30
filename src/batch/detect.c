@@ -1,3 +1,5 @@
+/* detect.c — io_uring and inotify capability detection */
+
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif

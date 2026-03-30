@@ -1,0 +1,236 @@
+        -:    0:Source:src/core/realpath.c
+        -:    1:/* realpath.c — realpath builtin: resolve symlinks and canonicalize path */
+        -:    2:
+        -:    3:#ifndef _POSIX_C_SOURCE
+        -:    4:#define _POSIX_C_SOURCE 200809L
+        -:    5:#endif
+        -:    6:
+        -:    7:#include "../util/path.h"
+        -:    8:#include "../util/error.h"
+        -:    9:
+        -:   10:#include <errno.h>
+        -:   11:#include <limits.h>
+        -:   12:#include <stdio.h>
+        -:   13:#include <stdlib.h>
+        -:   14:#include <string.h>
+        -:   15:#include <sys/stat.h>
+        -:   16:#include <unistd.h>
+        -:   17:
+        -:   18:/* Compute a relative path from 'base_dir' to 'target' (both must be
+        -:   19: * absolute canonicalized paths).  Result written into 'out'. */
+    #####:   20:static void make_relative(const char *base_dir, const char *target,
+        -:   21:                           char *out, size_t outsz)
+        -:   22:{
+        -:   23:    /* Count common prefix components */
+    #####:   24:    const char *b = base_dir;
+    #####:   25:    const char *t = target;
+        -:   26:
+        -:   27:    /* Find longest common prefix at component boundary */
+    #####:   28:    const char *b_last_match = b;
+    #####:   29:    const char *t_last_match = t;
+        -:   30:
+    #####:   31:    while (*b && *t) {
+    #####:   32:        if (*b == *t) {
+    #####:   33:            if (*b == '/') {
+    #####:   34:                b_last_match = b;
+    #####:   35:                t_last_match = t;
+        -:   36:            }
+    #####:   37:            b++; t++;
+        -:   38:        } else {
+    #####:   39:            break;
+        -:   40:        }
+        -:   41:    }
+    #####:   42:    if ((*b == '\0' || *b == '/') && (*t == '\0' || *t == '/')) {
+    #####:   43:        b_last_match = b;
+    #####:   44:        t_last_match = t;
+        -:   45:    }
+        -:   46:
+        -:   47:    /* Consume the common prefix slash */
+    #####:   48:    b = b_last_match;
+    #####:   49:    t = t_last_match;
+    #####:   50:    if (*b == '/') b++;
+    #####:   51:    if (*t == '/') t++;
+        -:   52:
+        -:   53:    /* Count remaining components in base (each needs a '..') */
+        -:   54:    char result[PATH_MAX * 2];
+    #####:   55:    size_t pos = 0;
+    #####:   56:    result[0] = '\0';
+        -:   57:
+    #####:   58:    const char *p = b;
+    #####:   59:    while (*p) {
+    #####:   60:        if (*p == '/') {
+    #####:   61:            if (pos + 3 >= sizeof(result)) break;
+    #####:   62:            result[pos++] = '.';
+    #####:   63:            result[pos++] = '.';
+    #####:   64:            result[pos++] = '/';
+        -:   65:        }
+    #####:   66:        p++;
+        -:   67:    }
+    #####:   68:    if (*b != '\0') {
+        -:   69:        /* There was at least one remaining component */
+    #####:   70:        if (pos + 3 >= sizeof(result)) {
+    #####:   71:            snprintf(out, outsz, "%s", target);
+    #####:   72:            return;
+        -:   73:        }
+    #####:   74:        result[pos++] = '.';
+    #####:   75:        result[pos++] = '.';
+    #####:   76:        if (*t != '\0') result[pos++] = '/';
+        -:   77:    }
+        -:   78:
+        -:   79:    /* Append remaining target components */
+    #####:   80:    size_t tlen = strlen(t);
+    #####:   81:    if (pos + tlen + 1 <= sizeof(result)) {
+    #####:   82:        memcpy(result + pos, t, tlen);
+    #####:   83:        pos += tlen;
+        -:   84:    }
+    #####:   85:    result[pos] = '\0';
+        -:   86:
+    #####:   87:    if (pos == 0) {
+    #####:   88:        result[0] = '.';
+    #####:   89:        result[1] = '\0';
+        -:   90:    }
+        -:   91:
+    #####:   92:    snprintf(out, outsz, "%s", result);
+        -:   93:}
+        -:   94:
+    #####:   95:int applet_realpath(int argc, char **argv)
+        -:   96:{
+    #####:   97:    int opt_m           = 0;   /* -m: allow nonexistent components */
+    #####:   98:    const char *rel_to  = NULL; /* --relative-to=DIR */
+        -:   99:    int i;
+        -:  100:
+    #####:  101:    for (i = 1; i < argc; i++) {
+    #####:  102:        const char *arg = argv[i];
+    #####:  103:        if (strcmp(arg, "--") == 0) { i++; break; }
+        -:  104:
+    #####:  105:        if (strncmp(arg, "--relative-to=", 14) == 0) {
+    #####:  106:            rel_to = arg + 14;
+    #####:  107:            continue;
+        -:  108:        }
+    #####:  109:        if (strcmp(arg, "--relative-to") == 0) {
+    #####:  110:            i++;
+    #####:  111:            if (i >= argc) {
+    #####:  112:                err_usage("realpath", "[-m] [--relative-to=DIR] PATH...");
+    #####:  113:                return 1;
+        -:  114:            }
+    #####:  115:            rel_to = argv[i];
+    #####:  116:            continue;
+        -:  117:        }
+        -:  118:
+    #####:  119:        if (arg[0] != '-' || arg[1] == '\0') break;
+        -:  120:
+    #####:  121:        const char *p = arg + 1;
+    #####:  122:        while (*p) {
+    #####:  123:            switch (*p) {
+    #####:  124:            case 'm': opt_m = 1; break;
+    #####:  125:            case 'e': break; /* -e: all components must exist (default) */
+    #####:  126:            case 'L': break; /* -L: logical (resolve relative to cwd, no POSIX) */
+    #####:  127:            case 'P': break; /* -P: physical (default) */
+    #####:  128:            case 'q': break; /* -q: quiet */
+    #####:  129:            case 's': break; /* -s: no symlink resolution (GNU ext) */
+    #####:  130:            case 'z': break; /* -z: NUL separated output */
+    #####:  131:            default:
+    #####:  132:                err_msg("realpath", "unrecognized option '-%c'", *p);
+    #####:  133:                err_usage("realpath", "[-m] [--relative-to=DIR] PATH...");
+    #####:  134:                return 1;
+        -:  135:            }
+    #####:  136:            p++;
+        -:  137:        }
+        -:  138:    }
+        -:  139:
+    #####:  140:    if (i >= argc) {
+    #####:  141:        err_usage("realpath", "[-m] [--relative-to=DIR] PATH...");
+    #####:  142:        return 1;
+        -:  143:    }
+        -:  144:
+        -:  145:    /* Resolve --relative-to base */
+        -:  146:    char rel_base[PATH_MAX];
+    #####:  147:    if (rel_to) {
+    #####:  148:        if (!path_canon(rel_to, rel_base)) {
+        -:  149:            /* Try making absolute relative to cwd */
+        -:  150:            char cwd[PATH_MAX];
+    #####:  151:            if (!getcwd(cwd, sizeof(cwd))) {
+    #####:  152:                err_msg("realpath", "cannot get cwd");
+    #####:  153:                return 1;
+        -:  154:            }
+    #####:  155:            if (rel_to[0] == '/') {
+    #####:  156:                strncpy(rel_base, rel_to, sizeof(rel_base) - 1);
+    #####:  157:                rel_base[sizeof(rel_base) - 1] = '\0';
+        -:  158:            } else {
+    #####:  159:                int n = snprintf(rel_base, sizeof(rel_base), "%s/", cwd);
+    #####:  160:                if (n > 0 && (size_t)n < sizeof(rel_base))
+    #####:  161:                    strncat(rel_base + n, rel_to, sizeof(rel_base) - (size_t)n - 1);
+        -:  162:            }
+        -:  163:        }
+        -:  164:    }
+        -:  165:
+    #####:  166:    int ret = 0;
+    #####:  167:    for (; i < argc; i++) {
+        -:  168:        char resolved[PATH_MAX];
+        -:  169:
+    #####:  170:        if (opt_m) {
+        -:  171:            /* Allow nonexistent: manually canonicalize without stat */
+        -:  172:            /* Build absolute path first */
+        -:  173:            char abs[PATH_MAX * 2];
+    #####:  174:            if (argv[i][0] == '/') {
+    #####:  175:                snprintf(abs, sizeof(abs), "%s", argv[i]);
+        -:  176:            } else {
+        -:  177:                char cwd[PATH_MAX];
+    #####:  178:                if (!getcwd(cwd, sizeof(cwd))) {
+    #####:  179:                    err_msg("realpath", "cannot get cwd");
+    #####:  180:                    ret = 1;
+    #####:  181:                    continue;
+        -:  182:                }
+    #####:  183:                snprintf(abs, sizeof(abs), "%s/%s", cwd, argv[i]);
+        -:  184:            }
+        -:  185:            /* Normalize . and .. without resolving symlinks */
+        -:  186:            char norm[PATH_MAX * 2];
+    #####:  187:            size_t npos = 0;
+    #####:  188:            norm[npos++] = '/';
+    #####:  189:            const char *p = abs;
+    #####:  190:            if (*p == '/') p++;
+    #####:  191:            while (*p) {
+    #####:  192:                const char *end = p;
+    #####:  193:                while (*end && *end != '/') end++;
+    #####:  194:                size_t complen = (size_t)(end - p);
+    #####:  195:                if (complen == 0 || (complen == 1 && p[0] == '.')) {
+        -:  196:                    /* skip */
+    #####:  197:                } else if (complen == 2 && p[0] == '.' && p[1] == '.') {
+        -:  198:                    /* go up */
+    #####:  199:                    if (npos > 1) {
+    #####:  200:                        npos--;
+    #####:  201:                        while (npos > 1 && norm[npos - 1] != '/') npos--;
+        -:  202:                    }
+        -:  203:                } else {
+    #####:  204:                    if (npos > 1) norm[npos++] = '/';
+    #####:  205:                    if (npos + complen < sizeof(norm)) {
+    #####:  206:                        memcpy(norm + npos, p, complen);
+    #####:  207:                        npos += complen;
+        -:  208:                    }
+        -:  209:                }
+    #####:  210:                p = end;
+    #####:  211:                if (*p == '/') p++;
+        -:  212:            }
+    #####:  213:            norm[npos] = '\0';
+    #####:  214:            if (npos == 0) { norm[0] = '/'; norm[1] = '\0'; }
+    #####:  215:            strncpy(resolved, norm, sizeof(resolved) - 1);
+    #####:  216:            resolved[sizeof(resolved) - 1] = '\0';
+        -:  217:        } else {
+    #####:  218:            if (!path_canon(argv[i], resolved)) {
+    #####:  219:                err_msg("realpath", "%s: %s", argv[i], strerror(errno));
+    #####:  220:                ret = 1;
+    #####:  221:                continue;
+        -:  222:            }
+        -:  223:        }
+        -:  224:
+    #####:  225:        if (rel_to) {
+        -:  226:            char out[PATH_MAX * 2];
+    #####:  227:            make_relative(rel_base, resolved, out, sizeof(out));
+    #####:  228:            puts(out);
+        -:  229:        } else {
+    #####:  230:            puts(resolved);
+        -:  231:        }
+        -:  232:    }
+        -:  233:
+    #####:  234:    return ret;
+        -:  235:}

@@ -1,3 +1,5 @@
+/* redirect.c — shell I/O redirection: open, dup2, and heredoc */
+
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
@@ -244,6 +246,16 @@ void redirect_restore(redirect_ctx_t *ctx)
             dup2(s->saved_fd, s->orig_fd);
             close(s->saved_fd);
         }
+    }
+    ctx->saved = NULL;
+}
+
+void redirect_commit(redirect_ctx_t *ctx)
+{
+    /* Commit redirections permanently: close saved fds without restoring */
+    for (saved_fd_t *s = ctx->saved; s != NULL; s = s->next) {
+        if (s->saved_fd >= 0)
+            close(s->saved_fd);
     }
     ctx->saved = NULL;
 }

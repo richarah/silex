@@ -1,0 +1,91 @@
+        -:    0:Source:src/batch/fallback.c
+        -:    1:#ifndef _POSIX_C_SOURCE
+        -:    2:#define _POSIX_C_SOURCE 200809L
+        -:    3:#endif
+        -:    4:
+        -:    5:/*
+        -:    6: * fallback.c — sequential execution of batch operations.
+        -:    7: *
+        -:    8: * This is the always-correct fallback path used when io_uring is
+        -:    9: * unavailable, the operations are not independent, or the uring path
+        -:   10: * fails at setup time.
+        -:   11: *
+        -:   12: * Supported operations:
+        -:   13: *   BATCH_MKDIR   — mkdir(path, mode)
+        -:   14: *   BATCH_CHMOD   — chmod(path, mode)
+        -:   15: *   BATCH_TOUCH   — utimensat(AT_FDCWD, path, NULL, 0)  [set to current time]
+        -:   16: *   BATCH_RM_FILE — unlink(path)
+        -:   17: */
+        -:   18:
+        -:   19:#include "fallback.h"
+        -:   20:
+        -:   21:#include <errno.h>
+        -:   22:#include <fcntl.h>
+        -:   23:#include <stdio.h>
+        -:   24:#include <string.h>
+        -:   25:#include <sys/stat.h>
+        -:   26:#include <sys/types.h>
+        -:   27:#include <unistd.h>
+        -:   28:
+        -:   29:/* utimensat is declared in <sys/stat.h> with _POSIX_C_SOURCE 200809L */
+        -:   30:#include <fcntl.h>   /* AT_FDCWD */
+        -:   31:
+    #####:   32:int fallback_exec_seq(batch_op_t *ops)
+        -:   33:{
+    #####:   34:    int ret = 0;
+        -:   35:
+    #####:   36:    for (batch_op_t *op = ops; op; op = op->next) {
+    #####:   37:        if (!op->path) {
+    #####:   38:            fprintf(stderr, "matchbox: batch op with NULL path; skipping\n");
+    #####:   39:            ret = 1;
+    #####:   40:            continue;
+        -:   41:        }
+        -:   42:
+    #####:   43:        switch (op->type) {
+        -:   44:
+    #####:   45:        case BATCH_MKDIR:
+    #####:   46:            if (mkdir(op->path, (mode_t)op->mode) != 0) {
+    #####:   47:                fprintf(stderr, "matchbox: batch mkdir '%s': %s\n",
+    #####:   48:                        op->path, strerror(errno));
+    #####:   49:                ret = 1;
+        -:   50:            }
+    #####:   51:            break;
+        -:   52:
+    #####:   53:        case BATCH_CHMOD:
+    #####:   54:            if (chmod(op->path, (mode_t)op->mode) != 0) {
+    #####:   55:                fprintf(stderr, "matchbox: batch chmod '%s': %s\n",
+    #####:   56:                        op->path, strerror(errno));
+    #####:   57:                ret = 1;
+        -:   58:            }
+    #####:   59:            break;
+        -:   60:
+    #####:   61:        case BATCH_TOUCH:
+        -:   62:            /*
+        -:   63:             * Pass NULL for the times array: POSIX specifies that this sets
+        -:   64:             * both atime and mtime to the current time.
+        -:   65:             */
+    #####:   66:            if (utimensat(AT_FDCWD, op->path, NULL, 0) != 0) {
+    #####:   67:                fprintf(stderr, "matchbox: batch touch '%s': %s\n",
+    #####:   68:                        op->path, strerror(errno));
+    #####:   69:                ret = 1;
+        -:   70:            }
+    #####:   71:            break;
+        -:   72:
+    #####:   73:        case BATCH_RM_FILE:
+    #####:   74:            if (unlink(op->path) != 0) {
+    #####:   75:                fprintf(stderr, "matchbox: batch rm '%s': %s\n",
+    #####:   76:                        op->path, strerror(errno));
+    #####:   77:                ret = 1;
+        -:   78:            }
+    #####:   79:            break;
+        -:   80:
+    #####:   81:        default:
+    #####:   82:            fprintf(stderr, "matchbox: unknown batch op type %d for '%s'; skipping\n",
+    #####:   83:                    (int)op->type, op->path);
+    #####:   84:            ret = 1;
+    #####:   85:            break;
+        -:   86:        }
+        -:   87:    }
+        -:   88:
+    #####:   89:    return ret;
+        -:   90:}

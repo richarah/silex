@@ -1,3 +1,5 @@
+/* exec.c — shell command execution: builtins, pipelines, and fork/exec */
+
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
@@ -369,15 +371,31 @@ int exec_simple_cmd(shell_ctx_t *sh, char **words, char **assigns, redir_t *redi
     int argc = 0;
     while (expanded[argc]) argc++;
 
+    /* MATCHBOX_TRACE: print command before execution */
+    if (sh->trace_level >= 1) {
+        fputs("+ ", stderr);
+        for (int ti = 0; ti < argc; ti++) {
+            if (ti) fputc(' ', stderr);
+            fputs(expanded[ti], stderr);
+        }
+        fputc('\n', stderr);
+    }
+
     /* 3. Check for shell-internal builtin (high priority — run in-process) */
     shell_builtin_fn sfn = find_shell_builtin(cmd);
     if (sfn) {
+        if (sh->trace_level >= 2)
+            fprintf(stderr, "+ [builtin] %s\n", cmd);
         redirect_ctx_t rctx;
         rctx.saved = NULL;
         rctx.error = 0;
         if (redirs) redirect_apply(sh, redirs, &rctx);
         cmd_rc = sfn(sh, argc, expanded);
-        if (redirs) redirect_restore(&rctx);
+        /* 'exec' with no command: redirections are permanent (not restored) */
+        if (strcmp(cmd, "exec") == 0 && argc == 1)
+            redirect_commit(&rctx);
+        else if (redirs)
+            redirect_restore(&rctx);
         goto cmd_done;
     }
 
@@ -506,7 +524,7 @@ int exec_simple_cmd(shell_ctx_t *sh, char **words, char **assigns, redir_t *redi
     /* Parent */
     {
     int status;
-    waitpid(pid, &status, 0);
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
     if (WIFEXITED(status))
         cmd_rc = WEXITSTATUS(status);
     else if (WIFSIGNALED(status))
@@ -534,6 +552,38 @@ cmd_done:
  * exec_pipeline
  * ------------------------------------------------------------------------- */
 
+/*
+ * Pipe optimisation: eliminate useless `cat` (no args, no flags, no redirs)
+ * at the head of a pipeline.
+ *
+ *   cat | APPLET args…     →  APPLET args…   (APPLET reads stdin directly)
+ *
+ * Only the literal word "cat" is matched; $VAR expansion is intentionally
+ * skipped here to keep the fast path cheap.  Stages with file arguments or
+ * flags are left unchanged because the semantics differ (multiple-file grep
+ * adds filename prefixes, etc.).
+ */
+static void pipeline_elim_trivial_cat(node_t **stages, int *nstages)
+{
+    if (*nstages < 2) return;
+
+    node_t *s0 = stages[0];
+    if (s0->type != N_CMD) return;
+    /* Must have no env-prefix assignments */
+    if (s0->u.cmd.assigns && s0->u.cmd.assigns[0]) return;
+    /* Must have no redirections */
+    if (s0->u.cmd.redirs) return;
+    /* Must have exactly one word: "cat" */
+    if (!s0->u.cmd.words || !s0->u.cmd.words[0]) return;
+    if (s0->u.cmd.words[1] != NULL) return;          /* has args/files */
+    if (strcmp(s0->u.cmd.words[0], "cat") != 0) return;
+
+    /* Safe: remove stage 0, shift remaining stages down */
+    (*nstages)--;
+    for (int i = 0; i < *nstages; i++)
+        stages[i] = stages[i + 1];
+}
+
 int exec_pipeline(shell_ctx_t *sh, node_t *node)
 {
     /* Collect pipeline stages into a flat array */
@@ -547,6 +597,9 @@ int exec_pipeline(shell_ctx_t *sh, node_t *node)
     }
     if (cur && nstages < 255)
         stages[nstages++] = cur;
+
+    /* Pipe optimisation: eliminate trivial `cat | ...` */
+    pipeline_elim_trivial_cat(stages, &nstages);
 
     if (nstages == 1)
         return exec_node(sh, stages[0]);
@@ -947,6 +1000,12 @@ static int exec_builtin_exit(shell_ctx_t *sh, int argc, char **argv)
     int code = sh->last_exit;
     if (argc >= 2)
         code = atoi(argv[1]);
+    /* Fire EXIT trap (traps[0]) before exiting; clear first to prevent re-entry */
+    const char *exit_action = sh->traps[0].action;
+    if (exit_action != SHELL_TRAP_DEFAULT && exit_action[0] != '\0') {
+        sh->traps[0].action = SHELL_TRAP_DEFAULT;
+        shell_run_string(sh, exit_action);
+    }
     exit(code);
     return code; /* unreachable */
 }
@@ -1377,6 +1436,21 @@ static int exec_builtin_test(shell_ctx_t *sh, int argc, char **argv)
         if (strcmp(op, "-ge") == 0) return (atol(a) >= atol(b)) ? 0 : 1;
         if (strcmp(op, "-a") == 0)  return (a[0] && b[0]) ? 0 : 1;
         if (strcmp(op, "-o") == 0)  return (a[0] || b[0]) ? 0 : 1;
+        if (strcmp(op, "-nt") == 0) {
+            struct stat sa, sb2;
+            if (stat(a, &sa) != 0 || stat(b, &sb2) != 0) return 1;
+            return (sa.st_mtime > sb2.st_mtime) ? 0 : 1;
+        }
+        if (strcmp(op, "-ot") == 0) {
+            struct stat sa, sb2;
+            if (stat(a, &sa) != 0 || stat(b, &sb2) != 0) return 1;
+            return (sa.st_mtime < sb2.st_mtime) ? 0 : 1;
+        }
+        if (strcmp(op, "-ef") == 0) {
+            struct stat sa, sb2;
+            if (stat(a, &sa) != 0 || stat(b, &sb2) != 0) return 1;
+            return (sa.st_dev == sb2.st_dev && sa.st_ino == sb2.st_ino) ? 0 : 1;
+        }
     }
 
     /* Unary with 3 args: ! -z str */

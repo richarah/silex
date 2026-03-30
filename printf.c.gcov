@@ -1,0 +1,405 @@
+        -:    0:Source:src/core/printf.c
+        -:    1:/* printf.c -- printf builtin: format and print data */
+        -:    2:
+        -:    3:#ifndef _POSIX_C_SOURCE
+        -:    4:#define _POSIX_C_SOURCE 200809L
+        -:    5:#endif
+        -:    6:/* printf.c — printf builtin */
+        -:    7:
+        -:    8:#include "../util/error.h"
+        -:    9:
+        -:   10:#include <ctype.h>
+        -:   11:#include <errno.h>
+        -:   12:#include <stdio.h>
+        -:   13:#include <stdlib.h>
+        -:   14:#include <string.h>
+        -:   15:
+        -:   16:/* ------------------------------------------------------------------ */
+        -:   17:/* Escape processing (%b)                                               */
+        -:   18:/* ------------------------------------------------------------------ */
+        -:   19:
+        -:   20:/*
+        -:   21: * Parse a \NNN octal escape at *p (p points at first digit after '\').
+        -:   22: * Advances *p past consumed digits (up to 3).
+        -:   23: */
+    #####:   24:static unsigned char parse_octal_b(const char **p)
+        -:   25:{
+    #####:   26:    unsigned val = 0;
+    #####:   27:    int d = 0;
+    #####:   28:    while (d < 3 && **p >= '0' && **p <= '7') {
+    #####:   29:        val = val * 8 + (unsigned)(**p - '0');
+    #####:   30:        (*p)++;
+    #####:   31:        d++;
+        -:   32:    }
+    #####:   33:    return (unsigned char)val;
+        -:   34:}
+        -:   35:
+        -:   36:/*
+        -:   37: * Parse a \xHH hex escape at *p (p points at first hex char after 'x').
+        -:   38: * Advances *p past consumed digits (up to 2).
+        -:   39: */
+    #####:   40:static unsigned char parse_hex_b(const char **p)
+        -:   41:{
+    #####:   42:    unsigned val = 0;
+    #####:   43:    int d = 0;
+    #####:   44:    while (d < 2) {
+    #####:   45:        char c = **p;
+    #####:   46:        if (c >= '0' && c <= '9')      val = val * 16 + (unsigned)(c - '0');
+    #####:   47:        else if (c >= 'a' && c <= 'f') val = val * 16 + (unsigned)(c - 'a' + 10);
+    #####:   48:        else if (c >= 'A' && c <= 'F') val = val * 16 + (unsigned)(c - 'A' + 10);
+        -:   49:        else break;
+    #####:   50:        (*p)++;
+    #####:   51:        d++;
+        -:   52:    }
+    #####:   53:    return (unsigned char)val;
+        -:   54:}
+        -:   55:
+        -:   56:/*
+        -:   57: * Print string s with %b escape processing.
+        -:   58: * Returns 1 if \c was encountered (stop all output), 0 otherwise.
+        -:   59: */
+    #####:   60:static int print_b_string(const char *s)
+        -:   61:{
+    #####:   62:    for (const char *p = s; *p; p++) {
+    #####:   63:        if (*p != '\\') {
+    #####:   64:            putchar(*p);
+    #####:   65:            continue;
+        -:   66:        }
+    #####:   67:        p++;
+    #####:   68:        switch (*p) {
+    #####:   69:        case 'a':  putchar('\a'); break;
+    #####:   70:        case 'b':  putchar('\b'); break;
+    #####:   71:        case 'c':  return 1; /* stop output */
+    #####:   72:        case 'e':  putchar('\033'); break;
+    #####:   73:        case 'f':  putchar('\f'); break;
+    #####:   74:        case 'n':  putchar('\n'); break;
+    #####:   75:        case 'r':  putchar('\r'); break;
+    #####:   76:        case 't':  putchar('\t'); break;
+    #####:   77:        case 'v':  putchar('\v'); break;
+    #####:   78:        case '\\': putchar('\\'); break;
+    #####:   79:        case '0': {
+        -:   80:            /* \0NNN — octal, up to 3 digits after '0' */
+    #####:   81:            const char *q = p + 1;
+    #####:   82:            unsigned char c = parse_octal_b(&q);
+    #####:   83:            putchar((int)(unsigned char)c);
+    #####:   84:            p = q - 1;
+    #####:   85:            break;
+        -:   86:        }
+    #####:   87:        case 'x': {
+    #####:   88:            const char *q = p + 1;
+    #####:   89:            unsigned char c = parse_hex_b(&q);
+    #####:   90:            putchar((int)(unsigned char)c);
+    #####:   91:            p = q - 1;
+    #####:   92:            break;
+        -:   93:        }
+    #####:   94:        case '1': case '2': case '3': case '4':
+        -:   95:        case '5': case '6': case '7': {
+        -:   96:            /* \NNN where N is 1-7 (non-zero start) */
+    #####:   97:            const char *q = p;
+    #####:   98:            unsigned char c = parse_octal_b(&q);
+    #####:   99:            putchar((int)(unsigned char)c);
+    #####:  100:            p = q - 1;
+    #####:  101:            break;
+        -:  102:        }
+    #####:  103:        default:
+    #####:  104:            putchar('\\');
+    #####:  105:            putchar(*p);
+    #####:  106:            break;
+        -:  107:        }
+        -:  108:    }
+    #####:  109:    return 0;
+        -:  110:}
+        -:  111:
+        -:  112:/* ------------------------------------------------------------------ */
+        -:  113:/* Shell quoting (%q)                                                    */
+        -:  114:/* ------------------------------------------------------------------ */
+        -:  115:
+        -:  116:/*
+        -:  117: * Print s with shell quoting: wrap in single quotes, escaping internal
+        -:  118: * single quotes as '\''.
+        -:  119: */
+    #####:  120:static void print_q_string(const char *s)
+        -:  121:{
+        -:  122:    /* Check if empty — needs quoting */
+    #####:  123:    if (*s == '\0') {
+    #####:  124:        fputs("''", stdout);
+    #####:  125:        return;
+        -:  126:    }
+        -:  127:
+        -:  128:    /* Check if all chars are safe (alnum, _, -, ., /) */
+    #####:  129:    int needs_quoting = 0;
+    #####:  130:    for (const char *p = s; *p; p++) {
+    #####:  131:        if (!isalnum((unsigned char)*p) &&
+    #####:  132:            *p != '_' && *p != '-' && *p != '.' && *p != '/') {
+    #####:  133:            needs_quoting = 1;
+    #####:  134:            break;
+        -:  135:        }
+        -:  136:    }
+        -:  137:
+    #####:  138:    if (!needs_quoting) {
+    #####:  139:        fputs(s, stdout);
+    #####:  140:        return;
+        -:  141:    }
+        -:  142:
+    #####:  143:    putchar('\'');
+    #####:  144:    for (const char *p = s; *p; p++) {
+    #####:  145:        if (*p == '\'') {
+        -:  146:            /* End current quote, output escaped single quote, resume */
+    #####:  147:            fputs("'\\''", stdout);
+        -:  148:        } else {
+    #####:  149:            putchar(*p);
+        -:  150:        }
+        -:  151:    }
+    #####:  152:    putchar('\'');
+        -:  153:}
+        -:  154:
+        -:  155:/* ------------------------------------------------------------------ */
+        -:  156:/* Convert argument to number                                           */
+        -:  157:/* ------------------------------------------------------------------ */
+        -:  158:
+        -:  159:/*
+        -:  160: * Parse an argument to a numeric format spec.
+        -:  161: * Handles decimal, octal (0NNN), hex (0xHH), and character ('X).
+        -:  162: */
+    #####:  163:static long long arg_to_llong(const char *s)
+        -:  164:{
+    #####:  165:    if (!s || *s == '\0') return 0;
+    #####:  166:    if (s[0] == '\'' || s[0] == '"') {
+        -:  167:        /* Character constant: value of next character */
+    #####:  168:        return (long long)(unsigned char)s[1];
+        -:  169:    }
+        -:  170:    char *endp;
+    #####:  171:    errno = 0;
+    #####:  172:    long long val = strtoll(s, &endp, 0);
+    #####:  173:    if (errno != 0 || endp == s) {
+        -:  174:        /* Try as unsigned */
+    #####:  175:        unsigned long long uval = strtoull(s, &endp, 0);
+    #####:  176:        if (endp != s)
+    #####:  177:            return (long long)uval;
+        -:  178:        /* Non-numeric: return 0, print warning */
+    #####:  179:        fprintf(stderr, "matchbox: printf: '%s': invalid number\n", s);
+    #####:  180:        return 0;
+        -:  181:    }
+    #####:  182:    return val;
+        -:  183:}
+        -:  184:
+    #####:  185:static unsigned long long arg_to_ullong(const char *s)
+        -:  186:{
+    #####:  187:    if (!s || *s == '\0') return 0;
+    #####:  188:    if (s[0] == '\'' || s[0] == '"')
+    #####:  189:        return (unsigned long long)(unsigned char)s[1];
+        -:  190:    char *endp;
+    #####:  191:    errno = 0;
+    #####:  192:    unsigned long long val = strtoull(s, &endp, 0);
+    #####:  193:    if (errno != 0 || endp == s) {
+    #####:  194:        fprintf(stderr, "matchbox: printf: '%s': invalid number\n", s);
+    #####:  195:        return 0;
+        -:  196:    }
+    #####:  197:    return val;
+        -:  198:}
+        -:  199:
+    #####:  200:static double arg_to_double(const char *s)
+        -:  201:{
+    #####:  202:    if (!s || *s == '\0') return 0.0;
+    #####:  203:    if (s[0] == '\'' || s[0] == '"')
+    #####:  204:        return (double)(unsigned char)s[1];
+        -:  205:    char *endp;
+    #####:  206:    double val = strtod(s, &endp);
+    #####:  207:    if (endp == s) {
+    #####:  208:        fprintf(stderr, "matchbox: printf: '%s': invalid number\n", s);
+    #####:  209:        return 0.0;
+        -:  210:    }
+    #####:  211:    return val;
+        -:  212:}
+        -:  213:
+        -:  214:/* ------------------------------------------------------------------ */
+        -:  215:/* Process one format string pass with argv[arg_start..argc-1]         */
+        -:  216:/* ------------------------------------------------------------------ */
+        -:  217:
+        -:  218:/*
+        -:  219: * Process the format string once, consuming arguments starting at *arg_idx.
+        -:  220: * *arg_idx is updated.  Returns 1 if \c was seen (stop all output), 0 otherwise.
+        -:  221: */
+    #####:  222:static int process_format(const char *fmt, int argc, char **argv,
+        -:  223:                            int *arg_idx)
+        -:  224:{
+    #####:  225:    for (const char *p = fmt; *p; p++) {
+    #####:  226:        if (*p == '\\') {
+    #####:  227:            p++;
+    #####:  228:            switch (*p) {
+    #####:  229:            case 'a':  putchar('\a'); break;
+    #####:  230:            case 'b':  putchar('\b'); break;
+    #####:  231:            case 'c':  return 1;
+    #####:  232:            case 'e':  putchar('\033'); break;
+    #####:  233:            case 'f':  putchar('\f'); break;
+    #####:  234:            case 'n':  putchar('\n'); break;
+    #####:  235:            case 'r':  putchar('\r'); break;
+    #####:  236:            case 't':  putchar('\t'); break;
+    #####:  237:            case 'v':  putchar('\v'); break;
+    #####:  238:            case '\\': putchar('\\'); break;
+    #####:  239:            case '0': case '1': case '2': case '3':
+        -:  240:            case '4': case '5': case '6': case '7': {
+    #####:  241:                const char *q = p;
+    #####:  242:                unsigned char c = parse_octal_b(&q);
+    #####:  243:                putchar((int)(unsigned char)c);
+    #####:  244:                p = q - 1;
+    #####:  245:                break;
+        -:  246:            }
+    #####:  247:            case 'x': {
+    #####:  248:                const char *q = p + 1;
+    #####:  249:                unsigned char c = parse_hex_b(&q);
+    #####:  250:                putchar((int)(unsigned char)c);
+    #####:  251:                p = q - 1;
+    #####:  252:                break;
+        -:  253:            }
+    #####:  254:            case '"':  putchar('"'); break;
+    #####:  255:            case '\'': putchar('\''); break;
+    #####:  256:            case '\0':
+    #####:  257:                putchar('\\');
+    #####:  258:                p--;
+    #####:  259:                break;
+    #####:  260:            default:
+    #####:  261:                putchar('\\');
+    #####:  262:                putchar(*p);
+    #####:  263:                break;
+        -:  264:            }
+    #####:  265:            continue;
+        -:  266:        }
+        -:  267:
+    #####:  268:        if (*p != '%') {
+    #####:  269:            putchar(*p);
+    #####:  270:            continue;
+        -:  271:        }
+        -:  272:
+    #####:  273:        p++; /* skip '%' */
+    #####:  274:        if (*p == '\0') break;
+        -:  275:
+    #####:  276:        if (*p == '%') {
+    #####:  277:            putchar('%');
+    #####:  278:            continue;
+        -:  279:        }
+        -:  280:
+        -:  281:        /* Build a format spec to pass to printf family */
+        -:  282:        char spec[64];
+    #####:  283:        int  si = 0;
+    #####:  284:        spec[si++] = '%';
+        -:  285:
+        -:  286:        /* Flags: -, +, space, #, 0 */
+    #####:  287:        while (*p == '-' || *p == '+' || *p == ' ' ||
+    #####:  288:               *p == '#' || *p == '0') {
+    #####:  289:            if (si < (int)sizeof(spec) - 5) spec[si++] = *p;
+    #####:  290:            p++;
+        -:  291:        }
+        -:  292:
+        -:  293:        /* Width */
+    #####:  294:        while (isdigit((unsigned char)*p)) {
+    #####:  295:            if (si < (int)sizeof(spec) - 5) spec[si++] = *p;
+    #####:  296:            p++;
+        -:  297:        }
+        -:  298:
+        -:  299:        /* Precision */
+    #####:  300:        if (*p == '.') {
+    #####:  301:            if (si < (int)sizeof(spec) - 5) spec[si++] = '.';
+    #####:  302:            p++;
+    #####:  303:            while (isdigit((unsigned char)*p)) {
+    #####:  304:                if (si < (int)sizeof(spec) - 5) spec[si++] = *p;
+    #####:  305:                p++;
+        -:  306:            }
+        -:  307:        }
+        -:  308:
+    #####:  309:        const char *arg = (*arg_idx < argc) ? argv[(*arg_idx)++] : "";
+        -:  310:
+    #####:  311:        switch (*p) {
+    #####:  312:        case 'd': case 'i': {
+    #####:  313:            long long val = arg_to_llong(arg);
+    #####:  314:            spec[si++] = 'l'; spec[si++] = 'l';
+    #####:  315:            spec[si++] = *p; spec[si] = '\0';
+    #####:  316:            printf(spec, val); /* NOLINT(clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling) */
+    #####:  317:            break;
+        -:  318:        }
+    #####:  319:        case 'o': case 'u': case 'x': case 'X': {
+    #####:  320:            unsigned long long val = arg_to_ullong(arg);
+    #####:  321:            spec[si++] = 'l'; spec[si++] = 'l';
+    #####:  322:            spec[si++] = *p; spec[si] = '\0';
+    #####:  323:            printf(spec, val);
+    #####:  324:            break;
+        -:  325:        }
+    #####:  326:        case 'f': case 'F': case 'e': case 'E': case 'g': case 'G': {
+    #####:  327:            double val = arg_to_double(arg);
+    #####:  328:            spec[si++] = *p; spec[si] = '\0';
+    #####:  329:            printf(spec, val);
+    #####:  330:            break;
+        -:  331:        }
+    #####:  332:        case 'c': {
+    #####:  333:            unsigned char c = (arg[0] != '\0') ? (unsigned char)arg[0] : 0;
+    #####:  334:            spec[si++] = 'c'; spec[si] = '\0';
+    #####:  335:            printf(spec, (int)c);
+    #####:  336:            break;
+        -:  337:        }
+    #####:  338:        case 's': {
+    #####:  339:            spec[si++] = 's'; spec[si] = '\0';
+    #####:  340:            printf(spec, arg);
+    #####:  341:            break;
+        -:  342:        }
+    #####:  343:        case 'b': {
+        -:  344:            /* %b: like 's' but with escape processing; ignore width/prec
+        -:  345:             * for simplicity (GNU behaviour for %b ignores them too) */
+    #####:  346:            if (print_b_string(arg))
+    #####:  347:                return 1;
+    #####:  348:            break;
+        -:  349:        }
+    #####:  350:        case 'q': {
+        -:  351:            /* %q: shell-quoted string */
+    #####:  352:            print_q_string(arg);
+    #####:  353:            break;
+        -:  354:        }
+    #####:  355:        default:
+        -:  356:            /* Unknown: print literally */
+    #####:  357:            putchar('%');
+        -:  358:            /* Re-emit the spec chars we consumed */
+    #####:  359:            for (int k = 1; k < si; k++) putchar(spec[k]);
+    #####:  360:            putchar(*p);
+    #####:  361:            break;
+        -:  362:        }
+        -:  363:    }
+    #####:  364:    return 0;
+        -:  365:}
+        -:  366:
+        -:  367:/* ------------------------------------------------------------------ */
+        -:  368:/* Main                                                                  */
+        -:  369:/* ------------------------------------------------------------------ */
+        -:  370:
+    #####:  371:int applet_printf(int argc, char **argv)
+        -:  372:{
+    #####:  373:    if (argc < 2) {
+    #####:  374:        err_usage("printf", "FORMAT [ARG...]");
+    #####:  375:        return 1;
+        -:  376:    }
+        -:  377:
+    #####:  378:    const char *fmt = argv[1];
+    #####:  379:    int first_arg = 2;
+        -:  380:
+        -:  381:    /* If there are no extra arguments, run once */
+    #####:  382:    if (first_arg >= argc) {
+    #####:  383:        int arg_idx = first_arg;
+    #####:  384:        process_format(fmt, argc, argv, &arg_idx);
+    #####:  385:        return 0;
+        -:  386:    }
+        -:  387:
+        -:  388:    /*
+        -:  389:     * GNU behaviour: repeat FORMAT until all arguments are consumed.
+        -:  390:     * If FORMAT consumes no arguments, run once to avoid infinite loop.
+        -:  391:     */
+    #####:  392:    int arg_idx = first_arg;
+    #####:  393:    while (arg_idx < argc) {
+    #####:  394:        int prev = arg_idx;
+    #####:  395:        if (process_format(fmt, argc, argv, &arg_idx))
+    #####:  396:            break; /* \c seen */
+    #####:  397:        if (arg_idx == prev) {
+        -:  398:            /* No argument was consumed this pass — run once and stop */
+    #####:  399:            break;
+        -:  400:        }
+        -:  401:    }
+        -:  402:
+    #####:  403:    return 0;
+        -:  404:}

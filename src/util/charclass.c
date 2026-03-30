@@ -1,9 +1,4 @@
-/* charclass.c — ASCII character classification table definition
- *
- * Entries marked with a combination of CC_* flags from charclass.h.
- * Unset bytes default to 0 (no classification).
- * Uses C99/C11 designated initialisers; non-designated entries are zero.
- */
+/* charclass.c — ASCII character classification table definition */
 
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L

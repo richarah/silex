@@ -3,7 +3,7 @@
 # Auto-detects compiler and libc; defaults to glibc if musl-gcc is absent.
 
 # --- Version ------------------------------------------------------------------
-VERSION := 0.1.0
+VERSION := 0.2.0
 
 # --- Compiler selection -------------------------------------------------------
 MUSL_GCC := $(shell command -v musl-gcc 2>/dev/null)
@@ -24,8 +24,8 @@ else
     LTO_FLAG = -flto=auto
 endif
 
-# --- Architecture baseline (overridable: make release MARCH=x86-64-v2) -------
-MARCH ?= x86-64-v3
+# --- Architecture baseline (overridable: make MARCH=x86-64-v3 for newer CPUs) -
+MARCH ?= x86-64-v2
 ARCH  := $(shell uname -m)
 
 ifeq ($(ARCH),x86_64)
@@ -172,7 +172,12 @@ CORE_SRCS = \
     $(SRCDIR)/core/install.c \
     $(SRCDIR)/core/tr.c \
     $(SRCDIR)/core/cut.c \
-    $(SRCDIR)/core/sh.c
+    $(SRCDIR)/core/sh.c \
+    $(SRCDIR)/core/mktemp.c \
+    $(SRCDIR)/core/tee.c \
+    $(SRCDIR)/core/env.c \
+    $(SRCDIR)/core/realpath.c \
+    $(SRCDIR)/core/sha256sum.c
 
 SHELL_SRCS = \
     $(SRCDIR)/shell/vars.c \
@@ -396,6 +401,31 @@ stress-test: $(TARGET)
 edge-test: $(TARGET)
 	@echo "=== Running edge case tests ==="
 	@bash tests/edge/run_edge.sh $(TARGET)
+
+check: $(TARGET)
+	@sh check.sh
+
+# --- Module build -------------------------------------------------------------
+MODULES_DIR = modules
+MODULES_OUT = build/modules
+MODULE_SRCS = $(wildcard $(MODULES_DIR)/*.c)
+MODULE_SOS  = $(patsubst $(MODULES_DIR)/%.c,$(MODULES_OUT)/%.so,$(MODULE_SRCS))
+
+modules: $(MODULE_SOS)
+
+$(MODULES_OUT)/%.so: $(MODULES_DIR)/%.c matchbox_module.h | $(MODULES_OUT)
+	$(CC) -shared -fPIC -O2 -std=c11 -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE \
+	      -I$(SRCDIR) -o $@ $<
+
+$(MODULES_OUT):
+	mkdir -p $(MODULES_OUT)
+
+install-modules: modules
+	install -d $(DESTDIR)/usr/lib/matchbox/modules
+	install -m 644 $(MODULES_OUT)/*.so $(DESTDIR)/usr/lib/matchbox/modules/
+
+clean-modules:
+	rm -rf $(MODULES_OUT)
 
 # --- Fuzz targets -------------------------------------------------------------
 FUZZ_CC    = clang

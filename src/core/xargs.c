@@ -9,6 +9,7 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -32,6 +33,9 @@ typedef struct {
     char   opt_d;       /* -d DELIM: custom delimiter */
     int    has_d;       /* -d was specified */
     long   arg_max;     /* sysconf(_SC_ARG_MAX) - headroom */
+    const char *opt_a;  /* -a FILE: read args from file instead of stdin */
+    int    opt_L;       /* -L N: max lines per invocation */
+    long   opt_s;       /* -s N: max command-line bytes (overrides arg_max) */
 } xargs_opts_t;
 
 /* ------------------------------------------------------------------ */
@@ -431,6 +435,38 @@ int applet_xargs(int argc, char **argv)
             continue;
         }
 
+        if (strcmp(arg, "-a") == 0) {
+            if (++i >= argc) { err_msg("xargs", "-a requires argument"); return 1; }
+            opts.opt_a = argv[i];
+            continue;
+        }
+        if (strncmp(arg, "-a", 2) == 0 && arg[2]) {
+            opts.opt_a = arg + 2;
+            continue;
+        }
+
+        if (strcmp(arg, "-L") == 0) {
+            if (++i >= argc) { err_msg("xargs", "-L requires argument"); return 1; }
+            opts.opt_L = (int)strtol(argv[i], NULL, 10);
+            if (opts.opt_L < 1) { err_msg("xargs", "-L must be >= 1"); return 1; }
+            continue;
+        }
+        if (strncmp(arg, "-L", 2) == 0 && arg[2]) {
+            opts.opt_L = (int)strtol(arg + 2, NULL, 10);
+            if (opts.opt_L < 1) { err_msg("xargs", "-L must be >= 1"); return 1; }
+            continue;
+        }
+
+        if (strcmp(arg, "-s") == 0) {
+            if (++i >= argc) { err_msg("xargs", "-s requires argument"); return 1; }
+            opts.opt_s = strtol(argv[i], NULL, 10);
+            continue;
+        }
+        if (strncmp(arg, "-s", 2) == 0 && arg[2]) {
+            opts.opt_s = strtol(arg + 2, NULL, 10);
+            continue;
+        }
+
         if (arg[0] == '-') {
             err_msg("xargs", "unrecognized option '%s'", arg);
             return 1;
@@ -438,6 +474,29 @@ int applet_xargs(int argc, char **argv)
 
         break; /* rest is command + args */
     }
+
+    /* -a FILE: redirect stdin from file */
+    if (opts.opt_a) {
+        int fd = open(opts.opt_a, O_RDONLY);
+        if (fd < 0) {
+            err_msg("xargs", "cannot open '%s'", opts.opt_a);
+            return 1;
+        }
+        if (dup2(fd, STDIN_FILENO) < 0) {
+            err_msg("xargs", "dup2 failed");
+            close(fd);
+            return 1;
+        }
+        close(fd);
+    }
+
+    /* -s N: override arg_max */
+    if (opts.opt_s > 0 && opts.opt_s < opts.arg_max)
+        opts.arg_max = opts.opt_s;
+
+    /* -L N: treat like -n N (max items per invocation; simple impl) */
+    if (opts.opt_L > 0 && opts.opt_L < opts.opt_n)
+        opts.opt_n = opts.opt_L;
 
     /* Command template from remaining argv */
     int    cmd_argc;

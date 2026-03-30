@@ -1,3 +1,5 @@
+/* expand.c — word expansion: parameter, arithmetic, and glob */
+
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
@@ -309,6 +311,47 @@ static char *expand_braced(shell_ctx_t *sh, const char *body)
     int colon = (*p == ':');
     if (colon) p++;
 
+    /* ${VAR:offset}, ${VAR:offset:length} — substring (ksh/bash extension)
+     * Triggered when: digit after ':', OR space(s) then '-' digit (${x: -3}). */
+    if (colon) {
+        const char *q = p;
+        int had_space = 0;
+        while (*q == ' ') { had_space = 1; q++; }
+        if (is_digit((unsigned char)*q) ||
+            (had_space && *q == '-' && is_digit((unsigned char)*(q + 1)))) {
+            p = q;
+            int neg_off = (*p == '-');
+            if (neg_off) p++;
+            long off = 0;
+            while (is_digit((unsigned char)*p))
+                off = off * 10 + ((unsigned char)*p++ - '0');
+            if (neg_off) off = -off;
+            long sub_len = 0;
+            int has_len = 0;
+            if (*p == ':') {
+                p++;
+                has_len = 1;
+                int neg_len = (*p == '-');
+                if (neg_len) p++;
+                long ll = 0;
+                while (is_digit((unsigned char)*p))
+                    ll = ll * 10 + ((unsigned char)*p++ - '0');
+                sub_len = neg_len ? -ll : ll;
+            }
+            const char *s = val ? val : "";
+            long slen = (long)strlen(s);
+            if (off < 0) { off += slen; if (off < 0) off = 0; }
+            if (off > slen) off = slen;
+            long avail = slen - off;
+            if (has_len) {
+                if (sub_len >= 0 && sub_len < avail) avail = sub_len;
+                else if (sub_len < 0) avail += sub_len;  /* trim from end */
+            }
+            if (avail <= 0) return arena_strdup(&sh->parse_arena, "");
+            return arena_strndup(&sh->parse_arena, s + off, (size_t)avail);
+        }
+    }
+
     char op = *p;
     if (op == '-' || op == '+' || op == '=' || op == '?') {
         p++; /* skip operator char */
@@ -554,6 +597,7 @@ static void arith_skip_ws(arith_ctx_t *ac)
 }
 
 static long arith_expr(arith_ctx_t *ac);
+static long arith_ternary(arith_ctx_t *ac);
 
 static long arith_primary(arith_ctx_t *ac)
 {
@@ -567,6 +611,36 @@ static long arith_primary(arith_ctx_t *ac)
         arith_skip_ws(ac);
         if (ac->src[ac->pos] == ')') ac->pos++;
         return v;
+    }
+
+    /* Pre-increment: ++var */
+    if (c == '+' && ac->src[ac->pos + 1] == '+') {
+        ac->pos += 2;
+        arith_skip_ws(ac);
+        char preinc_name[256]; size_t preinc_ni = 0;
+        while (is_name_char((unsigned char)ac->src[ac->pos]) && preinc_ni < sizeof(preinc_name)-1)
+            preinc_name[preinc_ni++] = ac->src[ac->pos++];
+        preinc_name[preinc_ni] = '\0';
+        const char *preinc_v = sh_getvar(ac->sh, preinc_name);
+        long preinc_nv = (preinc_v ? atol(preinc_v) : 0L) + 1;
+        char preinc_nb[32]; snprintf(preinc_nb, sizeof(preinc_nb), "%ld", preinc_nv);
+        vars_set(&ac->sh->vars, preinc_name, preinc_nb);
+        return preinc_nv;
+    }
+
+    /* Pre-decrement: --var */
+    if (c == '-' && ac->src[ac->pos + 1] == '-') {
+        ac->pos += 2;
+        arith_skip_ws(ac);
+        char predec_name[256]; size_t predec_ni = 0;
+        while (is_name_char((unsigned char)ac->src[ac->pos]) && predec_ni < sizeof(predec_name)-1)
+            predec_name[predec_ni++] = ac->src[ac->pos++];
+        predec_name[predec_ni] = '\0';
+        const char *predec_v = sh_getvar(ac->sh, predec_name);
+        long predec_nv = (predec_v ? atol(predec_v) : 0L) - 1;
+        char predec_nb[32]; snprintf(predec_nb, sizeof(predec_nb), "%ld", predec_nv);
+        vars_set(&ac->sh->vars, predec_name, predec_nb);
+        return predec_nv;
     }
 
     /* Unary minus */
@@ -585,6 +659,12 @@ static long arith_primary(arith_ctx_t *ac)
     if (c == '!') {
         ac->pos++;
         return !arith_primary(ac);
+    }
+
+    /* Bitwise NOT */
+    if (c == '~') {
+        ac->pos++;
+        return ~arith_primary(ac);
     }
 
     /* $ variable reference */
@@ -609,7 +689,7 @@ static long arith_primary(arith_ctx_t *ac)
         return v ? atol(v) : 0L;
     }
 
-    /* Identifier without $ (direct variable name) */
+    /* Identifier without $ (direct variable name) — may have assignment op */
     if (is_alpha_underscore((unsigned char)c)) {
         char namebuf[256];
         size_t ni = 0;
@@ -617,8 +697,72 @@ static long arith_primary(arith_ctx_t *ac)
                ni < sizeof(namebuf) - 1)
             namebuf[ni++] = ac->src[ac->pos++];
         namebuf[ni] = '\0';
+
+        arith_skip_ws(ac);
+        const char *p = ac->src + ac->pos;
+
+        /* Post-increment: var++ */
+        if (p[0] == '+' && p[1] == '+') {
+            ac->pos += 2;
+            const char *postinc_v = sh_getvar(ac->sh, namebuf);
+            long postinc_old = postinc_v ? atol(postinc_v) : 0L;
+            char postinc_nb[32]; snprintf(postinc_nb, sizeof(postinc_nb), "%ld", postinc_old + 1);
+            vars_set(&ac->sh->vars, namebuf, postinc_nb);
+            return postinc_old;
+        }
+        /* Post-decrement: var-- */
+        if (p[0] == '-' && p[1] == '-') {
+            ac->pos += 2;
+            const char *postdec_v = sh_getvar(ac->sh, namebuf);
+            long postdec_old = postdec_v ? atol(postdec_v) : 0L;
+            char postdec_nb[32]; snprintf(postdec_nb, sizeof(postdec_nb), "%ld", postdec_old - 1);
+            vars_set(&ac->sh->vars, namebuf, postdec_nb);
+            return postdec_old;
+        }
+
+        /* Detect assignment operator */
+        int assign_op = 0;
+        size_t oplen  = 0;
+        if      (p[0]=='<' && p[1]=='<' && p[2]=='=') { assign_op=6;  oplen=3; }
+        else if (p[0]=='>' && p[1]=='>' && p[2]=='=') { assign_op=7;  oplen=3; }
+        else if (p[0]=='+' && p[1]=='=')              { assign_op=1;  oplen=2; }
+        else if (p[0]=='-' && p[1]=='=')              { assign_op=2;  oplen=2; }
+        else if (p[0]=='*' && p[1]=='=')              { assign_op=3;  oplen=2; }
+        else if (p[0]=='/' && p[1]=='=')              { assign_op=4;  oplen=2; }
+        else if (p[0]=='%' && p[1]=='=')              { assign_op=5;  oplen=2; }
+        else if (p[0]=='&' && p[1]=='=')              { assign_op=8;  oplen=2; }
+        else if (p[0]=='|' && p[1]=='=')              { assign_op=9;  oplen=2; }
+        else if (p[0]=='^' && p[1]=='=')              { assign_op=10; oplen=2; }
+        else if (p[0]=='=' && p[1]!='=')              { assign_op=11; oplen=1; }
+
         const char *v = sh_getvar(ac->sh, namebuf);
-        return v ? atol(v) : 0L;
+        long cur_val  = v ? atol(v) : 0L;
+
+        if (assign_op) {
+            ac->pos += oplen;
+            long rhs = arith_ternary(ac);  /* comma has lower precedence than assignment */
+            long result;
+            switch (assign_op) {
+            case 1:  result = cur_val + rhs; break;
+            case 2:  result = cur_val - rhs; break;
+            case 3:  result = cur_val * rhs; break;
+            case 4:  result = rhs ? cur_val / rhs : 0; break;
+            case 5:  result = rhs ? cur_val % rhs : 0; break;
+            case 6:  result = cur_val << rhs; break;
+            case 7:  result = cur_val >> rhs; break;
+            case 8:  result = cur_val & rhs; break;
+            case 9:  result = cur_val | rhs; break;
+            case 10: result = cur_val ^ rhs; break;
+            case 11: result = rhs; break;
+            default: result = cur_val;
+            }
+            char numbuf[32];
+            snprintf(numbuf, sizeof(numbuf), "%ld", result);
+            vars_set(&ac->sh->vars, namebuf, numbuf);
+            return result;
+        }
+
+        return cur_val;
     }
 
     /* Integer literal (decimal, hex, octal) */
@@ -658,6 +802,8 @@ static long arith_add(arith_ctx_t *ac)
         /* Do not consume a -- or ++ by accident; stop at two consecutive */
         if (op == '-' && ac->src[ac->pos + 1] == '-') break;
         if (op == '+' && ac->src[ac->pos + 1] == '+') break;
+        /* Do not consume += or -= (compound assignment) */
+        if (ac->src[ac->pos + 1] == '=') break;
         ac->pos++;
         long right = arith_mul(ac);
         if (op == '+') left += right;
@@ -666,23 +812,44 @@ static long arith_add(arith_ctx_t *ac)
     return left;
 }
 
-static long arith_cmp(arith_ctx_t *ac)
+static long arith_shift(arith_ctx_t *ac)
 {
     long left = arith_add(ac);
     for (;;) {
         arith_skip_ws(ac);
         const char *p = ac->src + ac->pos;
+        if (p[0] == '<' && p[1] == '<' && p[2] != '=') {
+            ac->pos += 2;
+            long right = arith_add(ac);
+            left = (right >= 0 && right < 64) ? (left << right) : 0;
+        } else if (p[0] == '>' && p[1] == '>' && p[2] != '=') {
+            ac->pos += 2;
+            long right = arith_add(ac);
+            left = (right >= 0 && right < 64) ? (left >> right) : 0;
+        } else {
+            break;
+        }
+    }
+    return left;
+}
+
+static long arith_cmp(arith_ctx_t *ac)
+{
+    long left = arith_shift(ac);
+    for (;;) {
+        arith_skip_ws(ac);
+        const char *p = ac->src + ac->pos;
         int op = 0;
         size_t oplen = 1;
-        if (p[0] == '<' && p[1] == '=') { op = 1; oplen = 2; }
-        else if (p[0] == '>' && p[1] == '=') { op = 2; oplen = 2; }
-        else if (p[0] == '<') { op = 3; oplen = 1; }
-        else if (p[0] == '>') { op = 4; oplen = 1; }
-        else if (p[0] == '=' && p[1] == '=') { op = 5; oplen = 2; }
-        else if (p[0] == '!' && p[1] == '=') { op = 6; oplen = 2; }
+        if      (p[0]=='<' && p[1]=='=')              { op=1; oplen=2; }
+        else if (p[0]=='>' && p[1]=='=')              { op=2; oplen=2; }
+        else if (p[0]=='<' && p[1]!='<' && p[1]!='=') { op=3; oplen=1; }
+        else if (p[0]=='>' && p[1]!='>' && p[1]!='=') { op=4; oplen=1; }
+        else if (p[0]=='=' && p[1]=='=')              { op=5; oplen=2; }
+        else if (p[0]=='!' && p[1]=='=')              { op=6; oplen=2; }
         else break;
         ac->pos += oplen;
-        long right = arith_add(ac);
+        long right = arith_shift(ac);
         switch (op) {
         case 1: left = left <= right; break;
         case 2: left = left >= right; break;
@@ -695,9 +862,111 @@ static long arith_cmp(arith_ctx_t *ac)
     return left;
 }
 
+static long arith_bitand(arith_ctx_t *ac)
+{
+    long left = arith_cmp(ac);
+    for (;;) {
+        arith_skip_ws(ac);
+        const char *p = ac->src + ac->pos;
+        if (p[0] == '&' && p[1] != '&' && p[1] != '=') {
+            ac->pos++;
+            left &= arith_cmp(ac);
+        } else {
+            break;
+        }
+    }
+    return left;
+}
+
+static long arith_bitxor(arith_ctx_t *ac)
+{
+    long left = arith_bitand(ac);
+    for (;;) {
+        arith_skip_ws(ac);
+        const char *p = ac->src + ac->pos;
+        if (p[0] == '^' && p[1] != '=') {
+            ac->pos++;
+            left ^= arith_bitand(ac);
+        } else {
+            break;
+        }
+    }
+    return left;
+}
+
+static long arith_bitor(arith_ctx_t *ac)
+{
+    long left = arith_bitxor(ac);
+    for (;;) {
+        arith_skip_ws(ac);
+        const char *p = ac->src + ac->pos;
+        if (p[0] == '|' && p[1] != '|' && p[1] != '=') {
+            ac->pos++;
+            left |= arith_bitxor(ac);
+        } else {
+            break;
+        }
+    }
+    return left;
+}
+
+static long arith_logical_and(arith_ctx_t *ac)
+{
+    long left = arith_bitor(ac);
+    for (;;) {
+        arith_skip_ws(ac);
+        const char *p = ac->src + ac->pos;
+        if (p[0] == '&' && p[1] == '&') {
+            ac->pos += 2;
+            long right = arith_bitor(ac);
+            left = (left && right) ? 1 : 0;
+        } else {
+            break;
+        }
+    }
+    return left;
+}
+
+static long arith_logical_or(arith_ctx_t *ac)
+{
+    long left = arith_logical_and(ac);
+    for (;;) {
+        arith_skip_ws(ac);
+        const char *p = ac->src + ac->pos;
+        if (p[0] == '|' && p[1] == '|') {
+            ac->pos += 2;
+            long right = arith_logical_and(ac);
+            left = (left || right) ? 1 : 0;
+        } else {
+            break;
+        }
+    }
+    return left;
+}
+
+static long arith_ternary(arith_ctx_t *ac)
+{
+    long cond = arith_logical_or(ac);
+    arith_skip_ws(ac);
+    if (ac->src[ac->pos] != '?') return cond;
+    ac->pos++;  /* consume '?' */
+    long t = arith_ternary(ac);  /* true branch (right-associative) */
+    arith_skip_ws(ac);
+    if (ac->src[ac->pos] == ':') ac->pos++;  /* consume ':' */
+    long f = arith_ternary(ac);  /* false branch */
+    return cond ? t : f;
+}
+
 static long arith_expr(arith_ctx_t *ac)
 {
-    return arith_cmp(ac);
+    long val = arith_ternary(ac);
+    arith_skip_ws(ac);
+    while (ac->src[ac->pos] == ',') {
+        ac->pos++;
+        val = arith_ternary(ac);
+        arith_skip_ws(ac);
+    }
+    return val;
 }
 
 long expand_arith(shell_ctx_t *sh, const char *expr)

@@ -59,7 +59,9 @@ got=$("$MB" -c 'export MY_VAR=exported; sh -c "echo \$MY_VAR"')
 check "export: variable visible in child sh" "$got" "exported"
 
 # --- Non-exported variable: not visible in child ---
-got=$("$MB" -c 'NOT_EXPORTED=hidden; sh -c "echo ${NOT_EXPORTED:-absent}"')
+# Use escaped $ so the outer shell does NOT expand ${NOT_EXPORTED:-absent};
+# the child sh receives it literally and sees an unset variable → absent.
+got=$("$MB" -c 'NOT_EXPORTED=hidden; sh -c "echo \${NOT_EXPORTED:-absent}"')
 check "unexported variable not visible in child" "$got" "absent"
 
 # --- readonly: assignment rejected ---
@@ -176,6 +178,24 @@ check "empty variable: \${EMPTY}suffix" "$got" "suffix"
 # --- Variable in arithmetic ---
 got=$("$MB" -c 'N=10; echo $((N + 5))')
 check "variable in arithmetic \$((N + 5))" "$got" "15"
+
+# --- F-03: IFS edge cases ---
+
+# IFS= read: preserves leading/trailing whitespace
+got=$("$MB" -c 'printf "  hello world  \n" | { IFS= read line; echo "$line"; }')
+check "IFS= read: preserves leading whitespace" "$got" "  hello world  "
+
+# IFS='' read: same as IFS= (no splitting, preserves whitespace)
+got=$("$MB" -c 'printf "  hello world  \n" | { IFS="" read x; echo "$x"; }')
+check 'IFS="" read: preserves leading whitespace' "$got" "  hello world  "
+
+# unset IFS: default splitting on whitespace
+got=$("$MB" -c 'unset IFS; V="a  b  c"; for w in $V; do printf "%s\n" "$w"; done')
+check "unset IFS: default whitespace splitting" "$got" "$(printf 'a\nb\nc')"
+
+# IFS=: custom separator in for loop
+got=$("$MB" -c 'IFS=:; V="x:y:z"; for w in $V; do printf "%s\n" "$w"; done')
+check "IFS=: splits on colon in for loop" "$got" "$(printf 'x\ny\nz')"
 
 echo ""
 echo "variable tests: $PASS passed, $FAIL failed"

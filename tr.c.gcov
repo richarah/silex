@@ -1,0 +1,378 @@
+        -:    0:Source:src/core/tr.c
+        -:    1:/* tr.c -- tr builtin: translate or delete characters */
+        -:    2:
+        -:    3:#ifndef _POSIX_C_SOURCE
+        -:    4:#define _POSIX_C_SOURCE 200809L
+        -:    5:#endif
+        -:    6:/* tr.c — tr builtin */
+        -:    7:
+        -:    8:#include "../util/error.h"
+        -:    9:
+        -:   10:#include <ctype.h>
+        -:   11:#include <stdio.h>
+        -:   12:#include <stdlib.h>
+        -:   13:#include <string.h>
+        -:   14:
+        -:   15:/* ------------------------------------------------------------------ */
+        -:   16:/* Set representation                                                   */
+        -:   17:/* ------------------------------------------------------------------ */
+        -:   18:
+        -:   19:#define SET_SIZE 256
+        -:   20:
+        -:   21:/*
+        -:   22: * A character set: flags[c] is 1 if byte c is a member.
+        -:   23: * seq[] holds the ordered expansion used for translation mapping.
+        -:   24: */
+        -:   25:typedef struct {
+        -:   26:    unsigned char flags[SET_SIZE];
+        -:   27:    unsigned char seq[SET_SIZE];
+        -:   28:    int           nseq;
+        -:   29:} charset_t;
+        -:   30:
+        -:   31:/* ------------------------------------------------------------------ */
+        -:   32:/* POSIX class helpers                                                   */
+        -:   33:/* ------------------------------------------------------------------ */
+        -:   34:
+        -:   35:typedef int (*class_fn)(int);
+        -:   36:
+        -:   37:static const struct {
+        -:   38:    const char *name;
+        -:   39:    class_fn    fn;
+        -:   40:} posix_classes[] = {
+        -:   41:    { "alpha",  isalpha  },
+        -:   42:    { "digit",  isdigit  },
+        -:   43:    { "alnum",  isalnum  },
+        -:   44:    { "upper",  isupper  },
+        -:   45:    { "lower",  islower  },
+        -:   46:    { "space",  isspace  },
+        -:   47:    { "blank",  isblank  },
+        -:   48:    { "print",  isprint  },
+        -:   49:    { "punct",  ispunct  },
+        -:   50:    { "cntrl",  iscntrl  },
+        -:   51:    { "graph",  isgraph  },
+        -:   52:    { "xdigit", isxdigit },
+        -:   53:    { NULL, NULL }
+        -:   54:};
+        -:   55:
+        -:   56:/*
+        -:   57: * Try to expand a POSIX class starting at *p, where *p points to ':'
+        -:   58: * (i.e. we have already consumed '[').
+        -:   59: * Appends matching bytes to cs.
+        -:   60: * On success, advances *p past the closing ']' of ':]'.
+        -:   61: * Returns 0 on success, -1 on unrecognised class.
+        -:   62: */
+    #####:   63:static int expand_posix_class(const char **p, charset_t *cs)
+        -:   64:{
+    #####:   65:    const char *start = *p + 1; /* skip ':' */
+    #####:   66:    const char *end   = strstr(start, ":]");
+    #####:   67:    if (!end) return -1;
+        -:   68:
+    #####:   69:    size_t len = (size_t)(end - start);
+        -:   70:    char name[32];
+    #####:   71:    if (len == 0 || len >= sizeof(name)) return -1;
+    #####:   72:    memcpy(name, start, len);
+    #####:   73:    name[len] = '\0';
+        -:   74:
+    #####:   75:    for (int k = 0; posix_classes[k].name; k++) {
+    #####:   76:        if (strcmp(name, posix_classes[k].name) == 0) {
+    #####:   77:            for (int c = 0; c < SET_SIZE; c++) {
+    #####:   78:                if (posix_classes[k].fn(c)) {
+    #####:   79:                    if (!cs->flags[c]) {
+    #####:   80:                        cs->flags[c] = 1;
+    #####:   81:                        if (cs->nseq < SET_SIZE)
+    #####:   82:                            cs->seq[cs->nseq++] = (unsigned char)c;
+        -:   83:                    }
+        -:   84:                }
+        -:   85:            }
+        -:   86:            /* Advance past ':]' then past the closing ']' already consumed */
+    #####:   87:            *p = end + 2; /* points one past ']' */
+    #####:   88:            return 0;
+        -:   89:        }
+        -:   90:    }
+    #####:   91:    return -1;
+        -:   92:}
+        -:   93:
+        -:   94:/* ------------------------------------------------------------------ */
+        -:   95:/* Escape parsing                                                        */
+        -:   96:/* ------------------------------------------------------------------ */
+        -:   97:
+        -:   98:/*
+        -:   99: * Parse an octal escape at *p (p points at first octal digit).
+        -:  100: * Advances *p past up to 3 consumed digits.
+        -:  101: */
+    #####:  102:static unsigned char parse_octal_tr(const char **p)
+        -:  103:{
+    #####:  104:    unsigned val = 0;
+    #####:  105:    int d = 0;
+    #####:  106:    while (d < 3 && **p >= '0' && **p <= '7') {
+    #####:  107:        val = val * 8 + (unsigned)(**p - '0');
+    #####:  108:        (*p)++;
+    #####:  109:        d++;
+        -:  110:    }
+    #####:  111:    return (unsigned char)val;
+        -:  112:}
+        -:  113:
+        -:  114:/*
+        -:  115: * Parse a backslash escape at *p (p points at char after backslash).
+        -:  116: * Advances *p past the consumed char(s).
+        -:  117: */
+    #####:  118:static unsigned char parse_escape_tr(const char **p)
+        -:  119:{
+        -:  120:    unsigned char c;
+    #####:  121:    switch (**p) {
+    #####:  122:    case 'a':  c = '\a'; (*p)++; break;
+    #####:  123:    case 'b':  c = '\b'; (*p)++; break;
+    #####:  124:    case 'f':  c = '\f'; (*p)++; break;
+    #####:  125:    case 'n':  c = '\n'; (*p)++; break;
+    #####:  126:    case 'r':  c = '\r'; (*p)++; break;
+    #####:  127:    case 't':  c = '\t'; (*p)++; break;
+    #####:  128:    case 'v':  c = '\v'; (*p)++; break;
+    #####:  129:    case '\\': c = '\\'; (*p)++; break;
+    #####:  130:    case '0': case '1': case '2': case '3':
+        -:  131:    case '4': case '5': case '6': case '7':
+    #####:  132:        c = parse_octal_tr(p);
+    #####:  133:        break;
+    #####:  134:    default:
+    #####:  135:        c = (unsigned char)**p;
+    #####:  136:        (*p)++;
+    #####:  137:        break;
+        -:  138:    }
+    #####:  139:    return c;
+        -:  140:}
+        -:  141:
+        -:  142:/* ------------------------------------------------------------------ */
+        -:  143:/* Set parsing                                                           */
+        -:  144:/* ------------------------------------------------------------------ */
+        -:  145:
+        -:  146:/*
+        -:  147: * Parse a set specification string into cs.
+        -:  148: * Handles: literals, a-z ranges, [:class:], \NNN octal escapes.
+        -:  149: * Returns 0 on success, -1 on error.
+        -:  150: */
+        4:  151:static int parse_set(const char *str, charset_t *cs)
+        -:  152:{
+        4:  153:    memset(cs, 0, sizeof(*cs));
+        4:  154:    const char *p = str;
+        -:  155:
+        8:  156:    while (*p) {
+        -:  157:        /* POSIX class [: ... :] */
+       4*:  158:        if (p[0] == '[' && p[1] == ':') {
+    #####:  159:            p++; /* now points at ':' */
+    #####:  160:            if (expand_posix_class(&p, cs) == 0)
+    #####:  161:                continue;
+        -:  162:            /* If unrecognised, treat '[' literally and retry from ':' */
+    #####:  163:            p--; /* back to '[' */
+    #####:  164:            unsigned char c = (unsigned char)'[';
+    #####:  165:            if (!cs->flags[c]) {
+    #####:  166:                cs->flags[c] = 1;
+    #####:  167:                if (cs->nseq < SET_SIZE) cs->seq[cs->nseq++] = c;
+        -:  168:            }
+    #####:  169:            p++;
+    #####:  170:            continue;
+        -:  171:        }
+        -:  172:
+        -:  173:        /* Backslash escape */
+       4*:  174:        if (*p == '\\') {
+    #####:  175:            p++;
+    #####:  176:            if (*p == '\0') break;
+    #####:  177:            unsigned char c = parse_escape_tr(&p);
+    #####:  178:            if (!cs->flags[c]) {
+    #####:  179:                cs->flags[c] = 1;
+    #####:  180:                if (cs->nseq < SET_SIZE) cs->seq[cs->nseq++] = c;
+        -:  181:            }
+    #####:  182:            continue;
+        -:  183:        }
+        -:  184:
+        -:  185:        /* Range: lo - hi  (but '-' at start or end is literal) */
+        4:  186:        if (p[1] == '-' && p[2] != '\0') {
+        4:  187:            unsigned char lo = (unsigned char)p[0];
+        4:  188:            p += 2; /* skip 'lo' and '-' */
+        -:  189:            unsigned char hi;
+        4:  190:            if (*p == '\\') {
+    #####:  191:                p++;
+    #####:  192:                hi = parse_escape_tr(&p);
+        -:  193:            } else {
+        4:  194:                hi = (unsigned char)*p;
+        4:  195:                p++;
+        -:  196:            }
+        4:  197:            if (lo > hi) {
+    #####:  198:                err_msg("tr", "range '\\%o-\\%o' is out of order",
+        -:  199:                        (unsigned)lo, (unsigned)hi);
+    #####:  200:                return -1;
+        -:  201:            }
+      108:  202:            for (unsigned int c = (unsigned int)lo; c <= (unsigned int)hi; c++) {
+      104:  203:                if (!cs->flags[c]) {
+      104:  204:                    cs->flags[c] = 1;
+      104:  205:                    if (cs->nseq < SET_SIZE)
+      104:  206:                        cs->seq[cs->nseq++] = (unsigned char)c;
+        -:  207:                }
+        -:  208:            }
+        4:  209:            continue;
+        -:  210:        }
+        -:  211:
+        -:  212:        /* Literal character */
+    #####:  213:        unsigned char c = (unsigned char)*p++;
+    #####:  214:        if (!cs->flags[c]) {
+    #####:  215:            cs->flags[c] = 1;
+    #####:  216:            if (cs->nseq < SET_SIZE) cs->seq[cs->nseq++] = c;
+        -:  217:        }
+        -:  218:    }
+        4:  219:    return 0;
+        -:  220:}
+        -:  221:
+        -:  222:/* ------------------------------------------------------------------ */
+        -:  223:/* Complement                                                            */
+        -:  224:/* ------------------------------------------------------------------ */
+        -:  225:
+        -:  226:/*
+        -:  227: * Build the complement of cs (all bytes NOT in cs), in byte order 0..255.
+        -:  228: */
+    #####:  229:static void complement_set(const charset_t *cs, charset_t *out)
+        -:  230:{
+    #####:  231:    memset(out, 0, sizeof(*out));
+    #####:  232:    for (int c = 0; c < SET_SIZE; c++) {
+    #####:  233:        if (!cs->flags[c]) {
+    #####:  234:            out->flags[c] = 1;
+    #####:  235:            if (out->nseq < SET_SIZE)
+    #####:  236:                out->seq[out->nseq++] = (unsigned char)c;
+        -:  237:        }
+        -:  238:    }
+    #####:  239:}
+        -:  240:
+        -:  241:/* ------------------------------------------------------------------ */
+        -:  242:/* Translation table                                                    */
+        -:  243:/* ------------------------------------------------------------------ */
+        -:  244:
+        -:  245:/*
+        -:  246: * Build a 256-byte translation table mapping set1 -> set2.
+        -:  247: * If set2 is shorter than set1, the last byte of set2 is reused.
+        -:  248: */
+        2:  249:static void build_xlat(const charset_t *s1, const charset_t *s2,
+        -:  250:                        unsigned char xlat[SET_SIZE])
+        -:  251:{
+      514:  252:    for (int i = 0; i < SET_SIZE; i++)
+      512:  253:        xlat[i] = (unsigned char)i;
+        -:  254:
+        2:  255:    int n2 = s2->nseq;
+       2*:  256:    if (n2 == 0) return;
+        -:  257:
+       54:  258:    for (int i = 0; i < s1->nseq; i++) {
+       52:  259:        unsigned char from = s1->seq[i];
+      52*:  260:        unsigned char to   = (i < n2) ? s2->seq[i] : s2->seq[n2 - 1];
+       52:  261:        xlat[from] = to;
+        -:  262:    }
+        -:  263:}
+        -:  264:
+        -:  265:/* ------------------------------------------------------------------ */
+        -:  266:/* Main                                                                  */
+        -:  267:/* ------------------------------------------------------------------ */
+        -:  268:
+        2:  269:int applet_tr(int argc, char **argv)
+        -:  270:{
+        2:  271:    int opt_d = 0; /* -d: delete */
+        2:  272:    int opt_s = 0; /* -s: squeeze */
+        2:  273:    int opt_c = 0; /* -c/-C: complement */
+        -:  274:    int i;
+        -:  275:
+       2*:  276:    for (i = 1; i < argc; i++) {
+        2:  277:        const char *arg = argv[i];
+        -:  278:
+       2*:  279:        if (strcmp(arg, "--") == 0) { i++; break; }
+       2*:  280:        if (arg[0] != '-' || arg[1] == '\0') break;
+        -:  281:
+    #####:  282:        const char *p = arg + 1;
+    #####:  283:        while (*p) {
+    #####:  284:            switch (*p) {
+    #####:  285:            case 'd': opt_d = 1; break;
+    #####:  286:            case 's': opt_s = 1; break;
+    #####:  287:            case 'c': case 'C': opt_c = 1; break;
+    #####:  288:            default:
+    #####:  289:                err_msg("tr", "unrecognized option '-%c'", *p);
+    #####:  290:                err_usage("tr", "[-dsc] SET1 [SET2]");
+    #####:  291:                return 1;
+        -:  292:            }
+    #####:  293:            p++;
+        -:  294:        }
+        -:  295:    }
+        -:  296:
+        2:  297:    int nsets = argc - i;
+        -:  298:
+        -:  299:    /* Validate argument counts */
+        2:  300:    if (opt_d) {
+        -:  301:        /* -d requires SET1; -d -s may optionally take SET2 for squeeze */
+    #####:  302:        if (nsets < 1) {
+    #####:  303:            err_usage("tr", "-d [-s] SET1 [SET2]");
+    #####:  304:            return 1;
+        -:  305:        }
+       2*:  306:    } else if (opt_s && nsets == 1) {
+        -:  307:        /* -s without -d: squeeze SET1 chars */
+        -:  308:        /* allowed */
+        2:  309:    } else if (nsets < 2) {
+    #####:  310:        err_usage("tr", "[-cs] SET1 SET2");
+    #####:  311:        return 1;
+        -:  312:    }
+        -:  313:
+        -:  314:    charset_t set1_raw, set1;
+        -:  315:    charset_t set2;
+        2:  316:    memset(&set2, 0, sizeof(set2));
+        -:  317:
+       2*:  318:    if (parse_set(argv[i], &set1_raw) != 0) return 1;
+        -:  319:
+        2:  320:    if (opt_c)
+    #####:  321:        complement_set(&set1_raw, &set1);
+        -:  322:    else
+        2:  323:        set1 = set1_raw;
+        -:  324:
+        2:  325:    if (nsets >= 2) {
+       2*:  326:        if (parse_set(argv[i + 1], &set2) != 0) return 1;
+        -:  327:    }
+        -:  328:
+        -:  329:    /* Build translation table (used when not in pure delete mode) */
+        -:  330:    unsigned char xlat[SET_SIZE];
+        2:  331:    if (!opt_d) {
+        2:  332:        if (nsets >= 2)
+        2:  333:            build_xlat(&set1, &set2, xlat);
+        -:  334:        else {
+        -:  335:            /* -s only: identity translation */
+    #####:  336:            for (int k = 0; k < SET_SIZE; k++)
+    #####:  337:                xlat[k] = (unsigned char)k;
+        -:  338:        }
+        -:  339:    }
+        -:  340:
+        -:  341:    /* Process stdin -> stdout */
+        -:  342:    int c;
+        2:  343:    int last_out = -1; /* last byte written, for squeeze */
+        -:  344:
+       14:  345:    while ((c = getchar()) != EOF) {
+       12:  346:        unsigned char uc = (unsigned char)c;
+        -:  347:
+      12*:  348:        if (opt_d) {
+        -:  349:            /* Delete chars in set1 */
+    #####:  350:            if (set1.flags[uc]) continue;
+        -:  351:
+        -:  352:            /* -d -s SET2: additionally squeeze consecutive set2 chars */
+    #####:  353:            if (opt_s && nsets >= 2 && set2.flags[uc]) {
+    #####:  354:                if (last_out >= 0 && uc == (unsigned char)last_out) continue;
+        -:  355:            }
+        -:  356:
+    #####:  357:            putchar(uc);
+    #####:  358:            last_out = uc;
+    #####:  359:            continue;
+        -:  360:        }
+        -:  361:
+        -:  362:        /* Translate */
+       12:  363:        unsigned char out = xlat[uc];
+        -:  364:
+        -:  365:        /* -s: squeeze consecutive identical translated chars that are in set2 */
+       12:  366:        if (opt_s) {
+    #####:  367:            int in_set2 = (nsets >= 2) ? set2.flags[out] : set1.flags[uc];
+    #####:  368:            if (in_set2 && last_out >= 0 && out == (unsigned char)last_out)
+    #####:  369:                continue;
+        -:  370:        }
+        -:  371:
+       12:  372:        putchar(out);
+       12:  373:        last_out = out;
+        -:  374:    }
+        -:  375:
+        2:  376:    return 0;
+        -:  377:}

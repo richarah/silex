@@ -1,0 +1,677 @@
+        -:    0:Source:src/core/stat.c
+        -:    1:/* stat.c -- stat builtin: display file or file system status */
+        -:    2:
+        -:    3:#ifndef _POSIX_C_SOURCE
+        -:    4:#define _POSIX_C_SOURCE 200809L
+        -:    5:#endif
+        -:    6:/* stat.c — stat builtin */
+        -:    7:
+        -:    8:#include "../util/error.h"
+        -:    9:#include "../util/strbuf.h"
+        -:   10:
+        -:   11:#include <errno.h>
+        -:   12:#include <grp.h>
+        -:   13:#include <limits.h>
+        -:   14:#include <pwd.h>
+        -:   15:#include <stdio.h>
+        -:   16:#include <stdlib.h>
+        -:   17:#include <string.h>
+        -:   18:#include <sys/stat.h>
+        -:   19:#include <sys/statvfs.h>
+        -:   20:#include <sys/types.h>
+        -:   21:#include <time.h>
+        -:   22:#include <unistd.h>
+        -:   23:
+        -:   24:/* ------------------------------------------------------------------ */
+        -:   25:/* Helpers                                                              */
+        -:   26:/* ------------------------------------------------------------------ */
+        -:   27:
+        -:   28:/* Return a string describing the file type. */
+    #####:   29:static const char *file_type_str(mode_t m)
+        -:   30:{
+    #####:   31:    if (S_ISREG(m))  return "regular file";
+    #####:   32:    if (S_ISDIR(m))  return "directory";
+    #####:   33:    if (S_ISLNK(m))  return "symbolic link";
+    #####:   34:    if (S_ISBLK(m))  return "block special file";
+    #####:   35:    if (S_ISCHR(m))  return "character special file";
+    #####:   36:    if (S_ISFIFO(m)) return "fifo";
+    #####:   37:    if (S_ISSOCK(m)) return "socket";
+    #####:   38:    return "unknown";
+        -:   39:}
+        -:   40:
+        -:   41:/* Build a symbolic permissions string like "-rwxr-xr-x" into buf (11 bytes + NUL). */
+    #####:   42:static void sym_perms(mode_t m, char *buf)
+        -:   43:{
+        -:   44:    /* File type character */
+    #####:   45:    if      (S_ISREG(m))  buf[0] = '-';
+    #####:   46:    else if (S_ISDIR(m))  buf[0] = 'd';
+    #####:   47:    else if (S_ISLNK(m))  buf[0] = 'l';
+    #####:   48:    else if (S_ISBLK(m))  buf[0] = 'b';
+    #####:   49:    else if (S_ISCHR(m))  buf[0] = 'c';
+    #####:   50:    else if (S_ISFIFO(m)) buf[0] = 'p';
+    #####:   51:    else if (S_ISSOCK(m)) buf[0] = 's';
+    #####:   52:    else                   buf[0] = '?';
+        -:   53:
+    #####:   54:    const char rwx[] = "rwxrwxrwx";
+    #####:   55:    for (int i = 0; i < 9; i++) {
+    #####:   56:        buf[1 + i] = (m & (0400 >> i)) ? rwx[i] : '-';
+        -:   57:    }
+        -:   58:    /* Handle setuid/setgid/sticky */
+    #####:   59:    if (m & S_ISUID) buf[3] = (m & S_IXUSR) ? 's' : 'S';
+    #####:   60:    if (m & S_ISGID) buf[6] = (m & S_IXGRP) ? 's' : 'S';
+        -:   61:#ifdef S_ISVTX
+    #####:   62:    if (m & S_ISVTX) buf[9] = (m & S_IXOTH) ? 't' : 'T';
+        -:   63:#endif
+    #####:   64:    buf[10] = '\0';
+    #####:   65:}
+        -:   66:
+        -:   67:/*
+        -:   68: * Format a struct timespec as "YYYY-MM-DD HH:MM:SS.NNNNNNNNN +ZZZZ"
+        -:   69: * into buf (must be at least 40 bytes).
+        -:   70: */
+    #####:   71:static void format_time(const struct timespec *ts, char *buf, size_t bufsz,
+        -:   72:                        int use_utc)
+        -:   73:{
+        -:   74:    struct tm tm_val;
+    #####:   75:    if (use_utc)
+    #####:   76:        gmtime_r(&ts->tv_sec, &tm_val);
+        -:   77:    else
+    #####:   78:        localtime_r(&ts->tv_sec, &tm_val);
+        -:   79:
+        -:   80:    char date_part[32];
+    #####:   81:    strftime(date_part, sizeof(date_part), "%Y-%m-%d %H:%M:%S", &tm_val);
+        -:   82:
+        -:   83:    char tz_part[8];
+    #####:   84:    strftime(tz_part, sizeof(tz_part), "%z", &tm_val);
+        -:   85:
+    #####:   86:    int n = snprintf(buf, bufsz, "%s.%09ld %s",
+    #####:   87:                     date_part, (long)ts->tv_nsec, tz_part);
+    #####:   88:    if (n < 0 || (size_t)n >= bufsz)
+    #####:   89:        buf[bufsz - 1] = '\0';
+    #####:   90:}
+        -:   91:
+        -:   92:/* Look up username for uid; returns static buffer or numeric string. */
+    #####:   93:static const char *uid_name(uid_t uid)
+        -:   94:{
+    #####:   95:    struct passwd *pw = getpwuid(uid);
+    #####:   96:    if (pw) return pw->pw_name;
+        -:   97:    static char buf[32];
+    #####:   98:    int n = snprintf(buf, sizeof(buf), "%u", (unsigned)uid);
+    #####:   99:    if (n < 0 || (size_t)n >= sizeof(buf)) buf[sizeof(buf)-1] = '\0';
+    #####:  100:    return buf;
+        -:  101:}
+        -:  102:
+        -:  103:/* Look up groupname for gid; returns static buffer or numeric string. */
+    #####:  104:static const char *gid_name(gid_t gid)
+        -:  105:{
+    #####:  106:    struct group *gr = getgrgid(gid);
+    #####:  107:    if (gr) return gr->gr_name;
+        -:  108:    static char buf[32];
+    #####:  109:    int n = snprintf(buf, sizeof(buf), "%u", (unsigned)gid);
+    #####:  110:    if (n < 0 || (size_t)n >= sizeof(buf)) buf[sizeof(buf)-1] = '\0';
+    #####:  111:    return buf;
+        -:  112:}
+        -:  113:
+        -:  114:/* ------------------------------------------------------------------ */
+        -:  115:/* Format string processing for -c FORMAT                              */
+        -:  116:/* ------------------------------------------------------------------ */
+        -:  117:
+        -:  118:/*
+        -:  119: * Process one format directive starting at *fmt (the character after '%').
+        -:  120: * Appends the result to sb.  Advances *fmt past the directive.
+        -:  121: * Returns 0 on success, 1 on unrecognised directive.
+        -:  122: */
+    #####:  123:static int process_directive(const char **fmt, const char *path,
+        -:  124:                              const struct stat *st, strbuf_t *sb,
+        -:  125:                              int use_utc)
+        -:  126:{
+        -:  127:    char tmp[256];
+        -:  128:    int n;
+        -:  129:
+    #####:  130:    switch (**fmt) {
+    #####:  131:    case 'n': /* file name */
+    #####:  132:        if (sb_append(sb, path) < 0) return 1;
+    #####:  133:        break;
+    #####:  134:    case 'N': /* quoted file name */
+    #####:  135:        n = snprintf(tmp, sizeof(tmp), "'%s'", path);
+    #####:  136:        if (n < 0 || (size_t)n >= sizeof(tmp)) return 1;
+    #####:  137:        if (sb_append(sb, tmp) < 0) return 1;
+    #####:  138:        break;
+    #####:  139:    case 's': /* total size in bytes */
+    #####:  140:        n = snprintf(tmp, sizeof(tmp), "%lld", (long long)st->st_size);
+    #####:  141:        if (n < 0 || (size_t)n >= sizeof(tmp)) return 1;
+    #####:  142:        if (sb_append(sb, tmp) < 0) return 1;
+    #####:  143:        break;
+    #####:  144:    case 'b': /* number of 512-byte blocks */
+    #####:  145:        n = snprintf(tmp, sizeof(tmp), "%lld", (long long)st->st_blocks);
+    #####:  146:        if (n < 0 || (size_t)n >= sizeof(tmp)) return 1;
+    #####:  147:        if (sb_append(sb, tmp) < 0) return 1;
+    #####:  148:        break;
+    #####:  149:    case 'B': /* block size (always 512) */
+    #####:  150:        if (sb_append(sb, "512") < 0) return 1;
+    #####:  151:        break;
+    #####:  152:    case 'f': /* raw hex mode */
+    #####:  153:        n = snprintf(tmp, sizeof(tmp), "%x", (unsigned)st->st_mode);
+    #####:  154:        if (n < 0 || (size_t)n >= sizeof(tmp)) return 1;
+    #####:  155:        if (sb_append(sb, tmp) < 0) return 1;
+    #####:  156:        break;
+    #####:  157:    case 'F': /* file type string */
+    #####:  158:        if (sb_append(sb, file_type_str(st->st_mode)) < 0) return 1;
+    #####:  159:        break;
+    #####:  160:    case 'u': /* uid */
+    #####:  161:        n = snprintf(tmp, sizeof(tmp), "%u", (unsigned)st->st_uid);
+    #####:  162:        if (n < 0 || (size_t)n >= sizeof(tmp)) return 1;
+    #####:  163:        if (sb_append(sb, tmp) < 0) return 1;
+    #####:  164:        break;
+    #####:  165:    case 'g': /* gid */
+    #####:  166:        n = snprintf(tmp, sizeof(tmp), "%u", (unsigned)st->st_gid);
+    #####:  167:        if (n < 0 || (size_t)n >= sizeof(tmp)) return 1;
+    #####:  168:        if (sb_append(sb, tmp) < 0) return 1;
+    #####:  169:        break;
+    #####:  170:    case 'U': /* username */
+    #####:  171:        if (sb_append(sb, uid_name(st->st_uid)) < 0) return 1;
+    #####:  172:        break;
+    #####:  173:    case 'G': /* groupname */
+    #####:  174:        if (sb_append(sb, gid_name(st->st_gid)) < 0) return 1;
+    #####:  175:        break;
+    #####:  176:    case 'i': /* inode */
+    #####:  177:        n = snprintf(tmp, sizeof(tmp), "%llu", (unsigned long long)st->st_ino);
+    #####:  178:        if (n < 0 || (size_t)n >= sizeof(tmp)) return 1;
+    #####:  179:        if (sb_append(sb, tmp) < 0) return 1;
+    #####:  180:        break;
+    #####:  181:    case 'h': /* hard link count */
+    #####:  182:        n = snprintf(tmp, sizeof(tmp), "%lu", (unsigned long)st->st_nlink);
+    #####:  183:        if (n < 0 || (size_t)n >= sizeof(tmp)) return 1;
+    #####:  184:        if (sb_append(sb, tmp) < 0) return 1;
+    #####:  185:        break;
+    #####:  186:    case 'a': /* octal permissions */
+    #####:  187:        n = snprintf(tmp, sizeof(tmp), "%o", (unsigned)(st->st_mode & 07777));
+    #####:  188:        if (n < 0 || (size_t)n >= sizeof(tmp)) return 1;
+    #####:  189:        if (sb_append(sb, tmp) < 0) return 1;
+    #####:  190:        break;
+    #####:  191:    case 'A': { /* symbolic permissions */
+        -:  192:        char perms[12];
+    #####:  193:        sym_perms(st->st_mode, perms);
+    #####:  194:        if (sb_append(sb, perms) < 0) return 1;
+    #####:  195:        break;
+        -:  196:    }
+    #####:  197:    case 'x': { /* atime */
+        -:  198:        char tbuf[64];
+    #####:  199:        format_time(&st->st_atim, tbuf, sizeof(tbuf), use_utc);
+    #####:  200:        if (sb_append(sb, tbuf) < 0) return 1;
+    #####:  201:        break;
+        -:  202:    }
+    #####:  203:    case 'y': { /* mtime */
+        -:  204:        char tbuf[64];
+    #####:  205:        format_time(&st->st_mtim, tbuf, sizeof(tbuf), use_utc);
+    #####:  206:        if (sb_append(sb, tbuf) < 0) return 1;
+    #####:  207:        break;
+        -:  208:    }
+    #####:  209:    case 'z': { /* ctime */
+        -:  210:        char tbuf[64];
+    #####:  211:        format_time(&st->st_ctim, tbuf, sizeof(tbuf), use_utc);
+    #####:  212:        if (sb_append(sb, tbuf) < 0) return 1;
+    #####:  213:        break;
+        -:  214:    }
+    #####:  215:    case 'W': /* birth time — not available in stat on Linux; print 0 */
+    #####:  216:        if (sb_append(sb, "0") < 0) return 1;
+    #####:  217:        break;
+    #####:  218:    case 'X': /* atime seconds */
+    #####:  219:        n = snprintf(tmp, sizeof(tmp), "%lld", (long long)st->st_atim.tv_sec);
+    #####:  220:        if (n < 0 || (size_t)n >= sizeof(tmp)) return 1;
+    #####:  221:        if (sb_append(sb, tmp) < 0) return 1;
+    #####:  222:        break;
+    #####:  223:    case 'Y': /* mtime seconds */
+    #####:  224:        n = snprintf(tmp, sizeof(tmp), "%lld", (long long)st->st_mtim.tv_sec);
+    #####:  225:        if (n < 0 || (size_t)n >= sizeof(tmp)) return 1;
+    #####:  226:        if (sb_append(sb, tmp) < 0) return 1;
+    #####:  227:        break;
+    #####:  228:    case 'Z': /* ctime seconds */
+    #####:  229:        n = snprintf(tmp, sizeof(tmp), "%lld", (long long)st->st_ctim.tv_sec);
+    #####:  230:        if (n < 0 || (size_t)n >= sizeof(tmp)) return 1;
+    #####:  231:        if (sb_append(sb, tmp) < 0) return 1;
+    #####:  232:        break;
+    #####:  233:    case 'd': /* device number (decimal) */
+    #####:  234:        n = snprintf(tmp, sizeof(tmp), "%llu", (unsigned long long)st->st_dev);
+    #####:  235:        if (n < 0 || (size_t)n >= sizeof(tmp)) return 1;
+    #####:  236:        if (sb_append(sb, tmp) < 0) return 1;
+    #####:  237:        break;
+    #####:  238:    case 'D': /* device number (hex) */
+    #####:  239:        n = snprintf(tmp, sizeof(tmp), "%llx", (unsigned long long)st->st_dev);
+    #####:  240:        if (n < 0 || (size_t)n >= sizeof(tmp)) return 1;
+    #####:  241:        if (sb_append(sb, tmp) < 0) return 1;
+    #####:  242:        break;
+    #####:  243:    case 'r': /* device type if special (decimal) */
+    #####:  244:        n = snprintf(tmp, sizeof(tmp), "%llu", (unsigned long long)st->st_rdev);
+    #####:  245:        if (n < 0 || (size_t)n >= sizeof(tmp)) return 1;
+    #####:  246:        if (sb_append(sb, tmp) < 0) return 1;
+    #####:  247:        break;
+    #####:  248:    case 'R': /* device type if special (hex) */
+    #####:  249:        n = snprintf(tmp, sizeof(tmp), "%llx", (unsigned long long)st->st_rdev);
+    #####:  250:        if (n < 0 || (size_t)n >= sizeof(tmp)) return 1;
+    #####:  251:        if (sb_append(sb, tmp) < 0) return 1;
+    #####:  252:        break;
+    #####:  253:    case 'o': /* optimal I/O block size */
+    #####:  254:        n = snprintf(tmp, sizeof(tmp), "%lu", (unsigned long)st->st_blksize);
+    #####:  255:        if (n < 0 || (size_t)n >= sizeof(tmp)) return 1;
+    #####:  256:        if (sb_append(sb, tmp) < 0) return 1;
+    #####:  257:        break;
+    #####:  258:    case '%':
+    #####:  259:        if (sb_appendc(sb, '%') < 0) return 1;
+    #####:  260:        break;
+    #####:  261:    default:
+        -:  262:        /* Unknown directive: print literally */
+    #####:  263:        if (sb_appendc(sb, '%') < 0) return 1;
+    #####:  264:        if (sb_appendc(sb, **fmt) < 0) return 1;
+    #####:  265:        break;
+        -:  266:    }
+    #####:  267:    (*fmt)++;
+    #####:  268:    return 0;
+        -:  269:}
+        -:  270:
+        -:  271:/*
+        -:  272: * Process format directives for filesystem stats (-f flag).
+        -:  273: */
+    #####:  274:static int process_fs_directive(const char **fmt, const char *path,
+        -:  275:                                 const struct statvfs *sv, strbuf_t *sb)
+        -:  276:{
+        -:  277:    char tmp[256];
+        -:  278:    int n;
+        -:  279:
+    #####:  280:    switch (**fmt) {
+    #####:  281:    case 'n': if (sb_append(sb, path) < 0) return 1; break;
+    #####:  282:    case 'i': /* filesystem id — show as hex pair */
+    #####:  283:        n = snprintf(tmp, sizeof(tmp), "%lx", (unsigned long)sv->f_fsid);
+    #####:  284:        if (n < 0 || (size_t)n >= sizeof(tmp)) return 1;
+    #####:  285:        if (sb_append(sb, tmp) < 0) return 1;
+    #####:  286:        break;
+    #####:  287:    case 'l': /* max filename length */
+    #####:  288:        n = snprintf(tmp, sizeof(tmp), "%lu", (unsigned long)sv->f_namemax);
+    #####:  289:        if (n < 0 || (size_t)n >= sizeof(tmp)) return 1;
+    #####:  290:        if (sb_append(sb, tmp) < 0) return 1;
+    #####:  291:        break;
+    #####:  292:    case 't': /* filesystem type (hex) */
+    #####:  293:        n = snprintf(tmp, sizeof(tmp), "%lx", (unsigned long)sv->f_flag);
+    #####:  294:        if (n < 0 || (size_t)n >= sizeof(tmp)) return 1;
+    #####:  295:        if (sb_append(sb, tmp) < 0) return 1;
+    #####:  296:        break;
+    #####:  297:    case 'T': if (sb_append(sb, "unknown") < 0) return 1; break;
+    #####:  298:    case 'b': /* total blocks */
+    #####:  299:        n = snprintf(tmp, sizeof(tmp), "%llu", (unsigned long long)sv->f_blocks);
+    #####:  300:        if (n < 0 || (size_t)n >= sizeof(tmp)) return 1;
+    #####:  301:        if (sb_append(sb, tmp) < 0) return 1;
+    #####:  302:        break;
+    #####:  303:    case 'f': /* free blocks */
+    #####:  304:        n = snprintf(tmp, sizeof(tmp), "%llu", (unsigned long long)sv->f_bfree);
+    #####:  305:        if (n < 0 || (size_t)n >= sizeof(tmp)) return 1;
+    #####:  306:        if (sb_append(sb, tmp) < 0) return 1;
+    #####:  307:        break;
+    #####:  308:    case 'a': /* available blocks (non-root) */
+    #####:  309:        n = snprintf(tmp, sizeof(tmp), "%llu", (unsigned long long)sv->f_bavail);
+    #####:  310:        if (n < 0 || (size_t)n >= sizeof(tmp)) return 1;
+    #####:  311:        if (sb_append(sb, tmp) < 0) return 1;
+    #####:  312:        break;
+    #####:  313:    case 's': /* block size */
+    #####:  314:        n = snprintf(tmp, sizeof(tmp), "%lu", (unsigned long)sv->f_frsize);
+    #####:  315:        if (n < 0 || (size_t)n >= sizeof(tmp)) return 1;
+    #####:  316:        if (sb_append(sb, tmp) < 0) return 1;
+    #####:  317:        break;
+    #####:  318:    case 'S': /* fundamental block size */
+    #####:  319:        n = snprintf(tmp, sizeof(tmp), "%lu", (unsigned long)sv->f_bsize);
+    #####:  320:        if (n < 0 || (size_t)n >= sizeof(tmp)) return 1;
+    #####:  321:        if (sb_append(sb, tmp) < 0) return 1;
+    #####:  322:        break;
+    #####:  323:    case 'c': /* total inodes */
+    #####:  324:        n = snprintf(tmp, sizeof(tmp), "%llu", (unsigned long long)sv->f_files);
+    #####:  325:        if (n < 0 || (size_t)n >= sizeof(tmp)) return 1;
+    #####:  326:        if (sb_append(sb, tmp) < 0) return 1;
+    #####:  327:        break;
+    #####:  328:    case 'd': /* free inodes */
+    #####:  329:        n = snprintf(tmp, sizeof(tmp), "%llu", (unsigned long long)sv->f_ffree);
+    #####:  330:        if (n < 0 || (size_t)n >= sizeof(tmp)) return 1;
+    #####:  331:        if (sb_append(sb, tmp) < 0) return 1;
+    #####:  332:        break;
+    #####:  333:    case '%':
+    #####:  334:        if (sb_appendc(sb, '%') < 0) return 1;
+    #####:  335:        break;
+    #####:  336:    default:
+    #####:  337:        if (sb_appendc(sb, '%') < 0) return 1;
+    #####:  338:        if (sb_appendc(sb, **fmt) < 0) return 1;
+    #####:  339:        break;
+        -:  340:    }
+    #####:  341:    (*fmt)++;
+    #####:  342:    return 0;
+        -:  343:}
+        -:  344:
+        -:  345:/* Expand escape sequences (\n, \t, \\, etc.) in a format string. */
+    #####:  346:static int expand_escapes(const char *in, strbuf_t *sb)
+        -:  347:{
+    #####:  348:    for (const char *p = in; *p; p++) {
+    #####:  349:        if (*p != '\\') {
+    #####:  350:            if (sb_appendc(sb, *p) < 0) return -1;
+    #####:  351:            continue;
+        -:  352:        }
+    #####:  353:        p++;
+    #####:  354:        switch (*p) {
+    #####:  355:        case 'n': if (sb_appendc(sb, '\n') < 0) return -1; break;
+    #####:  356:        case 't': if (sb_appendc(sb, '\t') < 0) return -1; break;
+    #####:  357:        case '\\': if (sb_appendc(sb, '\\') < 0) return -1; break;
+    #####:  358:        case '0': case '1': case '2': case '3':
+        -:  359:        case '4': case '5': case '6': case '7': {
+    #####:  360:            unsigned val = (unsigned)(*p - '0');
+    #####:  361:            int d = 1;
+    #####:  362:            while (d < 3 && p[1] >= '0' && p[1] <= '7') {
+    #####:  363:                val = val * 8 + (unsigned)(p[1] - '0');
+    #####:  364:                p++; d++;
+        -:  365:            }
+    #####:  366:            if (sb_appendc(sb, (char)(unsigned char)val) < 0) return -1;
+    #####:  367:            break;
+        -:  368:        }
+    #####:  369:        case '\0': /* trailing backslash */
+    #####:  370:            if (sb_appendc(sb, '\\') < 0) return -1;
+    #####:  371:            p--;
+    #####:  372:            break;
+    #####:  373:        default:
+    #####:  374:            if (sb_appendc(sb, '\\') < 0) return -1;
+    #####:  375:            if (sb_appendc(sb, *p) < 0) return -1;
+    #####:  376:            break;
+        -:  377:        }
+        -:  378:    }
+    #####:  379:    return 0;
+        -:  380:}
+        -:  381:
+        -:  382:/* ------------------------------------------------------------------ */
+        -:  383:/* Output one file's default (no format) human-readable output         */
+        -:  384:/* ------------------------------------------------------------------ */
+        -:  385:
+    #####:  386:static int print_default(const char *path, int opt_fs, int follow_links,
+        -:  387:                          int use_utc)
+        -:  388:{
+    #####:  389:    if (opt_fs) {
+        -:  390:        struct statvfs sv;
+    #####:  391:        if (statvfs(path, &sv) != 0) {
+    #####:  392:            err_sys("stat", "cannot statfs '%s'", path);
+    #####:  393:            return 1;
+        -:  394:        }
+    #####:  395:        printf("  File: \"%s\"\n", path);
+    #####:  396:        printf("    ID: %-16lx Namelen: %-7lu Type: unknown\n",
+        -:  397:               (unsigned long)sv.f_fsid, (unsigned long)sv.f_namemax);
+    #####:  398:        printf("Block size: %-10lu Fundamental block size: %lu\n",
+        -:  399:               (unsigned long)sv.f_bsize, (unsigned long)sv.f_frsize);
+    #####:  400:        printf("Blocks: Total: %-10llu Free: %-10llu Available: %llu\n",
+    #####:  401:               (unsigned long long)sv.f_blocks,
+    #####:  402:               (unsigned long long)sv.f_bfree,
+    #####:  403:               (unsigned long long)sv.f_bavail);
+    #####:  404:        printf("Inodes: Total: %-10llu Free: %llu\n",
+    #####:  405:               (unsigned long long)sv.f_files,
+    #####:  406:               (unsigned long long)sv.f_ffree);
+    #####:  407:        return 0;
+        -:  408:    }
+        -:  409:
+        -:  410:    struct stat st;
+    #####:  411:    int rc = follow_links ? stat(path, &st) : lstat(path, &st);
+    #####:  412:    if (rc != 0) {
+    #####:  413:        err_sys("stat", "cannot stat '%s'", path);
+    #####:  414:        return 1;
+        -:  415:    }
+        -:  416:
+        -:  417:    char perms[12];
+    #####:  418:    sym_perms(st.st_mode, perms);
+        -:  419:
+        -:  420:    char atime[64], mtime[64], ctime[64];
+    #####:  421:    format_time(&st.st_atim, atime, sizeof(atime), use_utc);
+    #####:  422:    format_time(&st.st_mtim, mtime, sizeof(mtime), use_utc);
+    #####:  423:    format_time(&st.st_ctim, ctime, sizeof(ctime), use_utc);
+        -:  424:
+    #####:  425:    printf("  File: %s\n", path);
+    #####:  426:    printf("  Size: %-15lld\tBlocks: %-10lld IO Block: %-6lu %s\n",
+    #####:  427:           (long long)st.st_size, (long long)st.st_blocks,
+    #####:  428:           (unsigned long)st.st_blksize, file_type_str(st.st_mode));
+    #####:  429:    printf("Device: %lluh/%llud\tInode: %-11llu  Links: %lu\n",
+    #####:  430:           (unsigned long long)st.st_dev, (unsigned long long)st.st_dev,
+    #####:  431:           (unsigned long long)st.st_ino, (unsigned long)st.st_nlink);
+    #####:  432:    printf("Access: (%04o/%s)  Uid: (%5u/%8s)   Gid: (%5u/%8s)\n",
+    #####:  433:           (unsigned)(st.st_mode & 07777), perms,
+    #####:  434:           (unsigned)st.st_uid, uid_name(st.st_uid),
+    #####:  435:           (unsigned)st.st_gid, gid_name(st.st_gid));
+    #####:  436:    printf("Access: %s\n", atime);
+    #####:  437:    printf("Modify: %s\n", mtime);
+    #####:  438:    printf("Change: %s\n", ctime);
+    #####:  439:    printf(" Birth: -\n");
+        -:  440:
+    #####:  441:    return 0;
+        -:  442:}
+        -:  443:
+        -:  444:/* ------------------------------------------------------------------ */
+        -:  445:/* Terse output                                                         */
+        -:  446:/* ------------------------------------------------------------------ */
+        -:  447:
+    #####:  448:static int print_terse(const char *path, int opt_fs, int follow_links,
+        -:  449:                        int use_utc)
+        -:  450:{
+    #####:  451:    if (opt_fs) {
+        -:  452:        struct statvfs sv;
+    #####:  453:        if (statvfs(path, &sv) != 0) {
+    #####:  454:            err_sys("stat", "cannot statfs '%s'", path);
+    #####:  455:            return 1;
+        -:  456:        }
+        -:  457:        /* GNU stat -tf terse: name id namelen type bsize bfree bavail files ffree */
+    #####:  458:        printf("%s %lx %lu %lx %lu %llu %llu %llu %llu\n",
+        -:  459:               path,
+        -:  460:               (unsigned long)sv.f_fsid,
+        -:  461:               (unsigned long)sv.f_namemax,
+        -:  462:               (unsigned long)sv.f_flag,
+        -:  463:               (unsigned long)sv.f_frsize,
+    #####:  464:               (unsigned long long)sv.f_blocks,
+    #####:  465:               (unsigned long long)sv.f_bfree,
+    #####:  466:               (unsigned long long)sv.f_bavail,
+    #####:  467:               (unsigned long long)sv.f_files);
+    #####:  468:        return 0;
+        -:  469:    }
+        -:  470:
+        -:  471:    struct stat st;
+    #####:  472:    int rc = follow_links ? stat(path, &st) : lstat(path, &st);
+    #####:  473:    if (rc != 0) {
+    #####:  474:        err_sys("stat", "cannot stat '%s'", path);
+    #####:  475:        return 1;
+        -:  476:    }
+        -:  477:
+        -:  478:    (void)use_utc; /* timestamps as raw seconds in terse mode */
+    #####:  479:    printf("%s %lld %lld %x %u %u %llu %llu %lu %lld %lld %lld %lld\n",
+        -:  480:           path,
+    #####:  481:           (long long)st.st_size,
+    #####:  482:           (long long)st.st_blocks,
+    #####:  483:           (unsigned)st.st_mode,
+    #####:  484:           (unsigned)st.st_uid,
+    #####:  485:           (unsigned)st.st_gid,
+    #####:  486:           (unsigned long long)st.st_dev,
+    #####:  487:           (unsigned long long)st.st_ino,
+    #####:  488:           (unsigned long)st.st_nlink,
+    #####:  489:           (long long)st.st_atim.tv_sec,
+    #####:  490:           (long long)st.st_mtim.tv_sec,
+    #####:  491:           (long long)st.st_ctim.tv_sec,
+        -:  492:           (long long)0 /* birth */);
+    #####:  493:    return 0;
+        -:  494:}
+        -:  495:
+        -:  496:/* ------------------------------------------------------------------ */
+        -:  497:/* Format-driven output                                                 */
+        -:  498:/* ------------------------------------------------------------------ */
+        -:  499:
+    #####:  500:static int print_formatted(const char *path, const char *fmt,
+        -:  501:                             int opt_fs, int follow_links, int use_utc,
+        -:  502:                             int add_newline)
+        -:  503:{
+        -:  504:    strbuf_t sb;
+    #####:  505:    if (sb_init(&sb, 256) < 0) {
+    #####:  506:        err_msg("stat", "out of memory");
+    #####:  507:        return 1;
+        -:  508:    }
+        -:  509:
+        -:  510:    struct stat st;
+        -:  511:    struct statvfs sv;
+        -:  512:
+    #####:  513:    if (opt_fs) {
+    #####:  514:        if (statvfs(path, &sv) != 0) {
+    #####:  515:            err_sys("stat", "cannot statfs '%s'", path);
+    #####:  516:            sb_free(&sb);
+    #####:  517:            return 1;
+        -:  518:        }
+        -:  519:    } else {
+    #####:  520:        int rc = follow_links ? stat(path, &st) : lstat(path, &st);
+    #####:  521:        if (rc != 0) {
+    #####:  522:            err_sys("stat", "cannot stat '%s'", path);
+    #####:  523:            sb_free(&sb);
+    #####:  524:            return 1;
+        -:  525:        }
+        -:  526:    }
+        -:  527:
+        -:  528:    /* Walk the format string */
+    #####:  529:    for (const char *p = fmt; *p; ) {
+    #####:  530:        if (*p == '%') {
+    #####:  531:            p++;
+    #####:  532:            if (*p == '\0') break;
+    #####:  533:            if (opt_fs) {
+    #####:  534:                if (process_fs_directive(&p, path, &sv, &sb) != 0) {
+    #####:  535:                    err_msg("stat", "out of memory");
+    #####:  536:                    sb_free(&sb);
+    #####:  537:                    return 1;
+        -:  538:                }
+        -:  539:            } else {
+    #####:  540:                if (process_directive(&p, path, &st, &sb, use_utc) != 0) {
+    #####:  541:                    err_msg("stat", "out of memory");
+    #####:  542:                    sb_free(&sb);
+    #####:  543:                    return 1;
+        -:  544:                }
+        -:  545:            }
+    #####:  546:        } else if (*p == '\\') {
+        -:  547:            /* Expand single escape via expand_escapes helper */
+    #####:  548:            char two[3] = { p[0], p[1], '\0' };
+        -:  549:            strbuf_t tmp_sb;
+    #####:  550:            if (sb_init(&tmp_sb, 4) < 0) {
+    #####:  551:                err_msg("stat", "out of memory");
+    #####:  552:                sb_free(&sb);
+    #####:  553:                return 1;
+        -:  554:            }
+    #####:  555:            expand_escapes(two, &tmp_sb);
+    #####:  556:            if (sb_appendn(&sb, sb_str(&tmp_sb), sb_len(&tmp_sb)) < 0) {
+    #####:  557:                sb_free(&tmp_sb);
+    #####:  558:                err_msg("stat", "out of memory");
+    #####:  559:                sb_free(&sb);
+    #####:  560:                return 1;
+        -:  561:            }
+    #####:  562:            sb_free(&tmp_sb);
+    #####:  563:            p += (p[1] ? 2 : 1);
+        -:  564:        } else {
+    #####:  565:            if (sb_appendc(&sb, *p) < 0) {
+    #####:  566:                err_msg("stat", "out of memory");
+    #####:  567:                sb_free(&sb);
+    #####:  568:                return 1;
+        -:  569:            }
+    #####:  570:            p++;
+        -:  571:        }
+        -:  572:    }
+        -:  573:
+    #####:  574:    fwrite(sb_str(&sb), 1, sb_len(&sb), stdout);
+    #####:  575:    if (add_newline)
+    #####:  576:        putchar('\n');
+        -:  577:
+    #####:  578:    sb_free(&sb);
+    #####:  579:    return 0;
+        -:  580:}
+        -:  581:
+        -:  582:/* ------------------------------------------------------------------ */
+        -:  583:/* Main                                                                 */
+        -:  584:/* ------------------------------------------------------------------ */
+        -:  585:
+    #####:  586:int applet_stat(int argc, char **argv)
+        -:  587:{
+    #####:  588:    int opt_fs      = 0;   /* -f: filesystem stats */
+    #####:  589:    int opt_terse   = 0;   /* -t: terse */
+    #####:  590:    int opt_nofollow = 0;  /* -L would mean follow; by default no follow */
+    #####:  591:    int opt_follow  = 1;   /* by default, follow links (like GNU stat) */
+    #####:  592:    int use_utc     = 0;
+    #####:  593:    int add_newline = 1;   /* --printf suppresses trailing newline */
+    #####:  594:    const char *format  = NULL;
+        -:  595:    int i;
+        -:  596:
+    #####:  597:    for (i = 1; i < argc; i++) {
+    #####:  598:        const char *arg = argv[i];
+        -:  599:
+    #####:  600:        if (strcmp(arg, "--") == 0) { i++; break; }
+        -:  601:
+    #####:  602:        if (strncmp(arg, "--format=", 9) == 0) {
+    #####:  603:            format = arg + 9;
+    #####:  604:            add_newline = 1;
+    #####:  605:            continue;
+        -:  606:        }
+    #####:  607:        if (strncmp(arg, "--printf=", 9) == 0) {
+    #####:  608:            format = arg + 9;
+    #####:  609:            add_newline = 0;
+    #####:  610:            continue;
+        -:  611:        }
+    #####:  612:        if (strcmp(arg, "--terse") == 0)         { opt_terse = 1; continue; }
+    #####:  613:        if (strcmp(arg, "--dereference") == 0)   { opt_follow = 1; opt_nofollow = 0; continue; }
+    #####:  614:        if (strcmp(arg, "--no-dereference") == 0){ opt_nofollow = 1; opt_follow = 0; continue; }
+    #####:  615:        if (strcmp(arg, "--file-system") == 0)   { opt_fs = 1; continue; }
+        -:  616:
+    #####:  617:        if (arg[0] != '-' || arg[1] == '\0')
+        -:  618:            break;
+        -:  619:
+    #####:  620:        const char *p = arg + 1;
+    #####:  621:        int stop = 0;
+    #####:  622:        while (*p && !stop) {
+    #####:  623:            switch (*p) {
+    #####:  624:            case 'f': opt_fs = 1; break;
+    #####:  625:            case 't': opt_terse = 1; break;
+    #####:  626:            case 'L': opt_follow = 1; opt_nofollow = 0; break;
+    #####:  627:            case 'c':
+        -:  628:                /* -c FORMAT */
+    #####:  629:                if (p[1]) {
+    #####:  630:                    format = p + 1;
+    #####:  631:                    stop = 1;
+        -:  632:                } else {
+    #####:  633:                    i++;
+    #####:  634:                    if (i >= argc) {
+    #####:  635:                        err_usage("stat", "[-ftL] [-c FORMAT] FILE...");
+    #####:  636:                        return 1;
+        -:  637:                    }
+    #####:  638:                    format = argv[i];
+        -:  639:                }
+    #####:  640:                add_newline = 1;
+    #####:  641:                break;
+    #####:  642:            default:
+    #####:  643:                err_msg("stat", "unrecognized option '-%c'", *p);
+    #####:  644:                err_usage("stat", "[-ftL] [-c FORMAT] FILE...");
+    #####:  645:                return 1;
+        -:  646:            }
+    #####:  647:            p++;
+        -:  648:        }
+        -:  649:    }
+        -:  650:
+    #####:  651:    if (i >= argc) {
+    #####:  652:        err_usage("stat", "[-ftL] [-c FORMAT] FILE...");
+    #####:  653:        return 1;
+        -:  654:    }
+        -:  655:
+    #####:  656:    int follow_links = opt_follow && !opt_nofollow;
+    #####:  657:    int ret = 0;
+        -:  658:
+    #####:  659:    for (; i < argc; i++) {
+    #####:  660:        const char *path = argv[i];
+        -:  661:
+    #####:  662:        if (format) {
+    #####:  663:            if (print_formatted(path, format, opt_fs, follow_links,
+        -:  664:                                 use_utc, add_newline) != 0)
+    #####:  665:                ret = 1;
+    #####:  666:        } else if (opt_terse) {
+    #####:  667:            if (print_terse(path, opt_fs, follow_links, use_utc) != 0)
+    #####:  668:                ret = 1;
+        -:  669:        } else {
+    #####:  670:            if (print_default(path, opt_fs, follow_links, use_utc) != 0)
+    #####:  671:                ret = 1;
+        -:  672:        }
+        -:  673:    }
+        -:  674:
+    #####:  675:    return ret;
+        -:  676:}

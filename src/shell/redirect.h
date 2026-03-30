@@ -25,4 +25,7 @@ int redirect_apply(struct shell_ctx *sh, redir_t *redirs, redirect_ctx_t *ctx);
 /* Restore saved file descriptors */
 void redirect_restore(redirect_ctx_t *ctx);
 
+/* Commit redirections permanently (close saved fds, do not restore) */
+void redirect_commit(redirect_ctx_t *ctx);
+
 #endif

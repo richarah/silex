@@ -1,0 +1,491 @@
+        -:    0:Source:src/util/regex/thompson.c
+        -:    1:/* thompson.c — Thompson NFA simulation with lazy DFA cache + BMH
+        -:    2: *
+        -:    3: * Two-list NFA simulation:
+        -:    4: *   - Maintain "current state set" and "next state set"
+        -:    5: *   - For each input char, advance all current states simultaneously
+        -:    6: *   - O(n * k) where n = input length, k = NFA size (usually small)
+        -:    7: *
+        -:    8: * Lazy DFA cache:
+        -:    9: *   - Encode NFA state set as a sorted array, hashed via FNV-1a
+        -:   10: *   - Cache {state_set → per-char next_state_set_id} to amortise repeated steps
+        -:   11: *   - Bounded at DFA_CACHE_MAX entries; evict LRU when full
+        -:   12: *   - Gives O(n) amortised for repeated patterns on similar text
+        -:   13: *
+        -:   14: * Boyer-Moore-Horspool (BMH) for fixed-string search:
+        -:   15: *   - Precompute bad-character skip table from needle
+        -:   16: *   - Average O(n/m) for typical text
+        -:   17: */
+        -:   18:
+        -:   19:#ifndef _POSIX_C_SOURCE
+        -:   20:#define _POSIX_C_SOURCE 200809L
+        -:   21:#endif
+        -:   22:
+        -:   23:#include "regex_internal.h"
+        -:   24:#include "../section.h"
+        -:   25:#include <ctype.h>
+        -:   26:#include <string.h>
+        -:   27:#include <stdlib.h>
+        -:   28:
+        -:   29:/* ---- Boyer-Moore-Horspool ------------------------------------------------ */
+        -:   30:
+       24:   31:void mb_bmh_build(const char *needle, size_t nlen, size_t skip[256])
+        -:   32:{
+     6168:   33:    for (int i = 0; i < 256; i++)
+     6144:   34:        skip[i] = nlen ? nlen : 1;
+       24:   35:    if (nlen < 2) return;  /* guard unsigned underflow for nlen-1 */
+       80:   36:    for (size_t i = 0; i < nlen - 1; i++)
+       64:   37:        skip[(unsigned char)needle[i]] = nlen - 1 - i;
+        -:   38:}
+        -:   39:
+       82:   40:HOT const char *mb_bmh_search(const char *haystack, size_t hlen,
+        -:   41:                               const char *needle, size_t nlen,
+        -:   42:                               const size_t skip[256])
+        -:   43:{
+       82:   44:    if (nlen == 0) return haystack;
+       82:   45:    if (nlen > hlen) return NULL;
+        -:   46:
+       70:   47:    size_t i = nlen - 1;
+      206:   48:    while (i < hlen) {
+        -:   49:        size_t j = nlen - 1;
+        -:   50:        size_t k = i;
+      196:   51:        while (j < nlen && haystack[k] == needle[j]) {
+       60:   52:            if (j == 0) return haystack + k;
+       28:   53:            j--; k--;
+        -:   54:        }
+      136:   55:        i += skip[(unsigned char)haystack[i]];
+        -:   56:    }
+        -:   57:    return NULL;
+        -:   58:}
+        -:   59:
+        2:   60:void mb_bmh_build_icase(const char *needle, size_t nlen, size_t skip[256])
+        -:   61:{
+      514:   62:    for (int i = 0; i < 256; i++)
+      512:   63:        skip[i] = nlen ? nlen : 1;
+        2:   64:    if (nlen < 2) return;  /* guard unsigned underflow */
+       10:   65:    for (size_t i = 0; i < nlen - 1; i++) {
+        8:   66:        unsigned char lo = (unsigned char)tolower((unsigned char)needle[i]);
+        8:   67:        unsigned char up = (unsigned char)toupper((unsigned char)needle[i]);
+        8:   68:        size_t s = nlen - 1 - i;
+        8:   69:        skip[lo] = s;
+        8:   70:        skip[up] = s;
+        -:   71:    }
+        -:   72:}
+        -:   73:
+       10:   74:HOT const char *mb_bmh_search_icase(const char *haystack, size_t hlen,
+        -:   75:                                     const char *needle, size_t nlen,
+        -:   76:                                     const size_t skip[256])
+        -:   77:{
+       10:   78:    if (nlen == 0) return haystack;
+       10:   79:    if (nlen > hlen) return NULL;
+        -:   80:
+        8:   81:    size_t i = nlen - 1;
+       16:   82:    while (i < hlen) {
+        -:   83:        size_t j = nlen - 1;
+        -:   84:        size_t k = i;
+       18:   85:        while (j < nlen &&
+       18:   86:               tolower((unsigned char)haystack[k]) ==
+       18:   87:               tolower((unsigned char)needle[j])) {
+       10:   88:            if (j == 0) return haystack + k;
+        8:   89:            j--; k--;
+        -:   90:        }
+        8:   91:        i += skip[(unsigned char)haystack[i]];
+        -:   92:    }
+        -:   93:    return NULL;
+        -:   94:}
+        -:   95:
+        -:   96:/* ---- NFA state list ------------------------------------------------------- */
+        -:   97:
+        -:   98:#define MAX_NFA_STATES MB_MAX_INSTRS
+        -:   99:
+        -:  100:typedef struct {
+        -:  101:    int  states[MAX_NFA_STATES];
+        -:  102:    int  n;
+        -:  103:    int  gen;   /* generation counter for deduplication */
+        -:  104:} nfa_list;
+        -:  105:
+        -:  106:/* Per-state "last generation added" for deduplication */
+        -:  107:static int state_last[MAX_NFA_STATES];
+        -:  108:static int global_gen = 0;
+        -:  109:
+        -:  110:/*
+        -:  111: * Add state 's' to list 'l', following SPLIT and JUMP transitions recursively.
+        -:  112: * Uses global_gen to avoid adding the same state twice.
+        -:  113: * 'depth' guards against stack overflow from pathological epsilon-closure chains;
+        -:  114: * the cap is MB_MAX_INSTRS (4096) since no chain can be longer than the program.
+        -:  115: */
+      100:  116:static void addstate(const mb_prog *prog, nfa_list *l, int s, int depth)
+        -:  117:{
+      120:  118:    if (s < 0 || s >= prog->len) return;
+      120:  119:    if (depth >= MB_MAX_INSTRS) return;        /* recursion depth guard */
+      120:  120:    if (state_last[s] == l->gen) return;       /* already in list */
+      120:  121:    state_last[s] = l->gen;
+        -:  122:
+      120:  123:    const mb_instr *in = &prog->instrs[s];
+      120:  124:    if (in->op == I_SPLIT) {
+       20:  125:        addstate(prog, l, in->x, depth + 1);
+       20:  126:        addstate(prog, l, in->y, depth + 1);
+       20:  127:        return;
+        -:  128:    }
+      100:  129:    if (in->op == I_JUMP) {
+    #####:  130:        addstate(prog, l, in->x, depth + 1);
+    #####:  131:        return;
+        -:  132:    }
+        -:  133:    /* Regular state: add to list */
+      100:  134:    if (l->n < MAX_NFA_STATES)
+      100:  135:        l->states[l->n++] = s;
+        -:  136:}
+        -:  137:
+        -:  138:/*
+        -:  139: * Compute the next state list from clist given input character c.
+        -:  140: */
+       78:  141:HOT static void step(const mb_prog *prog, int flags,
+        -:  142:                     const nfa_list *clist, unsigned char c,
+        -:  143:                     nfa_list *nlist, int is_newline_prev)
+        -:  144:{
+       78:  145:    nlist->n   = 0;
+       78:  146:    nlist->gen = ++global_gen;
+       78:  147:    (void)is_newline_prev;
+        -:  148:
+       78:  149:    int newline_mode = (flags & MB_REG_NEWLINE) != 0;
+        -:  150:
+      140:  151:    for (int i = 0; i < clist->n; i++) {
+       62:  152:        int s = clist->states[i];
+      62*:  153:        if (s < 0 || s >= prog->len) continue;
+       62:  154:        const mb_instr *in = &prog->instrs[s];
+        -:  155:
+       62:  156:        switch (in->op) {
+       48:  157:        case I_CHAR:
+       48:  158:            if ((unsigned char)in->arg.c == c)
+       10:  159:                addstate(prog, nlist, in->x, 0);
+        -:  160:            break;
+        -:  161:        case I_ICHAR:
+    #####:  162:            if ((unsigned char)tolower(c) == (unsigned char)in->arg.c)
+    #####:  163:                addstate(prog, nlist, in->x, 0);
+        -:  164:            break;
+    #####:  165:        case I_CLASS:
+    #####:  166:            if (in->arg.cc && mb_charclass_test(in->arg.cc, c))
+    #####:  167:                addstate(prog, nlist, in->x, 0);
+        -:  168:            break;
+       14:  169:        case I_ANY:
+       14:  170:            if (!newline_mode || c != '\n')
+       14:  171:                addstate(prog, nlist, in->x, 0);
+        -:  172:            break;
+        -:  173:        case I_BOL:
+        -:  174:        case I_EOL:
+        -:  175:            /* Zero-width assertions handled at start of addstate */
+        -:  176:            break;
+        -:  177:        case I_MATCH:
+        -:  178:        case I_SPLIT:
+        -:  179:        case I_JUMP:
+        -:  180:        case I_SAVE:
+        -:  181:            break;
+        -:  182:        }
+        -:  183:    }
+       78:  184:}
+        -:  185:
+        -:  186:/* Check if clist contains a MATCH state */
+      96*:  187:HOT static int is_match(const mb_prog *prog, const nfa_list *l)
+        -:  188:{
+     200*:  189:    for (int i = 0; i < l->n; i++) {
+     108*:  190:        int s = l->states[i];
+     108*:  191:        if (s >= 0 && s < prog->len && prog->instrs[s].op == I_MATCH)
+        -:  192:            return 1;
+        -:  193:    }
+        -:  194:    return 0;
+        -:  195:}
+        -:  196:
+        -:  197:/* Check if clist contains any MATCH-producing state (including checking
+        -:  198: * if any state is I_MATCH directly) */
+      96*:  199:HOT static int contains_match(const mb_prog *prog, const nfa_list *l)
+        -:  200:{
+     192*:  201:    return is_match(prog, l);
+        -:  202:}
+        -:  203:
+        -:  204:/* ---- Zero-width assertion handling --------------------------------------- */
+        -:  205:
+        -:  206:/*
+        -:  207: * Process zero-width assertions (BOL, EOL) in the current state list.
+        -:  208: * Called at the start of simulation and after each character.
+        -:  209: */
+      146:  210:static void process_assertions(const mb_prog *prog, int flags,
+        -:  211:                                nfa_list *l, int at_bol, int at_eol)
+        -:  212:{
+      146:  213:    int newline_mode = (flags & MB_REG_NEWLINE) != 0;
+      146:  214:    (void)newline_mode;
+        -:  215:
+        -:  216:    /* Expand BOL/EOL states */
+      264:  217:    for (int i = 0; i < l->n; i++) {
+      118:  218:        int s = l->states[i];
+     118*:  219:        if (s < 0 || s >= prog->len) continue;
+      118:  220:        const mb_instr *in = &prog->instrs[s];
+     118*:  221:        if (in->op == I_BOL && at_bol) {
+    #####:  222:            addstate(prog, l, in->x, 0);
+     118*:  223:        } else if (in->op == I_EOL && at_eol) {
+    #####:  224:            addstate(prog, l, in->x, 0);
+        -:  225:        }
+        -:  226:    }
+      146:  227:}
+        -:  228:
+        -:  229:/* ---- Lazy DFA cache ------------------------------------------------------- */
+        -:  230:
+        -:  231:/*
+        -:  232: * The DFA cache maps {sorted NFA state set} → {per-char next state set id}.
+        -:  233: * This turns O(n*k) NFA simulation into O(n) amortised.
+        -:  234: *
+        -:  235: * Implementation: simple open-addressing hash table of DFA states.
+        -:  236: * Each DFA state stores:
+        -:  237: *   - sorted array of NFA states
+        -:  238: *   - transition table: 256 ints (DFA state ID for each input byte)
+        -:  239: *
+        -:  240: * Bounded at DFA_CACHE_MAX. When full, clear all entries (simple eviction).
+        -:  241: */
+        -:  242:
+        -:  243:#define DFA_CACHE_MAX 256
+        -:  244:
+        -:  245:typedef struct {
+        -:  246:    int nfa_states[MAX_NFA_STATES];
+        -:  247:    int n_states;
+        -:  248:    int next[256];   /* -1 = not computed yet */
+        -:  249:    int is_match;    /* 1 if this DFA state contains a MATCH NFA state */
+        -:  250:    int in_use;
+        -:  251:} dfa_state_t;
+        -:  252:
+        -:  253:/* DFA cache is per-call (on stack or static) to keep things thread-safe per use */
+        -:  254:typedef struct {
+        -:  255:    dfa_state_t states[DFA_CACHE_MAX];
+        -:  256:    int         count;
+        -:  257:} dfa_cache_t;
+        -:  258:
+      134:  259:static uint32_t fnv1a(const int *data, int n)
+        -:  260:{
+      134:  261:    uint32_t h = 2166136261u;
+      234:  262:    for (int i = 0; i < n; i++) {
+      100:  263:        h ^= (uint32_t)data[i];
+      100:  264:        h *= 16777619u;
+        -:  265:    }
+        -:  266:    return h;
+        -:  267:}
+        -:  268:
+      134:  269:static int dfa_find_or_create(dfa_cache_t *cache, const mb_prog *prog,
+        -:  270:                               const nfa_list *states)
+        -:  271:{
+      134:  272:    if (cache->count >= DFA_CACHE_MAX) {
+        -:  273:        /* Cache full: clear and start over */
+    #####:  274:        memset(cache->states, 0, sizeof(cache->states));
+    #####:  275:        cache->count = 0;
+        -:  276:    }
+        -:  277:
+        -:  278:    /* Compute hash */
+      134:  279:    uint32_t h = fnv1a(states->states, states->n) % DFA_CACHE_MAX;
+        -:  280:
+        -:  281:    /* Linear probe */
+     134*:  282:    for (int tries = 0; tries < DFA_CACHE_MAX; tries++) {
+      134:  283:        int slot = (int)((h + (uint32_t)tries) % DFA_CACHE_MAX);
+      134:  284:        dfa_state_t *d = &cache->states[slot];
+        -:  285:
+      134:  286:        if (!d->in_use) {
+        -:  287:            /* Create new DFA state */
+       28:  288:            d->n_states = states->n;
+       62:  289:            for (int i = 0; i < states->n && i < MAX_NFA_STATES; i++)
+       34:  290:                d->nfa_states[i] = states->states[i];
+       28:  291:            memset(d->next, -1, sizeof(d->next));
+       28:  292:            d->is_match = contains_match(prog, states);
+       28:  293:            d->in_use   = 1;
+       28:  294:            cache->count++;
+       28:  295:            return slot;
+        -:  296:        }
+        -:  297:
+        -:  298:        /* Check if this slot matches */
+      106:  299:        if (d->n_states == states->n) {
+      172:  300:            int match = 1;
+      172:  301:            for (int i = 0; i < states->n; i++) {
+       66:  302:                if (d->nfa_states[i] != states->states[i]) {
+        -:  303:                    match = 0; break;
+        -:  304:                }
+        -:  305:            }
+      106:  306:            if (match) return slot;
+        -:  307:        }
+        -:  308:    }
+        -:  309:
+        -:  310:    /* Hash table full (shouldn't happen with clear above) */
+        -:  311:    return -1;
+        -:  312:}
+        -:  313:
+        -:  314:/* ---- Main search function ------------------------------------------------- */
+        -:  315:
+       10:  316:HOT int mb_thompson_search(const mb_prog *prog, int flags,
+        -:  317:                            const char *text, size_t n,
+        -:  318:                            mb_match *out, int anchor_bol)
+        -:  319:{
+       10:  320:    if (!prog || prog->len == 0) return 0;
+        -:  321:
+       10:  322:    int newline_mode = (flags & MB_REG_NEWLINE) != 0;
+        -:  323:
+        -:  324:    /* State lists (two-list simulation) */
+       10:  325:    nfa_list clist, nlist;
+        -:  326:
+        -:  327:    /* DFA cache (stack-allocated for thread safety) */
+       10:  328:    dfa_cache_t *dfa = malloc(sizeof(dfa_cache_t));
+      10*:  329:    if (!dfa) goto no_dfa;  /* fall back to pure NFA simulation */
+        -:  330:
+       10:  331:    memset(dfa, 0, sizeof(dfa_cache_t));
+        -:  332:
+        -:  333:    /* Try matching from each start position */
+       62:  334:    for (size_t start = 0; start <= n; start++) {
+       56:  335:        if (anchor_bol && start > 0) break;
+        -:  336:
+        -:  337:        /* Initialize state list from pattern entry */
+       56:  338:        clist.n   = 0;
+       56:  339:        clist.gen = ++global_gen;
+       56:  340:        memset(state_last, 0, (size_t)prog->len * sizeof(int));
+        -:  341:
+       56:  342:        addstate(prog, &clist, 0, 0);  /* entry is always 0; depth starts at 0 */
+        -:  343:
+        -:  344:        /* Handle BOL assertion at this position */
+      56*:  345:        int at_bol = (start == 0) || (newline_mode && start > 0 &&
+    #####:  346:                                       text[start - 1] == '\n');
+       56:  347:        process_assertions(prog, flags, &clist, at_bol, 0);
+        -:  348:
+        -:  349:        /* Check for immediate match (empty pattern or all-assertions) */
+      112:  350:        if (contains_match(prog, &clist)) {
+    #####:  351:            if (out) { out->start = text + start; out->end = text + start; }
+    #####:  352:            free(dfa);
+    #####:  353:            return 1;
+        -:  354:        }
+        -:  355:
+      56*:  356:        if (clist.n == 0) continue;
+        -:  357:
+        -:  358:        /* Get DFA state for this initial state set */
+       56:  359:        int dfa_id = dfa_find_or_create(dfa, prog, &clist);
+        -:  360:
+        -:  361:        /* Run the NFA/DFA over text[start..] */
+      270:  362:        for (size_t i = start; i < n; i++) {
+      218:  363:            unsigned char c = (unsigned char)text[i];
+        -:  364:
+        -:  365:            /* Use DFA cache if available */
+      218:  366:            if (dfa_id >= 0) {
+      218:  367:                int next_id = dfa->states[dfa_id].next[c];
+      218:  368:                if (next_id >= 0) {
+        -:  369:                    dfa_id = next_id;
+        -:  370:                } else {
+        -:  371:                    /* Compute next NFA state set */
+       78:  372:                    step(prog, flags, &clist, c, &nlist, 0);
+        -:  373:
+        -:  374:                    /* Handle EOL/BOL assertions in nlist */
+       78:  375:                    int at_eol_next = (i + 1 >= n) ||
+    #####:  376:                                      (newline_mode && text[i + 1] == '\n');
+       78:  377:                    int at_bol_next = newline_mode && c == '\n';
+       78:  378:                    process_assertions(prog, flags, &nlist, at_bol_next, at_eol_next);
+        -:  379:
+       78:  380:                    int new_id = dfa_find_or_create(dfa, prog, &nlist);
+       78:  381:                    if (dfa_id >= 0 && new_id >= 0)
+       78:  382:                        dfa->states[dfa_id].next[c] = new_id;
+       78:  383:                    dfa_id = new_id;
+        -:  384:
+        -:  385:                    /* Update clist for next iteration */
+       78:  386:                    clist = nlist;
+        -:  387:                }
+        -:  388:
+       78:  389:                if (dfa_id < 0) break;
+        -:  390:
+      218:  391:                if (dfa->states[dfa_id].is_match) {
+        4:  392:                    if (out) {
+    #####:  393:                        out->start = text + start;
+    #####:  394:                        out->end   = text + i + 1;
+        -:  395:                    }
+        4:  396:                    free(dfa);
+        4:  397:                    return 1;
+        -:  398:                }
+        -:  399:
+        -:  400:                /* Update clist from DFA state */
+      214:  401:                if (dfa_id >= 0) {
+      214:  402:                    clist.n   = dfa->states[dfa_id].n_states;
+      214:  403:                    clist.gen = ++global_gen;
+      274:  404:                    for (int j = 0; j < clist.n; j++) {
+       60:  405:                        clist.states[j] = dfa->states[dfa_id].nfa_states[j];
+       60:  406:                        state_last[clist.states[j]] = clist.gen;
+        -:  407:                    }
+        -:  408:                }
+        -:  409:            } else {
+        -:  410:                /* Pure NFA fallback */
+    #####:  411:                step(prog, flags, &clist, c, &nlist, 0);
+    #####:  412:                int at_eol_next = (i + 1 >= n) ||
+    #####:  413:                                  (newline_mode && text[i + 1] == '\n');
+    #####:  414:                int at_bol_next = newline_mode && c == '\n';
+    #####:  415:                process_assertions(prog, flags, &nlist, at_bol_next, at_eol_next);
+        -:  416:
+    #####:  417:                if (contains_match(prog, &nlist)) {
+    #####:  418:                    if (out) {
+    #####:  419:                        out->start = text + start;
+    #####:  420:                        out->end   = text + i + 1;
+        -:  421:                    }
+    #####:  422:                    free(dfa);
+    #####:  423:                    return 1;
+        -:  424:                }
+        -:  425:
+    #####:  426:                clist = nlist;
+    #####:  427:                if (clist.n == 0) break;
+        -:  428:            }
+        -:  429:        }
+        -:  430:
+        -:  431:        /* Check EOL assertion at end of string */
+       52:  432:        if (clist.n > 0) {
+       12:  433:            int at_eol = 1;
+       12:  434:            process_assertions(prog, flags, &clist, 0, at_eol);
+       24:  435:            if (contains_match(prog, &clist)) {
+    #####:  436:                if (out) { out->start = text + start; out->end = text + n; }
+    #####:  437:                free(dfa);
+    #####:  438:                return 1;
+        -:  439:            }
+        -:  440:        }
+        -:  441:    }
+        -:  442:
+        6:  443:    free(dfa);
+        6:  444:    return 0;
+        -:  445:
+    #####:  446:no_dfa:
+        -:  447:    /* Pure NFA simulation without DFA cache */
+    #####:  448:    for (size_t start = 0; start <= n; start++) {
+    #####:  449:        if (anchor_bol && start > 0) break;
+        -:  450:
+    #####:  451:        clist.n   = 0;
+    #####:  452:        clist.gen = ++global_gen;
+    #####:  453:        memset(state_last, 0, (size_t)prog->len * sizeof(int));
+    #####:  454:        addstate(prog, &clist, 0, 0);
+        -:  455:
+    #####:  456:        int at_bol = (start == 0) || (newline_mode && start > 0 &&
+    #####:  457:                                       text[start - 1] == '\n');
+    #####:  458:        process_assertions(prog, flags, &clist, at_bol, 0);
+        -:  459:
+    #####:  460:        if (contains_match(prog, &clist)) {
+    #####:  461:            if (out) { out->start = text + start; out->end = text + start; }
+    #####:  462:            return 1;
+        -:  463:        }
+        -:  464:
+    #####:  465:        for (size_t i = start; i < n; i++) {
+    #####:  466:            unsigned char c = (unsigned char)text[i];
+    #####:  467:            step(prog, flags, &clist, c, &nlist, 0);
+    #####:  468:            int at_eol_next = (i + 1 >= n) ||
+    #####:  469:                              (newline_mode && text[i + 1] == '\n');
+    #####:  470:            int at_bol_next = newline_mode && c == '\n';
+    #####:  471:            process_assertions(prog, flags, &nlist, at_bol_next, at_eol_next);
+        -:  472:
+    #####:  473:            if (contains_match(prog, &nlist)) {
+    #####:  474:                if (out) { out->start = text + start; out->end = text + i + 1; }
+    #####:  475:                return 1;
+        -:  476:            }
+    #####:  477:            clist = nlist;
+    #####:  478:            if (clist.n == 0) break;
+        -:  479:        }
+        -:  480:
+    #####:  481:        if (clist.n > 0) {
+    #####:  482:            process_assertions(prog, flags, &clist, 0, 1);
+    #####:  483:            if (contains_match(prog, &clist)) {
+    #####:  484:                if (out) { out->start = text + start; out->end = text + n; }
+    #####:  485:                return 1;
+        -:  486:            }
+        -:  487:        }
+        -:  488:    }
+        -:  489:    return 0;
+        -:  490:}

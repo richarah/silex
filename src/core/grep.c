@@ -40,6 +40,8 @@ typedef struct {
     int opt_c;           /* -c: count matches */
     int opt_i;           /* -i: case insensitive */
     int opt_l;           /* -l: list filenames only */
+    int opt_L;           /* -L: list files with NO match */
+    int opt_H;           /* -H: always print filename prefix */
     int opt_n;           /* -n: print line numbers */
     int opt_q;           /* -q: quiet */
     int opt_s;           /* -s: suppress file errors */
@@ -47,6 +49,10 @@ typedef struct {
     int opt_w;           /* -w: word boundaries */
     int opt_r;           /* -r/-R: recursive */
     int opt_color;       /* --color: ANSI highlight */
+    int opt_o;           /* -o: only matching portion */
+    int max_matches;     /* -m N: stop after N matches (0 = unlimited) */
+    int context_A;       /* -A N: N lines of after-context */
+    int context_B;       /* -B N: N lines of before-context */
 
     /* Patterns */
     char  *patterns[MAX_PATTERNS];
@@ -275,6 +281,71 @@ static void print_line_color_regex(const mb_regex *re, const char *line)
     if (*p != '\0') fputs(p, stdout);
 }
 
+/* Print the line prefix (filename + linenum) into strbuf out */
+static int grep_print_prefix(strbuf_t *out, const char *filename,
+                              int show_fname, long linenum,
+                              const grep_opts_t *g, int is_context)
+{
+    if (show_fname && filename) {
+        if (g->opt_color) {
+            if (sb_append(out, COL_FNAME)  != 0) return -1;
+            if (sb_append(out, filename)    != 0) return -1;
+            if (sb_append(out, COL_RESET)   != 0) return -1;
+            if (sb_appendc(out, is_context ? '-' : ':') != 0) return -1;
+        } else {
+            if (sb_append(out, filename) != 0) return -1;
+            if (sb_appendc(out, is_context ? '-' : ':') != 0) return -1;
+        }
+    }
+    if (g->opt_n) {
+        if (g->opt_color) {
+            if (sb_appendf(out, COL_LINENO "%ld" COL_RESET "%c",
+                           linenum, is_context ? '-' : ':') != 0) return -1;
+        } else {
+            if (sb_appendf(out, "%ld%c", linenum,
+                           is_context ? '-' : ':') != 0) return -1;
+        }
+    }
+    return 0;
+}
+
+/* Print matched portions of line (for -o flag) */
+static void grep_print_only_match(const char *line, const grep_opts_t *g,
+                                  const char *prefix)
+{
+    if (g->opt_F) {
+        if (g->npatterns == 0) return;
+        size_t plen = strlen(g->patterns[0]);
+        const char *p = line;
+        for (;;) {
+            const char *found = g->opt_i ? stristr(p, g->patterns[0])
+                                          : strstr(p, g->patterns[0]);
+            if (!found) break;
+            printf("%s", prefix);
+            fwrite(found, 1, plen, stdout);
+            putchar('\n');
+            p = found + (plen > 0 ? plen : 1);
+        }
+    } else {
+        if (g->npatterns == 0 || !g->compiled_ok[0]) return;
+        const char *p   = line;
+        size_t      rem = strlen(line);
+        for (;;) {
+            mb_match m;
+            if (!mb_regex_search(g->mb_compiled[0], p, rem, &m)) break;
+            size_t mlen = (size_t)(m.end - m.start);
+            printf("%s", prefix);
+            fwrite(m.start, 1, mlen, stdout);
+            putchar('\n');
+            size_t advance = (size_t)(m.end - p);
+            if (advance == 0) advance = 1;
+            if (advance > rem) break;
+            p   += advance;
+            rem -= advance;
+        }
+    }
+}
+
 /*
  * Search one open FILE stream for matches.
  * filename: displayed name (NULL if reading from stdin with no label).
@@ -292,9 +363,30 @@ static int grep_stream(FILE *fp, const char *filename,
     int      binary   = 0;
     int      result   = 1; /* assume no match */
 
+    /* Context support */
+    int ctx_B = g->context_B;
+    int ctx_A = g->context_A;
+    int after_left  = 0;
+    long last_printed = -1;
+
+    char  **before_buf  = NULL;
+    long   *before_lnum = NULL;
+    int     before_pos  = 0;
+    int     before_full = 0;
+    if (ctx_B > 0) {
+        before_buf  = calloc((size_t)ctx_B, sizeof(char *));
+        before_lnum = calloc((size_t)ctx_B, sizeof(long));
+        if (!before_buf || !before_lnum) {
+            free(before_buf); free(before_lnum);
+            err_msg("grep", "out of memory");
+            return 2;
+        }
+    }
+
     /* Use a strbuf to build output lines */
     strbuf_t out;
     if (sb_init(&out, 256) != 0) {
+        free(before_buf); free(before_lnum);
         err_msg("grep", "out of memory");
         return 2;
     }
@@ -305,17 +397,10 @@ static int grep_stream(FILE *fp, const char *filename,
         /* Binary detection: check for NUL bytes */
         if (!binary) {
             for (ssize_t k = 0; k < linelen; k++) {
-                if (linebuf[k] == '\0') {
-                    binary = 1;
-                    break;
-                }
+                if (linebuf[k] == '\0') { binary = 1; break; }
             }
         }
-
-        if (binary) {
-            /* Binary file: stop line scanning */
-            break;
-        }
+        if (binary) break;
 
         /* Strip trailing newline for matching */
         if (linelen > 0 && linebuf[linelen - 1] == '\n') {
@@ -324,75 +409,125 @@ static int grep_stream(FILE *fp, const char *filename,
         }
 
         int matched = line_matches_any(linebuf, g);
-        if (g->opt_v)
-            matched = !matched;
+        if (g->opt_v) matched = !matched;
 
-        if (!matched)
+        if (!matched) {
+            /* Print as after-context if needed */
+            if (after_left > 0 && !g->opt_c && !g->opt_q && !g->opt_l && !g->opt_L) {
+                sb_reset(&out);
+                if (grep_print_prefix(&out, filename, show_fname,
+                                       linenum, g, 1) < 0) goto oom;
+                fputs(sb_str(&out), stdout);
+                fputs(linebuf, stdout);
+                putchar('\n');
+                last_printed = linenum;
+                after_left--;
+            }
+            /* Store in before-context ring buffer */
+            if (ctx_B > 0) {
+                free(before_buf[before_pos]);
+                before_buf[before_pos]  = strdup(linebuf);
+                before_lnum[before_pos] = linenum;
+                before_pos = (before_pos + 1) % ctx_B;
+                if (!before_full && before_pos == 0) before_full = 1;
+            }
             continue;
+        }
 
         count++;
         result = 0;
         g_matched_any = 1;
 
-        if (g->opt_q)
+        /* -m: stop after max_matches */
+        if (g->max_matches > 0 && count > g->max_matches) {
+            count--;
+            result = (count > 0) ? 0 : 1;
             goto done;
+        }
+
+        if (g->opt_q) goto done;
+        if (g->opt_L) continue; /* suppress output; track match status only */
         if (g->opt_l) {
             printf("%s\n", filename ? filename : "(stdin)");
             goto done;
         }
-        if (g->opt_c)
-            continue; /* accumulate count, print at end */
+        if (g->opt_c) {
+            if (ctx_B > 0) {
+                free(before_buf[before_pos]);
+                before_buf[before_pos]  = strdup(linebuf);
+                before_lnum[before_pos] = linenum;
+                before_pos = (before_pos + 1) % ctx_B;
+                if (!before_full && before_pos == 0) before_full = 1;
+            }
+            continue;
+        }
 
-        /* Build output line */
+        /* Print separator between context groups */
+        if ((ctx_A > 0 || ctx_B > 0) && last_printed >= 0 &&
+            last_printed < linenum - 1) {
+            puts("--");
+        }
+
+        /* Print before-context lines */
+        if (ctx_B > 0) {
+            int n_avail = before_full ? ctx_B : before_pos;
+            int start   = before_full ? before_pos : 0;
+            for (int k = 0; k < n_avail; k++) {
+                int idx = (start + k) % ctx_B;
+                if (!before_buf[idx] || before_lnum[idx] <= last_printed) continue;
+                sb_reset(&out);
+                if (grep_print_prefix(&out, filename, show_fname,
+                                       before_lnum[idx], g, 1) < 0) goto oom;
+                fputs(sb_str(&out), stdout);
+                fputs(before_buf[idx], stdout);
+                putchar('\n');
+                last_printed = before_lnum[idx];
+            }
+            for (int k = 0; k < ctx_B; k++) {
+                free(before_buf[k]); before_buf[k] = NULL; before_lnum[k] = 0;
+            }
+            before_pos = 0; before_full = 0;
+        }
+
+        /* Build prefix for this matched line */
         sb_reset(&out);
+        if (grep_print_prefix(&out, filename, show_fname, linenum, g, 0) < 0)
+            goto oom;
+        const char *prefix_str = sb_str(&out);
 
-        if (show_fname && filename) {
-            if (g->opt_color) {
-                if (sb_append(&out, COL_FNAME)  != 0) goto oom;
-                if (sb_append(&out, filename)    != 0) goto oom;
-                if (sb_append(&out, COL_RESET)   != 0) goto oom;
-                if (sb_append(&out, COL_SEP ":" COL_RESET) != 0) goto oom;
-            } else {
-                if (sb_append(&out, filename) != 0) goto oom;
-                if (sb_appendc(&out, ':')     != 0) goto oom;
-            }
-        }
-
-        if (g->opt_n) {
-            if (g->opt_color) {
-                if (sb_appendf(&out, COL_LINENO "%ld" COL_RESET
-                               COL_SEP ":" COL_RESET, linenum) != 0) goto oom;
-            } else {
-                if (sb_appendf(&out, "%ld:", linenum) != 0) goto oom;
-            }
-        }
-
-        /* Print prefix, then the line (with optional color) */
-        fputs(sb_str(&out), stdout);
-
-        if (g->opt_color && !g->opt_F && g->npatterns > 0 && g->compiled_ok[0]) {
-            /* Color-highlight first compiled pattern */
-            print_line_color_regex(g->mb_compiled[0], linebuf);
-        } else if (g->opt_color && g->opt_F && g->npatterns > 0) {
-            print_line_color_fixed(linebuf, g->patterns[0], g->opt_i);
+        if (g->opt_o) {
+            grep_print_only_match(linebuf, g, prefix_str);
         } else {
-            fputs(linebuf, stdout);
+            fputs(prefix_str, stdout);
+            if (g->opt_color && !g->opt_F && g->npatterns > 0 && g->compiled_ok[0]) {
+                print_line_color_regex(g->mb_compiled[0], linebuf);
+            } else if (g->opt_color && g->opt_F && g->npatterns > 0) {
+                print_line_color_fixed(linebuf, g->patterns[0], g->opt_i);
+            } else {
+                fputs(linebuf, stdout);
+            }
+            putchar('\n');
         }
-        putchar('\n');
+        last_printed = linenum;
+        after_left   = ctx_A;
+
+        if (ctx_B > 0) {
+            free(before_buf[before_pos]);
+            before_buf[before_pos]  = strdup(linebuf);
+            before_lnum[before_pos] = linenum;
+            before_pos = (before_pos + 1) % ctx_B;
+            if (!before_full && before_pos == 0) before_full = 1;
+        }
     }
 
     if (ferror(fp)) {
         if (!g->opt_s && filename)
             err_sys("grep", "%s", filename);
-        sb_free(&out);
-        free(linebuf);
-        return 2;
+        goto cleanup_err;
     }
 
     if (binary) {
         if (!g->opt_q && !g->opt_l) {
-            /* Drain rest of file to determine if any match — not practical,
-             * just report binary file matches if we got here via content scan */
             printf("Binary file %s matches\n",
                    filename ? filename : "(stdin)");
         } else if (g->opt_l && filename) {
@@ -412,12 +547,21 @@ static int grep_stream(FILE *fp, const char *filename,
     }
 
 done:
+    if (ctx_B > 0) {
+        for (int k = 0; k < ctx_B; k++) free(before_buf[k]);
+        free(before_buf); free(before_lnum);
+    }
     sb_free(&out);
     free(linebuf);
     return result;
 
 oom:
     err_msg("grep", "out of memory building output line");
+cleanup_err:
+    if (ctx_B > 0) {
+        for (int k = 0; k < ctx_B; k++) free(before_buf[k]);
+        free(before_buf); free(before_lnum);
+    }
     sb_free(&out);
     free(linebuf);
     return 2;
@@ -526,6 +670,11 @@ static int grep_path(const char *path, int show_fname, const grep_opts_t *g)
 
     int r = grep_stream(fp, path, show_fname, g);
     fclose(fp);
+    /* -L: print filename of files with NO match */
+    if (g->opt_L && r == 1) {
+        printf("%s\n", path);
+        return 1; /* still "no match" for exit status */
+    }
     return r;
 }
 
@@ -676,12 +825,67 @@ int applet_grep(int argc, char **argv)
             case 'c': g.opt_c = 1; break;
             case 'i': g.opt_i = 1; break;
             case 'l': g.opt_l = 1; break;
+            case 'L': g.opt_L = 1; break;
+            case 'H': g.opt_H = 1; break;
             case 'n': g.opt_n = 1; break;
             case 'q': g.opt_q = 1; break;
             case 's': g.opt_s = 1; break;
             case 'v': g.opt_v = 1; break;
             case 'w': g.opt_w = 1; break;
             case 'r': case 'R': g.opt_r = 1; break;
+            case 'o': g.opt_o = 1; break;
+            case 'm': {
+                const char *val;
+                if (p[1]) { val = p + 1; stop = 1; }
+                else {
+                    if (++i >= argc) {
+                        err_msg("grep", "-m requires argument"); return 2;
+                    }
+                    val = argv[i];
+                }
+                g.max_matches = atoi(val);
+                stop = 1;
+                break;
+            }
+            case 'A': {
+                const char *val;
+                if (p[1]) { val = p + 1; stop = 1; }
+                else {
+                    if (++i >= argc) {
+                        err_msg("grep", "-A requires argument"); return 2;
+                    }
+                    val = argv[i];
+                }
+                g.context_A = atoi(val);
+                stop = 1;
+                break;
+            }
+            case 'B': {
+                const char *val;
+                if (p[1]) { val = p + 1; stop = 1; }
+                else {
+                    if (++i >= argc) {
+                        err_msg("grep", "-B requires argument"); return 2;
+                    }
+                    val = argv[i];
+                }
+                g.context_B = atoi(val);
+                stop = 1;
+                break;
+            }
+            case 'C': {
+                const char *val;
+                if (p[1]) { val = p + 1; stop = 1; }
+                else {
+                    if (++i >= argc) {
+                        err_msg("grep", "-C requires argument"); return 2;
+                    }
+                    val = argv[i];
+                }
+                g.context_A = g.context_B = atoi(val);
+                stop = 1;
+                break;
+            }
             case 'e': {
                 const char *pat;
                 if (p[1]) {
@@ -766,7 +970,7 @@ int applet_grep(int argc, char **argv)
         else if (r == 2)
             final_result = 2;
     } else {
-        int show_fname = (nfiles > 1) || g.opt_r;
+        int show_fname = (nfiles > 1) || g.opt_r || g.opt_H;
         for (int j = i; j < argc; j++) {
             int r = grep_path(argv[j], show_fname, &g);
             if (r == 0)

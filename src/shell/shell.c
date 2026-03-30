@@ -1,3 +1,5 @@
+/* shell.c — shell initialization, main loop, and cleanup */
+
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
@@ -119,6 +121,14 @@ int shell_init(shell_ctx_t *sh, int argc, char **argv)
     /* Initialise all traps to default */
     for (int i = 0; i < NSIG; i++)
         sh->traps[i].action = SHELL_TRAP_DEFAULT;
+
+    /* MATCHBOX_TRACE: tracing/debugging mode */
+    const char *trace_env = getenv("MATCHBOX_TRACE");
+    if (trace_env) {
+        sh->trace_level = atoi(trace_env);
+        if (sh->trace_level < 0) sh->trace_level = 0;
+        if (sh->trace_level > 2) sh->trace_level = 2;
+    }
 
     /* Ignore SIGPIPE in the shell process; children restore SIG_DFL before exec */
     signal(SIGPIPE, SIG_IGN);

@@ -1,3 +1,5 @@
+/* platform.c — platform capability detection (AVX2, io_uring, inotify) */
+
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
@@ -16,6 +18,7 @@
 #include "platform.h"
 
 #include <errno.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -74,6 +77,14 @@ struct matchbox_io_uring_params {
 
 void platform_detect(void)
 {
+    /* MATCHBOX_FORCE_FALLBACKS=1: disable all optional kernel features.
+     * Used for testing the portable fallback paths. */
+    if (getenv("MATCHBOX_FORCE_FALLBACKS") != NULL) {
+        g_uring_available   = 0;
+        g_inotify_available = 0;
+        return;
+    }
+
     /* ------------------------------------------------------------------ */
     /* io_uring probe                                                       */
     /* ------------------------------------------------------------------ */

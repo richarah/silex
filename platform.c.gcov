@@ -1,0 +1,121 @@
+        -:    0:Source:src/util/platform.c
+        -:    1:#ifndef _POSIX_C_SOURCE
+        -:    2:#define _POSIX_C_SOURCE 200809L
+        -:    3:#endif
+        -:    4:
+        -:    5:/*
+        -:    6: * platform.c — runtime detection of Linux-specific features.
+        -:    7: *
+        -:    8: * Detects:
+        -:    9: *   - io_uring via SYS_io_uring_setup (no liburing dependency)
+        -:   10: *   - inotify  via inotify_init1()
+        -:   11: *
+        -:   12: * Both probes are conservative: on any error the feature is marked
+        -:   13: * unavailable and all code paths must fall back gracefully.
+        -:   14: */
+        -:   15:
+        -:   16:#include "platform.h"
+        -:   17:
+        -:   18:#include <errno.h>
+        -:   19:#include <stdlib.h>
+        -:   20:#include <string.h>
+        -:   21:#include <unistd.h>
+        -:   22:
+        -:   23:/* sys/syscall.h gives us SYS_io_uring_setup */
+        -:   24:#include <sys/syscall.h>
+        -:   25:
+        -:   26:/* syscall(2) is not declared in strict POSIX mode; declare it explicitly */
+        -:   27:extern long syscall(long number, ...);
+        -:   28:
+        -:   29:/* inotify */
+        -:   30:#include <sys/inotify.h>
+        -:   31:
+        -:   32:int g_uring_available    = 0;
+        -:   33:int g_inotify_available  = 0;
+        -:   34:
+        -:   35:/*
+        -:   36: * io_uring_params layout matches the kernel ABI.
+        -:   37: * We define the minimal struct here to avoid depending on linux/io_uring.h,
+        -:   38: * which may not be present on all toolchains.
+        -:   39: *
+        -:   40: * The kernel ABI is stable; only the first few fields matter for a
+        -:   41: * zero-initialised probe call.
+        -:   42: */
+        -:   43:#ifndef SYS_io_uring_setup
+        -:   44:/* Architecture-specific syscall numbers — Linux stable ABI */
+        -:   45:#  if defined(__x86_64__)
+        -:   46:#    define SYS_io_uring_setup 425
+        -:   47:#  elif defined(__aarch64__)
+        -:   48:#    define SYS_io_uring_setup 425
+        -:   49:#  elif defined(__arm__)
+        -:   50:#    define SYS_io_uring_setup 425
+        -:   51:#  elif defined(__riscv)
+        -:   52:#    define SYS_io_uring_setup 425
+        -:   53:#  else
+        -:   54:/* Unknown arch: disable io_uring */
+        -:   55:#    define SYS_io_uring_setup (-1L)
+        -:   56:#  endif
+        -:   57:#endif
+        -:   58:
+        -:   59:/*
+        -:   60: * Minimal io_uring_params: the kernel fills this in on io_uring_setup().
+        -:   61: * We zero-initialise it and only care whether the syscall succeeds.
+        -:   62: */
+        -:   63:struct matchbox_io_uring_params {
+        -:   64:    unsigned int sq_entries;
+        -:   65:    unsigned int cq_entries;
+        -:   66:    unsigned int flags;
+        -:   67:    unsigned int sq_thread_cpu;
+        -:   68:    unsigned int sq_thread_idle;
+        -:   69:    unsigned int features;
+        -:   70:    unsigned int wq_fd;
+        -:   71:    unsigned int resv[3];
+        -:   72:    /* sq_off and cq_off follow; we don't need them for the probe */
+        -:   73:    unsigned char pad[128];
+        -:   74:};
+        -:   75:
+    #####:   76:void platform_detect(void)
+        -:   77:{
+        -:   78:    /* MATCHBOX_FORCE_FALLBACKS=1: disable all optional kernel features.
+        -:   79:     * Used for testing the portable fallback paths. */
+    #####:   80:    if (getenv("MATCHBOX_FORCE_FALLBACKS") != NULL) {
+    #####:   81:        g_uring_available   = 0;
+    #####:   82:        g_inotify_available = 0;
+    #####:   83:        return;
+        -:   84:    }
+        -:   85:
+        -:   86:    /* ------------------------------------------------------------------ */
+        -:   87:    /* io_uring probe                                                       */
+        -:   88:    /* ------------------------------------------------------------------ */
+        -:   89:#if SYS_io_uring_setup != (-1L)
+        -:   90:    {
+    #####:   91:        struct matchbox_io_uring_params params;
+    #####:   92:        memset(&params, 0, sizeof(params));
+        -:   93:
+    #####:   94:        long fd = syscall((long)SYS_io_uring_setup, (long)1, &params);
+    #####:   95:        if (fd >= 0) {
+    #####:   96:            g_uring_available = 1;
+    #####:   97:            close((int)fd);
+        -:   98:        } else {
+        -:   99:            /* ENOSYS: kernel too old; EPERM: seccomp/capability denied.
+        -:  100:             * Either way, io_uring is not available. */
+    #####:  101:            g_uring_available = 0;
+        -:  102:        }
+        -:  103:    }
+        -:  104:#else
+        -:  105:    g_uring_available = 0;
+        -:  106:#endif
+        -:  107:
+        -:  108:    /* ------------------------------------------------------------------ */
+        -:  109:    /* inotify probe                                                        */
+        -:  110:    /* ------------------------------------------------------------------ */
+        -:  111:    {
+    #####:  112:        int ifd = inotify_init1(IN_CLOEXEC);
+    #####:  113:        if (ifd >= 0) {
+    #####:  114:            g_inotify_available = 1;
+    #####:  115:            close(ifd);
+        -:  116:        } else {
+    #####:  117:            g_inotify_available = 0;
+        -:  118:        }
+        -:  119:    }
+        -:  120:}

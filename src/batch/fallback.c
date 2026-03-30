@@ -1,3 +1,5 @@
+/* fallback.c — portable I/O fallback implementations (read/write/splice) */
+
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif

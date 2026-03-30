@@ -1,9 +1,8 @@
-/* date.c -- date builtin: print or set the system date and time */
+/* date.c — date builtin: print or set the system date and time */
 
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
-/* date.c — date builtin */
 
 #include "../util/error.h"
 
@@ -367,12 +366,23 @@ int applet_date(int argc, char **argv)
         t = set_t;
     }
 
-    /* Convert to tm */
+    /* Convert to tm.
+     * For -u, set TZ=UTC so strftime %Z returns "UTC" (not "GMT" from gmtime). */
     struct tm tm_val;
-    if (opt_u)
-        gmtime_r(&t, &tm_val);
-    else
+    if (opt_u) {
+        const char *old_tz = getenv("TZ");
+        setenv("TZ", "UTC", 1);
+        tzset();
         localtime_r(&t, &tm_val);
+        /* Restore previous TZ */
+        if (old_tz)
+            setenv("TZ", old_tz, 1);
+        else
+            unsetenv("TZ");
+        tzset();
+    } else {
+        localtime_r(&t, &tm_val);
+    }
 
     char buf[256];
 

@@ -1,4 +1,4 @@
-/* sh.c -- sh applet: entry point for the matchbox POSIX shell */
+/* sh.c — sh applet: entry point for the matchbox POSIX shell */
 
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
@@ -151,6 +151,15 @@ int applet_sh(int argc, char **argv)
         ret = shell_run_file(&sh, argv[arg_start]);
     } else {
         ret = shell_run_stdin(&sh);
+    }
+
+    /* Fire EXIT trap on normal script completion */
+    const char *exit_action = sh.traps[0].action;
+    if (exit_action != SHELL_TRAP_DEFAULT && exit_action[0] != '\0') {
+        sh.traps[0].action = SHELL_TRAP_DEFAULT;
+        shell_run_string(&sh, exit_action);
+        /* Exit code follows the trap action's last status, per POSIX */
+        ret = sh.last_exit;
     }
 
     shell_free(&sh);

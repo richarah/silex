@@ -1,7 +1,4 @@
-/* linescan_scalar.c — scalar newline scanner using memchr
- *
- * Always compiled; used as fallback and for testing reference.
- */
+/* linescan_scalar.c — scalar newline scanner using memchr */
 
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L

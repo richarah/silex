@@ -1,0 +1,297 @@
+        -:    0:Source:src/module/registry.c
+        -:    1:#ifndef _POSIX_C_SOURCE
+        -:    2:#define _POSIX_C_SOURCE 200809L
+        -:    3:#endif
+        -:    4:
+        -:    5:#include "registry.h"
+        -:    6:#include "loader.h"
+        -:    7:#include "../../matchbox_module.h"
+        -:    8:
+        -:    9:#include <dirent.h>
+        -:   10:#include <errno.h>
+        -:   11:#include <stdint.h>
+        -:   12:#include <stdio.h>
+        -:   13:#include <stdlib.h>
+        -:   14:#include <string.h>
+        -:   15:#include <sys/stat.h>
+        -:   16:#include <time.h>
+        -:   17:#include <unistd.h>
+        -:   18:#include <limits.h>
+        -:   19:
+        -:   20:/*
+        -:   21: * registry.c — module registry for matchbox.
+        -:   22: *
+        -:   23: * Modules are discovered by scanning directories listed in the
+        -:   24: * MATCHBOX_MODULE_PATH environment variable (colon-separated), falling back
+        -:   25: * to /usr/lib/matchbox/modules/.
+        -:   26: *
+        -:   27: * Registry entries are hashed by "tool:flag" using FNV-1a and stored in
+        -:   28: * 64 buckets.  The directory mtime is checked on each lookup to detect new
+        -:   29: * or removed modules and invalidate the cache accordingly.
+        -:   30: */
+        -:   31:
+        -:   32:#define REGISTRY_BUCKETS     64
+        -:   33:#define REGISTRY_MAX_ENTRIES 1024   /* hard cap: stop loading beyond this many modules */
+        -:   34:#define DEFAULT_MODULE_DIR   "/usr/lib/matchbox/modules"
+        -:   35:
+        -:   36:typedef struct reg_entry {
+        -:   37:    char               *tool;
+        -:   38:    char               *flag;
+        -:   39:    char               *so_path;
+        -:   40:    matchbox_module_t  *mod;
+        -:   41:    struct reg_entry   *next;
+        -:   42:} reg_entry_t;
+        -:   43:
+        -:   44:static reg_entry_t *buckets[REGISTRY_BUCKETS];
+        -:   45:static time_t       dir_mtime;     /* mtime of the last-checked module dir */
+        -:   46:static int          registry_count; /* total entries across all buckets */
+        -:   47:
+        -:   48:/* FNV-1a hash over a NUL-terminated string */
+    #####:   49:static uint32_t fnv1a(const char *s)
+        -:   50:{
+    #####:   51:    uint32_t hash = 2166136261u;
+    #####:   52:    for (; *s; s++) {
+    #####:   53:        hash ^= (unsigned char)*s;
+    #####:   54:        hash *= 16777619u;
+        -:   55:    }
+    #####:   56:    return hash;
+        -:   57:}
+        -:   58:
+        -:   59:/* Compute bucket index for (tool, flag) */
+    #####:   60:static size_t bucket_index(const char *tool, const char *flag)
+        -:   61:{
+        -:   62:    /* Hash "tool:flag" */
+    #####:   63:    char key[512];
+    #####:   64:    snprintf(key, sizeof(key), "%s:%s", tool, flag);
+    #####:   65:    return fnv1a(key) & (REGISTRY_BUCKETS - 1);
+        -:   66:}
+        -:   67:
+        -:   68:/* Free a single entry and its heap strings (but NOT the module itself) */
+    #####:   69:static void entry_free(reg_entry_t *e)
+        -:   70:{
+    #####:   71:    if (!e) return;
+    #####:   72:    free(e->tool);
+    #####:   73:    free(e->flag);
+    #####:   74:    free(e->so_path);
+    #####:   75:    free(e);
+        -:   76:}
+        -:   77:
+        -:   78:/* Free all registry entries */
+    #####:   79:static void registry_clear(void)
+        -:   80:{
+    #####:   81:    for (int i = 0; i < REGISTRY_BUCKETS; i++) {
+    #####:   82:        reg_entry_t *e = buckets[i];
+    #####:   83:        while (e) {
+    #####:   84:            reg_entry_t *next = e->next;
+    #####:   85:            entry_free(e);
+    #####:   86:            e = next;
+        -:   87:        }
+    #####:   88:        buckets[i] = NULL;
+        -:   89:    }
+    #####:   90:    registry_count = 0;
+    #####:   91:}
+        -:   92:
+        -:   93:/*
+        -:   94: * Determine the first module directory to check.
+        -:   95: * If MATCHBOX_MODULE_PATH is set, use its first component.
+        -:   96: * Otherwise use the default.
+        -:   97: */
+    #####:   98:static void first_module_dir(char out[PATH_MAX])
+        -:   99:{
+    #####:  100:    const char *env = getenv("MATCHBOX_MODULE_PATH");
+    #####:  101:    if (env && *env) {
+        -:  102:        /* Take first colon-separated component */
+    #####:  103:        const char *colon = strchr(env, ':');
+    #####:  104:        size_t len = colon ? (size_t)(colon - env) : strlen(env);
+    #####:  105:        if (len >= PATH_MAX) len = PATH_MAX - 1;
+    #####:  106:        memcpy(out, env, len);
+    #####:  107:        out[len] = '\0';
+        -:  108:    } else {
+    #####:  109:        snprintf(out, PATH_MAX, "%s", DEFAULT_MODULE_DIR);
+        -:  110:    }
+    #####:  111:}
+        -:  112:
+    #####:  113:void registry_check_invalidate(void)
+        -:  114:{
+    #####:  115:    char dir[PATH_MAX];
+    #####:  116:    first_module_dir(dir);
+        -:  117:
+    #####:  118:    struct stat st;
+    #####:  119:    if (stat(dir, &st) != 0) {
+        -:  120:        /* Directory does not exist — clear any cached entries */
+    #####:  121:        if (dir_mtime != 0) {
+    #####:  122:            registry_clear();
+    #####:  123:            dir_mtime = 0;
+        -:  124:        }
+    #####:  125:        return;
+        -:  126:    }
+        -:  127:
+    #####:  128:    if (st.st_mtime != dir_mtime) {
+    #####:  129:        registry_clear();
+    #####:  130:        dir_mtime = st.st_mtime;
+        -:  131:    }
+        -:  132:}
+        -:  133:
+    #####:  134:matchbox_module_t *registry_find(const char *tool, const char *flag)
+        -:  135:{
+    #####:  136:    size_t idx = bucket_index(tool, flag);
+    #####:  137:    for (reg_entry_t *e = buckets[idx]; e; e = e->next) {
+    #####:  138:        if (strcmp(e->tool, tool) == 0 && strcmp(e->flag, flag) == 0)
+    #####:  139:            return e->mod;
+        -:  140:    }
+        -:  141:    return NULL;
+        -:  142:}
+        -:  143:
+    #####:  144:void registry_register(const char *tool, const char *flag,
+        -:  145:                        const char *so_path, matchbox_module_t *mod)
+        -:  146:{
+    #####:  147:    size_t idx = bucket_index(tool, flag);
+        -:  148:
+        -:  149:    /* Avoid duplicate registrations */
+    #####:  150:    for (reg_entry_t *e = buckets[idx]; e; e = e->next) {
+    #####:  151:        if (strcmp(e->tool, tool) == 0 && strcmp(e->flag, flag) == 0)
+        -:  152:            return;
+        -:  153:    }
+        -:  154:
+        -:  155:    /* Hard cap: refuse to grow beyond REGISTRY_MAX_ENTRIES */
+    #####:  156:    if (registry_count >= REGISTRY_MAX_ENTRIES) return;
+        -:  157:
+    #####:  158:    reg_entry_t *e = calloc(1, sizeof(*e));
+    #####:  159:    if (!e) return;
+        -:  160:
+    #####:  161:    e->tool    = strdup(tool);
+    #####:  162:    e->flag    = strdup(flag);
+    #####:  163:    e->so_path = strdup(so_path);
+    #####:  164:    e->mod     = mod;
+        -:  165:
+    #####:  166:    if (!e->tool || !e->flag || !e->so_path) {
+    #####:  167:        entry_free(e);
+    #####:  168:        return;
+        -:  169:    }
+        -:  170:
+    #####:  171:    e->next       = buckets[idx];
+    #####:  172:    buckets[idx]  = e;
+    #####:  173:    registry_count++;
+        -:  174:}
+        -:  175:
+        -:  176:/*
+        -:  177: * Check whether a .so file passes the minimal security checks needed for
+        -:  178: * scanning (skip symlinks and world-writable files owned by others).
+        -:  179: * Full checks are done by module_load(); this is just a quick pre-filter.
+        -:  180: */
+    #####:  181:static int so_passes_scan_checks(const char *path)
+        -:  182:{
+    #####:  183:    uid_t my_uid = getuid();
+    #####:  184:    struct stat lst;
+        -:  185:
+    #####:  186:    if (lstat(path, &lst) != 0)
+        -:  187:        return 0;
+    #####:  188:    if (S_ISLNK(lst.st_mode))
+        -:  189:        return 0;
+    #####:  190:    if (lst.st_mode & S_IWOTH)
+        -:  191:        return 0;
+    #####:  192:    if (lst.st_uid != 0 && lst.st_uid != my_uid)
+    #####:  193:        return 0;
+        -:  194:    return 1;
+        -:  195:}
+        -:  196:
+        -:  197:/*
+        -:  198: * Scan one directory for a module supporting (tool, flag).
+        -:  199: * Returns the first matching module pointer, or NULL.
+        -:  200: */
+    #####:  201:static matchbox_module_t *scan_dir(const char *dir,
+        -:  202:                                    const char *tool, const char *flag)
+        -:  203:{
+    #####:  204:    DIR *d = opendir(dir);
+    #####:  205:    if (!d) return NULL;
+        -:  206:
+        -:  207:    struct dirent *ent;
+        -:  208:    matchbox_module_t *found = NULL;
+        -:  209:
+    #####:  210:    while (!found && (ent = readdir(d)) != NULL) {
+    #####:  211:        const char *name = ent->d_name;
+    #####:  212:        size_t namelen = strlen(name);
+        -:  213:
+        -:  214:        /* Only consider files ending in ".so" */
+    #####:  215:        if (namelen < 4 || strcmp(name + namelen - 3, ".so") != 0)
+    #####:  216:            continue;
+        -:  217:
+    #####:  218:        char so_path[PATH_MAX];
+    #####:  219:        int r = snprintf(so_path, sizeof(so_path), "%s/%s", dir, name);
+    #####:  220:        if (r < 0 || (size_t)r >= sizeof(so_path))
+    #####:  221:            continue;
+        -:  222:
+    #####:  223:        if (!so_passes_scan_checks(so_path))
+    #####:  224:            continue;
+        -:  225:
+    #####:  226:        matchbox_module_t *mod = module_load(so_path);
+    #####:  227:        if (!mod)
+    #####:  228:            continue;
+        -:  229:
+        -:  230:        /* Check if this module handles the requested tool */
+    #####:  231:        if (!mod->tool_name || strcmp(mod->tool_name, tool) != 0)
+    #####:  232:            continue;
+        -:  233:
+        -:  234:        /* Check if the extra_flags list contains the requested flag */
+    #####:  235:        if (!mod->extra_flags)
+    #####:  236:            continue;
+        -:  237:
+    #####:  238:        int flag_match = 0;
+    #####:  239:        for (const char **f = mod->extra_flags; *f; f++) {
+    #####:  240:            if (strcmp(*f, flag) == 0) {
+        -:  241:                flag_match = 1;
+        -:  242:                break;
+        -:  243:            }
+        -:  244:        }
+        -:  245:
+    #####:  246:        if (!flag_match)
+    #####:  247:            continue;
+        -:  248:
+        -:  249:        /* Register all flags this module advertises for this tool */
+    #####:  250:        for (const char **f = mod->extra_flags; *f; f++)
+    #####:  251:            registry_register(tool, *f, so_path, mod);
+        -:  252:
+    #####:  253:        found = mod;
+        -:  254:    }
+        -:  255:
+    #####:  256:    closedir(d);
+    #####:  257:    return found;
+        -:  258:}
+        -:  259:
+    #####:  260:matchbox_module_t *registry_lookup(const char *tool, const char *flag)
+        -:  261:{
+        -:  262:    /* Invalidate stale cache first */
+    #####:  263:    registry_check_invalidate();
+        -:  264:
+        -:  265:    /* Check in-memory registry first */
+    #####:  266:    matchbox_module_t *cached = registry_find(tool, flag);
+    #####:  267:    if (cached)
+        -:  268:        return cached;
+        -:  269:
+        -:  270:    /* Scan all module directories in MATCHBOX_MODULE_PATH */
+    #####:  271:    const char *env = getenv("MATCHBOX_MODULE_PATH");
+    #####:  272:    if (env && *env) {
+        -:  273:        /* Make a mutable copy to tokenise */
+    #####:  274:        char *env_copy = strdup(env);
+    #####:  275:        if (!env_copy) return NULL;
+        -:  276:
+    #####:  277:        char *saveptr = NULL;
+    #####:  278:        char *token = strtok_r(env_copy, ":", &saveptr);
+    #####:  279:        while (token) {
+    #####:  280:            matchbox_module_t *mod = scan_dir(token, tool, flag);
+    #####:  281:            if (mod) {
+    #####:  282:                free(env_copy);
+    #####:  283:                return mod;
+        -:  284:            }
+    #####:  285:            token = strtok_r(NULL, ":", &saveptr);
+        -:  286:        }
+    #####:  287:        free(env_copy);
+        -:  288:    } else {
+        -:  289:        /* Fall back to default module directory */
+    #####:  290:        matchbox_module_t *mod = scan_dir(DEFAULT_MODULE_DIR, tool, flag);
+    #####:  291:        if (mod)
+        -:  292:            return mod;
+        -:  293:    }
+        -:  294:
+        -:  295:    return NULL;
+        -:  296:}

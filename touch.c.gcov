@@ -1,0 +1,346 @@
+        -:    0:Source:src/core/touch.c
+        -:    1:/* touch.c — touch builtin: change file timestamps */
+        -:    2:
+        -:    3:#ifndef _POSIX_C_SOURCE
+        -:    4:#define _POSIX_C_SOURCE 200809L
+        -:    5:#endif
+        -:    6:
+        -:    7:#include "../util/error.h"
+        -:    8:
+        -:    9:#include <errno.h>
+        -:   10:#include <fcntl.h>
+        -:   11:#include <limits.h>
+        -:   12:#include <stdio.h>
+        -:   13:#include <stdlib.h>
+        -:   14:#include <string.h>
+        -:   15:#include <sys/stat.h>
+        -:   16:#include <time.h>
+        -:   17:#include <unistd.h>
+        -:   18:
+        -:   19:/*
+        -:   20: * Parse -t STAMP: [[CC]YY]MMDDhhmm[.ss]
+        -:   21: *
+        -:   22: * Accepted lengths:
+        -:   23: *   8  chars: MMDDhhmm
+        -:   24: *   10 chars: YYMMDDhhmm
+        -:   25: *   12 chars: CCYYMMDDhhmm
+        -:   26: *   10 chars + .ss = 13: YYMMDDhhmm.ss
+        -:   27: *   12 chars + .ss = 15: CCYYMMDDhhmm.ss
+        -:   28: *
+        -:   29: * Returns 0 on success, -1 on parse error.
+        -:   30: * Fills *ts with the parsed time as a CLOCK_REALTIME timespec.
+        -:   31: */
+    #####:   32:static int parse_t_stamp(const char *s, struct timespec *ts)
+        -:   33:{
+    #####:   34:    size_t len = strlen(s);
+    #####:   35:    int has_sec = 0;
+    #####:   36:    int sec = 0;
+        -:   37:
+        -:   38:    /* Detect optional .ss suffix */
+    #####:   39:    const char *dot = strchr(s, '.');
+    #####:   40:    if (dot != NULL) {
+        -:   41:        /* must be exactly 2 digits after dot */
+    #####:   42:        const char *p = dot + 1;
+    #####:   43:        if (p[0] < '0' || p[0] > '9' || p[1] < '0' || p[1] > '9' || p[2] != '\0')
+    #####:   44:            return -1;
+    #####:   45:        sec = (p[0] - '0') * 10 + (p[1] - '0');
+    #####:   46:        if (sec > 60)
+    #####:   47:            return -1;
+    #####:   48:        has_sec = 1;
+    #####:   49:        len = (size_t)(dot - s); /* recount without .ss */
+        -:   50:    }
+        -:   51:
+        -:   52:    /* Validate that every char in [s, dot) is a digit */
+    #####:   53:    for (size_t i = 0; i < len; i++) {
+    #####:   54:        if (s[i] < '0' || s[i] > '9')
+    #####:   55:            return -1;
+        -:   56:    }
+        -:   57:
+    #####:   58:    int CC = -1, YY = -1, MM, DD, hh, mm;
+        -:   59:
+    #####:   60:    if (len == 8) {
+        -:   61:        /* MMDDhhmm */
+    #####:   62:        MM = (s[0]-'0')*10 + (s[1]-'0');
+    #####:   63:        DD = (s[2]-'0')*10 + (s[3]-'0');
+    #####:   64:        hh = (s[4]-'0')*10 + (s[5]-'0');
+    #####:   65:        mm = (s[6]-'0')*10 + (s[7]-'0');
+    #####:   66:    } else if (len == 10) {
+        -:   67:        /* YYMMDDhhmm */
+    #####:   68:        YY = (s[0]-'0')*10 + (s[1]-'0');
+    #####:   69:        MM = (s[2]-'0')*10 + (s[3]-'0');
+    #####:   70:        DD = (s[4]-'0')*10 + (s[5]-'0');
+    #####:   71:        hh = (s[6]-'0')*10 + (s[7]-'0');
+    #####:   72:        mm = (s[8]-'0')*10 + (s[9]-'0');
+    #####:   73:    } else if (len == 12) {
+        -:   74:        /* CCYYMMDDhhmm */
+    #####:   75:        CC = (s[0]-'0')*10 + (s[1]-'0');
+    #####:   76:        YY = (s[2]-'0')*10 + (s[3]-'0');
+    #####:   77:        MM = (s[4]-'0')*10 + (s[5]-'0');
+    #####:   78:        DD = (s[6]-'0')*10 + (s[7]-'0');
+    #####:   79:        hh = (s[8]-'0')*10 + (s[9]-'0');
+    #####:   80:        mm = (s[10]-'0')*10 + (s[11]-'0');
+        -:   81:    } else {
+    #####:   82:        return -1;
+        -:   83:    }
+        -:   84:
+        -:   85:    /* Basic range checks */
+    #####:   86:    if (MM < 1 || MM > 12) return -1;
+    #####:   87:    if (DD < 1 || DD > 31) return -1;
+    #####:   88:    if (hh > 23 || mm > 59) return -1;
+        -:   89:
+        -:   90:    /* Build struct tm */
+        -:   91:    struct tm t;
+    #####:   92:    memset(&t, 0, sizeof(t));
+    #####:   93:    t.tm_sec  = has_sec ? sec : 0;
+    #####:   94:    t.tm_min  = mm;
+    #####:   95:    t.tm_hour = hh;
+    #####:   96:    t.tm_mday = DD;
+    #####:   97:    t.tm_mon  = MM - 1;
+    #####:   98:    t.tm_isdst = -1;
+        -:   99:
+    #####:  100:    if (CC >= 0 && YY >= 0) {
+    #####:  101:        t.tm_year = CC * 100 + YY - 1900;
+    #####:  102:    } else if (YY >= 0) {
+        -:  103:        /* Two-digit year: 69-99 -> 1969-1999, 00-68 -> 2000-2068 */
+    #####:  104:        t.tm_year = (YY >= 69) ? (YY) : (YY + 100);
+        -:  105:    } else {
+        -:  106:        /* No year given: use current year */
+    #####:  107:        time_t now = time(NULL);
+    #####:  108:        struct tm *nowtm = localtime(&now);
+    #####:  109:        if (!nowtm) return -1;
+    #####:  110:        t.tm_year = nowtm->tm_year;
+        -:  111:    }
+        -:  112:
+    #####:  113:    time_t result = mktime(&t);
+    #####:  114:    if (result == (time_t)-1)
+    #####:  115:        return -1;
+        -:  116:
+    #####:  117:    ts->tv_sec  = result;
+    #####:  118:    ts->tv_nsec = 0;
+    #####:  119:    return 0;
+        -:  120:}
+        -:  121:
+        -:  122:/*
+        -:  123: * Parse -d DATE: simple subset "YYYY-MM-DD [HH:MM:SS]"
+        -:  124: * Returns 0 on success, -1 on parse error.
+        -:  125: */
+    #####:  126:static int parse_d_date(const char *s, struct timespec *ts)
+        -:  127:{
+        -:  128:    struct tm t;
+    #####:  129:    memset(&t, 0, sizeof(t));
+    #####:  130:    t.tm_isdst = -1;
+        -:  131:
+        -:  132:    int n;
+    #####:  133:    int yr, mo, dy, hh = 0, mm = 0, ss = 0;
+        -:  134:
+        -:  135:    /* Try with time component first */
+    #####:  136:    n = sscanf(s, "%d-%d-%d %d:%d:%d", &yr, &mo, &dy, &hh, &mm, &ss);
+    #####:  137:    if (n != 6 && n != 3)
+    #####:  138:        return -1;
+    #####:  139:    if (n == 3) {
+    #####:  140:        hh = mm = ss = 0;
+        -:  141:    }
+        -:  142:
+    #####:  143:    if (mo < 1 || mo > 12) return -1;
+    #####:  144:    if (dy < 1 || dy > 31) return -1;
+    #####:  145:    if (hh > 23 || mm > 59 || ss > 60) return -1;
+        -:  146:
+    #####:  147:    t.tm_year  = yr - 1900;
+    #####:  148:    t.tm_mon   = mo - 1;
+    #####:  149:    t.tm_mday  = dy;
+    #####:  150:    t.tm_hour  = hh;
+    #####:  151:    t.tm_min   = mm;
+    #####:  152:    t.tm_sec   = ss;
+        -:  153:
+    #####:  154:    time_t result = mktime(&t);
+    #####:  155:    if (result == (time_t)-1)
+    #####:  156:        return -1;
+        -:  157:
+    #####:  158:    ts->tv_sec  = result;
+    #####:  159:    ts->tv_nsec = 0;
+    #####:  160:    return 0;
+        -:  161:}
+        -:  162:
+        -:  163:/*
+        -:  164: * Core touch operation for a single path.
+        -:  165: *
+        -:  166: * opt_a:     only update atime
+        -:  167: * opt_m:     only update mtime
+        -:  168: * opt_c:     don't create if not exists
+        -:  169: * have_time: if 1, use *stamp for both (or just the selected one)
+        -:  170: * stamp:     the time to apply (if have_time)
+        -:  171: *
+        -:  172: * Returns 0 on success, 1 on error.
+        -:  173: */
+    #####:  174:static int touch_path(const char *path,
+        -:  175:                      int opt_a, int opt_m, int opt_c,
+        -:  176:                      int have_time, const struct timespec *stamp)
+        -:  177:{
+        -:  178:    /* If file doesn't exist and -c not set, create it */
+        -:  179:    struct stat st;
+    #####:  180:    if (stat(path, &st) != 0) {
+    #####:  181:        if (errno != ENOENT) {
+    #####:  182:            err_sys("touch", "cannot stat '%s'", path);
+    #####:  183:            return 1;
+        -:  184:        }
+        -:  185:        /* Does not exist */
+    #####:  186:        if (opt_c)
+    #####:  187:            return 0; /* skip silently */
+    #####:  188:        int fd = open(path, O_CREAT | O_WRONLY, 0666);
+    #####:  189:        if (fd < 0) {
+    #####:  190:            err_sys("touch", "cannot create '%s'", path);
+    #####:  191:            return 1;
+        -:  192:        }
+    #####:  193:        close(fd);
+        -:  194:        /* After creating, fall through to set times */
+        -:  195:    }
+        -:  196:
+        -:  197:    struct timespec times[2];
+        -:  198:
+    #####:  199:    if (!have_time) {
+        -:  200:        /* Use current time */
+        -:  201:        struct timespec now;
+    #####:  202:        if (clock_gettime(CLOCK_REALTIME, &now) != 0) {
+    #####:  203:            err_sys("touch", "clock_gettime");
+    #####:  204:            return 1;
+        -:  205:        }
+    #####:  206:        times[0] = now;
+    #####:  207:        times[1] = now;
+        -:  208:    } else {
+    #####:  209:        times[0] = *stamp;
+    #####:  210:        times[1] = *stamp;
+        -:  211:    }
+        -:  212:
+        -:  213:    /* UTIME_OMIT: don't change if flag not set (when only one side requested) */
+    #####:  214:    if (!opt_a && opt_m) {
+        -:  215:        /* -m only: omit atime */
+    #####:  216:        times[0].tv_nsec = UTIME_OMIT;
+    #####:  217:    } else if (opt_a && !opt_m) {
+        -:  218:        /* -a only: omit mtime */
+    #####:  219:        times[1].tv_nsec = UTIME_OMIT;
+        -:  220:    }
+        -:  221:    /* else: both (or neither means both) */
+        -:  222:
+    #####:  223:    if (utimensat(AT_FDCWD, path, times, 0) != 0) {
+    #####:  224:        err_sys("touch", "setting times on '%s'", path);
+    #####:  225:        return 1;
+        -:  226:    }
+    #####:  227:    return 0;
+        -:  228:}
+        -:  229:
+    #####:  230:int applet_touch(int argc, char **argv)
+        -:  231:{
+    #####:  232:    int opt_a = 0;       /* -a: atime only */
+    #####:  233:    int opt_m = 0;       /* -m: mtime only */
+    #####:  234:    int opt_c = 0;       /* -c: no create */
+    #####:  235:    int have_time = 0;
+    #####:  236:    struct timespec stamp = {0, 0};
+    #####:  237:    int ret = 0;
+        -:  238:    int i;
+        -:  239:
+    #####:  240:    for (i = 1; i < argc; i++) {
+    #####:  241:        const char *arg = argv[i];
+        -:  242:
+    #####:  243:        if (strcmp(arg, "--") == 0) { i++; break; }
+    #####:  244:        if (arg[0] != '-' || arg[1] == '\0') break;
+        -:  245:
+    #####:  246:        if (strcmp(arg, "--no-create") == 0)  { opt_c = 1; continue; }
+        -:  247:
+        -:  248:        /* Short flags (may be clustered: -am, -ac, etc.) */
+    #####:  249:        const char *p = arg + 1;
+    #####:  250:        int stop = 0;
+    #####:  251:        while (*p && !stop) {
+    #####:  252:            switch (*p) {
+    #####:  253:            case 'a': opt_a = 1; break;
+    #####:  254:            case 'm': opt_m = 1; break;
+    #####:  255:            case 'c': opt_c = 1; break;
+    #####:  256:            case 't': {
+        -:  257:                /* -t STAMP: next arg or remainder */
+        -:  258:                const char *stamp_str;
+    #####:  259:                if (p[1]) {
+    #####:  260:                    stamp_str = p + 1;
+    #####:  261:                    stop = 1; /* consume rest of this arg */
+        -:  262:                } else {
+    #####:  263:                    i++;
+    #####:  264:                    if (i >= argc) {
+    #####:  265:                        err_usage("touch", "[-amc] [-t STAMP] [-r REF] [-d DATE] FILE...");
+    #####:  266:                        return 1;
+        -:  267:                    }
+    #####:  268:                    stamp_str = argv[i];
+        -:  269:                }
+    #####:  270:                if (parse_t_stamp(stamp_str, &stamp) != 0) {
+    #####:  271:                    err_msg("touch", "invalid date format: '%s'", stamp_str);
+    #####:  272:                    return 1;
+        -:  273:                }
+    #####:  274:                have_time = 1;
+    #####:  275:                stop = 1;
+    #####:  276:                break;
+        -:  277:            }
+    #####:  278:            case 'r': {
+        -:  279:                /* -r REF: use reference file's times */
+        -:  280:                const char *ref;
+    #####:  281:                if (p[1]) {
+    #####:  282:                    ref = p + 1;
+    #####:  283:                    stop = 1;
+        -:  284:                } else {
+    #####:  285:                    i++;
+    #####:  286:                    if (i >= argc) {
+    #####:  287:                        err_usage("touch", "[-amc] [-t STAMP] [-r REF] [-d DATE] FILE...");
+    #####:  288:                        return 1;
+        -:  289:                    }
+    #####:  290:                    ref = argv[i];
+        -:  291:                }
+        -:  292:                struct stat ref_st;
+    #####:  293:                if (stat(ref, &ref_st) != 0) {
+    #####:  294:                    err_sys("touch", "cannot stat reference '%s'", ref);
+    #####:  295:                    return 1;
+        -:  296:                }
+        -:  297:                /* Use mtime of reference as the stamp */
+    #####:  298:                stamp = ref_st.st_mtim;
+    #####:  299:                have_time = 1;
+    #####:  300:                stop = 1;
+    #####:  301:                break;
+        -:  302:            }
+    #####:  303:            case 'd': {
+        -:  304:                /* -d DATE */
+        -:  305:                const char *date_str;
+    #####:  306:                if (p[1]) {
+    #####:  307:                    date_str = p + 1;
+    #####:  308:                    stop = 1;
+        -:  309:                } else {
+    #####:  310:                    i++;
+    #####:  311:                    if (i >= argc) {
+    #####:  312:                        err_usage("touch", "[-amc] [-t STAMP] [-r REF] [-d DATE] FILE...");
+    #####:  313:                        return 1;
+        -:  314:                    }
+    #####:  315:                    date_str = argv[i];
+        -:  316:                }
+    #####:  317:                if (parse_d_date(date_str, &stamp) != 0) {
+    #####:  318:                    err_msg("touch", "invalid date string: '%s'", date_str);
+    #####:  319:                    return 1;
+        -:  320:                }
+    #####:  321:                have_time = 1;
+    #####:  322:                stop = 1;
+    #####:  323:                break;
+        -:  324:            }
+    #####:  325:            default:
+    #####:  326:                err_msg("touch", "unrecognized option '-%c'", *p);
+    #####:  327:                err_usage("touch", "[-amct] [-t STAMP] [-r REF] [-d DATE] FILE...");
+    #####:  328:                return 1;
+        -:  329:            }
+    #####:  330:            p++;
+        -:  331:        }
+        -:  332:    }
+        -:  333:
+    #####:  334:    if (i >= argc) {
+    #####:  335:        err_usage("touch", "[-amct] [-t STAMP] [-r REF] [-d DATE] FILE...");
+    #####:  336:        return 1;
+        -:  337:    }
+        -:  338:
+    #####:  339:    for (; i < argc; i++) {
+    #####:  340:        if (touch_path(argv[i], opt_a, opt_m, opt_c, have_time, &stamp) != 0)
+    #####:  341:            ret = 1;
+        -:  342:    }
+        -:  343:
+    #####:  344:    return ret;
+        -:  345:}

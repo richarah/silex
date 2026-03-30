@@ -1,3 +1,5 @@
+/* lexer.c — shell lexer: tokenize input into shell tokens */
+
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif

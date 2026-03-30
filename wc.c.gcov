@@ -1,0 +1,296 @@
+        -:    0:Source:src/core/wc.c
+        -:    1:/* wc.c — wc builtin: print newline, word, and byte counts for each file */
+        -:    2:
+        -:    3:#ifndef _POSIX_C_SOURCE
+        -:    4:#define _POSIX_C_SOURCE 200809L
+        -:    5:#endif
+        -:    6:
+        -:    7:#include "../util/error.h"
+        -:    8:#include "../util/linescan.h"
+        -:    9:
+        -:   10:#include <ctype.h>
+        -:   11:#include <fcntl.h>
+        -:   12:#include <limits.h>
+        -:   13:#include <stdio.h>
+        -:   14:#include <stdlib.h>
+        -:   15:#include <string.h>
+        -:   16:#include <unistd.h>
+        -:   17:
+        -:   18:/* Per-file statistics */
+        -:   19:typedef struct {
+        -:   20:    long long lines;
+        -:   21:    long long words;
+        -:   22:    long long bytes;
+        -:   23:    long long chars;   /* same as bytes for now (no wide-char) */
+        -:   24:    long long maxline; /* max line length (-L) */
+        -:   25:} wc_counts_t;
+        -:   26:
+        -:   27:/* Read buffer size for wc — 256KB matches GNU wc's read chunk size,
+        -:   28: * cutting read() syscall count by 4x vs the previous 64KB buffer. */
+        -:   29:#define WC_BUF_SIZE 262144
+        -:   30:
+        -:   31:/*
+        -:   32: * Count statistics for stream fp.
+        -:   33: * Uses fread() into a buffer and scan_newline() for the line-count hot path.
+        -:   34: *
+        -:   35: * need_words: 1 when word/maxline counting is also required.
+        -:   36: * When need_words == 0, the inner per-byte loop is skipped entirely: we
+        -:   37: * only call scan_newline() to jump between newlines, counting them as we go.
+        -:   38: * This matches GNU wc's performance for "wc -l" (line-count-only) workloads.
+        -:   39: */
+       22:   40:static int wc_count(FILE *fp, wc_counts_t *c, int need_words)
+        -:   41:{
+       22:   42:    static char buf[WC_BUF_SIZE];  /* static: avoids large stack alloc */
+       22:   43:    memset(c, 0, sizeof(*c));
+        -:   44:
+       22:   45:    long long cur_line_len = 0;
+       22:   46:    int in_word = 0;
+        -:   47:
+       40:   48:    for (;;) {
+       40:   49:        size_t nr = fread(buf, 1, sizeof(buf), fp);
+       40:   50:        if (nr == 0)
+        -:   51:            break;
+        -:   52:
+       18:   53:        c->bytes += (long long)nr;
+       18:   54:        c->chars += (long long)nr;
+        -:   55:
+       18:   56:        const char *p   = buf;
+       18:   57:        const char *end = buf + nr;
+        -:   58:
+       18:   59:        if (!need_words) {
+        -:   60:            /*
+        -:   61:             * Fast path: line-count (and byte-count) only.
+        -:   62:             * Skip the per-byte word/maxline loop; use scan_newline() to
+        -:   63:             * jump directly to each '\n', increment lines, and continue.
+        -:   64:             */
+       50:   65:            while (p < end) {
+       38:   66:                const char *nl = scan_newline(p, (size_t)(end - p));
+       38:   67:                if (nl < end) {
+       36:   68:                    c->lines++;
+       36:   69:                    p = nl + 1;
+        -:   70:                } else {
+        -:   71:                    break;
+        -:   72:                }
+        -:   73:            }
+        -:   74:        } else {
+       12:   75:            while (p < end) {
+        -:   76:                /* Jump to the next newline using vectorised scan */
+        8:   77:                const char *nl = scan_newline(p, (size_t)(end - p));
+        -:   78:
+        -:   79:                /* Process bytes between p and nl (none contain '\n') */
+       96:   80:                while (p < nl) {
+       88:   81:                    unsigned char ch = (unsigned char)*p++;
+       88:   82:                    cur_line_len++;
+       88:   83:                    if (isspace(ch)) {
+        -:   84:                        in_word = 0;
+        -:   85:                    } else {
+       78:   86:                        if (!in_word) { c->words++; in_word = 1; }
+        -:   87:                    }
+        -:   88:                }
+        -:   89:
+        8:   90:                if (p < end) {
+        -:   91:                    /* *p == '\n' */
+        8:   92:                    c->lines++;
+        8:   93:                    if (cur_line_len > c->maxline)
+        6:   94:                        c->maxline = cur_line_len;
+        8:   95:                    cur_line_len = 0;
+        8:   96:                    in_word = 0;
+        8:   97:                    p++;   /* skip the newline */
+        -:   98:                }
+        -:   99:            }
+        -:  100:        }
+        -:  101:    }
+        -:  102:
+        -:  103:    /* Handle file not ending with newline: update maxline */
+       22:  104:    if (cur_line_len > c->maxline)
+    #####:  105:        c->maxline = cur_line_len;
+        -:  106:
+       22:  107:    return ferror(fp) ? 1 : 0;
+        -:  108:}
+        -:  109:
+        -:  110:/*
+        -:  111: * Print one result line.
+        -:  112: * width: minimum field width for right-aligned counts.
+        -:  113: * flags control which fields to print.
+        -:  114: */
+       24:  115:static void wc_print(const wc_counts_t *c, int do_l, int do_w, int do_c,
+        -:  116:                     int do_m, int do_L, int width, const char *label)
+        -:  117:{
+        -:  118:    /* Build format string dynamically to right-align each field */
+       24:  119:    int first = 1;
+        -:  120:
+        -:  121:#define PRINT_FIELD(val) \
+        -:  122:    do { \
+        -:  123:        if (!first) fputc(' ', stdout); \
+        -:  124:        fprintf(stdout, "%*lld", width, (long long)(val)); \
+        -:  125:        first = 0; \
+        -:  126:    } while (0)
+        -:  127:
+       24:  128:    if (do_l) PRINT_FIELD(c->lines);
+       24:  129:    if (do_w) PRINT_FIELD(c->words);
+       24:  130:    if (do_c) PRINT_FIELD(c->bytes);
+      24*:  131:    if (do_m) PRINT_FIELD(c->chars);
+      24*:  132:    if (do_L) PRINT_FIELD(c->maxline);
+        -:  133:
+        -:  134:#undef PRINT_FIELD
+        -:  135:
+       24:  136:    if (label && *label)
+       16:  137:        fprintf(stdout, " %s", label);
+       24:  138:    fputc('\n', stdout);
+       24:  139:}
+        -:  140:
+        -:  141:/*
+        -:  142: * Determine the minimum field width needed to display val.
+        -:  143: * (number of decimal digits)
+        -:  144: */
+       20:  145:static int count_digits(long long val)
+        -:  146:{
+       20:  147:    if (val < 0) val = -val;
+       20:  148:    if (val == 0) return 1;
+        -:  149:    int d = 0;
+       38:  150:    while (val > 0) { d++; val /= 10; }
+        -:  151:    return d;
+        -:  152:}
+        -:  153:
+       20:  154:int applet_wc(int argc, char **argv)
+        -:  155:{
+       20:  156:    int opt_l = 0;   /* -l lines */
+       20:  157:    int opt_w = 0;   /* -w words */
+       20:  158:    int opt_c = 0;   /* -c bytes */
+       20:  159:    int opt_m = 0;   /* -m chars */
+       20:  160:    int opt_L = 0;   /* -L max line length */
+       20:  161:    int ret   = 0;
+       20:  162:    int i;
+        -:  163:
+       38:  164:    for (i = 1; i < argc; i++) {
+       30:  165:        const char *arg = argv[i];
+      30*:  166:        if (strcmp(arg, "--") == 0) { i++; break; }
+       30:  167:        if (arg[0] != '-' || arg[1] == '\0') break;
+        -:  168:
+      18*:  169:        if (strcmp(arg, "--lines") == 0)     { opt_l = 1; continue; }
+      18*:  170:        if (strcmp(arg, "--words") == 0)     { opt_w = 1; continue; }
+      18*:  171:        if (strcmp(arg, "--bytes") == 0)     { opt_c = 1; continue; }
+      18*:  172:        if (strcmp(arg, "--chars") == 0)     { opt_m = 1; continue; }
+      18*:  173:        if (strcmp(arg, "--max-line-length") == 0) { opt_L = 1; continue; }
+        -:  174:
+       18:  175:        const char *p = arg + 1;
+       18:  176:        int unknown = 0;
+       36:  177:        while (*p && !unknown) {
+       18:  178:            switch (*p) {
+        -:  179:            case 'l': opt_l = 1; break;
+        2:  180:            case 'w': opt_w = 1; break;
+        6:  181:            case 'c': opt_c = 1; break;
+    #####:  182:            case 'm': opt_m = 1; break;
+    #####:  183:            case 'L': opt_L = 1; break;
+    #####:  184:            default:
+    #####:  185:                err_msg("wc", "unrecognized option '-%c'", *p);
+    #####:  186:                err_usage("wc", "[-clwmL] [FILE...]");
+    #####:  187:                return 1;
+        -:  188:            }
+       18:  189:            p++;
+        -:  190:        }
+        -:  191:        if (unknown) return 1;
+        -:  192:    }
+        -:  193:
+        -:  194:    /* Default: lines, words, bytes */
+       20:  195:    int default_mode = !(opt_l || opt_w || opt_c || opt_m || opt_L);
+       20:  196:    if (default_mode) {
+        2:  197:        opt_l = opt_w = opt_c = 1;
+        -:  198:    }
+        -:  199:
+        -:  200:    /* need_words: 1 if any of word/maxline/char counting is requested */
+       20:  201:    int need_words = (opt_w || opt_m || opt_L);
+        -:  202:
+       20:  203:    int nfiles = argc - i;
+        -:  204:
+       20:  205:    if (nfiles == 0) {
+        -:  206:        /* stdin only */
+        8:  207:        wc_counts_t c;
+        8:  208:        if (wc_count(stdin, &c, need_words) != 0) {
+    #####:  209:            err_sys("wc", "read error");
+    #####:  210:            ret = 1;
+        -:  211:        }
+        -:  212:        /* Determine display width from the largest value we'll print */
+        8:  213:        long long maxval = 0;
+        8:  214:        if (opt_l && c.lines   > maxval) maxval = c.lines;
+       8*:  215:        if (opt_w && c.words   > maxval) maxval = c.words;
+        8:  216:        if (opt_c && c.bytes   > maxval) maxval = c.bytes;
+       8*:  217:        if (opt_m && c.chars   > maxval) maxval = c.chars;
+       8*:  218:        if (opt_L && c.maxline > maxval) maxval = c.maxline;
+        8:  219:        int width = count_digits(maxval);
+        6:  220:        if (width < 1) width = 1;
+        -:  221:
+        8:  222:        wc_print(&c, opt_l, opt_w, opt_c, opt_m, opt_L, width, "");
+        8:  223:        return ret;
+        -:  224:    }
+        -:  225:
+       12:  226:    wc_counts_t *counts = calloc((size_t)nfiles, sizeof(wc_counts_t));
+      12*:  227:    if (!counts) { err_msg("wc", "out of memory"); return 1; }
+        -:  228:
+       26:  229:    for (int j = 0; j < nfiles; j++) {
+       14:  230:        const char *fname = argv[i + j];
+       14:  231:        FILE *fp;
+       14:  232:        if (strcmp(fname, "-") == 0) {
+    #####:  233:            fp = stdin;
+        -:  234:        } else {
+       14:  235:            fp = fopen(fname, "r");
+      14*:  236:            if (!fp) {
+    #####:  237:                err_sys("wc", "cannot open '%s'", fname);
+    #####:  238:                ret = 1;
+    #####:  239:                continue;
+        -:  240:            }
+       14:  241:            posix_fadvise(fileno(fp), 0, 0, POSIX_FADV_SEQUENTIAL);
+        -:  242:        }
+       14:  243:        if (wc_count(fp, &counts[j], need_words) != 0) {
+    #####:  244:            err_sys("wc", "read error on '%s'", fname);
+    #####:  245:            ret = 1;
+        -:  246:        }
+       14:  247:        if (fp != stdin) fclose(fp);
+        -:  248:    }
+        -:  249:
+        -:  250:    /* Compute total and maximum value for column-width determination */
+       12:  251:    wc_counts_t total = {0, 0, 0, 0, 0};
+       12:  252:    long long maxval = 0;
+        -:  253:
+       26:  254:    for (int j = 0; j < nfiles; j++) {
+       14:  255:        total.lines   += counts[j].lines;
+       14:  256:        total.words   += counts[j].words;
+       14:  257:        total.bytes   += counts[j].bytes;
+       14:  258:        total.chars   += counts[j].chars;
+       14:  259:        if (counts[j].maxline > total.maxline) total.maxline = counts[j].maxline;
+        -:  260:
+       14:  261:        if (opt_l && counts[j].lines   > maxval) maxval = counts[j].lines;
+       14:  262:        if (opt_w && counts[j].words   > maxval) maxval = counts[j].words;
+       14:  263:        if (opt_c && counts[j].bytes   > maxval) maxval = counts[j].bytes;
+      14*:  264:        if (opt_m && counts[j].chars   > maxval) maxval = counts[j].chars;
+      14*:  265:        if (opt_L && counts[j].maxline > maxval) maxval = counts[j].maxline;
+        -:  266:        /* For multi-file output, factor in byte count for column-width even
+        -:  267:         * when -c was not requested (matches coreutils/uutils behaviour). */
+       14:  268:        if (nfiles > 1 && counts[j].bytes > maxval) maxval = counts[j].bytes;
+        -:  269:    }
+        -:  270:
+       12:  271:    if (nfiles > 1) {
+        2:  272:        if (opt_l && total.lines   > maxval) maxval = total.lines;
+       2*:  273:        if (opt_w && total.words   > maxval) maxval = total.words;
+       2*:  274:        if (opt_c && total.bytes   > maxval) maxval = total.bytes;
+       2*:  275:        if (opt_m && total.chars   > maxval) maxval = total.chars;
+       2*:  276:        if (opt_L && total.maxline > maxval) maxval = total.maxline;
+        2:  277:        if (total.bytes > maxval) maxval = total.bytes;
+        -:  278:    }
+        -:  279:
+       12:  280:    int width = count_digits(maxval);
+       10:  281:    if (width < 1) width = 1;
+        -:  282:
+       26:  283:    for (int j = 0; j < nfiles; j++) {
+       14:  284:        const char *fname = argv[i + j];
+      14*:  285:        const char *label = (strcmp(fname, "-") == 0) ? "" : fname;
+       14:  286:        wc_print(&counts[j], opt_l, opt_w, opt_c, opt_m, opt_L, width, label);
+        -:  287:    }
+        -:  288:
+       12:  289:    if (nfiles > 1) {
+        2:  290:        wc_print(&total, opt_l, opt_w, opt_c, opt_m, opt_L, width, "total");
+        -:  291:    }
+        -:  292:
+       12:  293:    free(counts);
+       12:  294:    return ret;
+        -:  295:}

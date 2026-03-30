@@ -1,0 +1,116 @@
+        -:    0:Source:src/util/strbuf.c
+        -:    1:/* strbuf.c — bounds-checked, heap-managed string buffer */
+        -:    2:
+        -:    3:#include "strbuf.h"
+        -:    4:
+        -:    5:#include <stdarg.h>
+        -:    6:#include <stdio.h>
+        -:    7:#include <stdlib.h>
+        -:    8:#include <string.h>
+        -:    9:
+        -:   10:#define SB_MIN_CAP  64
+        -:   11:#define SB_MAX_CAP  (64 * 1024 * 1024)  /* 64 MB hard cap — no shell string is ever larger */
+        -:   12:
+    #####:   13:static int sb_grow(strbuf_t *sb, size_t needed)
+        -:   14:{
+    #####:   15:    if (needed + 1 > SB_MAX_CAP)
+        -:   16:        return -1;  /* requested size exceeds hard cap */
+        -:   17:
+    #####:   18:    size_t new_cap = sb->cap ? sb->cap * 2 : SB_MIN_CAP;
+    #####:   19:    while (new_cap < needed + 1) /* +1 for NUL */
+    #####:   20:        new_cap *= 2;
+    #####:   21:    if (new_cap > SB_MAX_CAP)
+        -:   22:        new_cap = SB_MAX_CAP;
+        -:   23:
+    #####:   24:    char *p = realloc(sb->buf, new_cap);
+    #####:   25:    if (!p)
+        -:   26:        return -1;
+    #####:   27:    sb->buf = p;
+    #####:   28:    sb->cap = new_cap;
+    #####:   29:    return 0;
+        -:   30:}
+        -:   31:
+    2547*:   32:int sb_init(strbuf_t *sb, size_t initial_cap)
+        -:   33:{
+    2547*:   34:    size_t cap = initial_cap > SB_MIN_CAP ? initial_cap : SB_MIN_CAP;
+    2547*:   35:    sb->buf = malloc(cap);
+    2547*:   36:    if (!sb->buf)
+        -:   37:        return -1;
+    2547*:   38:    sb->buf[0] = '\0';
+    2547*:   39:    sb->len = 0;
+    2547*:   40:    sb->cap = cap;
+    2547*:   41:    return 0;
+        -:   42:}
+        -:   43:
+    #####:   44:int sb_init_str(strbuf_t *sb, const char *s)
+        -:   45:{
+    #####:   46:    size_t slen = strlen(s);
+    #####:   47:    if (sb_init(sb, slen + 1) != 0)
+        -:   48:        return -1;
+    #####:   49:    memcpy(sb->buf, s, slen + 1);
+    #####:   50:    sb->len = slen;
+    #####:   51:    return 0;
+        -:   52:}
+        -:   53:
+     2545:   54:void sb_free(strbuf_t *sb)
+        -:   55:{
+     2545:   56:    free(sb->buf);
+     2545:   57:    sb->buf = NULL;
+     2545:   58:    sb->len = 0;
+     2545:   59:    sb->cap = 0;
+     2545:   60:}
+        -:   61:
+      110:   62:void sb_reset(strbuf_t *sb)
+        -:   63:{
+      110:   64:    sb->len = 0;
+      110:   65:    if (sb->buf)
+      110:   66:        sb->buf[0] = '\0';
+      110:   67:}
+        -:   68:
+     9679:   69:int sb_appendn(strbuf_t *sb, const char *s, size_t n)
+        -:   70:{
+     9679:   71:    if (sb->len + n >= sb->cap) {
+    #####:   72:        if (sb_grow(sb, sb->len + n) != 0)
+        -:   73:            return -1;
+        -:   74:    }
+     9679:   75:    memcpy(sb->buf + sb->len, s, n);
+     9679:   76:    sb->len += n;
+     9679:   77:    sb->buf[sb->len] = '\0';
+     9679:   78:    return 0;
+        -:   79:}
+        -:   80:
+      602:   81:int sb_append(strbuf_t *sb, const char *s)
+        -:   82:{
+      602:   83:    return sb_appendn(sb, s, strlen(s));
+        -:   84:}
+        -:   85:
+     9034:   86:int sb_appendc(strbuf_t *sb, char c)
+        -:   87:{
+     9034:   88:    return sb_appendn(sb, &c, 1);
+        -:   89:}
+        -:   90:
+        6:   91:int sb_appendf(strbuf_t *sb, const char *fmt, ...)
+        -:   92:{
+        6:   93:    va_list ap;
+        6:   94:    int needed;
+        -:   95:
+        -:   96:    /* First pass: measure */
+        6:   97:    va_start(ap, fmt);
+        6:   98:    needed = vsnprintf(NULL, 0, fmt, ap);
+        6:   99:    va_end(ap);
+        -:  100:
+        6:  101:    if (needed < 0)
+        -:  102:        return -1;
+        -:  103:
+        6:  104:    if (sb->len + (size_t)needed >= sb->cap) {
+    #####:  105:        if (sb_grow(sb, sb->len + (size_t)needed) != 0)
+        -:  106:            return -1;
+        -:  107:    }
+        -:  108:
+        6:  109:    va_start(ap, fmt);
+        6:  110:    vsnprintf(sb->buf + sb->len, sb->cap - sb->len, fmt, ap);
+        6:  111:    va_end(ap);
+        -:  112:
+        6:  113:    sb->len += (size_t)needed;
+        6:  114:    return 0;
+        -:  115:}

@@ -1,0 +1,420 @@
+        -:    0:Source:src/core/date.c
+        -:    1:/* date.c -- date builtin: print or set the system date and time */
+        -:    2:
+        -:    3:#ifndef _POSIX_C_SOURCE
+        -:    4:#define _POSIX_C_SOURCE 200809L
+        -:    5:#endif
+        -:    6:/* date.c — date builtin */
+        -:    7:
+        -:    8:#include "../util/error.h"
+        -:    9:
+        -:   10:#include <ctype.h>
+        -:   11:#include <errno.h>
+        -:   12:#include <stdio.h>
+        -:   13:#include <stdlib.h>
+        -:   14:#include <string.h>
+        -:   15:#include <strings.h>
+        -:   16:#include <time.h>
+        -:   17:#include <unistd.h>
+        -:   18:
+        -:   19:/* ------------------------------------------------------------------ */
+        -:   20:/* Weekday helpers                                                       */
+        -:   21:/* ------------------------------------------------------------------ */
+        -:   22:
+        -:   23:static const char *const WEEKDAY_NAMES[] = {
+        -:   24:    "sunday", "monday", "tuesday", "wednesday",
+        -:   25:    "thursday", "friday", "saturday", NULL
+        -:   26:};
+        -:   27:
+        -:   28:/* Return 0-6 (Sun-Sat) for name, or -1 if not recognised. */
+    #####:   29:static int parse_weekday(const char *name)
+        -:   30:{
+    #####:   31:    for (int i = 0; WEEKDAY_NAMES[i]; i++) {
+    #####:   32:        if (strcasecmp(name, WEEKDAY_NAMES[i]) == 0)
+    #####:   33:            return i;
+        -:   34:    }
+    #####:   35:    return -1;
+        -:   36:}
+        -:   37:
+        -:   38:/* ------------------------------------------------------------------ */
+        -:   39:/* Relative date parser                                                  */
+        -:   40:/* ------------------------------------------------------------------ */
+        -:   41:
+        -:   42:/*
+        -:   43: * Parse a --date=STRING into a time_t.
+        -:   44: * Supported formats:
+        -:   45: *   @UNIX_TIMESTAMP
+        -:   46: *   YYYY-MM-DD
+        -:   47: *   HH:MM:SS
+        -:   48: *   YYYY-MM-DD HH:MM:SS
+        -:   49: *   today / yesterday / tomorrow
+        -:   50: *   N days ago / N hours ago / N weeks ago / N minutes ago / N seconds ago
+        -:   51: *   next WEEKDAY / last WEEKDAY
+        -:   52: *   now
+        -:   53: * Returns 0 on success, -1 on failure.
+        -:   54: */
+    #####:   55:static int parse_date_string(const char *s, time_t *out)
+        -:   56:{
+        -:   57:    /* Unix timestamp */
+    #####:   58:    if (s[0] == '@') {
+        -:   59:        char *endp;
+    #####:   60:        long long val = strtoll(s + 1, &endp, 10);
+    #####:   61:        if (endp == s + 1 || (*endp != '\0' && !isspace((unsigned char)*endp)))
+    #####:   62:            return -1;
+    #####:   63:        *out = (time_t)val;
+    #####:   64:        return 0;
+        -:   65:    }
+        -:   66:
+        -:   67:    /* Grab current local time */
+    #####:   68:    time_t now = time(NULL);
+        -:   69:    struct tm tm_now;
+    #####:   70:    localtime_r(&now, &tm_now);
+        -:   71:
+        -:   72:    /* today / now */
+    #####:   73:    if (strcasecmp(s, "today") == 0 || strcasecmp(s, "now") == 0) {
+    #####:   74:        *out = now;
+    #####:   75:        return 0;
+        -:   76:    }
+        -:   77:
+        -:   78:    /* yesterday */
+    #####:   79:    if (strcasecmp(s, "yesterday") == 0) {
+    #####:   80:        *out = now - 86400;
+    #####:   81:        return 0;
+        -:   82:    }
+        -:   83:
+        -:   84:    /* tomorrow */
+    #####:   85:    if (strcasecmp(s, "tomorrow") == 0) {
+    #####:   86:        *out = now + 86400;
+    #####:   87:        return 0;
+        -:   88:    }
+        -:   89:
+        -:   90:    /* N unit ago */
+        -:   91:    {
+        -:   92:        long n;
+        -:   93:        char unit[32];
+        -:   94:        char ago[8];
+    #####:   95:        if (sscanf(s, "%ld %31s %7s", &n, unit, ago) == 3 &&
+    #####:   96:            strcasecmp(ago, "ago") == 0) {
+    #####:   97:            long secs = 0;
+    #####:   98:            if (strcasecmp(unit, "second") == 0 ||
+    #####:   99:                strcasecmp(unit, "seconds") == 0)  secs = n;
+    #####:  100:            else if (strcasecmp(unit, "minute") == 0 ||
+    #####:  101:                     strcasecmp(unit, "minutes") == 0) secs = n * 60;
+    #####:  102:            else if (strcasecmp(unit, "hour") == 0 ||
+    #####:  103:                     strcasecmp(unit, "hours") == 0)   secs = n * 3600;
+    #####:  104:            else if (strcasecmp(unit, "day") == 0 ||
+    #####:  105:                     strcasecmp(unit, "days") == 0)    secs = n * 86400;
+    #####:  106:            else if (strcasecmp(unit, "week") == 0 ||
+    #####:  107:                     strcasecmp(unit, "weeks") == 0)   secs = n * 604800;
+    #####:  108:            else return -1;
+    #####:  109:            *out = now - secs;
+    #####:  110:            return 0;
+        -:  111:        }
+        -:  112:    }
+        -:  113:
+        -:  114:    /* N unit (forward) */
+        -:  115:    {
+        -:  116:        long n;
+        -:  117:        char unit[32];
+    #####:  118:        if (sscanf(s, "%ld %31s", &n, unit) == 2) {
+        -:  119:            /* Make sure there's no 3rd token (would be "ago") */
+        -:  120:            char extra[8];
+    #####:  121:            if (sscanf(s, "%ld %31s %7s", &n, unit, extra) != 3) {
+    #####:  122:                long secs = 0;
+    #####:  123:                int matched = 1;
+    #####:  124:                if (strcasecmp(unit, "second") == 0 ||
+    #####:  125:                    strcasecmp(unit, "seconds") == 0)  secs = n;
+    #####:  126:                else if (strcasecmp(unit, "minute") == 0 ||
+    #####:  127:                         strcasecmp(unit, "minutes") == 0) secs = n * 60;
+    #####:  128:                else if (strcasecmp(unit, "hour") == 0 ||
+    #####:  129:                         strcasecmp(unit, "hours") == 0)   secs = n * 3600;
+    #####:  130:                else if (strcasecmp(unit, "day") == 0 ||
+    #####:  131:                         strcasecmp(unit, "days") == 0)    secs = n * 86400;
+    #####:  132:                else if (strcasecmp(unit, "week") == 0 ||
+    #####:  133:                         strcasecmp(unit, "weeks") == 0)   secs = n * 604800;
+    #####:  134:                else matched = 0;
+        -:  135:
+    #####:  136:                if (matched) {
+    #####:  137:                    *out = now + secs;
+    #####:  138:                    return 0;
+        -:  139:                }
+        -:  140:            }
+        -:  141:        }
+        -:  142:    }
+        -:  143:
+        -:  144:    /* next WEEKDAY */
+    #####:  145:    if (strncasecmp(s, "next ", 5) == 0) {
+    #####:  146:        int wday = parse_weekday(s + 5);
+    #####:  147:        if (wday < 0) return -1;
+    #####:  148:        int diff = wday - tm_now.tm_wday;
+    #####:  149:        if (diff <= 0) diff += 7;
+    #####:  150:        *out = now + diff * 86400;
+    #####:  151:        return 0;
+        -:  152:    }
+        -:  153:
+        -:  154:    /* last WEEKDAY */
+    #####:  155:    if (strncasecmp(s, "last ", 5) == 0) {
+    #####:  156:        int wday = parse_weekday(s + 5);
+    #####:  157:        if (wday < 0) return -1;
+    #####:  158:        int diff = tm_now.tm_wday - wday;
+    #####:  159:        if (diff <= 0) diff += 7;
+    #####:  160:        *out = now - diff * 86400;
+    #####:  161:        return 0;
+        -:  162:    }
+        -:  163:
+        -:  164:    /* YYYY-MM-DD HH:MM:SS */
+        -:  165:    {
+    #####:  166:        struct tm t = {0};
+    #####:  167:        int n_matched = sscanf(s, "%d-%d-%d %d:%d:%d",
+        -:  168:                                &t.tm_year, &t.tm_mon, &t.tm_mday,
+        -:  169:                                &t.tm_hour, &t.tm_min, &t.tm_sec);
+    #####:  170:        if (n_matched == 6) {
+    #####:  171:            t.tm_year -= 1900;
+    #####:  172:            t.tm_mon  -= 1;
+    #####:  173:            t.tm_isdst = -1;
+    #####:  174:            *out = mktime(&t);
+    #####:  175:            if (*out == (time_t)-1) return -1;
+    #####:  176:            return 0;
+        -:  177:        }
+        -:  178:    }
+        -:  179:
+        -:  180:    /* YYYY-MM-DD */
+        -:  181:    {
+    #####:  182:        struct tm t = {0};
+    #####:  183:        int n_matched = sscanf(s, "%d-%d-%d", &t.tm_year, &t.tm_mon, &t.tm_mday);
+    #####:  184:        if (n_matched == 3) {
+    #####:  185:            t.tm_year -= 1900;
+    #####:  186:            t.tm_mon  -= 1;
+    #####:  187:            t.tm_isdst = -1;
+    #####:  188:            *out = mktime(&t);
+    #####:  189:            if (*out == (time_t)-1) return -1;
+    #####:  190:            return 0;
+        -:  191:        }
+        -:  192:    }
+        -:  193:
+        -:  194:    /* HH:MM:SS */
+        -:  195:    {
+    #####:  196:        struct tm t = tm_now; /* start from today */
+        -:  197:        int h, m, sec;
+    #####:  198:        if (sscanf(s, "%d:%d:%d", &h, &m, &sec) == 3) {
+    #####:  199:            t.tm_hour = h;
+    #####:  200:            t.tm_min  = m;
+    #####:  201:            t.tm_sec  = sec;
+    #####:  202:            t.tm_isdst = -1;
+    #####:  203:            *out = mktime(&t);
+    #####:  204:            if (*out == (time_t)-1) return -1;
+    #####:  205:            return 0;
+        -:  206:        }
+        -:  207:    }
+        -:  208:
+    #####:  209:    return -1; /* unrecognised */
+        -:  210:}
+        -:  211:
+        -:  212:/* ------------------------------------------------------------------ */
+        -:  213:/* RFC 2822 formatting                                                   */
+        -:  214:/* ------------------------------------------------------------------ */
+        -:  215:
+    #####:  216:static void format_rfc2822(const struct tm *tm_val, char *buf, size_t bufsz)
+        -:  217:{
+        -:  218:    /* Example: Wed, 01 Jan 2025 00:00:00 +0000 */
+    #####:  219:    strftime(buf, bufsz, "%a, %d %b %Y %H:%M:%S %z", tm_val);
+    #####:  220:}
+        -:  221:
+        -:  222:/* ------------------------------------------------------------------ */
+        -:  223:/* ISO 8601 formatting                                                   */
+        -:  224:/* ------------------------------------------------------------------ */
+        -:  225:
+    #####:  226:static void format_iso8601(const struct tm *tm_val, const char *timespec,
+        -:  227:                             char *buf, size_t bufsz)
+        -:  228:{
+        -:  229:    /* timespec: "date" | "hours" | "minutes" | "seconds" | "ns" */
+    #####:  230:    if (!timespec || strcasecmp(timespec, "date") == 0) {
+    #####:  231:        strftime(buf, bufsz, "%Y-%m-%d", tm_val);
+    #####:  232:        return;
+        -:  233:    }
+    #####:  234:    if (strcasecmp(timespec, "hours") == 0) {
+    #####:  235:        strftime(buf, bufsz, "%Y-%m-%dT%H%z", tm_val);
+    #####:  236:        return;
+        -:  237:    }
+    #####:  238:    if (strcasecmp(timespec, "minutes") == 0) {
+    #####:  239:        strftime(buf, bufsz, "%Y-%m-%dT%H:%M%z", tm_val);
+    #####:  240:        return;
+        -:  241:    }
+        -:  242:    /* "seconds" or default */
+    #####:  243:    strftime(buf, bufsz, "%Y-%m-%dT%H:%M:%S%z", tm_val);
+        -:  244:}
+        -:  245:
+        -:  246:/* ------------------------------------------------------------------ */
+        -:  247:/* Main                                                                  */
+        -:  248:/* ------------------------------------------------------------------ */
+        -:  249:
+    #####:  250:int applet_date(int argc, char **argv)
+        -:  251:{
+    #####:  252:    int opt_u    = 0;   /* -u: UTC */
+    #####:  253:    int opt_R    = 0;   /* -R: RFC 2822 */
+    #####:  254:    int opt_set  = 0;   /* -s: set time */
+    #####:  255:    const char *opt_date   = NULL;  /* -d / --date= */
+    #####:  256:    const char *opt_format = NULL;  /* +FORMAT */
+    #####:  257:    const char *opt_iso    = NULL;  /* -I[TIMESPEC] */
+    #####:  258:    const char *set_date   = NULL;  /* -s DATE */
+        -:  259:    int i;
+        -:  260:
+    #####:  261:    for (i = 1; i < argc; i++) {
+    #####:  262:        const char *arg = argv[i];
+        -:  263:
+    #####:  264:        if (strcmp(arg, "--") == 0) { i++; break; }
+        -:  265:
+        -:  266:        /* +FORMAT */
+    #####:  267:        if (arg[0] == '+') {
+    #####:  268:            opt_format = arg + 1;
+    #####:  269:            continue;
+        -:  270:        }
+        -:  271:
+    #####:  272:        if (strncmp(arg, "--date=", 7) == 0) {
+    #####:  273:            opt_date = arg + 7;
+    #####:  274:            continue;
+        -:  275:        }
+    #####:  276:        if (strcmp(arg, "--date") == 0 || strcmp(arg, "-d") == 0) {
+    #####:  277:            i++;
+    #####:  278:            if (i >= argc) {
+    #####:  279:                err_usage("date", "[-uR] [-d STRING] [+FORMAT]");
+    #####:  280:                return 1;
+        -:  281:            }
+    #####:  282:            opt_date = argv[i];
+    #####:  283:            continue;
+        -:  284:        }
+    #####:  285:        if (strcmp(arg, "--utc") == 0 || strcmp(arg, "--universal") == 0) {
+    #####:  286:            opt_u = 1;
+    #####:  287:            continue;
+        -:  288:        }
+    #####:  289:        if (strcmp(arg, "--rfc-2822") == 0 ||
+    #####:  290:            strcmp(arg, "--rfc-email") == 0) {
+    #####:  291:            opt_R = 1;
+    #####:  292:            continue;
+        -:  293:        }
+    #####:  294:        if (strncmp(arg, "--iso-8601", 10) == 0) {
+    #####:  295:            if (arg[10] == '=')
+    #####:  296:                opt_iso = arg + 11;
+        -:  297:            else
+    #####:  298:                opt_iso = "seconds";
+    #####:  299:            continue;
+        -:  300:        }
+        -:  301:
+    #####:  302:        if (arg[0] != '-' || arg[1] == '\0')
+        -:  303:            break;
+        -:  304:
+    #####:  305:        const char *p = arg + 1;
+    #####:  306:        int stop = 0;
+    #####:  307:        while (*p && !stop) {
+    #####:  308:            switch (*p) {
+    #####:  309:            case 'u': opt_u = 1; break;
+    #####:  310:            case 'R': opt_R = 1; break;
+    #####:  311:            case 'I':
+        -:  312:                /* -I or -ITIMESPEC */
+    #####:  313:                if (p[1]) {
+    #####:  314:                    opt_iso = p + 1;
+    #####:  315:                    stop = 1;
+        -:  316:                } else {
+    #####:  317:                    opt_iso = "seconds";
+        -:  318:                }
+    #####:  319:                break;
+    #####:  320:            case 's':
+        -:  321:                /* -s DATE */
+    #####:  322:                if (p[1]) {
+    #####:  323:                    set_date = p + 1;
+    #####:  324:                    stop = 1;
+        -:  325:                } else {
+    #####:  326:                    i++;
+    #####:  327:                    if (i >= argc) {
+    #####:  328:                        err_usage("date", "[-uR] [-d STRING] [-s DATE] [+FORMAT]");
+    #####:  329:                        return 1;
+        -:  330:                    }
+    #####:  331:                    set_date = argv[i];
+        -:  332:                }
+    #####:  333:                opt_set = 1;
+    #####:  334:                break;
+    #####:  335:            default:
+    #####:  336:                err_msg("date", "unrecognized option '-%c'", *p);
+    #####:  337:                err_usage("date", "[-uRIs] [-d STRING] [+FORMAT]");
+    #####:  338:                return 1;
+        -:  339:            }
+    #####:  340:            p++;
+        -:  341:        }
+        -:  342:    }
+        -:  343:
+        -:  344:    /* Determine the time to display */
+        -:  345:    time_t t;
+    #####:  346:    if (opt_date) {
+    #####:  347:        if (parse_date_string(opt_date, &t) != 0) {
+    #####:  348:            err_msg("date", "invalid date '%s'", opt_date);
+    #####:  349:            return 1;
+        -:  350:        }
+        -:  351:    } else {
+    #####:  352:        t = time(NULL);
+        -:  353:    }
+        -:  354:
+        -:  355:    /* Set system time (-s) */
+    #####:  356:    if (opt_set && set_date) {
+        -:  357:        time_t set_t;
+    #####:  358:        if (parse_date_string(set_date, &set_t) != 0) {
+    #####:  359:            err_msg("date", "invalid date '%s'", set_date);
+    #####:  360:            return 1;
+        -:  361:        }
+    #####:  362:        struct timespec ts = { set_t, 0 };
+    #####:  363:        if (clock_settime(CLOCK_REALTIME, &ts) != 0) {
+    #####:  364:            err_sys("date", "cannot set time");
+    #####:  365:            return 1;
+        -:  366:        }
+    #####:  367:        t = set_t;
+        -:  368:    }
+        -:  369:
+        -:  370:    /* Convert to tm */
+        -:  371:    struct tm tm_val;
+    #####:  372:    if (opt_u)
+    #####:  373:        gmtime_r(&t, &tm_val);
+        -:  374:    else
+    #####:  375:        localtime_r(&t, &tm_val);
+        -:  376:
+        -:  377:    char buf[256];
+        -:  378:
+    #####:  379:    if (opt_R) {
+    #####:  380:        format_rfc2822(&tm_val, buf, sizeof(buf));
+    #####:  381:        puts(buf);
+    #####:  382:        return 0;
+        -:  383:    }
+        -:  384:
+    #####:  385:    if (opt_iso) {
+    #####:  386:        format_iso8601(&tm_val, opt_iso, buf, sizeof(buf));
+    #####:  387:        puts(buf);
+    #####:  388:        return 0;
+        -:  389:    }
+        -:  390:
+    #####:  391:    if (opt_format) {
+    #####:  392:        size_t n = strftime(buf, sizeof(buf), opt_format, &tm_val);
+    #####:  393:        if (n == 0 && opt_format[0] != '\0') {
+        -:  394:            /* Buffer too small — try with heap allocation */
+    #####:  395:            size_t sz = 4096;
+    #####:  396:            char *hbuf = malloc(sz);
+    #####:  397:            if (!hbuf) {
+    #####:  398:                err_msg("date", "out of memory");
+    #####:  399:                return 1;
+        -:  400:            }
+    #####:  401:            n = strftime(hbuf, sz, opt_format, &tm_val);
+    #####:  402:            if (n == 0) {
+    #####:  403:                free(hbuf);
+    #####:  404:                err_msg("date", "format string produced no output");
+    #####:  405:                return 1;
+        -:  406:            }
+    #####:  407:            puts(hbuf);
+    #####:  408:            free(hbuf);
+    #####:  409:            return 0;
+        -:  410:        }
+    #####:  411:        puts(buf);
+    #####:  412:        return 0;
+        -:  413:    }
+        -:  414:
+        -:  415:    /* Default: "%a %b %e %H:%M:%S %Z %Y" */
+    #####:  416:    strftime(buf, sizeof(buf), "%a %b %e %H:%M:%S %Z %Y", &tm_val);
+    #####:  417:    puts(buf);
+    #####:  418:    return 0;
+        -:  419:}

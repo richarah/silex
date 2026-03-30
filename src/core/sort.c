@@ -33,6 +33,7 @@ typedef struct {
     int general_numeric;  /* -g */
     int human_numeric;    /* -h */
     int version_sort;     /* -V */
+    int month_sort;       /* -M */
     int reverse;          /* -r */
     int unique;           /* -u */
     int zero_term;        /* -z */
@@ -223,6 +224,30 @@ static int cmp_human_numeric(const char *a, const char *b)
     return 0;
 }
 
+/* Month sort: parse first 3 chars against month abbreviations (case-insensitive) */
+static int month_index(const char *s)
+{
+    static const char months[12][4] = {
+        "jan", "feb", "mar", "apr", "may", "jun",
+        "jul", "aug", "sep", "oct", "nov", "dec"
+    };
+    /* Skip leading whitespace */
+    while (*s == ' ' || *s == '\t') s++;
+    char buf[4] = { 0 };
+    for (int i = 0; i < 3 && s[i]; i++)
+        buf[i] = (char)(s[i] >= 'A' && s[i] <= 'Z' ? s[i] + 32 : s[i]);
+    for (int m = 0; m < 12; m++)
+        if (strncmp(buf, months[m], 3) == 0) return m;
+    return -1; /* unknown: sort before January */
+}
+
+static int cmp_month(const char *a, const char *b)
+{
+    int ia = month_index(a);
+    int ib = month_index(b);
+    return (ia < ib) ? -1 : (ia > ib) ? 1 : 0;
+}
+
 /*
  * Version sort: tokenise into alternating numeric/non-numeric segments
  * and compare segment-by-segment.
@@ -295,7 +320,7 @@ static const char *apply_key_flags(const char *s, int kb, int kd, int kf, int ki
 static const line_t *g_lines_ptr;   /* set before qsort call */
 
 static int key_compare_strings(const char *a, const char *b,
-                                int kn, int kg, int kh, int kV,
+                                int kn, int kg, int kh, int kV, int kM,
                                 int kb, int kd, int kf, int ki, int kr)
 {
     char abuf[4096], bbuf[4096];
@@ -321,6 +346,8 @@ static int key_compare_strings(const char *a, const char *b,
         rc = cmp_human_numeric(as, bs);
     } else if (kV) {
         rc = cmp_version(as, bs);
+    } else if (kM) {
+        rc = cmp_month(as, bs);
     } else {
         rc = strcmp(as, bs);
     }
@@ -338,6 +365,7 @@ static int compare_lines(const line_t *la, const line_t *lb)
         int bg = g_opts.general_numeric;
         int bh = g_opts.human_numeric;
         int bV = g_opts.version_sort;
+        int bM = g_opts.month_sort;
         int bb = g_opts.ignore_blanks;
         int bd = g_opts.dict_order;
         int bf = g_opts.fold_lower;
@@ -356,7 +384,7 @@ static int compare_lines(const line_t *la, const line_t *lb)
         memcpy(ka, as, al); ka[al] = '\0';
         memcpy(kb_buf, bs, bl); kb_buf[bl] = '\0';
 
-        int rc = key_compare_strings(ka, kb_buf, bn, bg, bh, bV, bb, bd, bf, bi, 0);
+        int rc = key_compare_strings(ka, kb_buf, bn, bg, bh, bV, bM, bb, bd, bf, bi, 0);
         if (rc != 0) return g_opts.reverse ? -rc : rc;
         /* Stable: use original index */
         return (la->idx < lb->idx) ? -1 : (la->idx > lb->idx) ? 1 : 0;
@@ -376,13 +404,14 @@ static int compare_lines(const line_t *la, const line_t *lb)
         int kg = kd_ptr->start.g  >= 0 ? kd_ptr->start.g  : g_opts.general_numeric;
         int kh = kd_ptr->start.h  >= 0 ? kd_ptr->start.h  : g_opts.human_numeric;
         int kV = kd_ptr->start.V  >= 0 ? kd_ptr->start.V  : g_opts.version_sort;
+        int kM = g_opts.month_sort; /* per-key -M not parsed; fall back to global */
         int kb_f = kd_ptr->start.b  >= 0 ? kd_ptr->start.b : g_opts.ignore_blanks;
         int kd_f = kd_ptr->start.d  >= 0 ? kd_ptr->start.d : g_opts.dict_order;
         int kf_f = kd_ptr->start.f  >= 0 ? kd_ptr->start.f : g_opts.fold_lower;
         int ki   = kd_ptr->start.i  >= 0 ? kd_ptr->start.i : g_opts.ignore_nonprint;
         int kr   = kd_ptr->start.r  >= 0 ? kd_ptr->start.r : 0; /* per-key reverse */
 
-        int rc = key_compare_strings(ka, kb_buf, kn, kg, kh, kV, kb_f, kd_f, kf_f, ki, kr);
+        int rc = key_compare_strings(ka, kb_buf, kn, kg, kh, kV, kM, kb_f, kd_f, kf_f, ki, kr);
         if (rc != 0) return g_opts.reverse ? -rc : rc;
     }
 
@@ -712,6 +741,7 @@ int applet_sort(int argc, char **argv)
         if (strcmp(arg, "--general-numeric-sort") == 0) { g_opts.general_numeric = 1; continue; }
         if (strcmp(arg, "--human-numeric-sort") == 0)   { g_opts.human_numeric = 1; continue; }
         if (strcmp(arg, "--version-sort") == 0)      { g_opts.version_sort = 1; continue; }
+        if (strcmp(arg, "--month-sort") == 0)        { g_opts.month_sort = 1; continue; }
         if (strcmp(arg, "--ignore-leading-blanks") == 0) { g_opts.ignore_blanks = 1; continue; }
         if (strcmp(arg, "--dictionary-order") == 0)  { g_opts.dict_order = 1; continue; }
         if (strcmp(arg, "--ignore-case") == 0)       { g_opts.fold_lower = 1; continue; }
@@ -749,6 +779,7 @@ int applet_sort(int argc, char **argv)
             case 'g': g_opts.general_numeric = 1; break;
             case 'h': g_opts.human_numeric = 1; break;
             case 'V': g_opts.version_sort = 1; break;
+            case 'M': g_opts.month_sort = 1; break;
             case 'r': g_opts.reverse = 1; break;
             case 'u': g_opts.unique = 1; break;
             case 's': break; /* stable — already our default */

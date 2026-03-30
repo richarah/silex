@@ -1,0 +1,250 @@
+        -:    0:Source:src/shell/redirect.c
+        -:    1:#ifndef _POSIX_C_SOURCE
+        -:    2:#define _POSIX_C_SOURCE 200809L
+        -:    3:#endif
+        -:    4:
+        -:    5:#include "redirect.h"
+        -:    6:#include "shell.h"
+        -:    7:#include "expand.h"
+        -:    8:
+        -:    9:#include <errno.h>
+        -:   10:#include <fcntl.h>
+        -:   11:#include <stdlib.h>
+        -:   12:#include <string.h>
+        -:   13:#include <unistd.h>
+        -:   14:
+        -:   15:/* Save fd orig_fd into a new fd (CLOEXEC), record in ctx */
+       68:   16:static int save_fd(redirect_ctx_t *ctx, int orig_fd, arena_t *arena)
+        -:   17:{
+       68:   18:    int saved = fcntl(orig_fd, F_DUPFD_CLOEXEC, 3);
+       68:   19:    if (saved < 0) {
+        -:   20:        /* fd may not be open; that is acceptable — record -1 so restore skips */
+    #####:   21:        saved = -1;
+        -:   22:    }
+        -:   23:
+       68:   24:    saved_fd_t *entry = arena_alloc(arena, sizeof(saved_fd_t));
+       68:   25:    entry->orig_fd  = orig_fd;
+       68:   26:    entry->saved_fd = saved;
+       68:   27:    entry->next     = ctx->saved;
+       68:   28:    ctx->saved      = entry;
+       68:   29:    return 0;
+        -:   30:}
+        -:   31:
+       63:   32:int redirect_apply(struct shell_ctx *sh, redir_t *redirs, redirect_ctx_t *ctx)
+        -:   33:{
+       63:   34:    fflush(NULL);   /* flush all stdio buffers before redirecting fds */
+       63:   35:    ctx->saved = NULL;
+       63:   36:    ctx->error = 0;
+        -:   37:
+      131:   38:    for (redir_t *r = redirs; r != NULL; r = r->next) {
+       68:   39:        int fd = r->fd;   /* target fd; caller sets sensible default */
+        -:   40:
+        -:   41:        /* Expand the target word (except for heredocs which are literal) */
+       68:   42:        char *target = NULL;
+       68:   43:        if (r->op != TOK_DLESS && r->op != TOK_DLESSDASH) {
+       47:   44:            target = expand_word(sh, r->target);
+       47:   45:            if (!target)
+    #####:   46:                target = r->target;
+        -:   47:        }
+        -:   48:
+        -:   49:        /* Save the original fd before we touch it */
+      68*:   50:        save_fd(ctx, fd, sh->parse_arena.head ? sh->vars.arena : &sh->parse_arena);
+        -:   51:
+       68:   52:        int new_fd = -1;
+        -:   53:
+      68*:   54:        switch (r->op) {
+        6:   55:        case TOK_LESS:
+        6:   56:            new_fd = open(target, O_RDONLY);
+        6:   57:            if (new_fd < 0) {
+    #####:   58:                perror(target);
+    #####:   59:                ctx->error = 1;
+    #####:   60:                return -1;
+        -:   61:            }
+        6:   62:            break;
+        -:   63:
+       29:   64:        case TOK_GREAT:
+       29:   65:            new_fd = open(target, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+       29:   66:            if (new_fd < 0) {
+    #####:   67:                perror(target);
+    #####:   68:                ctx->error = 1;
+    #####:   69:                return -1;
+        -:   70:            }
+       29:   71:            break;
+        -:   72:
+        7:   73:        case TOK_DGREAT:
+        7:   74:            new_fd = open(target, O_WRONLY | O_CREAT | O_APPEND, 0666);
+        7:   75:            if (new_fd < 0) {
+    #####:   76:                perror(target);
+    #####:   77:                ctx->error = 1;
+    #####:   78:                return -1;
+        -:   79:            }
+        7:   80:            break;
+        -:   81:
+    #####:   82:        case TOK_CLOBBER:
+        -:   83:            /* >| — open for write even if noclobber is set */
+    #####:   84:            new_fd = open(target, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    #####:   85:            if (new_fd < 0) {
+    #####:   86:                perror(target);
+    #####:   87:                ctx->error = 1;
+    #####:   88:                return -1;
+        -:   89:            }
+    #####:   90:            break;
+        -:   91:
+    #####:   92:        case TOK_LESSAND:
+    #####:   93:            if (strcmp(target, "-") == 0) {
+    #####:   94:                close(fd);
+    #####:   95:                continue;
+    #####:   96:            } else {
+        -:   97:                /* Validate: target must be a non-negative decimal integer */
+    #####:   98:                if (target[0] == '\0' || target[0] == '-') {
+    #####:   99:                    fprintf(stderr, "matchbox: redirect: invalid fd: %s\n", target);
+    #####:  100:                    ctx->error = 1;
+    #####:  101:                    return -1;
+        -:  102:                }
+    #####:  103:                for (const char *tp = target; *tp; tp++) {
+    #####:  104:                    if (*tp < '0' || *tp > '9') {
+    #####:  105:                        fprintf(stderr, "matchbox: redirect: invalid fd: %s\n", target);
+    #####:  106:                        ctx->error = 1;
+    #####:  107:                        return -1;
+        -:  108:                    }
+        -:  109:                }
+    #####:  110:                int src = atoi(target);
+    #####:  111:                if (dup2(src, fd) < 0) {
+    #####:  112:                    perror("redirect <&");
+    #####:  113:                    ctx->error = 1;
+    #####:  114:                    return -1;
+        -:  115:                }
+    #####:  116:                continue;
+        -:  117:            }
+        -:  118:
+        5:  119:        case TOK_GREATAND:
+       5*:  120:            if (strcmp(target, "-") == 0) {
+    #####:  121:                close(fd);
+    #####:  122:                continue;
+        5:  123:            } else {
+        -:  124:                /* Validate: target must be a non-negative decimal integer */
+        5:  125:                if (target[0] == '\0' || target[0] == '-') {
+    #####:  126:                    fprintf(stderr, "matchbox: redirect: invalid fd: %s\n", target);
+    #####:  127:                    ctx->error = 1;
+    #####:  128:                    return -1;
+        -:  129:                }
+       10:  130:                for (const char *tp = target; *tp; tp++) {
+        5:  131:                    if (*tp < '0' || *tp > '9') {
+    #####:  132:                        fprintf(stderr, "matchbox: redirect: invalid fd: %s\n", target);
+    #####:  133:                        ctx->error = 1;
+    #####:  134:                        return -1;
+        -:  135:                    }
+        -:  136:                }
+        5:  137:                int src = atoi(target);
+        5:  138:                if (dup2(src, fd) < 0) {
+    #####:  139:                    perror("redirect >&");
+    #####:  140:                    ctx->error = 1;
+    #####:  141:                    return -1;
+        -:  142:                }
+        5:  143:                continue;
+        -:  144:            }
+        -:  145:
+    #####:  146:        case TOK_LESSGREAT:
+    #####:  147:            new_fd = open(target, O_RDWR | O_CREAT, 0666);
+    #####:  148:            if (new_fd < 0) {
+    #####:  149:                perror(target);
+    #####:  150:                ctx->error = 1;
+    #####:  151:                return -1;
+        -:  152:            }
+    #####:  153:            break;
+        -:  154:
+       21:  155:        case TOK_DLESS:
+        -:  156:        case TOK_DLESSDASH: {
+        -:  157:            /* heredoc: write body to a temp file, dup2 read end */
+       21:  158:            char tmpname[] = "/tmp/matchbox_heredoc_XXXXXX";
+       21:  159:            int tmpfd = mkstemp(tmpname);
+       21:  160:            if (tmpfd < 0) {
+    #####:  161:                perror("mkstemp");
+    #####:  162:                ctx->error = 1;
+    #####:  163:                return -1;
+        -:  164:            }
+       21:  165:            unlink(tmpname); /* unlink immediately; fd keeps it alive */
+        -:  166:
+        -:  167:            /* Expand variables in heredoc body unless delimiter was quoted */
+      21*:  168:            const char *body_raw = r->heredoc ? r->heredoc : "";
+        -:  169:            const char *body;
+       21:  170:            char *expanded = NULL;
+       21:  171:            if (!r->heredoc_no_expand) {
+       13:  172:                expanded = expand_word(sh, body_raw);
+      13*:  173:                body = expanded ? expanded : body_raw;
+        -:  174:            } else {
+        8:  175:                body = body_raw;
+        -:  176:            }
+        -:  177:            /* For <<-, strip leading tabs from each line */
+       21:  178:            char *stripped = NULL;
+       21:  179:            if (r->op == TOK_DLESSDASH) {
+        2:  180:                size_t slen = strlen(body);
+        2:  181:                stripped = malloc(slen + 1);
+        2:  182:                if (stripped) {
+        2:  183:                    size_t si = 0;
+        2:  184:                    int at_line_start = 1;
+       56:  185:                    for (size_t bi = 0; bi < slen; bi++) {
+       54:  186:                        if (at_line_start && body[bi] == '\t')
+        4:  187:                            continue;
+       50:  188:                        stripped[si++] = body[bi];
+       50:  189:                        at_line_start = (body[bi] == '\n');
+        -:  190:                    }
+        2:  191:                    stripped[si] = '\0';
+        2:  192:                    body = stripped;
+        -:  193:                }
+        -:  194:            }
+       21:  195:            size_t blen = strlen(body);
+       21:  196:            size_t written = 0;
+       42:  197:            while (written < blen) {
+       21:  198:                ssize_t n = write(tmpfd, body + written, blen - written);
+       21:  199:                if (n < 0) {
+    #####:  200:                    perror("heredoc write");
+    #####:  201:                    free(stripped);
+    #####:  202:                    close(tmpfd);
+    #####:  203:                    ctx->error = 1;
+    #####:  204:                    return -1;
+        -:  205:                }
+       21:  206:                written += (size_t)n;
+        -:  207:            }
+       21:  208:            free(stripped);
+       21:  209:            if (lseek(tmpfd, 0, SEEK_SET) < 0) {
+    #####:  210:                perror("heredoc lseek");
+    #####:  211:                close(tmpfd);
+    #####:  212:                ctx->error = 1;
+    #####:  213:                return -1;
+        -:  214:            }
+       21:  215:            new_fd = tmpfd;
+       21:  216:            break;
+        -:  217:        }
+        -:  218:
+    #####:  219:        default:
+        -:  220:            /* Unknown redirect op — skip */
+    #####:  221:            continue;
+        -:  222:        }
+        -:  223:
+        -:  224:        /* dup2 new_fd onto the target fd */
+       63:  225:        if (new_fd >= 0) {
+       63:  226:            if (dup2(new_fd, fd) < 0) {
+    #####:  227:                perror("dup2");
+    #####:  228:                close(new_fd);
+    #####:  229:                ctx->error = 1;
+    #####:  230:                return -1;
+        -:  231:            }
+       63:  232:            close(new_fd);
+        -:  233:        }
+        -:  234:    }
+        -:  235:
+       63:  236:    return 0;
+        -:  237:}
+        -:  238:
+       63:  239:void redirect_restore(redirect_ctx_t *ctx)
+        -:  240:{
+       63:  241:    fflush(NULL);   /* flush all stdio buffers before restoring fds */
+      131:  242:    for (saved_fd_t *s = ctx->saved; s != NULL; s = s->next) {
+       68:  243:        if (s->saved_fd >= 0) {
+       68:  244:            dup2(s->saved_fd, s->orig_fd);
+       68:  245:            close(s->saved_fd);
+        -:  246:        }
+        -:  247:    }
+       63:  248:    ctx->saved = NULL;
+       63:  249:}

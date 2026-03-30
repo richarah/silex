@@ -1,11 +1,4 @@
-/* linescan_avx2.c — AVX2 vectorised newline scanner (x86_64)
- *
- * Compiled only on x86_64 with -mavx2.  Processes 32 bytes per iteration.
- * Falls back to scalar tail for the remaining bytes.
- *
- * This function intentionally has the same signature as scan_newline() in
- * linescan_scalar.c; the Makefile selects exactly one implementation to link.
- */
+/* linescan_avx2.c — AVX2 vectorised newline scanner (x86_64) */
 
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L

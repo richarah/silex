@@ -104,6 +104,24 @@ The shell ignores `SIGPIPE` (set to `SIG_IGN` in `shell_init`). Each child
 process restores `SIGPIPE` to `SIG_DFL` before `execv`. This matches the
 behaviour of bash and dash and prevents silent truncation of pipeline output.
 
+### trap builtin
+
+User-defined signal traps (`trap CMD SIGNAL`) install a signal handler that
+calls `shell_run_string()` from within the handler context. This is a
+deliberate design choice for POSIX compliance but imposes constraints:
+
+- Signal handlers use `shell_run_string()` with the same parse arena as the
+  main script. Re-entrant arena allocation is safe because the arena is a
+  bump allocator — it only advances, never frees mid-execution.
+- `waitpid()` calls in the main execution loop retry on `EINTR` so that
+  signals delivered during child-process waits do not corrupt exit status.
+- The EXIT trap (`trap CMD EXIT`) fires in two places:
+  1. `exec_builtin_exit()` — before calling `exit(code)` for explicit `exit`
+  2. `applet_sh()` — after the main script completes, before `shell_free()`
+  The action is cleared before execution to prevent infinite re-entry.
+- `SIGPIPE` in child processes is always reset to `SIG_DFL`, regardless of
+  any parent trap for SIGPIPE.
+
 ## Reporting Vulnerabilities
 
 File a GitHub issue with the label `security`. For sensitive reports, email
@@ -171,6 +189,8 @@ matchbox reads the following environment variables:
 | PWD | Working directory hint | Overridden by `getcwd()` if inconsistent |
 | MATCHBOX_MODULE_PATH | Extra module search directory | Validated with same security checks as default module dir |
 | MATCHBOX_FSCACHE_TTL | Filesystem cache TTL in seconds | Validated as a non-negative integer; invalid values use the default |
+| MATCHBOX_TRACE | Shell tracing level (1 or 2) | Informational only; no privilege escalation; output goes to stderr |
+| MATCHBOX_FORCE_FALLBACKS | Disable io_uring/inotify (set to any value) | For testing only; disables performance features, not security controls |
 
 **LD_PRELOAD**: mitigated completely in the musl static build (static binaries ignore
 LD_PRELOAD). The glibc dynamic build is susceptible to LD_PRELOAD injection, which is

@@ -45,8 +45,14 @@ const applet_t applet_table[] = {
     { "date",     applet_date,     "date [-u] [-d DATE] [+FORMAT]"               },
     { "printf",   applet_printf,   "printf FORMAT [ARG]..."                      },
     { "install",  applet_install,  "install [-d] [-m MODE] [-o OWN] [-g GRP] [-vs] SRC DEST" },
-    { "tr",       applet_tr,       "tr [-dsc] SET1 [SET2]"                       },
-    { "cut",      applet_cut,      "cut [-bcf] [-d DELIM] [-s] FIELDS [FILE]..."  },
+    { "tr",        applet_tr,        "tr [-dsc] SET1 [SET2]"                                  },
+    { "cut",       applet_cut,       "cut [-bcf] [-d DELIM] [-s] FIELDS [FILE]..."             },
+    /* Phase 4: new builtins */
+    { "mktemp",    applet_mktemp,    "mktemp [-d] [-p DIR] [TEMPLATE]"                         },
+    { "tee",       applet_tee,       "tee [-ai] [FILE]..."                                      },
+    { "env",       applet_env,       "env [-i] [-u NAME] [NAME=VAL]... [CMD [ARG]...]"          },
+    { "realpath",  applet_realpath,  "realpath [-m] [--relative-to=DIR] PATH..."                },
+    { "sha256sum", applet_sha256sum, "sha256sum [-c] [FILE]..."                                 },
     { NULL, NULL, NULL }
 };
 

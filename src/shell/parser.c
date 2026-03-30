@@ -1,3 +1,5 @@
+/* parser.c — shell parser: build AST from token stream */
+
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
@@ -358,6 +360,15 @@ static node_t *parse_simple_command(parser_t *p)
                 *redir_tail = r;
                 redir_tail  = &r->next;
             }
+            continue;
+        }
+
+        /* POSIX: reserved words are only keywords at command-name position.
+         * After the command name is established, treat keyword tokens as
+         * plain word arguments (e.g. 'echo done', 'echo fi', 'echo then'). */
+        if (seen_cmd_word && t.text != NULL) {
+            consume(p);
+            wl_push(&words, t.text);
             continue;
         }
 
@@ -889,6 +900,13 @@ static node_t *parse_command(parser_t *p)
                         *redir_tail = r;
                         redir_tail  = &r->next;
                     }
+                    continue;
+                }
+
+                /* POSIX: keywords in argument position treated as words */
+                if (words.count > 0 && cur.text != NULL) {
+                    consume(p);
+                    wl_push(&words, cur.text);
                     continue;
                 }
 

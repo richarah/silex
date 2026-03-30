@@ -1,0 +1,53 @@
+        -:    0:Source:src/util/linescan_avx2.c
+        -:    1:/* linescan_avx2.c — AVX2 vectorised newline scanner (x86_64)
+        -:    2: *
+        -:    3: * Compiled only on x86_64 with -mavx2.  Processes 32 bytes per iteration.
+        -:    4: * Falls back to scalar tail for the remaining bytes.
+        -:    5: *
+        -:    6: * This function intentionally has the same signature as scan_newline() in
+        -:    7: * linescan_scalar.c; the Makefile selects exactly one implementation to link.
+        -:    8: */
+        -:    9:
+        -:   10:#ifndef _POSIX_C_SOURCE
+        -:   11:#define _POSIX_C_SOURCE 200809L
+        -:   12:#endif
+        -:   13:
+        -:   14:#include "linescan.h"
+        -:   15:#include "section.h"
+        -:   16:
+        -:   17:#include <immintrin.h>   /* AVX2 intrinsics */
+        -:   18:#include <stdint.h>
+        -:   19:#include <string.h>
+        -:   20:
+       46:   21:HOT const char *scan_newline(const char *buf, size_t len)
+        -:   22:{
+       46:   23:    if (len == 0)
+        -:   24:        return buf;
+        -:   25:
+       46:   26:    const char *p   = buf;
+       46:   27:    const char *end = buf + len;
+        -:   28:
+        -:   29:    /* Process 32-byte chunks with AVX2 */
+       46:   30:    if (len >= 32) {
+        -:   31:        __m256i nl = _mm256_set1_epi8('\n');
+        -:   32:
+        4:   33:        while (p + 32 <= end) {
+        4:   34:            __m256i v    = _mm256_loadu_si256((const __m256i *)p);
+        4:   35:            __m256i cmp  = _mm256_cmpeq_epi8(v, nl);
+        4:   36:            int     mask = _mm256_movemask_epi8(cmp);
+        4:   37:            if (mask) {
+        -:   38:                /* __builtin_ctz gives index of lowest set bit */
+        4:   39:                return p + __builtin_ctz((unsigned)mask);
+        -:   40:            }
+        -:   41:            p += 32;
+        -:   42:        }
+        -:   43:    }
+        -:   44:
+        -:   45:    /* Scalar tail */
+      276:   46:    while (p < end) {
+      274:   47:        if (*p == '\n')
+        -:   48:            return p;
+      234:   49:        p++;
+        -:   50:    }
+        -:   51:    return end;
+        -:   52:}

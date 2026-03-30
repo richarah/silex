@@ -1,4 +1,4 @@
-/* readlink.c -- readlink builtin: print resolved symbolic link or canonical file name */
+/* readlink.c — readlink builtin: print resolved symbolic link or canonical file name */
 
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
@@ -6,7 +6,6 @@
 #ifndef _DEFAULT_SOURCE
 #define _DEFAULT_SOURCE
 #endif
-/* readlink.c — readlink builtin */
 
 #include "../util/error.h"
 #include "../util/path.h"
@@ -134,12 +133,16 @@ int applet_readlink(int argc, char **argv)
                 continue;
             }
         } else if (opt_f) {
-            /* Canonicalize; last component may be missing */
-            if (canon_allow_missing_last(path, result) != 0) {
-                if (!opt_q)
-                    err_sys("readlink", "%s", path);
-                ret = 1;
-                continue;
+            /* Canonicalize; last component may be missing.
+             * Try realpath() first (handles symlinks in final component);
+             * fall back to canon_allow_missing_last for dangling cases. */
+            if (realpath(path, result) == NULL) {
+                if (canon_allow_missing_last(path, result) != 0) {
+                    if (!opt_q)
+                        err_sys("readlink", "%s", path);
+                    ret = 1;
+                    continue;
+                }
             }
         } else if (opt_m) {
             /* Canonicalize; no existence checks — use path_normalize */

@@ -1,0 +1,151 @@
+        -:    0:Source:src/core/echo.c
+        -:    1:/* echo.c — echo builtin: print arguments to stdout */
+        -:    2:
+        -:    3:#include <stdio.h>
+        -:    4:#include <string.h>
+        -:    5:
+        -:    6:/*
+        -:    7: * Parse a single octal escape sequence starting at *p (after the leading \0).
+        -:    8: * Advances *p past the consumed digits (up to 3).
+        -:    9: * Returns the character value.
+        -:   10: */
+        1:   11:static unsigned char parse_octal(const char **p)
+        -:   12:{
+        1:   13:    unsigned val = 0;
+        1:   14:    int digits = 0;
+        4:   15:    while (digits < 3 && **p >= '0' && **p <= '7') {
+        3:   16:        val = val * 8 + (unsigned)(**p - '0');
+        3:   17:        (*p)++;
+        3:   18:        digits++;
+        -:   19:    }
+        1:   20:    return (unsigned char)val;
+        -:   21:}
+        -:   22:
+        -:   23:/*
+        -:   24: * Parse a hex escape \xHH starting at *p (after the 'x').
+        -:   25: * Advances *p past the consumed digits (up to 2).
+        -:   26: */
+        1:   27:static unsigned char parse_hex(const char **p)
+        -:   28:{
+        1:   29:    unsigned val = 0;
+        1:   30:    int digits = 0;
+        3:   31:    while (digits < 2) {
+        2:   32:        char c = **p;
+        2:   33:        if (c >= '0' && c <= '9')      val = val * 16 + (unsigned)(c - '0');
+    #####:   34:        else if (c >= 'a' && c <= 'f') val = val * 16 + (unsigned)(c - 'a' + 10);
+    #####:   35:        else if (c >= 'A' && c <= 'F') val = val * 16 + (unsigned)(c - 'A' + 10);
+        -:   36:        else break;
+        2:   37:        (*p)++;
+        2:   38:        digits++;
+        -:   39:    }
+        1:   40:    return (unsigned char)val;
+        -:   41:}
+        -:   42:
+        -:   43:/*
+        -:   44: * Print a string with backslash escape interpretation (-e mode).
+        -:   45: * Returns 1 if \c was encountered (suppress further output and newline).
+        -:   46: */
+       15:   47:static int print_escaped(const char *s)
+        -:   48:{
+       54:   49:    for (; *s; s++) {
+       40:   50:        if (*s != '\\') {
+       24:   51:            putchar(*s);
+       24:   52:            continue;
+        -:   53:        }
+       16:   54:        s++; /* consume backslash */
+       16:   55:        switch (*s) {
+        1:   56:        case 'a':  putchar('\a'); break;
+    #####:   57:        case 'b':  putchar('\b'); break;
+        1:   58:        case 'c':  return 1; /* suppress rest of output */
+    #####:   59:        case 'e':  putchar('\033'); break;
+    #####:   60:        case 'f':  putchar('\f'); break;
+        6:   61:        case 'n':  putchar('\n'); break;
+    #####:   62:        case 'r':  putchar('\r'); break;
+        4:   63:        case 't':  putchar('\t'); break;
+    #####:   64:        case 'v':  putchar('\v'); break;
+        2:   65:        case '\\': putchar('\\'); break;
+        1:   66:        case '0': case '1': case '2': case '3':
+        -:   67:        case '4': case '5': case '6': case '7': {
+        -:   68:            /*
+        -:   69:             * GNU echo -e interprets \NNN (1-3 octal digits starting with
+        -:   70:             * any octal digit) as the character with that octal value.
+        -:   71:             * parse_octal consumes up to 3 digits from the current position.
+        -:   72:             */
+        1:   73:            const char *p = s; /* s already points at the first octal digit */
+        1:   74:            unsigned char c = parse_octal(&p);
+        1:   75:            putchar((int)(unsigned char)c);
+        1:   76:            s = p - 1; /* s++ in loop will advance past last consumed digit */
+        1:   77:            break;
+        -:   78:        }
+        1:   79:        case 'x': {
+        1:   80:            const char *p = s + 1;
+        1:   81:            unsigned char c = parse_hex(&p);
+        1:   82:            putchar((int)(unsigned char)c);
+        1:   83:            s = p - 1;
+        1:   84:            break;
+        -:   85:        }
+    #####:   86:        default:
+        -:   87:            /* Unknown escape: print backslash and char literally */
+    #####:   88:            putchar('\\');
+    #####:   89:            putchar(*s);
+    #####:   90:            break;
+        -:   91:        }
+        -:   92:    }
+       14:   93:    return 0;
+        -:   94:}
+        -:   95:
+      422:   96:int applet_echo(int argc, char **argv)
+        -:   97:{
+      422:   98:    int opt_n = 0; /* -n: suppress trailing newline */
+      422:   99:    int opt_e = 0; /* -e: interpret backslash escapes */
+        -:  100:    int i;
+        -:  101:
+        -:  102:    /*
+        -:  103:     * Parse flags.  GNU echo only recognises flags as a leading cluster
+        -:  104:     * of -n/-e/-E options.  As soon as we see an argument that is not
+        -:  105:     * a recognised flag cluster, everything else is treated as a string.
+        -:  106:     */
+      445:  107:    for (i = 1; i < argc; i++) {
+      438:  108:        const char *arg = argv[i];
+      438:  109:        if (arg[0] != '-' || arg[1] == '\0')
+        -:  110:            break;
+        -:  111:
+        -:  112:        /* Check that every char after '-' is a valid flag */
+       25:  113:        const char *p = arg + 1;
+       25:  114:        int valid = 1;
+       51:  115:        while (*p) {
+       28:  116:            if (*p != 'n' && *p != 'e' && *p != 'E') {
+        2:  117:                valid = 0;
+        2:  118:                break;
+        -:  119:            }
+       26:  120:            p++;
+        -:  121:        }
+       25:  122:        if (!valid)
+        2:  123:            break;
+        -:  124:
+        -:  125:        /* Apply the flags */
+       23:  126:        p = arg + 1;
+       49:  127:        while (*p) {
+       26:  128:            if (*p == 'n') opt_n = 1;
+       17:  129:            else if (*p == 'e') opt_e = 1;
+        2:  130:            else if (*p == 'E') opt_e = 0;
+       26:  131:            p++;
+        -:  132:        }
+        -:  133:    }
+        -:  134:
+        -:  135:    /* Print remaining arguments separated by spaces */
+      422:  136:    int stopped = 0;
+      864:  137:    for (int j = i; j < argc && !stopped; j++) {
+      442:  138:        if (j > i)
+       27:  139:            putchar(' ');
+      442:  140:        if (opt_e)
+       15:  141:            stopped = print_escaped(argv[j]);
+        -:  142:        else
+      427:  143:            fputs(argv[j], stdout);
+        -:  144:    }
+        -:  145:
+      422:  146:    if (!opt_n && !stopped)
+      412:  147:        putchar('\n');
+        -:  148:
+      422:  149:    return 0;
+        -:  150:}

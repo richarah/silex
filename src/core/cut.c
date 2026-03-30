@@ -1,9 +1,8 @@
-/* cut.c -- cut builtin: remove sections from each line of files */
+/* cut.c — cut builtin: remove sections from each line of files */
 
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
-/* cut.c — cut builtin */
 
 #include "../util/error.h"
 

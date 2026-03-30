@@ -1,0 +1,414 @@
+        -:    0:Source:src/core/cut.c
+        -:    1:/* cut.c -- cut builtin: remove sections from each line of files */
+        -:    2:
+        -:    3:#ifndef _POSIX_C_SOURCE
+        -:    4:#define _POSIX_C_SOURCE 200809L
+        -:    5:#endif
+        -:    6:/* cut.c — cut builtin */
+        -:    7:
+        -:    8:#include "../util/error.h"
+        -:    9:
+        -:   10:#include <limits.h>
+        -:   11:#include <stdio.h>
+        -:   12:#include <stdlib.h>
+        -:   13:#include <string.h>
+        -:   14:
+        -:   15:/* ------------------------------------------------------------------ */
+        -:   16:/* Range list                                                            */
+        -:   17:/* ------------------------------------------------------------------ */
+        -:   18:
+        -:   19:/*
+        -:   20: * A single range entry.  lo and hi are 1-based field/byte numbers.
+        -:   21: * hi == INT_MAX means "to end of line".
+        -:   22: * lo == 0 means "from start" (i.e. -N form).
+        -:   23: */
+        -:   24:typedef struct {
+        -:   25:    int lo;
+        -:   26:    int hi;
+        -:   27:} range_t;
+        -:   28:
+        -:   29:#define MAX_RANGES 512
+        -:   30:
+        -:   31:typedef struct {
+        -:   32:    range_t r[MAX_RANGES];
+        -:   33:    int     n;
+        -:   34:} rangelist_t;
+        -:   35:
+        -:   36:/*
+        -:   37: * Parse a position list string like "1,3-5,7-" into rl.
+        -:   38: * Returns 0 on success, -1 on error.
+        -:   39: */
+        2:   40:static int parse_positions(const char *s, rangelist_t *rl)
+        -:   41:{
+        2:   42:    rl->n = 0;
+        2:   43:    const char *p = s;
+        -:   44:
+        4:   45:    while (*p) {
+        -:   46:        /* Find end of this token (up to next ',') */
+        2:   47:        const char *comma = strchr(p, ',');
+       2*:   48:        size_t toklen = comma ? (size_t)(comma - p) : strlen(p);
+        -:   49:
+        -:   50:        char tok[64];
+        2:   51:        if (toklen == 0 || toklen >= sizeof(tok)) {
+    #####:   52:            err_msg("cut", "invalid range '%.*s'", (int)toklen, p);
+    #####:   53:            return -1;
+        -:   54:        }
+        2:   55:        memcpy(tok, p, toklen);
+        2:   56:        tok[toklen] = '\0';
+        -:   57:
+        2:   58:        if (rl->n >= MAX_RANGES) {
+    #####:   59:            err_msg("cut", "too many ranges");
+    #####:   60:            return -1;
+        -:   61:        }
+        -:   62:
+        2:   63:        range_t *r = &rl->r[rl->n];
+        -:   64:
+        -:   65:        /* Forms: N  |  N-M  |  N-  |  -M */
+        2:   66:        char *dash = strchr(tok, '-');
+        2:   67:        if (!dash) {
+        -:   68:            /* Single position N */
+        -:   69:            char *endp;
+        2:   70:            long v = strtol(tok, &endp, 10);
+        2:   71:            if (*endp != '\0' || v < 1) {
+    #####:   72:                err_msg("cut", "invalid field value '%s'", tok);
+    #####:   73:                return -1;
+        -:   74:            }
+        2:   75:            r->lo = r->hi = (int)v;
+    #####:   76:        } else if (dash == tok) {
+        -:   77:            /* -M form: from 1 to M */
+        -:   78:            char *endp;
+    #####:   79:            long v = strtol(tok + 1, &endp, 10);
+    #####:   80:            if (*endp != '\0' || v < 1) {
+    #####:   81:                err_msg("cut", "invalid field value '%s'", tok);
+    #####:   82:                return -1;
+        -:   83:            }
+    #####:   84:            r->lo = 1;
+    #####:   85:            r->hi = (int)v;
+        -:   86:        } else {
+        -:   87:            /* N- or N-M */
+    #####:   88:            *dash = '\0';
+        -:   89:            char *endp;
+    #####:   90:            long lo = strtol(tok, &endp, 10);
+    #####:   91:            if (*endp != '\0' || lo < 1) {
+    #####:   92:                err_msg("cut", "invalid field value '%s'", tok);
+    #####:   93:                return -1;
+        -:   94:            }
+    #####:   95:            r->lo = (int)lo;
+    #####:   96:            if (*(dash + 1) == '\0') {
+        -:   97:                /* N- form */
+    #####:   98:                r->hi = INT_MAX;
+        -:   99:            } else {
+    #####:  100:                long hi = strtol(dash + 1, &endp, 10);
+    #####:  101:                if (*endp != '\0' || hi < 1) {
+    #####:  102:                    err_msg("cut", "invalid field value '%s'", tok);
+    #####:  103:                    return -1;
+        -:  104:                }
+    #####:  105:                if (hi < lo) {
+    #####:  106:                    err_msg("cut", "invalid decreasing range");
+    #####:  107:                    return -1;
+        -:  108:                }
+    #####:  109:                r->hi = (int)hi;
+        -:  110:            }
+        -:  111:        }
+        -:  112:
+        2:  113:        rl->n++;
+        2:  114:        p += toklen;
+       2*:  115:        if (*p == ',') p++;
+        -:  116:    }
+        -:  117:
+        2:  118:    if (rl->n == 0) {
+    #####:  119:        err_msg("cut", "no positions specified");
+    #####:  120:        return -1;
+        -:  121:    }
+        -:  122:
+        2:  123:    return 0;
+        -:  124:}
+        -:  125:
+        -:  126:/*
+        -:  127: * Return 1 if position pos (1-based) is selected by rl.
+        -:  128: */
+        6:  129:static int in_range(const rangelist_t *rl, int pos)
+        -:  130:{
+       10:  131:    for (int i = 0; i < rl->n; i++) {
+        6:  132:        if (pos >= rl->r[i].lo && pos <= rl->r[i].hi)
+        2:  133:            return 1;
+        -:  134:    }
+        4:  135:    return 0;
+        -:  136:}
+        -:  137:
+        -:  138:/* ------------------------------------------------------------------ */
+        -:  139:/* Line processing                                                       */
+        -:  140:/* ------------------------------------------------------------------ */
+        -:  141:
+        -:  142:/*
+        -:  143: * Process one line for byte/char mode (-b/-c).
+        -:  144: * Line does NOT include the newline terminator.
+        -:  145: * Outputs selected bytes, then a newline.
+        -:  146: */
+    #####:  147:static void cut_bytes(const char *line, size_t len, const rangelist_t *rl)
+        -:  148:{
+    #####:  149:    for (size_t i = 0; i < len; i++) {
+    #####:  150:        int pos = (int)(i + 1);
+    #####:  151:        if (in_range(rl, pos))
+    #####:  152:            putchar((unsigned char)line[i]);
+        -:  153:    }
+    #####:  154:    putchar('\n');
+    #####:  155:}
+        -:  156:
+        -:  157:/*
+        -:  158: * Process one line for field mode (-f).
+        -:  159: * delim is the single-byte field delimiter.
+        -:  160: * suppress: if set, lines without delimiter are not printed.
+        -:  161: * Outputs selected fields joined by delim, then newline.
+        -:  162: */
+        2:  163:static void cut_fields(const char *line, size_t len,
+        -:  164:                        const rangelist_t *rl, char delim, int suppress)
+        -:  165:{
+        -:  166:    /* Check if delimiter is present */
+        2:  167:    int has_delim = (memchr(line, (unsigned char)delim, len) != NULL);
+        -:  168:
+        2:  169:    if (!has_delim) {
+        -:  170:        /* No delimiter in line */
+    #####:  171:        if (!suppress) {
+    #####:  172:            fwrite(line, 1, len, stdout);
+    #####:  173:            putchar('\n');
+        -:  174:        }
+    #####:  175:        return;
+        -:  176:    }
+        -:  177:
+        -:  178:    /*
+        -:  179:     * Split line into fields and output selected ones.
+        -:  180:     * We collect pointers to field starts and their lengths.
+        -:  181:     */
+        2:  182:    const char *p    = line;
+        2:  183:    const char *end  = line + len;
+        2:  184:    int   field      = 1;
+        2:  185:    int   first_out  = 1; /* used to know when to print delimiter */
+        -:  186:
+        6:  187:    while (p <= end) {
+        -:  188:        /* Find end of this field */
+        6:  189:        const char *next = memchr(p, (unsigned char)delim, (size_t)(end - p));
+        -:  190:        size_t flen;
+        6:  191:        if (next) {
+        4:  192:            flen = (size_t)(next - p);
+        -:  193:        } else {
+        2:  194:            flen = (size_t)(end - p);
+        2:  195:            next = end;
+        -:  196:        }
+        -:  197:
+        6:  198:        if (in_range(rl, field)) {
+       2*:  199:            if (!first_out) putchar(delim);
+        2:  200:            fwrite(p, 1, flen, stdout);
+        2:  201:            first_out = 0;
+        -:  202:        }
+        -:  203:
+        6:  204:        field++;
+        6:  205:        p = next + 1;
+        6:  206:        if (next == end) break;
+        -:  207:    }
+        -:  208:
+        2:  209:    putchar('\n');
+        -:  210:}
+        -:  211:
+        -:  212:/* ------------------------------------------------------------------ */
+        -:  213:/* Main                                                                  */
+        -:  214:/* ------------------------------------------------------------------ */
+        -:  215:
+        2:  216:int applet_cut(int argc, char **argv)
+        -:  217:{
+        2:  218:    int opt_b = 0; /* -b: byte positions */
+        2:  219:    int opt_c = 0; /* -c: character positions (treated as bytes) */
+        2:  220:    int opt_f = 0; /* -f: fields */
+        2:  221:    int opt_s = 0; /* -s: suppress lines without delimiter */
+        2:  222:    char delim = '\t';
+        2:  223:    int have_delim = 0;
+        2:  224:    const char *positions = NULL;
+        2:  225:    int mode = 0; /* 'b', 'c', or 'f' */
+        -:  226:    int i;
+        -:  227:
+        6:  228:    for (i = 1; i < argc; i++) {
+        4:  229:        const char *arg = argv[i];
+        -:  230:
+       4*:  231:        if (strcmp(arg, "--") == 0) { i++; break; }
+        -:  232:
+       4*:  233:        if (strncmp(arg, "--bytes=", 8) == 0) {
+    #####:  234:            positions = arg + 8; opt_b = 1; mode = 'b'; continue;
+        -:  235:        }
+       4*:  236:        if (strncmp(arg, "--characters=", 13) == 0) {
+    #####:  237:            positions = arg + 13; opt_c = 1; mode = 'c'; continue;
+        -:  238:        }
+       4*:  239:        if (strncmp(arg, "--fields=", 9) == 0) {
+    #####:  240:            positions = arg + 9; opt_f = 1; mode = 'f'; continue;
+        -:  241:        }
+       4*:  242:        if (strncmp(arg, "--delimiter=", 12) == 0) {
+    #####:  243:            if (strlen(arg + 12) != 1) {
+    #####:  244:                err_msg("cut", "the delimiter must be a single character");
+    #####:  245:                return 1;
+        -:  246:            }
+    #####:  247:            delim = arg[12]; have_delim = 1; continue;
+        -:  248:        }
+       4*:  249:        if (strcmp(arg, "--only-delimited") == 0) { opt_s = 1; continue; }
+        -:  250:
+        4:  251:        if (arg[0] != '-' || arg[1] == '\0')
+        -:  252:            break;
+        -:  253:
+        4:  254:        const char *p = arg + 1;
+        4:  255:        int stop = 0;
+        8:  256:        while (*p && !stop) {
+        4:  257:            switch (*p) {
+    #####:  258:            case 'b':
+    #####:  259:                opt_b = 1; mode = 'b';
+    #####:  260:                if (p[1]) { positions = p + 1; stop = 1; }
+        -:  261:                else {
+    #####:  262:                    i++;
+    #####:  263:                    if (i >= argc) {
+    #####:  264:                        err_usage("cut", "-b LIST [-z] [FILE...]");
+    #####:  265:                        return 1;
+        -:  266:                    }
+    #####:  267:                    positions = argv[i];
+        -:  268:                }
+    #####:  269:                break;
+    #####:  270:            case 'c':
+    #####:  271:                opt_c = 1; mode = 'c';
+    #####:  272:                if (p[1]) { positions = p + 1; stop = 1; }
+        -:  273:                else {
+    #####:  274:                    i++;
+    #####:  275:                    if (i >= argc) {
+    #####:  276:                        err_usage("cut", "-c LIST [-z] [FILE...]");
+    #####:  277:                        return 1;
+        -:  278:                    }
+    #####:  279:                    positions = argv[i];
+        -:  280:                }
+    #####:  281:                break;
+        2:  282:            case 'f':
+        2:  283:                opt_f = 1; mode = 'f';
+        2:  284:                if (p[1]) { positions = p + 1; stop = 1; }
+        -:  285:                else {
+    #####:  286:                    i++;
+    #####:  287:                    if (i >= argc) {
+    #####:  288:                        err_usage("cut", "-f LIST [-d DELIM] [-s] [FILE...]");
+    #####:  289:                        return 1;
+        -:  290:                    }
+    #####:  291:                    positions = argv[i];
+        -:  292:                }
+        2:  293:                break;
+        2:  294:            case 'd':
+        2:  295:                if (p[1]) {
+        2:  296:                    if (p[2] != '\0') {
+    #####:  297:                        err_msg("cut", "the delimiter must be a single character");
+    #####:  298:                        return 1;
+        -:  299:                    }
+        2:  300:                    delim = p[1];
+        2:  301:                    have_delim = 1;
+        2:  302:                    stop = 1;
+        -:  303:                } else {
+    #####:  304:                    i++;
+    #####:  305:                    if (i >= argc) {
+    #####:  306:                        err_usage("cut", "-f LIST -d DELIM [FILE...]");
+    #####:  307:                        return 1;
+        -:  308:                    }
+    #####:  309:                    if (strlen(argv[i]) != 1) {
+    #####:  310:                        err_msg("cut", "the delimiter must be a single character");
+    #####:  311:                        return 1;
+        -:  312:                    }
+    #####:  313:                    delim = argv[i][0];
+    #####:  314:                    have_delim = 1;
+        -:  315:                }
+        2:  316:                break;
+    #####:  317:            case 's': opt_s = 1; break;
+    #####:  318:            default:
+    #####:  319:                err_msg("cut", "unrecognized option '-%c'", *p);
+    #####:  320:                err_usage("cut", "[-bcf] LIST [-d DELIM] [-s] [FILE...]");
+    #####:  321:                return 1;
+        -:  322:            }
+        4:  323:            p++;
+        -:  324:        }
+        -:  325:    }
+        -:  326:
+        2:  327:    if (mode == 0) {
+    #####:  328:        err_msg("cut", "you must specify a list of bytes, characters, or fields");
+    #####:  329:        err_usage("cut", "[-bcf] LIST [-d DELIM] [-s] [FILE...]");
+    #####:  330:        return 1;
+        -:  331:    }
+        -:  332:
+        2:  333:    if (!positions) {
+    #####:  334:        err_msg("cut", "missing position list");
+    #####:  335:        return 1;
+        -:  336:    }
+        -:  337:
+        -:  338:    /* -d and -s are only meaningful with -f */
+        2:  339:    if (have_delim && !opt_f) {
+    #####:  340:        err_msg("cut", "an input delimiter may only be specified when operating on fields");
+    #####:  341:        return 1;
+        -:  342:    }
+       2*:  343:    if (opt_s && !opt_f) {
+    #####:  344:        err_msg("cut", "-s requires -f");
+    #####:  345:        return 1;
+        -:  346:    }
+        -:  347:
+        -:  348:    (void)opt_b; (void)opt_c; (void)opt_f;
+        -:  349:
+        -:  350:    rangelist_t rl;
+        2:  351:    if (parse_positions(positions, &rl) != 0)
+    #####:  352:        return 1;
+        -:  353:
+        -:  354:    /*
+        -:  355:     * Process files (or stdin if no file args).
+        -:  356:     * We read line-by-line using a dynamic buffer to handle long lines.
+        -:  357:     */
+        2:  358:    int file_start = i;
+        2:  359:    int ret = 0;
+        -:  360:
+        -:  361:    /* We process either file list or stdin */
+        2:  362:    int do_stdin = (file_start >= argc);
+        2:  363:    int file_idx = file_start;
+        -:  364:
+    #####:  365:    for (;;) {
+        -:  366:        FILE *fp;
+        2:  367:        if (do_stdin) {
+        2:  368:            fp = stdin;
+        -:  369:        } else {
+    #####:  370:            if (file_idx >= argc) break;
+    #####:  371:            const char *fname = argv[file_idx++];
+    #####:  372:            if (strcmp(fname, "-") == 0) {
+    #####:  373:                fp = stdin;
+        -:  374:            } else {
+    #####:  375:                fp = fopen(fname, "r");
+    #####:  376:                if (!fp) {
+    #####:  377:                    err_sys("cut", "cannot open '%s'", fname);
+    #####:  378:                    ret = 1;
+    #####:  379:                    continue;
+        -:  380:                }
+        -:  381:            }
+        -:  382:        }
+        -:  383:
+        -:  384:        /* Read line by line */
+        2:  385:        char   *linebuf = NULL;
+        2:  386:        size_t  linecap = 0;
+        -:  387:        ssize_t linelen;
+        -:  388:
+        4:  389:        while ((linelen = getline(&linebuf, &linecap, fp)) >= 0) {
+        -:  390:            /* Strip trailing newline */
+        2:  391:            size_t len = (size_t)linelen;
+        2:  392:            if (len > 0 && linebuf[len - 1] == '\n') {
+        2:  393:                linebuf[--len] = '\0';
+        -:  394:                /* Also strip \r for CRLF */
+        2:  395:                if (len > 0 && linebuf[len - 1] == '\r')
+    #####:  396:                    linebuf[--len] = '\0';
+        -:  397:            }
+        -:  398:
+        2:  399:            if (mode == 'b' || mode == 'c') {
+    #####:  400:                cut_bytes(linebuf, len, &rl);
+        -:  401:            } else {
+        2:  402:                cut_fields(linebuf, len, &rl, delim, opt_s);
+        -:  403:            }
+        -:  404:        }
+        -:  405:
+        2:  406:        free(linebuf);
+        -:  407:
+       2*:  408:        if (fp != stdin) fclose(fp);
+        2:  409:        if (do_stdin) break;
+        -:  410:    }
+        -:  411:
+        2:  412:    return ret;
+        -:  413:}

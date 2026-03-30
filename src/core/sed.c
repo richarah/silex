@@ -144,11 +144,9 @@ static int sed_regcomp(regex_t **out, const char *src, int flags,
         free(re);
         return -1;
     }
-    /* Track last regex */
-    if (g_last_re) {
-        regfree(g_last_re);
-        free(g_last_re);
-    }
+    /* Track last compiled pattern for empty-pattern reuse (non-owning pointer).
+     * Each sed_cmd_t owns its own regex_t; we do NOT free the old g_last_re
+     * here because the previous cmd still holds a reference to it. */
     free(g_last_src);
     g_last_re  = re;
     g_last_src = strdup(src);
@@ -514,14 +512,15 @@ static sed_cmd_t *parse_script(const char *script, int ere, int *err)
             cmd->re_src     = pattern;
             cmd->replacement = replacement;
 
-            /* Compile regex: empty pattern reuses last */
-            if (strlen(pattern) == 0) {
-                cmd->re = g_last_re; /* borrowed reference */
-            } else {
-                int icase = (cmd->subst_flags & SUBST_I) ? 1 : 0;
-                if (sed_regcomp(&cmd->re, pattern, 0, ere, icase) != 0) {
-                    *err = 1; free(cmd); return head;
-                }
+            /* Compile regex: empty pattern reuses last compiled src */
+            const char *re_src = (strlen(pattern) == 0) ? g_last_src : pattern;
+            if (!re_src) {
+                err_msg("sed", "no previous regex for empty s pattern");
+                *err = 1; free(cmd); return head;
+            }
+            int icase = (cmd->subst_flags & SUBST_I) ? 1 : 0;
+            if (sed_regcomp(&cmd->re, re_src, 0, ere, icase) != 0) {
+                *err = 1; free(cmd); return head;
             }
             break;
         }
@@ -1072,8 +1071,7 @@ static void free_cmds(sed_cmd_t *head)
     sed_cmd_t *c = head;
     while (c) {
         sed_cmd_t *next = c->next;
-        /* Note: re may be shared (empty pattern), so only free if we own it */
-        if (c->re && c->re != g_last_re) {
+        if (c->re) {
             regfree(c->re);
             free(c->re);
         }
@@ -1084,12 +1082,12 @@ static void free_cmds(sed_cmd_t *head)
         free(c->text);
         free(c->filename);
         free(c->label);
-        if (c->addr1.re && c->addr1.re != g_last_re) {
+        if (c->addr1.re) {
             regfree(c->addr1.re);
             free(c->addr1.re);
         }
         free(c->addr1.re_src);
-        if (c->addr2.re && c->addr2.re != g_last_re) {
+        if (c->addr2.re) {
             regfree(c->addr2.re);
             free(c->addr2.re);
         }
@@ -1554,11 +1552,8 @@ int applet_sed(int argc, char **argv)
     if (fps) free(fps);
     if (tmp_paths) free(tmp_paths);
     free_cmds(head);
-    if (g_last_re) {
-        regfree(g_last_re);
-        free(g_last_re);
-        g_last_re = NULL;
-    }
+    /* g_last_re is a non-owning pointer; the owning cmd freed it in free_cmds */
+    g_last_re = NULL;
     free(g_last_src);
     g_last_src = NULL;
     return ret;

@@ -1,0 +1,176 @@
+        -:    0:Source:src/util/regex/charclass_re.c
+        -:    1:/* charclass_re.c — parse regex character classes into 256-bit bitmaps */
+        -:    2:
+        -:    3:#ifndef _POSIX_C_SOURCE
+        -:    4:#define _POSIX_C_SOURCE 200809L
+        -:    5:#endif
+        -:    6:
+        -:    7:#include "regex_internal.h"
+        -:    8:#include <ctype.h>
+        -:    9:#include <string.h>
+        -:   10:
+        -:   11:/*
+        -:   12: * Parse a POSIX character class name (without the enclosing [: :]).
+        -:   13: * Sets the corresponding bits in cc. Returns 1 on success, 0 on unknown class.
+        -:   14: */
+    #####:   15:static int apply_posix_class(mb_charclass *cc, const char *name, int negate)
+        -:   16:{
+    #####:   17:    int found = 0;
+        -:   18:
+    #####:   19:    for (int c = 0; c < 256; c++) {
+    #####:   20:        int match = 0;
+    #####:   21:        unsigned char uc = (unsigned char)c;
+        -:   22:
+    #####:   23:        if (strcmp(name, "alpha")  == 0) match = isalpha(uc);
+    #####:   24:        else if (strcmp(name, "digit")  == 0) match = isdigit(uc);
+    #####:   25:        else if (strcmp(name, "alnum")  == 0) match = isalnum(uc);
+    #####:   26:        else if (strcmp(name, "space")  == 0) match = isspace(uc);
+    #####:   27:        else if (strcmp(name, "blank")  == 0) match = (uc == ' ' || uc == '\t');
+    #####:   28:        else if (strcmp(name, "upper")  == 0) match = isupper(uc);
+    #####:   29:        else if (strcmp(name, "lower")  == 0) match = islower(uc);
+    #####:   30:        else if (strcmp(name, "print")  == 0) match = isprint(uc);
+    #####:   31:        else if (strcmp(name, "punct")  == 0) match = ispunct(uc);
+    #####:   32:        else if (strcmp(name, "graph")  == 0) match = isgraph(uc);
+    #####:   33:        else if (strcmp(name, "cntrl")  == 0) match = iscntrl(uc);
+    #####:   34:        else if (strcmp(name, "xdigit") == 0) match = isxdigit(uc);
+    #####:   35:        else { return 0; }  /* unknown class */
+        -:   36:
+    #####:   37:        found = 1;
+    #####:   38:        if (!negate && match)
+    #####:   39:            mb_charclass_set(cc, (unsigned char)c);
+        -:   40:    }
+    #####:   41:    return found;
+        -:   42:}
+        -:   43:
+        -:   44:/*
+        -:   45: * Parse a bracket expression starting after '[' (pat points to first char
+        -:   46: * after '[', end points to the closing ']' or end of string).
+        -:   47: * Handles: [abc], [a-z], [^...], [[:name:]], combinations.
+        -:   48: * Fills out->bits.
+        -:   49: * Returns 1 on success, 0 on error.
+        -:   50: */
+    #####:   51:int mb_charclass_parse(const char *pat, const char *end,
+        -:   52:                       mb_charclass *out, int flags)
+        -:   53:{
+    #####:   54:    int icase = (flags & MB_REG_ICASE) != 0;
+    #####:   55:    memset(out->bits, 0, sizeof(out->bits));
+        -:   56:
+    #####:   57:    const char *p = pat;
+    #####:   58:    int negate = 0;
+        -:   59:
+        -:   60:    /* Negation */
+    #####:   61:    if (*p == '^') {
+    #####:   62:        negate = 1;
+    #####:   63:        p++;
+        -:   64:    }
+        -:   65:
+        -:   66:    /* ] as first char is literal */
+    #####:   67:    if (*p == ']') {
+    #####:   68:        mb_charclass_set(out, (unsigned char)']');
+    #####:   69:        p++;
+        -:   70:    }
+        -:   71:
+    #####:   72:    while (p < end && *p != ']') {
+        -:   73:        /* POSIX named class: [:name:] */
+    #####:   74:        if (*p == '[' && p[1] == ':') {
+    #####:   75:            const char *cls_start = p + 2;
+    #####:   76:            const char *cls_end = cls_start;
+    #####:   77:            while (cls_end < end && *cls_end != ':') cls_end++;
+    #####:   78:            if (*cls_end == ':' && cls_end[1] == ']') {
+        -:   79:                /* Valid POSIX class */
+        -:   80:                char name[32];
+    #####:   81:                size_t nlen = (size_t)(cls_end - cls_start);
+    #####:   82:                if (nlen < sizeof(name)) {
+    #####:   83:                    memcpy(name, cls_start, nlen);
+    #####:   84:                    name[nlen] = '\0';
+        -:   85:                    /* Apply to out (we'll negate at the end if needed) */
+        -:   86:                    mb_charclass tmp;
+    #####:   87:                    memset(tmp.bits, 0, sizeof(tmp.bits));
+    #####:   88:                    apply_posix_class(&tmp, name, 0);
+        -:   89:                    /* Merge into out */
+    #####:   90:                    for (int i = 0; i < 32; i++)
+    #####:   91:                        out->bits[i] |= tmp.bits[i];
+        -:   92:                }
+    #####:   93:                p = cls_end + 2; /* skip :] */
+    #####:   94:                continue;
+        -:   95:            }
+        -:   96:        }
+        -:   97:
+        -:   98:        /* Collating element [. .] — treat as literal char */
+    #####:   99:        if (*p == '[' && p[1] == '.') {
+    #####:  100:            p += 2;
+    #####:  101:            unsigned char lit = (p < end) ? (unsigned char)*p : 0;
+    #####:  102:            while (p < end && !(*p == '.' && p[1] == ']')) p++;
+    #####:  103:            if (p < end) p += 2; /* skip .] */
+    #####:  104:            mb_charclass_set(out, lit);
+    #####:  105:            continue;
+        -:  106:        }
+        -:  107:
+        -:  108:        /* Equivalence class [= =] — treat as literal char */
+    #####:  109:        if (*p == '[' && p[1] == '=') {
+    #####:  110:            p += 2;
+    #####:  111:            unsigned char lit = (p < end) ? (unsigned char)*p : 0;
+    #####:  112:            while (p < end && !(*p == '=' && p[1] == ']')) p++;
+    #####:  113:            if (p < end) p += 2; /* skip =] */
+    #####:  114:            mb_charclass_set(out, lit);
+    #####:  115:            continue;
+        -:  116:        }
+        -:  117:
+        -:  118:        /* Range: a-z */
+    #####:  119:        if (p + 2 < end && p[1] == '-' && p[2] != ']') {
+    #####:  120:            unsigned char lo = (unsigned char)*p;
+    #####:  121:            unsigned char hi = (unsigned char)p[2];
+    #####:  122:            if (lo > hi) {
+        -:  123:                /* Invalid range: treat as three literal chars */
+    #####:  124:                mb_charclass_set(out, lo);
+    #####:  125:                mb_charclass_set(out, (unsigned char)'-');
+    #####:  126:                mb_charclass_set(out, hi);
+        -:  127:            } else {
+    #####:  128:                for (unsigned int c = lo; c <= hi; c++)
+    #####:  129:                    mb_charclass_set(out, (unsigned char)c);
+        -:  130:            }
+    #####:  131:            p += 3;
+    #####:  132:            continue;
+        -:  133:        }
+        -:  134:
+        -:  135:        /* Literal char (including escaped) */
+        -:  136:        unsigned char c;
+    #####:  137:        if (*p == '\\' && p + 1 < end) {
+    #####:  138:            p++;
+    #####:  139:            switch (*p) {
+    #####:  140:            case 'n': c = '\n'; break;
+    #####:  141:            case 't': c = '\t'; break;
+    #####:  142:            case 'r': c = '\r'; break;
+    #####:  143:            default:  c = (unsigned char)*p; break;
+        -:  144:            }
+        -:  145:        } else {
+    #####:  146:            c = (unsigned char)*p;
+        -:  147:        }
+    #####:  148:        mb_charclass_set(out, c);
+    #####:  149:        p++;
+        -:  150:    }
+        -:  151:
+        -:  152:    /* Apply case-insensitive: for every set char, also set its counterpart */
+    #####:  153:    if (icase) {
+        -:  154:        mb_charclass tmp;
+    #####:  155:        memcpy(&tmp, out, sizeof(tmp));
+    #####:  156:        for (int c = 0; c < 256; c++) {
+    #####:  157:            if (mb_charclass_test(&tmp, (unsigned char)c)) {
+    #####:  158:                unsigned char lo = (unsigned char)tolower((unsigned char)c);
+    #####:  159:                unsigned char up = (unsigned char)toupper((unsigned char)c);
+    #####:  160:                mb_charclass_set(out, lo);
+    #####:  161:                mb_charclass_set(out, up);
+        -:  162:            }
+        -:  163:        }
+        -:  164:    }
+        -:  165:
+        -:  166:    /* Apply negation */
+    #####:  167:    if (negate) {
+    #####:  168:        for (int i = 0; i < 32; i++)
+    #####:  169:            out->bits[i] ^= 0xFF;
+        -:  170:        /* Never match NUL in negated class */
+    #####:  171:        out->bits[0] &= (uint8_t)~1u;
+        -:  172:    }
+        -:  173:
+    #####:  174:    return 1;
+        -:  175:}

@@ -1,0 +1,307 @@
+        -:    0:Source:src/core/sha256sum.c
+        -:    1:/* sha256sum.c — sha256sum builtin: compute and verify SHA-256 checksums */
+        -:    2:
+        -:    3:#ifndef _POSIX_C_SOURCE
+        -:    4:#define _POSIX_C_SOURCE 200809L
+        -:    5:#endif
+        -:    6:
+        -:    7:#include "../util/error.h"
+        -:    8:
+        -:    9:#include <errno.h>
+        -:   10:#include <limits.h>
+        -:   11:#include <stdio.h>
+        -:   12:#include <stdlib.h>
+        -:   13:#include <string.h>
+        -:   14:#include <unistd.h>
+        -:   15:
+        -:   16:/* ---------------------------------------------------------------------------
+        -:   17: * SHA-256 implementation (~150 lines, self-contained)
+        -:   18: * ---------------------------------------------------------------------------*/
+        -:   19:
+        -:   20:typedef struct {
+        -:   21:    unsigned int  state[8];
+        -:   22:    unsigned long count[2];  /* bit count, low/high */
+        -:   23:    unsigned char buf[64];
+        -:   24:} sha256_ctx_t;
+        -:   25:
+        -:   26:static const unsigned int K[64] = {
+        -:   27:    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
+        -:   28:    0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+        -:   29:    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+        -:   30:    0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+        -:   31:    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+        -:   32:    0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        -:   33:    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        -:   34:    0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+        -:   35:    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+        -:   36:    0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        -:   37:    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
+        -:   38:    0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        -:   39:    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
+        -:   40:    0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        -:   41:    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+        -:   42:    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+        -:   43:};
+        -:   44:
+        -:   45:#define ROR32(x, n) (((x) >> (n)) | ((x) << (32 - (n))))
+        -:   46:#define CH(x,y,z)   (((x) & (y)) ^ (~(x) & (z)))
+        -:   47:#define MAJ(x,y,z)  (((x) & (y)) ^ ((x) & (z)) ^ ((y) & (z)))
+        -:   48:#define SIG0(x) (ROR32(x, 2)  ^ ROR32(x, 13) ^ ROR32(x, 22))
+        -:   49:#define SIG1(x) (ROR32(x, 6)  ^ ROR32(x, 11) ^ ROR32(x, 25))
+        -:   50:#define sig0(x) (ROR32(x, 7)  ^ ROR32(x, 18) ^ ((x) >> 3))
+        -:   51:#define sig1(x) (ROR32(x, 17) ^ ROR32(x, 19) ^ ((x) >> 10))
+        -:   52:
+    #####:   53:static void sha256_transform(sha256_ctx_t *ctx, const unsigned char *data)
+        -:   54:{
+        -:   55:    unsigned int W[64], a, b, c, d, e, f, g, h, T1, T2;
+        -:   56:
+    #####:   57:    for (int i = 0; i < 16; i++) {
+    #####:   58:        W[i] = ((unsigned int)data[i*4  ] << 24) |
+    #####:   59:               ((unsigned int)data[i*4+1] << 16) |
+    #####:   60:               ((unsigned int)data[i*4+2] <<  8) |
+    #####:   61:               ((unsigned int)data[i*4+3]);
+        -:   62:    }
+    #####:   63:    for (int i = 16; i < 64; i++)
+    #####:   64:        W[i] = sig1(W[i-2]) + W[i-7] + sig0(W[i-15]) + W[i-16];
+        -:   65:
+    #####:   66:    a = ctx->state[0]; b = ctx->state[1];
+    #####:   67:    c = ctx->state[2]; d = ctx->state[3];
+    #####:   68:    e = ctx->state[4]; f = ctx->state[5];
+    #####:   69:    g = ctx->state[6]; h = ctx->state[7];
+        -:   70:
+    #####:   71:    for (int i = 0; i < 64; i++) {
+    #####:   72:        T1 = h + SIG1(e) + CH(e,f,g) + K[i] + W[i];
+    #####:   73:        T2 = SIG0(a) + MAJ(a,b,c);
+    #####:   74:        h=g; g=f; f=e; e=d+T1;
+    #####:   75:        d=c; c=b; b=a; a=T1+T2;
+        -:   76:    }
+        -:   77:
+    #####:   78:    ctx->state[0] += a; ctx->state[1] += b;
+    #####:   79:    ctx->state[2] += c; ctx->state[3] += d;
+    #####:   80:    ctx->state[4] += e; ctx->state[5] += f;
+    #####:   81:    ctx->state[6] += g; ctx->state[7] += h;
+    #####:   82:}
+        -:   83:
+    #####:   84:static void sha256_init(sha256_ctx_t *ctx)
+        -:   85:{
+    #####:   86:    ctx->state[0] = 0x6a09e667; ctx->state[1] = 0xbb67ae85;
+    #####:   87:    ctx->state[2] = 0x3c6ef372; ctx->state[3] = 0xa54ff53a;
+    #####:   88:    ctx->state[4] = 0x510e527f; ctx->state[5] = 0x9b05688c;
+    #####:   89:    ctx->state[6] = 0x1f83d9ab; ctx->state[7] = 0x5be0cd19;
+    #####:   90:    ctx->count[0] = ctx->count[1] = 0;
+    #####:   91:}
+        -:   92:
+    #####:   93:static void sha256_update(sha256_ctx_t *ctx, const unsigned char *data, size_t len)
+        -:   94:{
+    #####:   95:    size_t i    = 0;
+    #####:   96:    size_t index = (size_t)((ctx->count[0] >> 3) & 0x3f);
+    #####:   97:    ctx->count[0] += (unsigned long)(len << 3);
+    #####:   98:    if (ctx->count[0] < (unsigned long)(len << 3)) ctx->count[1]++;
+    #####:   99:    ctx->count[1] += (unsigned long)(len >> 29);
+        -:  100:
+    #####:  101:    size_t partlen = 64 - index;
+    #####:  102:    if (len >= partlen) {
+    #####:  103:        memcpy(ctx->buf + index, data, partlen);
+    #####:  104:        sha256_transform(ctx, ctx->buf);
+    #####:  105:        for (i = partlen; i + 63 < len; i += 64)
+    #####:  106:            sha256_transform(ctx, data + i);
+    #####:  107:        index = 0;
+        -:  108:    }
+    #####:  109:    memcpy(ctx->buf + index, data + i, len - i);
+    #####:  110:}
+        -:  111:
+    #####:  112:static void sha256_final(sha256_ctx_t *ctx, unsigned char digest[32])
+        -:  113:{
+        -:  114:    unsigned char bits[8];
+    #####:  115:    for (int i = 0; i < 4; i++) {
+    #####:  116:        bits[i]   = (unsigned char)((ctx->count[1] >> (24 - i*8)) & 0xff);
+    #####:  117:        bits[i+4] = (unsigned char)((ctx->count[0] >> (24 - i*8)) & 0xff);
+        -:  118:    }
+    #####:  119:    size_t index = (size_t)((ctx->count[0] >> 3) & 0x3f);
+    #####:  120:    size_t padlen = (index < 56) ? (56 - index) : (120 - index);
+    #####:  121:    unsigned char padding[128] = { 0x80, 0 };
+    #####:  122:    sha256_update(ctx, padding, padlen);
+    #####:  123:    sha256_update(ctx, bits, 8);
+    #####:  124:    for (int i = 0; i < 8; i++) {
+    #####:  125:        digest[i*4  ] = (unsigned char)((ctx->state[i] >> 24) & 0xff);
+    #####:  126:        digest[i*4+1] = (unsigned char)((ctx->state[i] >> 16) & 0xff);
+    #####:  127:        digest[i*4+2] = (unsigned char)((ctx->state[i] >>  8) & 0xff);
+    #####:  128:        digest[i*4+3] = (unsigned char)( ctx->state[i]        & 0xff);
+        -:  129:    }
+    #####:  130:}
+        -:  131:
+        -:  132:/* ---------------------------------------------------------------------------
+        -:  133: * Hash a file and print "HASH  FILENAME"
+        -:  134: * ---------------------------------------------------------------------------*/
+        -:  135:#define HASH_BUFSZ 65536
+        -:  136:
+    #####:  137:static int hash_file(FILE *fp, unsigned char digest[32])
+        -:  138:{
+        -:  139:    sha256_ctx_t ctx;
+    #####:  140:    sha256_init(&ctx);
+    #####:  141:    unsigned char *buf = malloc(HASH_BUFSZ);
+    #####:  142:    if (!buf) return -1;
+        -:  143:    size_t n;
+    #####:  144:    while ((n = fread(buf, 1, HASH_BUFSZ, fp)) > 0)
+    #####:  145:        sha256_update(&ctx, buf, n);
+    #####:  146:    free(buf);
+    #####:  147:    if (ferror(fp)) return -1;
+    #####:  148:    sha256_final(&ctx, digest);
+    #####:  149:    return 0;
+        -:  150:}
+        -:  151:
+    #####:  152:static void print_digest(const unsigned char digest[32], const char *name)
+        -:  153:{
+    #####:  154:    for (int i = 0; i < 32; i++)
+    #####:  155:        printf("%02x", digest[i]);
+    #####:  156:    printf("  %s\n", name);
+    #####:  157:}
+        -:  158:
+    #####:  159:static int check_file(const char *checkfile, int opt_status, int opt_warn)
+        -:  160:{
+    #####:  161:    FILE *fp = fopen(checkfile, "r");
+    #####:  162:    if (!fp) {
+    #####:  163:        err_msg("sha256sum", "cannot open '%s'", checkfile);
+    #####:  164:        return 1;
+        -:  165:    }
+        -:  166:
+    #####:  167:    int ok = 0, fail = 0, bad_format = 0;
+        -:  168:    char line[PATH_MAX + 80];
+    #####:  169:    while (fgets(line, sizeof(line), fp)) {
+        -:  170:        /* Strip newline */
+    #####:  171:        size_t llen = strlen(line);
+    #####:  172:        while (llen > 0 && (line[llen-1] == '\n' || line[llen-1] == '\r'))
+    #####:  173:            line[--llen] = '\0';
+    #####:  174:        if (llen == 0 || line[0] == '#') continue;
+        -:  175:
+        -:  176:        /* Expect: 64-hex-chars '  ' filename */
+    #####:  177:        if (llen < 66 || line[64] != ' ' || line[65] != ' ') {
+    #####:  178:            bad_format++;
+    #####:  179:            continue;
+        -:  180:        }
+        -:  181:        char expected_hex[65];
+    #####:  182:        memcpy(expected_hex, line, 64);
+    #####:  183:        expected_hex[64] = '\0';
+    #####:  184:        const char *fname = line + 66;
+        -:  185:
+    #####:  186:        FILE *f2 = fopen(fname, "rb");
+    #####:  187:        if (!f2) {
+    #####:  188:            if (!opt_status) fprintf(stderr, "%s: FAILED open or read\n", fname);
+    #####:  189:            fail++;
+    #####:  190:            continue;
+        -:  191:        }
+        -:  192:        unsigned char digest[32];
+    #####:  193:        if (hash_file(f2, digest) < 0) {
+    #####:  194:            fclose(f2);
+    #####:  195:            if (!opt_status) fprintf(stderr, "%s: FAILED open or read\n", fname);
+    #####:  196:            fail++;
+    #####:  197:            continue;
+        -:  198:        }
+    #####:  199:        fclose(f2);
+        -:  200:
+        -:  201:        /* Compare */
+        -:  202:        char got_hex[65];
+    #####:  203:        for (int i = 0; i < 32; i++)
+    #####:  204:            snprintf(got_hex + i*2, 3, "%02x", digest[i]);
+    #####:  205:        got_hex[64] = '\0';
+        -:  206:
+    #####:  207:        if (strcmp(expected_hex, got_hex) == 0) {
+    #####:  208:            if (!opt_status) printf("%s: OK\n", fname);
+    #####:  209:            ok++;
+        -:  210:        } else {
+    #####:  211:            if (!opt_status) printf("%s: FAILED\n", fname);
+    #####:  212:            fail++;
+        -:  213:        }
+        -:  214:    }
+    #####:  215:    fclose(fp);
+        -:  216:
+    #####:  217:    if (opt_warn && bad_format > 0)
+    #####:  218:        fprintf(stderr, "sha256sum: WARNING: %d line(s) improperly formatted\n", bad_format);
+        -:  219:
+    #####:  220:    return (fail > 0 || (bad_format > 0 && !ok)) ? 1 : 0;
+        -:  221:}
+        -:  222:
+    #####:  223:int applet_sha256sum(int argc, char **argv)
+        -:  224:{
+    #####:  225:    int opt_c      = 0;   /* -c: check mode */
+    #####:  226:    int opt_status = 0;   /* --status: no output in check mode */
+    #####:  227:    int opt_warn   = 1;   /* --warn / --quiet */
+    #####:  228:    int opt_b      = 0;   /* -b: binary mode (ignore on Linux) */
+        -:  229:    int i;
+        -:  230:
+    #####:  231:    for (i = 1; i < argc; i++) {
+    #####:  232:        const char *arg = argv[i];
+    #####:  233:        if (strcmp(arg, "--") == 0) { i++; break; }
+    #####:  234:        if (arg[0] != '-' || arg[1] == '\0') break;
+        -:  235:
+    #####:  236:        if (strcmp(arg, "--check") == 0)  { opt_c = 1; continue; }
+    #####:  237:        if (strcmp(arg, "--status") == 0) { opt_status = 1; continue; }
+    #####:  238:        if (strcmp(arg, "--quiet") == 0)  { opt_warn = 0; continue; }
+    #####:  239:        if (strcmp(arg, "--warn") == 0)   { opt_warn = 1; continue; }
+        -:  240:
+    #####:  241:        const char *p = arg + 1;
+    #####:  242:        while (*p) {
+    #####:  243:            switch (*p) {
+    #####:  244:            case 'c': opt_c = 1; break;
+    #####:  245:            case 'b': opt_b = 1; break;
+    #####:  246:            case 't': opt_b = 0; break;
+    #####:  247:            default:
+    #####:  248:                err_msg("sha256sum", "unrecognized option '-%c'", *p);
+    #####:  249:                err_usage("sha256sum", "[-c] [FILE]...");
+    #####:  250:                return 1;
+        -:  251:            }
+    #####:  252:            p++;
+        -:  253:        }
+        -:  254:    }
+        -:  255:    (void)opt_b;
+        -:  256:
+        -:  257:    /* Check mode */
+    #####:  258:    if (opt_c) {
+    #####:  259:        if (i >= argc) {
+        -:  260:            /* Read from stdin */
+    #####:  261:            err_usage("sha256sum", "-c CHECKFILE");
+    #####:  262:            return 1;
+        -:  263:        }
+    #####:  264:        int ret = 0;
+    #####:  265:        for (; i < argc; i++)
+    #####:  266:            if (check_file(argv[i], opt_status, opt_warn)) ret = 1;
+    #####:  267:        return ret;
+        -:  268:    }
+        -:  269:
+        -:  270:    /* Hash mode */
+    #####:  271:    int ret = 0;
+    #####:  272:    if (i >= argc) {
+        -:  273:        /* stdin */
+        -:  274:        unsigned char digest[32];
+    #####:  275:        if (hash_file(stdin, digest) < 0) {
+    #####:  276:            err_msg("sha256sum", "read error");
+    #####:  277:            return 1;
+        -:  278:        }
+    #####:  279:        print_digest(digest, "-");
+    #####:  280:        return 0;
+        -:  281:    }
+        -:  282:
+    #####:  283:    for (; i < argc; i++) {
+        -:  284:        FILE *fp;
+    #####:  285:        if (strcmp(argv[i], "-") == 0) {
+    #####:  286:            fp = stdin;
+        -:  287:        } else {
+    #####:  288:            fp = fopen(argv[i], "rb");
+    #####:  289:            if (!fp) {
+    #####:  290:                err_msg("sha256sum", "cannot open '%s'", argv[i]);
+    #####:  291:                ret = 1;
+    #####:  292:                continue;
+        -:  293:            }
+        -:  294:        }
+        -:  295:        unsigned char digest[32];
+    #####:  296:        if (hash_file(fp, digest) < 0) {
+    #####:  297:            err_msg("sha256sum", "read error: '%s'", argv[i]);
+    #####:  298:            ret = 1;
+        -:  299:        } else {
+    #####:  300:            print_digest(digest, argv[i]);
+        -:  301:        }
+    #####:  302:        if (fp != stdin) fclose(fp);
+        -:  303:    }
+        -:  304:
+    #####:  305:    return ret;
+        -:  306:}

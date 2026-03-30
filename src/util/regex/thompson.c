@@ -1,20 +1,4 @@
-/* thompson.c — Thompson NFA simulation with lazy DFA cache + BMH
- *
- * Two-list NFA simulation:
- *   - Maintain "current state set" and "next state set"
- *   - For each input char, advance all current states simultaneously
- *   - O(n * k) where n = input length, k = NFA size (usually small)
- *
- * Lazy DFA cache:
- *   - Encode NFA state set as a sorted array, hashed via FNV-1a
- *   - Cache {state_set → per-char next_state_set_id} to amortise repeated steps
- *   - Bounded at DFA_CACHE_MAX entries; evict LRU when full
- *   - Gives O(n) amortised for repeated patterns on similar text
- *
- * Boyer-Moore-Horspool (BMH) for fixed-string search:
- *   - Precompute bad-character skip table from needle
- *   - Average O(n/m) for typical text
- */
+/* thompson.c — Thompson NFA simulation with lazy DFA cache + BMH */
 
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L

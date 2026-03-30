@@ -1,0 +1,183 @@
+        -:    0:Source:src/cache/hashmap.c
+        -:    1:#ifndef _POSIX_C_SOURCE
+        -:    2:#define _POSIX_C_SOURCE 200809L
+        -:    3:#endif
+        -:    4:
+        -:    5:/*
+        -:    6: * hashmap.c — open-addressing hash map with Fibonacci hashing and
+        -:    7: *             linear probing.
+        -:    8: *
+        -:    9: * Key:   uint64_t
+        -:   10: * Value: void *
+        -:   11: *
+        -:   12: * Hash function: Knuth / Fibonacci multiplicative hashing.
+        -:   13: *   slot = (key * 11400714819323198485ULL) >> (64 - log2(cap))
+        -:   14: *
+        -:   15: * The log2 of the capacity (which must be a power of two) is computed
+        -:   16: * once per lookup using __builtin_ctzll(cap) which counts trailing zeros
+        -:   17: * (equivalent to log2 for powers of two).
+        -:   18: *
+        -:   19: * Deletion uses tombstones (used == -1) so that chains are not broken.
+        -:   20: * Resize at 75% load: double capacity and rehash all live entries.
+        -:   21: */
+        -:   22:
+        -:   23:#include "hashmap.h"
+        -:   24:
+        -:   25:#include <assert.h>
+        -:   26:#include <stdlib.h>
+        -:   27:#include <string.h>
+        -:   28:
+        -:   29:/* Fibonacci multiplicative hash constant (2^64 / phi) */
+        -:   30:#define FIB_HASH  UINT64_C(11400714819323198485)
+        -:   31:
+        -:   32:#define SLOT_EMPTY     0
+        -:   33:#define SLOT_OCCUPIED  1
+        -:   34:#define SLOT_TOMBSTONE (-1)
+        -:   35:
+        -:   36:/* ------------------------------------------------------------------ */
+        -:   37:/* Internal helpers                                                     */
+        -:   38:/* ------------------------------------------------------------------ */
+        -:   39:
+        -:   40:/* Map a key to a slot index in a table of size cap (power of two). */
+    #####:   41:static inline size_t slot_index(uint64_t key, size_t cap)
+        -:   42:{
+        -:   43:    /* __builtin_ctzll(cap) == log2(cap) when cap is a power of two */
+    #####:   44:    unsigned shift = (unsigned)(64u - (unsigned)__builtin_ctzll((unsigned long long)cap));
+    #####:   45:    return (size_t)((key * FIB_HASH) >> shift);
+        -:   46:}
+        -:   47:
+        -:   48:/*
+        -:   49: * Find the slot for key in the given table.
+        -:   50: * If found (SLOT_OCCUPIED with matching key), returns its index.
+        -:   51: * If not found, returns the index of the first empty or tombstone slot
+        -:   52: * that can be used for insertion, or cap if the table is full (shouldn't
+        -:   53: * happen if resizing is done correctly).
+        -:   54: * 'found' is set to 1 if an occupied slot with matching key was found.
+        -:   55: */
+    #####:   56:static size_t find_slot(hm_slot_t *slots, size_t cap,
+        -:   57:                         uint64_t key, int *found)
+        -:   58:{
+    #####:   59:    size_t idx      = slot_index(key, cap);
+    #####:   60:    size_t first_ts = cap; /* index of first tombstone seen */
+        -:   61:
+    #####:   62:    for (size_t i = 0; i < cap; i++) {
+    #####:   63:        size_t probe = (idx + i) & (cap - 1);
+    #####:   64:        hm_slot_t *s = &slots[probe];
+        -:   65:
+    #####:   66:        if (s->used == SLOT_OCCUPIED && s->key == key) {
+    #####:   67:            *found = 1;
+    #####:   68:            return probe;
+        -:   69:        }
+    #####:   70:        if (s->used == SLOT_EMPTY) {
+        -:   71:            /* Key not present; return the first tombstone if we saw one,
+        -:   72:             * otherwise this empty slot for insertion */
+    #####:   73:            *found = 0;
+    #####:   74:            return (first_ts < cap) ? first_ts : probe;
+        -:   75:        }
+    #####:   76:        if (s->used == SLOT_TOMBSTONE && first_ts == cap) {
+    #####:   77:            first_ts = probe;
+        -:   78:        }
+        -:   79:    }
+        -:   80:
+        -:   81:    /* Table full (should not reach here with proper load-factor check) */
+    #####:   82:    *found = 0;
+    #####:   83:    return (first_ts < cap) ? first_ts : cap;
+        -:   84:}
+        -:   85:
+        -:   86:/* Resize the table to new_cap (must be a power of two > current cap). */
+    #####:   87:static void resize(hashmap_t *m, size_t new_cap)
+        -:   88:{
+    #####:   89:    hm_slot_t *new_slots = calloc(new_cap, sizeof(hm_slot_t));
+    #####:   90:    if (!new_slots) return; /* out of memory; leave table as-is */
+        -:   91:
+        -:   92:    /* Rehash all live entries */
+    #####:   93:    for (size_t i = 0; i < m->cap; i++) {
+    #####:   94:        hm_slot_t *s = &m->slots[i];
+    #####:   95:        if (s->used != SLOT_OCCUPIED) continue;
+        -:   96:
+    #####:   97:        int dummy;
+    #####:   98:        size_t idx = find_slot(new_slots, new_cap, s->key, &dummy);
+    #####:   99:        new_slots[idx].key   = s->key;
+    #####:  100:        new_slots[idx].value = s->value;
+    #####:  101:        new_slots[idx].used  = SLOT_OCCUPIED;
+        -:  102:    }
+        -:  103:
+    #####:  104:    free(m->slots);
+    #####:  105:    m->slots = new_slots;
+    #####:  106:    m->cap   = new_cap;
+        -:  107:    /* m->count stays the same (tombstones are not counted) */
+        -:  108:}
+        -:  109:
+        -:  110:/* ------------------------------------------------------------------ */
+        -:  111:/* Public API                                                           */
+        -:  112:/* ------------------------------------------------------------------ */
+        -:  113:
+    #####:  114:void hm_init(hashmap_t *m, size_t initial_cap)
+        -:  115:{
+        -:  116:    /* Ensure initial_cap is at least 8 and a power of two */
+    #####:  117:    if (initial_cap < 8) initial_cap = 8;
+        -:  118:    /* Round up to next power of two */
+    #####:  119:    size_t cap = 1;
+    #####:  120:    while (cap < initial_cap) cap <<= 1;
+        -:  121:
+    #####:  122:    m->slots = calloc(cap, sizeof(hm_slot_t));
+    #####:  123:    m->cap   = m->slots ? cap : 0;
+    #####:  124:    m->count = 0;
+    #####:  125:}
+        -:  126:
+    #####:  127:void hm_free(hashmap_t *m)
+        -:  128:{
+    #####:  129:    free(m->slots);
+    #####:  130:    m->slots = NULL;
+    #####:  131:    m->cap   = 0;
+    #####:  132:    m->count = 0;
+    #####:  133:}
+        -:  134:
+       80:  135:void *hm_get(hashmap_t *m, uint64_t key)
+        -:  136:{
+      80*:  137:    if (!m->slots || m->cap == 0) return NULL;
+        -:  138:
+    #####:  139:    int found = 0;
+    #####:  140:    size_t idx = find_slot(m->slots, m->cap, key, &found);
+    #####:  141:    if (!found) return NULL;
+    #####:  142:    return m->slots[idx].value;
+        -:  143:}
+        -:  144:
+    #####:  145:void hm_put(hashmap_t *m, uint64_t key, void *value)
+        -:  146:{
+    #####:  147:    if (!m->slots) return;
+        -:  148:
+        -:  149:    /* Resize at 75% load factor */
+    #####:  150:    if (m->count + 1 > (m->cap * 3) / 4)
+    #####:  151:        resize(m, m->cap * 2);
+        -:  152:
+    #####:  153:    if (!m->slots || m->cap == 0) return;
+        -:  154:
+    #####:  155:    int found = 0;
+    #####:  156:    size_t idx = find_slot(m->slots, m->cap, key, &found);
+        -:  157:
+    #####:  158:    if (idx >= m->cap) return; /* table full; silently drop */
+        -:  159:
+    #####:  160:    if (!found) {
+        -:  161:        /* New entry */
+    #####:  162:        m->slots[idx].key  = key;
+    #####:  163:        m->slots[idx].used = SLOT_OCCUPIED;
+    #####:  164:        m->count++;
+        -:  165:    }
+        -:  166:    /* Update value (works for both new and existing entries) */
+    #####:  167:    m->slots[idx].value = value;
+        -:  168:}
+        -:  169:
+    #####:  170:void hm_delete(hashmap_t *m, uint64_t key)
+        -:  171:{
+    #####:  172:    if (!m->slots || m->cap == 0) return;
+        -:  173:
+    #####:  174:    int found = 0;
+    #####:  175:    size_t idx = find_slot(m->slots, m->cap, key, &found);
+    #####:  176:    if (!found) return;
+        -:  177:
+        -:  178:    /* Mark as tombstone so probing chains are preserved */
+    #####:  179:    m->slots[idx].used  = SLOT_TOMBSTONE;
+    #####:  180:    m->slots[idx].value = NULL;
+    #####:  181:    if (m->count > 0) m->count--;
+        -:  182:}

@@ -1,0 +1,236 @@
+        -:    0:Source:src/shell/vars.c
+        -:    1:/* vars.c — shell variable store */
+        -:    2:
+        -:    3:#ifndef _POSIX_C_SOURCE
+        -:    4:#define _POSIX_C_SOURCE 200809L
+        -:    5:#endif
+        -:    6:
+        -:    7:#include "vars.h"
+        -:    8:
+        -:    9:#include <stddef.h>
+        -:   10:#include <stdio.h>
+        -:   11:#include <stdlib.h>
+        -:   12:#include <string.h>
+        -:   13:
+        -:   14:/* FNV-1a hash, 32-bit */
+    41601:   15:static unsigned int fnv1a(const char *s)
+        -:   16:{
+    41601:   17:    unsigned int hash = 2166136261u;
+   483406:   18:    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+   441805:   19:        hash ^= (unsigned int)*p;
+   441805:   20:        hash *= 16777619u;
+        -:   21:    }
+    41601:   22:    return hash & (VARS_HASH_SIZE - 1);
+        -:   23:}
+        -:   24:
+      463:   25:void vars_init(vars_t *v, arena_t *a)
+        -:   26:{
+      463:   27:    v->scope = NULL;
+      463:   28:    v->arena = a;
+      463:   29:    vars_push_scope(v);
+      463:   30:}
+        -:   31:
+      522:   32:void vars_push_scope(vars_t *v)
+        -:   33:{
+      522:   34:    var_scope_t *s = arena_alloc(v->arena, sizeof(var_scope_t));
+      522:   35:    memset(s->buckets, 0, sizeof(s->buckets));
+      522:   36:    s->parent = v->scope;
+      522:   37:    v->scope  = s;
+      522:   38:}
+        -:   39:
+       59:   40:void vars_pop_scope(vars_t *v)
+        -:   41:{
+       59:   42:    if (v->scope->parent != NULL)
+       59:   43:        v->scope = v->scope->parent;
+       59:   44:}
+        -:   45:
+    20704:   46:const char *vars_get(vars_t *v, const char *name)
+        -:   47:{
+    20704:   48:    unsigned int idx = fnv1a(name);
+    39144:   49:    for (var_scope_t *s = v->scope; s != NULL; s = s->parent) {
+    23230:   50:        for (var_entry_t *e = s->buckets[idx]; e != NULL; e = e->next) {
+     4790:   51:            if (strcmp(e->name, name) == 0)
+     2442:   52:                return e->value;
+        -:   53:        }
+        -:   54:    }
+    18262:   55:    return NULL;
+        -:   56:}
+        -:   57:
+        -:   58:/*
+        -:   59: * Search only the current scope for an existing entry.
+        -:   60: * Returns pointer to the entry, or NULL if absent.
+        -:   61: */
+     2669:   62:static var_entry_t *scope_find(var_scope_t *s, const char *name, unsigned int idx)
+        -:   63:{
+     3690:   64:    for (var_entry_t *e = s->buckets[idx]; e != NULL; e = e->next) {
+     3009:   65:        if (strcmp(e->name, name) == 0)
+     1988:   66:            return e;
+        -:   67:    }
+      681:   68:    return NULL;
+        -:   69:}
+        -:   70:
+        -:   71:/*
+        -:   72: * Search all scopes (current first, then parents).
+        -:   73: * Returns pointer to the first matching entry, or NULL.
+        -:   74: */
+        8:   75:static var_entry_t *vars_find(vars_t *v, const char *name)
+        -:   76:{
+        8:   77:    unsigned int idx = fnv1a(name);
+       8*:   78:    for (var_scope_t *s = v->scope; s != NULL; s = s->parent) {
+        8:   79:        var_entry_t *e = scope_find(s, name, idx);
+        8:   80:        if (e)
+        8:   81:            return e;
+        -:   82:    }
+    #####:   83:    return NULL;
+        -:   84:}
+        -:   85:
+     2635:   86:int vars_set(vars_t *v, const char *name, const char *value)
+        -:   87:{
+     2635:   88:    unsigned int idx = fnv1a(name);
+        -:   89:
+        -:   90:    /* Search all scopes for existing entry */
+     3298:   91:    for (var_scope_t *s = v->scope; s != NULL; s = s->parent) {
+     2643:   92:        var_entry_t *e = scope_find(s, name, idx);
+     2643:   93:        if (e) {
+     1980:   94:            if (e->readonly) {
+        2:   95:                fprintf(stderr, "matchbox: %s: readonly variable\n", name);
+        2:   96:                return 1;
+        -:   97:            }
+     1978:   98:            e->value = arena_strdup(v->arena, value);
+     1978:   99:            return 0;
+        -:  100:        }
+        -:  101:    }
+        -:  102:
+        -:  103:    /* Not found — create in current scope */
+      655:  104:    var_entry_t *e    = arena_alloc(v->arena, sizeof(var_entry_t));
+      655:  105:    e->name           = arena_strdup(v->arena, name);
+      655:  106:    e->value          = arena_strdup(v->arena, value);
+      655:  107:    e->exported       = 0;
+      655:  108:    e->readonly       = 0;
+      655:  109:    e->next           = v->scope->buckets[idx];
+      655:  110:    v->scope->buckets[idx] = e;
+      655:  111:    return 0;
+        -:  112:}
+        -:  113:
+       18:  114:int vars_set_local(vars_t *v, const char *name, const char *value)
+        -:  115:{
+       18:  116:    unsigned int idx = fnv1a(name);
+        -:  117:
+        -:  118:    /* Search only the current scope for an existing entry */
+       18:  119:    var_entry_t *e = scope_find(v->scope, name, idx);
+       18:  120:    if (e) {
+    #####:  121:        if (e->readonly) {
+    #####:  122:            fprintf(stderr, "matchbox: %s: readonly variable\n", name);
+    #####:  123:            return 1;
+        -:  124:        }
+    #####:  125:        e->value = arena_strdup(v->arena, value);
+    #####:  126:        return 0;
+        -:  127:    }
+        -:  128:
+        -:  129:    /* Create in current scope */
+       18:  130:    e               = arena_alloc(v->arena, sizeof(var_entry_t));
+       18:  131:    e->name         = arena_strdup(v->arena, name);
+       18:  132:    e->value        = arena_strdup(v->arena, value);
+       18:  133:    e->exported     = 0;
+       18:  134:    e->readonly     = 0;
+       18:  135:    e->next         = v->scope->buckets[idx];
+       18:  136:    v->scope->buckets[idx] = e;
+       18:  137:    return 0;
+        -:  138:}
+        -:  139:
+        2:  140:int vars_export(vars_t *v, const char *name)
+        -:  141:{
+        2:  142:    var_entry_t *e = vars_find(v, name);
+        2:  143:    if (!e)
+    #####:  144:        return 1;
+        2:  145:    e->exported = 1;
+        2:  146:    setenv(name, e->value, 1);
+        2:  147:    return 0;
+        -:  148:}
+        -:  149:
+        6:  150:int vars_readonly(vars_t *v, const char *name)
+        -:  151:{
+        6:  152:    var_entry_t *e = vars_find(v, name);
+        6:  153:    if (!e)
+    #####:  154:        return 1;
+        6:  155:    e->readonly = 1;
+        6:  156:    return 0;
+        -:  157:}
+        -:  158:
+       14:  159:int vars_unset(vars_t *v, const char *name)
+        -:  160:{
+       14:  161:    unsigned int idx = fnv1a(name);
+        -:  162:
+       22:  163:    for (var_scope_t *s = v->scope; s != NULL; s = s->parent) {
+       14:  164:        var_entry_t **pp = &s->buckets[idx];
+       22:  165:        while (*pp) {
+       14:  166:            var_entry_t *e = *pp;
+       14:  167:            if (strcmp(e->name, name) == 0) {
+        6:  168:                if (e->readonly) {
+        2:  169:                    fprintf(stderr, "matchbox: %s: readonly variable\n", name);
+        2:  170:                    return 1;
+        -:  171:                }
+        4:  172:                *pp = e->next;
+        4:  173:                return 0;
+        -:  174:            }
+        8:  175:            pp = &e->next;
+        -:  176:        }
+        -:  177:    }
+        8:  178:    return 0;
+        -:  179:}
+        -:  180:
+        2:  181:void vars_export_env(vars_t *v)
+        -:  182:{
+        4:  183:    for (var_scope_t *s = v->scope; s != NULL; s = s->parent) {
+      514:  184:        for (int i = 0; i < VARS_HASH_SIZE; i++) {
+      592:  185:            for (var_entry_t *e = s->buckets[i]; e != NULL; e = e->next) {
+       80:  186:                if (e->exported)
+       78:  187:                    setenv(e->name, e->value, 1);
+        -:  188:            }
+        -:  189:        }
+        -:  190:    }
+        2:  191:}
+        -:  192:
+      463:  193:void vars_import_env(vars_t *v)
+        -:  194:{
+        -:  195:    extern char **environ;
+     463*:  196:    if (!environ) return;
+    18685:  197:    for (int i = 0; environ[i]; i++) {
+    18222:  198:        const char *entry = environ[i];
+    18222:  199:        const char *eq = strchr(entry, '=');
+   18222*:  200:        if (!eq) continue;
+    18222:  201:        size_t nlen = (size_t)(eq - entry);
+    18222:  202:        char *name = strndup(entry, nlen);
+   18222*:  203:        if (!name) continue;
+        -:  204:        /* Only import if it has a valid shell identifier name */
+    18222:  205:        int valid = (nlen > 0);
+    18222:  206:        if (valid) {
+    18222:  207:            unsigned char fc = (unsigned char)name[0];
+   18222*:  208:            if (!(fc == '_' || (fc >= 'A' && fc <= 'Z') || (fc >= 'a' && fc <= 'z')))
+    #####:  209:                valid = 0;
+        -:  210:        }
+    18222:  211:        if (valid) {
+   212911:  212:            for (size_t j = 1; j < nlen; j++) {
+   194689:  213:                unsigned char c = (unsigned char)name[j];
+  194689*:  214:                if (!(c == '_' || (c >= 'A' && c <= 'Z') ||
+   12501*:  215:                      (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'))) {
+    #####:  216:                    valid = 0; break;
+        -:  217:                }
+        -:  218:            }
+        -:  219:        }
+    18222:  220:        if (valid) {
+        -:  221:            /* Only import if not already set (don't override IFS etc.) */
+    18222:  222:            if (!vars_get(v, name)) {
+    18222:  223:                unsigned int idx = fnv1a(name);
+    18222:  224:                var_entry_t *e = arena_alloc(v->arena, sizeof(var_entry_t));
+    18222:  225:                e->name     = arena_strdup(v->arena, name);
+    18222:  226:                e->value    = arena_strdup(v->arena, eq + 1);
+    18222:  227:                e->exported = 1;
+    18222:  228:                e->readonly = 0;
+    18222:  229:                e->next     = v->scope->buckets[idx];
+    18222:  230:                v->scope->buckets[idx] = e;
+        -:  231:            }
+        -:  232:        }
+    18222:  233:        free(name);
+        -:  234:    }
+        -:  235:}

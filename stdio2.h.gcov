@@ -1,0 +1,405 @@
+        -:    0:Source:/usr/include/x86_64-linux-gnu/bits/stdio2.h
+        -:    1:/* Checking macros for stdio functions.
+        -:    2:   Copyright (C) 2004-2025 Free Software Foundation, Inc.
+        -:    3:   This file is part of the GNU C Library.
+        -:    4:
+        -:    5:   The GNU C Library is free software; you can redistribute it and/or
+        -:    6:   modify it under the terms of the GNU Lesser General Public
+        -:    7:   License as published by the Free Software Foundation; either
+        -:    8:   version 2.1 of the License, or (at your option) any later version.
+        -:    9:
+        -:   10:   The GNU C Library is distributed in the hope that it will be useful,
+        -:   11:   but WITHOUT ANY WARRANTY; without even the implied warranty of
+        -:   12:   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+        -:   13:   Lesser General Public License for more details.
+        -:   14:
+        -:   15:   You should have received a copy of the GNU Lesser General Public
+        -:   16:   License along with the GNU C Library; if not, see
+        -:   17:   <https://www.gnu.org/licenses/>.  */
+        -:   18:
+        -:   19:#ifndef _BITS_STDIO2_H
+        -:   20:#define _BITS_STDIO2_H 1
+        -:   21:
+        -:   22:#ifndef _STDIO_H
+        -:   23:# error "Never include <bits/stdio2.h> directly; use <stdio.h> instead."
+        -:   24:#endif
+        -:   25:
+        -:   26:#ifdef __va_arg_pack
+        -:   27:__fortify_function int
+        -:   28:__NTH (sprintf (char *__restrict __s, const char *__restrict __fmt, ...))
+        -:   29:{
+        -:   30:  return __builtin___sprintf_chk (__s, __USE_FORTIFY_LEVEL - 1,
+        -:   31:				  __glibc_objsize (__s), __fmt,
+        -:   32:				  __va_arg_pack ());
+        -:   33:}
+        -:   34:#elif __fortify_use_clang
+        -:   35:/* clang does not have __va_arg_pack, so defer to va_arg version.  */
+        -:   36:__fortify_function_error_function __attribute_overloadable__ int
+        -:   37:__NTH (sprintf (__fortify_clang_overload_arg (char *, __restrict, __s),
+        -:   38:		const char *__restrict __fmt, ...))
+        -:   39:{
+        -:   40:  __gnuc_va_list __fortify_ap;
+        -:   41:  __builtin_va_start (__fortify_ap, __fmt);
+        -:   42:  int __r = __builtin___vsprintf_chk (__s, __USE_FORTIFY_LEVEL - 1,
+        -:   43:				      __glibc_objsize (__s), __fmt,
+        -:   44:				      __fortify_ap);
+        -:   45:  __builtin_va_end (__fortify_ap);
+        -:   46:  return __r;
+        -:   47:}
+        -:   48:#elif !defined __cplusplus
+        -:   49:# define sprintf(str, ...) \
+        -:   50:  __builtin___sprintf_chk (str, __USE_FORTIFY_LEVEL - 1,		      \
+        -:   51:			   __glibc_objsize (str), __VA_ARGS__)
+        -:   52:#endif
+        -:   53:
+        -:   54:__fortify_function __attribute_overloadable__ int
+        -:   55:__NTH (vsprintf (__fortify_clang_overload_arg (char *, __restrict, __s),
+        -:   56:		 const char *__restrict __fmt, __gnuc_va_list __ap))
+        -:   57:{
+        -:   58:  return __builtin___vsprintf_chk (__s, __USE_FORTIFY_LEVEL - 1,
+        -:   59:				   __glibc_objsize (__s), __fmt, __ap);
+        -:   60:}
+        -:   61:
+        -:   62:#if defined __USE_ISOC99 || defined __USE_UNIX98
+        -:   63:# ifdef __va_arg_pack
+        -:   64:__fortify_function int
+    #####:   65:__NTH (snprintf (char *__restrict __s, size_t __n,
+        -:   66:		 const char *__restrict __fmt, ...))
+        -:   67:{
+    #####:   68:  return __builtin___snprintf_chk (__s, __n, __USE_FORTIFY_LEVEL - 1,
+        -:   69:				   __glibc_objsize (__s), __fmt,
+        -:   70:				   __va_arg_pack ());
+        -:   71:}
+        -:   72:# elif __fortify_use_clang
+        -:   73:/* clang does not have __va_arg_pack, so defer to va_arg version.  */
+        -:   74:__fortify_function_error_function __attribute_overloadable__ int
+        -:   75:__NTH (snprintf (__fortify_clang_overload_arg (char *, __restrict, __s),
+        -:   76:		 size_t __n, const char *__restrict __fmt, ...))
+        -:   77:{
+        -:   78:  __gnuc_va_list __fortify_ap;
+        -:   79:  __builtin_va_start (__fortify_ap, __fmt);
+        -:   80:  int __r = __builtin___vsnprintf_chk (__s, __n, __USE_FORTIFY_LEVEL - 1,
+        -:   81:				       __glibc_objsize (__s), __fmt,
+        -:   82:				       __fortify_ap);
+        -:   83:  __builtin_va_end (__fortify_ap);
+        -:   84:  return __r;
+        -:   85:}
+        -:   86:# elif !defined __cplusplus
+        -:   87:#  define snprintf(str, len, ...) \
+        -:   88:  __builtin___snprintf_chk (str, len, __USE_FORTIFY_LEVEL - 1,		      \
+        -:   89:			    __glibc_objsize (str), __VA_ARGS__)
+        -:   90:# endif
+        -:   91:
+        -:   92:__fortify_function __attribute_overloadable__ int
+        -:   93:__NTH (vsnprintf (__fortify_clang_overload_arg (char *, __restrict, __s),
+        -:   94:		  size_t __n, const char *__restrict __fmt,
+        -:   95:		  __gnuc_va_list __ap))
+        -:   96:     __fortify_clang_warning (__fortify_clang_bos_static_lt (__n, __s),
+        -:   97:			      "call to vsnprintf may overflow the destination "
+        -:   98:			      "buffer")
+        -:   99:{
+        -:  100:  return __builtin___vsnprintf_chk (__s, __n, __USE_FORTIFY_LEVEL - 1,
+        -:  101:				    __glibc_objsize (__s), __fmt, __ap);
+        -:  102:}
+        -:  103:
+        -:  104:#endif
+        -:  105:
+        -:  106:#if __USE_FORTIFY_LEVEL > 1
+        -:  107:# ifdef __va_arg_pack
+        -:  108:__fortify_function __nonnull ((1)) int
+    #####:  109:fprintf (FILE *__restrict __stream, const char *__restrict __fmt, ...)
+        -:  110:{
+    #####:  111:  return __fprintf_chk (__stream, __USE_FORTIFY_LEVEL - 1, __fmt,
+        -:  112:			__va_arg_pack ());
+        -:  113:}
+        -:  114:
+        -:  115:__fortify_function int
+        -:  116:printf (const char *__restrict __fmt, ...)
+        -:  117:{
+        -:  118:  return __printf_chk (__USE_FORTIFY_LEVEL - 1, __fmt, __va_arg_pack ());
+        -:  119:}
+        -:  120:# elif __fortify_use_clang
+        -:  121:/* clang does not have __va_arg_pack, so defer to va_arg version.  */
+        -:  122:__fortify_function_error_function __attribute_overloadable__ __nonnull ((1)) int
+        -:  123:fprintf (__fortify_clang_overload_arg (FILE *, __restrict, __stream),
+        -:  124:	 const char *__restrict __fmt, ...)
+        -:  125:{
+        -:  126:  __gnuc_va_list __fortify_ap;
+        -:  127:  __builtin_va_start (__fortify_ap, __fmt);
+        -:  128:  int __r = __builtin___vfprintf_chk (__stream, __USE_FORTIFY_LEVEL - 1,
+        -:  129:				      __fmt, __fortify_ap);
+        -:  130:  __builtin_va_end (__fortify_ap);
+        -:  131:  return __r;
+        -:  132:}
+        -:  133:
+        -:  134:__fortify_function_error_function __attribute_overloadable__ int
+        -:  135:printf (__fortify_clang_overload_arg (const char *, __restrict, __fmt), ...)
+        -:  136:{
+        -:  137:  __gnuc_va_list __fortify_ap;
+        -:  138:  __builtin_va_start (__fortify_ap, __fmt);
+        -:  139:  int __r = __builtin___vprintf_chk (__USE_FORTIFY_LEVEL - 1, __fmt,
+        -:  140:				     __fortify_ap);
+        -:  141:  __builtin_va_end (__fortify_ap);
+        -:  142:  return __r;
+        -:  143:}
+        -:  144:# elif !defined __cplusplus
+        -:  145:#  define printf(...) \
+        -:  146:  __printf_chk (__USE_FORTIFY_LEVEL - 1, __VA_ARGS__)
+        -:  147:#  define fprintf(stream, ...) \
+        -:  148:  __fprintf_chk (stream, __USE_FORTIFY_LEVEL - 1, __VA_ARGS__)
+        -:  149:# endif
+        -:  150:
+        -:  151:__fortify_function __attribute_overloadable__ int
+        -:  152:vprintf (__fortify_clang_overload_arg (const char *, __restrict, __fmt),
+        -:  153:	 __gnuc_va_list __ap)
+        -:  154:{
+        -:  155:#ifdef __USE_EXTERN_INLINES
+        -:  156:  return __vfprintf_chk (stdout, __USE_FORTIFY_LEVEL - 1, __fmt, __ap);
+        -:  157:#else
+        -:  158:  return __vprintf_chk (__USE_FORTIFY_LEVEL - 1, __fmt, __ap);
+        -:  159:#endif
+        -:  160:}
+        -:  161:
+        -:  162:__fortify_function __nonnull ((1)) int
+        -:  163:vfprintf (FILE *__restrict __stream,
+        -:  164:	  const char *__restrict __fmt, __gnuc_va_list __ap)
+        -:  165:{
+        -:  166:  return __vfprintf_chk (__stream, __USE_FORTIFY_LEVEL - 1, __fmt, __ap);
+        -:  167:}
+        -:  168:
+        -:  169:# ifdef __USE_XOPEN2K8
+        -:  170:#  ifdef __va_arg_pack
+        -:  171:__fortify_function int
+        -:  172:dprintf (int __fd, const char *__restrict __fmt, ...)
+        -:  173:{
+        -:  174:  return __dprintf_chk (__fd, __USE_FORTIFY_LEVEL - 1, __fmt,
+        -:  175:			__va_arg_pack ());
+        -:  176:}
+        -:  177:#  elif __fortify_use_clang
+        -:  178:__fortify_function_error_function __attribute_overloadable__ int
+        -:  179:dprintf (int __fd, __fortify_clang_overload_arg (const char *, __restrict,
+        -:  180:						 __fmt), ...)
+        -:  181:{
+        -:  182:  __gnuc_va_list __fortify_ap;
+        -:  183:  __builtin_va_start (__fortify_ap, __fmt);
+        -:  184:  int __r = __vdprintf_chk (__fd, __USE_FORTIFY_LEVEL - 1, __fmt,
+        -:  185:			    __fortify_ap);
+        -:  186:  __builtin_va_end (__fortify_ap);
+        -:  187:  return __r;
+        -:  188:}
+        -:  189:#  elif !defined __cplusplus
+        -:  190:#   define dprintf(fd, ...) \
+        -:  191:  __dprintf_chk (fd, __USE_FORTIFY_LEVEL - 1, __VA_ARGS__)
+        -:  192:#  endif
+        -:  193:
+        -:  194:__fortify_function int
+        -:  195:vdprintf (int __fd, const char *__restrict __fmt, __gnuc_va_list __ap)
+        -:  196:{
+        -:  197:  return __vdprintf_chk (__fd, __USE_FORTIFY_LEVEL - 1, __fmt, __ap);
+        -:  198:}
+        -:  199:# endif
+        -:  200:
+        -:  201:# ifdef __USE_GNU
+        -:  202:#  ifdef __va_arg_pack
+        -:  203:__fortify_function int
+        -:  204:__NTH (asprintf (char **__restrict __ptr, const char *__restrict __fmt, ...))
+        -:  205:{
+        -:  206:  return __asprintf_chk (__ptr, __USE_FORTIFY_LEVEL - 1, __fmt,
+        -:  207:			 __va_arg_pack ());
+        -:  208:}
+        -:  209:
+        -:  210:__fortify_function int
+        -:  211:__NTH (__asprintf (char **__restrict __ptr, const char *__restrict __fmt,
+        -:  212:		   ...))
+        -:  213:{
+        -:  214:  return __asprintf_chk (__ptr, __USE_FORTIFY_LEVEL - 1, __fmt,
+        -:  215:			 __va_arg_pack ());
+        -:  216:}
+        -:  217:
+        -:  218:__fortify_function int
+        -:  219:__NTH (obstack_printf (struct obstack *__restrict __obstack,
+        -:  220:		       const char *__restrict __fmt, ...))
+        -:  221:{
+        -:  222:  return __obstack_printf_chk (__obstack, __USE_FORTIFY_LEVEL - 1, __fmt,
+        -:  223:			       __va_arg_pack ());
+        -:  224:}
+        -:  225:#  elif __fortify_use_clang
+        -:  226:__fortify_function_error_function __attribute_overloadable__ int
+        -:  227:__NTH (asprintf (__fortify_clang_overload_arg (char **, __restrict, __ptr),
+        -:  228:		 const char *__restrict __fmt, ...))
+        -:  229:{
+        -:  230:  __gnuc_va_list __fortify_ap;
+        -:  231:  __builtin_va_start (__fortify_ap, __fmt);
+        -:  232:  int __r = __vasprintf_chk (__ptr, __USE_FORTIFY_LEVEL - 1, __fmt,
+        -:  233:			     __fortify_ap);
+        -:  234:  __builtin_va_end (__fortify_ap);
+        -:  235:  return __r;
+        -:  236:}
+        -:  237:
+        -:  238:__fortify_function_error_function __attribute_overloadable__ int
+        -:  239:__NTH (__asprintf (__fortify_clang_overload_arg (char **, __restrict, __ptr),
+        -:  240:		   const char *__restrict __fmt, ...))
+        -:  241:{
+        -:  242:  __gnuc_va_list __fortify_ap;
+        -:  243:  __builtin_va_start (__fortify_ap, __fmt);
+        -:  244:  int __r = __vasprintf_chk (__ptr, __USE_FORTIFY_LEVEL - 1, __fmt,
+        -:  245:			     __fortify_ap);
+        -:  246:  __builtin_va_end (__fortify_ap);
+        -:  247:  return __r;
+        -:  248:}
+        -:  249:
+        -:  250:__fortify_function_error_function __attribute_overloadable__ int
+        -:  251:__NTH (obstack_printf (__fortify_clang_overload_arg (struct obstack *,
+        -:  252:						     __restrict, __obstack),
+        -:  253:		       const char *__restrict __fmt, ...))
+        -:  254:{
+        -:  255:  __gnuc_va_list __fortify_ap;
+        -:  256:  __builtin_va_start (__fortify_ap, __fmt);
+        -:  257:  int __r = __obstack_vprintf_chk (__obstack, __USE_FORTIFY_LEVEL - 1,
+        -:  258:				   __fmt, __fortify_ap);
+        -:  259:  __builtin_va_end (__fortify_ap);
+        -:  260:  return __r;
+        -:  261:}
+        -:  262:#  elif !defined __cplusplus
+        -:  263:#   define asprintf(ptr, ...) \
+        -:  264:  __asprintf_chk (ptr, __USE_FORTIFY_LEVEL - 1, __VA_ARGS__)
+        -:  265:#   define __asprintf(ptr, ...) \
+        -:  266:  __asprintf_chk (ptr, __USE_FORTIFY_LEVEL - 1, __VA_ARGS__)
+        -:  267:#   define obstack_printf(obstack, ...) \
+        -:  268:  __obstack_printf_chk (obstack, __USE_FORTIFY_LEVEL - 1, __VA_ARGS__)
+        -:  269:#  endif
+        -:  270:
+        -:  271:__fortify_function int
+        -:  272:__NTH (vasprintf (char **__restrict __ptr, const char *__restrict __fmt,
+        -:  273:		  __gnuc_va_list __ap))
+        -:  274:{
+        -:  275:  return __vasprintf_chk (__ptr, __USE_FORTIFY_LEVEL - 1, __fmt, __ap);
+        -:  276:}
+        -:  277:
+        -:  278:__fortify_function int
+        -:  279:__NTH (obstack_vprintf (struct obstack *__restrict __obstack,
+        -:  280:			const char *__restrict __fmt, __gnuc_va_list __ap))
+        -:  281:{
+        -:  282:  return __obstack_vprintf_chk (__obstack, __USE_FORTIFY_LEVEL - 1, __fmt,
+        -:  283:				__ap);
+        -:  284:}
+        -:  285:
+        -:  286:# endif
+        -:  287:
+        -:  288:#endif
+        -:  289:
+        -:  290:#if __GLIBC_USE (DEPRECATED_GETS)
+        -:  291:__fortify_function __wur __attribute_overloadable__ char *
+        -:  292:gets (__fortify_clang_overload_arg (char *, , __str))
+        -:  293:     __fortify_clang_warning (__glibc_objsize (__str) == (size_t) -1,
+        -:  294:			      "please use fgets or getline instead, gets "
+        -:  295:			      "can not specify buffer size")
+        -:  296:{
+        -:  297:  if (__glibc_objsize (__str) != (size_t) -1)
+        -:  298:    return __gets_chk (__str, __glibc_objsize (__str));
+        -:  299:  return __gets_warn (__str);
+        -:  300:}
+        -:  301:#endif
+        -:  302:
+        -:  303:__fortify_function __wur __fortified_attr_access (__write_only__, 1, 2)
+        -:  304:__nonnull ((3)) __attribute_overloadable__ char *
+        -:  305:fgets (__fortify_clang_overload_arg (char *, __restrict, __s), int __n,
+        -:  306:       FILE *__restrict __stream)
+        -:  307:     __fortify_clang_warning (__fortify_clang_bos_static_lt (__n, __s) && __n > 0,
+        -:  308:			      "fgets called with bigger size than length of "
+        -:  309:			      "destination buffer")
+        -:  310:{
+        -:  311:  size_t __sz = __glibc_objsize (__s);
+        -:  312:  if (__glibc_safe_or_unknown_len (__n, sizeof (char), __sz))
+        -:  313:    return __fgets_alias (__s, __n, __stream);
+        -:  314:#if !__fortify_use_clang
+        -:  315:  if (__glibc_unsafe_len (__n, sizeof (char), __sz))
+        -:  316:    return __fgets_chk_warn (__s, __sz, __n, __stream);
+        -:  317:#endif
+        -:  318:  return __fgets_chk (__s, __sz, __n, __stream);
+        -:  319:}
+        -:  320:
+        -:  321:__fortify_function __wur __nonnull ((4)) __attribute_overloadable__ size_t
+        -:  322:fread (__fortify_clang_overload_arg (void *, __restrict, __ptr),
+        -:  323:       size_t __size, size_t __n, FILE *__restrict __stream)
+        -:  324:     __fortify_clang_warning (__fortify_clang_bos0_static_lt (__size * __n, __ptr)
+        -:  325:			      && !__fortify_clang_mul_may_overflow (__size, __n),
+        -:  326:			      "fread called with bigger size * n than length "
+        -:  327:			      "of destination buffer")
+        -:  328:{
+        -:  329:  size_t __sz = __glibc_objsize0 (__ptr);
+        -:  330:  if (__glibc_safe_or_unknown_len (__n, __size, __sz))
+        -:  331:    return __fread_alias (__ptr, __size, __n, __stream);
+        -:  332:#if !__fortify_use_clang
+        -:  333:  if (__glibc_unsafe_len (__n, __size, __sz))
+        -:  334:    return __fread_chk_warn (__ptr, __sz, __size, __n, __stream);
+        -:  335:#endif
+        -:  336:  return __fread_chk (__ptr, __sz, __size, __n, __stream);
+        -:  337:}
+        -:  338:
+        -:  339:#ifdef __USE_GNU
+        -:  340:__fortify_function __wur __fortified_attr_access (__write_only__, 1, 2)
+        -:  341:__nonnull ((3)) __attribute_overloadable__ char *
+        -:  342:fgets_unlocked (__fortify_clang_overload_arg (char *, __restrict, __s),
+        -:  343:		int __n, FILE *__restrict __stream)
+        -:  344:     __fortify_clang_warning (__fortify_clang_bos_static_lt (__n, __s) && __n > 0,
+        -:  345:			      "fgets called with bigger size than length of "
+        -:  346:			      "destination buffer")
+        -:  347:{
+        -:  348:  size_t __sz = __glibc_objsize (__s);
+        -:  349:  if (__glibc_safe_or_unknown_len (__n, sizeof (char), __sz))
+        -:  350:    return __fgets_unlocked_alias (__s, __n, __stream);
+        -:  351:#if !__fortify_use_clang
+        -:  352:  if (__glibc_unsafe_len (__n, sizeof (char), __sz))
+        -:  353:    return __fgets_unlocked_chk_warn (__s, __sz, __n, __stream);
+        -:  354:#endif
+        -:  355:  return __fgets_unlocked_chk (__s, __sz, __n, __stream);
+        -:  356:}
+        -:  357:#endif
+        -:  358:
+        -:  359:#ifdef __USE_MISC
+        -:  360:# undef fread_unlocked
+        -:  361:__fortify_function __wur __nonnull ((4)) __attribute_overloadable__ size_t
+        -:  362:fread_unlocked (__fortify_clang_overload_arg0 (void *, __restrict, __ptr),
+        -:  363:		size_t __size, size_t __n, FILE *__restrict __stream)
+        -:  364:     __fortify_clang_warning (__fortify_clang_bos0_static_lt (__size * __n, __ptr)
+        -:  365:			      && !__fortify_clang_mul_may_overflow (__size, __n),
+        -:  366:			      "fread_unlocked called with bigger size * n than "
+        -:  367:			      "length of destination buffer")
+        -:  368:{
+        -:  369:  size_t __sz = __glibc_objsize0 (__ptr);
+        -:  370:  if (__glibc_safe_or_unknown_len (__n, __size, __sz))
+        -:  371:    {
+        -:  372:# ifdef __USE_EXTERN_INLINES
+        -:  373:      if (__builtin_constant_p (__size)
+        -:  374:	  && __builtin_constant_p (__n)
+        -:  375:	  && (__size | __n) < (((size_t) 1) << (8 * sizeof (size_t) / 2))
+        -:  376:	  && __size * __n <= 8)
+        -:  377:	{
+        -:  378:	  size_t __cnt = __size * __n;
+        -:  379:	  char *__cptr = (char *) __ptr;
+        -:  380:	  if (__cnt == 0)
+        -:  381:	    return 0;
+        -:  382:
+        -:  383:	  for (; __cnt > 0; --__cnt)
+        -:  384:	    {
+        -:  385:	      int __c = getc_unlocked (__stream);
+        -:  386:	      if (__c == EOF)
+        -:  387:		break;
+        -:  388:	      *__cptr++ = __c;
+        -:  389:	    }
+        -:  390:	  return (__cptr - (char *) __ptr) / __size;
+        -:  391:	}
+        -:  392:# endif
+        -:  393:      return __fread_unlocked_alias (__ptr, __size, __n, __stream);
+        -:  394:    }
+        -:  395:# if !__fortify_use_clang
+        -:  396:  if (__glibc_unsafe_len (__n, __size, __sz))
+        -:  397:    return __fread_unlocked_chk_warn (__ptr, __sz, __size, __n, __stream);
+        -:  398:# endif
+        -:  399:  return __fread_unlocked_chk (__ptr, __sz, __size, __n, __stream);
+        -:  400:
+        -:  401:}
+        -:  402:#endif
+        -:  403:
+        -:  404:#endif /* bits/stdio2.h.  */

@@ -1,0 +1,199 @@
+        -:    0:Source:src/util/intern.c
+        -:    1:/* intern.c — string intern table (FNV-1a + open addressing + arena) */
+        -:    2:
+        -:    3:#ifndef _POSIX_C_SOURCE
+        -:    4:#define _POSIX_C_SOURCE 200809L
+        -:    5:#endif
+        -:    6:
+        -:    7:#include "intern.h"
+        -:    8:#include "section.h"
+        -:    9:
+        -:   10:#include <limits.h>
+        -:   11:#include <stdint.h>
+        -:   12:#include <stdlib.h>
+        -:   13:#include <string.h>
+        -:   14:
+        -:   15:/* ---- Arena: linked list of fixed blocks (stable pointers) ---------------- */
+        -:   16:
+        -:   17:#define INTERN_BLOCK_SIZE 65536  /* bytes per arena block */
+        -:   18:
+        -:   19:typedef struct intern_block {
+        -:   20:    struct intern_block *next;
+        -:   21:    size_t               used;
+        -:   22:    char                 data[INTERN_BLOCK_SIZE];
+        -:   23:} intern_block_t;
+        -:   24:
+        -:   25:static intern_block_t *g_arena = NULL;
+        -:   26:
+      116:   27:static char *arena_push(const char *s, size_t len)
+        -:   28:{
+      116:   29:    size_t need = len + 1; /* +1 for NUL */
+      116:   30:    if (need > INTERN_BLOCK_SIZE) return NULL; /* string exceeds block size */
+        -:   31:
+        -:   32:    /* Allocate new block if current one is too full */
+      116:   33:    if (!g_arena || g_arena->used + need > INTERN_BLOCK_SIZE) {
+      100:   34:        intern_block_t *b = malloc(sizeof(intern_block_t));
+      100:   35:        if (!b) return NULL;
+      100:   36:        b->next  = g_arena;
+      100:   37:        b->used  = 0;
+      100:   38:        g_arena  = b;
+        -:   39:    }
+        -:   40:
+      116:   41:    char *p = g_arena->data + g_arena->used;
+      116:   42:    memcpy(p, s, len);
+      116:   43:    p[len] = '\0';
+      116:   44:    g_arena->used += need;
+      116:   45:    return p;
+        -:   46:}
+        -:   47:
+    #####:   48:static void arena_reset(void)
+        -:   49:{
+    #####:   50:    while (g_arena) {
+    #####:   51:        intern_block_t *next = g_arena->next;
+    #####:   52:        free(g_arena);
+    #####:   53:        g_arena = next;
+        -:   54:    }
+        -:   55:}
+        -:   56:
+        -:   57:/* ---- Hash table (open addressing, linear probing) ----------------------- */
+        -:   58:
+        -:   59:#define INTERN_INIT_CAP    4096u      /* initial slot count (power of 2) */
+        -:   60:#define INTERN_MAX_ENTRIES 1000000u   /* hard cap: stop interning, return original ptr */
+        -:   61:
+        -:   62:typedef struct {
+        -:   63:    const char *str;    /* NULL = empty slot; pointer into arena */
+        -:   64:    uint64_t    hash;   /* cached FNV-1a hash */
+        -:   65:    size_t      len;    /* string length (excluding NUL) */
+        -:   66:} intern_slot_t;
+        -:   67:
+        -:   68:static intern_slot_t *g_slots       = NULL;
+        -:   69:static size_t         g_cap         = 0;
+        -:   70:static size_t         g_count       = 0;
+        -:   71:static size_t         g_bytes_saved = 0;
+        -:   72:
+        -:   73:static uint64_t fnv1a64(const char *s, size_t n)
+        -:   74:{
+        -:   75:    uint64_t h = UINT64_C(14695981039346656037);
+        -:   76:    size_t i;
+      589:   77:    for (i = 0; i < n; i++) {
+      339:   78:        h ^= (uint64_t)(unsigned char)s[i];
+      339:   79:        h *= UINT64_C(1099511628211);
+        -:   80:    }
+      250:   81:    return h;
+        -:   82:}
+        -:   83:
+        -:   84:/* Return an existing match or an empty slot for (s, len, hash).
+        -:   85: * Returns NULL only if table is completely full (should not happen). */
+      250:   86:static intern_slot_t *slot_find(const char *s, size_t len, uint64_t hash)
+        -:   87:{
+      250:   88:    size_t idx = (size_t)(hash & (uint64_t)(g_cap - 1));
+      250:   89:    size_t i;
+     250*:   90:    for (i = 0; i < g_cap; i++) {
+      250:   91:        intern_slot_t *sl = &g_slots[idx];
+      250:   92:        if (!sl->str)
+        -:   93:            return sl;  /* empty slot */
+      134:   94:        if (sl->hash == hash && sl->len == len &&
+      134:   95:            memcmp(sl->str, s, len) == 0)
+        -:   96:            return sl;  /* existing match */
+    #####:   97:        idx = (idx + 1) & (g_cap - 1);
+        -:   98:    }
+        -:   99:    return NULL; /* table full */
+        -:  100:}
+        -:  101:
+      100:  102:static int table_init(void)
+        -:  103:{
+      100:  104:    g_slots = calloc(INTERN_INIT_CAP, sizeof(intern_slot_t));
+      100:  105:    if (!g_slots) return -1;
+      100:  106:    g_cap = INTERN_INIT_CAP;
+      100:  107:    return 0;
+        -:  108:}
+        -:  109:
+        -:  110:/* Grow table to 2× current capacity and rehash all entries */
+    #####:  111:static int table_grow(void)
+        -:  112:{
+    #####:  113:    size_t newcap = g_cap * 2;
+    #####:  114:    intern_slot_t *ns = calloc(newcap, sizeof(intern_slot_t));
+    #####:  115:    if (!ns) return -1;
+        -:  116:
+        -:  117:    size_t i;
+    #####:  118:    for (i = 0; i < g_cap; i++) {
+    #####:  119:        intern_slot_t *old = &g_slots[i];
+    #####:  120:        if (!old->str) continue;
+    #####:  121:        size_t idx = (size_t)(old->hash & (uint64_t)(newcap - 1));
+    #####:  122:        size_t j;
+    #####:  123:        for (j = 0; j < newcap; j++) {
+    #####:  124:            if (!ns[idx].str) {
+    #####:  125:                ns[idx] = *old;
+    #####:  126:                break;
+        -:  127:            }
+    #####:  128:            idx = (idx + 1) & (newcap - 1);
+        -:  129:        }
+        -:  130:    }
+    #####:  131:    free(g_slots);
+    #####:  132:    g_slots = ns;
+    #####:  133:    g_cap   = newcap;
+    #####:  134:    return 0;
+        -:  135:}
+        -:  136:
+        -:  137:/* ---- Public API ---------------------------------------------------------- */
+        -:  138:
+      250:  139:HOT const char *intern_cstrn(const char *s, size_t n)
+        -:  140:{
+      250:  141:    if (!s) return "";
+        -:  142:
+        -:  143:    /* Reject strings that exceed one arena block or PATH_MAX: they can never be
+        -:  144:     * legitimate filesystem paths and would waste O(n) hashing time. */
+      250:  145:    if (n > PATH_MAX) return s;
+        -:  146:
+      250:  147:    if (!g_slots && table_init() != 0) return s; /* OOM: return original */
+        -:  148:
+        -:  149:    /* Hard cap: if the table is full, return the original pointer rather than
+        -:  150:     * growing unboundedly.  INTERN_MAX_ENTRIES distinct path components in one
+        -:  151:     * process is not a realistic scenario. */
+      250:  152:    if (g_count >= INTERN_MAX_ENTRIES) return s;
+        -:  153:
+      250:  154:    uint64_t hash = fnv1a64(s, n);
+        -:  155:
+        -:  156:    /* Check if already interned */
+      250:  157:    intern_slot_t *sl = slot_find(s, n, hash);
+      250:  158:    if (sl && sl->str) {
+      134:  159:        g_bytes_saved += n + 1;
+      134:  160:        return sl->str;
+        -:  161:    }
+        -:  162:
+        -:  163:    /* Grow at 75% load or if table is full */
+      116:  164:    if (!sl || g_count * 4u >= g_cap * 3u) {
+    #####:  165:        if (table_grow() != 0) return s;
+    #####:  166:        sl = slot_find(s, n, hash);
+    #####:  167:        if (!sl) return s; /* shouldn't happen after grow */
+        -:  168:    }
+        -:  169:
+        -:  170:    /* Insert new string into arena and table */
+      116:  171:    char *copy = arena_push(s, n);
+      116:  172:    if (!copy) return s; /* OOM: return original */
+        -:  173:
+      116:  174:    sl->str  = copy;
+      116:  175:    sl->hash = hash;
+      116:  176:    sl->len  = n;
+      116:  177:    g_count++;
+      116:  178:    return copy;
+        -:  179:}
+        -:  180:
+    #####:  181:HOT const char *intern_cstr(const char *s)
+        -:  182:{
+    #####:  183:    if (!s) return "";
+    #####:  184:    return intern_cstrn(s, strlen(s));
+        -:  185:}
+        -:  186:
+    #####:  187:COLD void intern_reset(void)
+        -:  188:{
+    #####:  189:    arena_reset();
+    #####:  190:    free(g_slots);
+    #####:  191:    g_slots       = NULL;
+    #####:  192:    g_cap         = 0;
+    #####:  193:    g_count       = 0;
+    #####:  194:    g_bytes_saved = 0;
+    #####:  195:}
+        -:  196:
+    #####:  197:size_t intern_count(void)       { return g_count; }
+    #####:  198:size_t intern_bytes_saved(void) { return g_bytes_saved; }

@@ -1,3 +1,5 @@
+/* registry.c — module registry: discovery, validation, and dispatch */
+
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif

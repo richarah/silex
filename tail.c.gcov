@@ -1,0 +1,580 @@
+        -:    0:Source:src/core/tail.c
+        -:    1:/* tail.c — tail builtin: output the last part of files */
+        -:    2:
+        -:    3:/* _GNU_SOURCE for inotify_init1 etc. */
+        -:    4:#ifndef _GNU_SOURCE
+        -:    5:#define _GNU_SOURCE
+        -:    6:#endif
+        -:    7:#ifndef _POSIX_C_SOURCE
+        -:    8:#define _POSIX_C_SOURCE 200809L
+        -:    9:#endif
+        -:   10:
+        -:   11:#include "../util/error.h"
+        -:   12:
+        -:   13:#include <errno.h>
+        -:   14:#include <fcntl.h>
+        -:   15:#include <limits.h>
+        -:   16:#include <poll.h>
+        -:   17:#include <signal.h>
+        -:   18:#include <stdio.h>
+        -:   19:#include <stdlib.h>
+        -:   20:#include <string.h>
+        -:   21:#include <sys/inotify.h>
+        -:   22:#include <sys/stat.h>
+        -:   23:#include <time.h>
+        -:   24:#include <unistd.h>
+        -:   25:
+        -:   26:/* ---- helpers ---------------------------------------------------------------- */
+        -:   27:
+    #####:   28:static int parse_count(const char *s, long long *val, int *plus_mode)
+        -:   29:{
+    #####:   30:    *plus_mode = 0;
+    #####:   31:    if (*s == '+') {
+    #####:   32:        *plus_mode = 1;
+    #####:   33:        s++;
+    #####:   34:    } else if (*s == '-') {
+    #####:   35:        s++;
+        -:   36:    }
+    #####:   37:    if (*s == '\0') return -1;
+        -:   38:    char *end;
+    #####:   39:    errno = 0;
+    #####:   40:    long long v = strtoll(s, &end, 10);
+    #####:   41:    if (*end != '\0' || errno != 0 || v < 0) return -1;
+    #####:   42:    *val = v;
+    #####:   43:    return 0;
+        -:   44:}
+        -:   45:
+        -:   46:/* ---- last-N-lines using circular pointer array ----------------------------- */
+        -:   47:
+        -:   48:/*
+        -:   49: * Seek-based fast path for last-N-lines on seekable regular files.
+        -:   50: * Strategy: seek backward in blocks of TAIL_SEEK_CHUNK bytes from EOF,
+        -:   51: * scanning for newlines, until we have found n+1 newlines (or BOF).
+        -:   52: * Returns 0 on success, 1 on error, -1 if fp is not seekable (use fallback).
+        -:   53: */
+        -:   54:#define TAIL_SEEK_CHUNK 65536
+        -:   55:
+    #####:   56:static int tail_lines_seek(FILE *fp, long long n)
+        -:   57:{
+    #####:   58:    if (n <= 0) return 0; /* nothing to print */
+        -:   59:
+        -:   60:    /* Get file size */
+    #####:   61:    if (fseeko(fp, 0, SEEK_END) != 0) return -1;
+    #####:   62:    off_t file_size = ftello(fp);
+    #####:   63:    if (file_size < 0) return -1;
+    #####:   64:    if (file_size == 0) return 0;
+        -:   65:
+    #####:   66:    char *buf = malloc(TAIL_SEEK_CHUNK);
+    #####:   67:    if (!buf) { err_msg("tail", "out of memory"); return 1; }
+        -:   68:
+    #####:   69:    long long newlines_found = 0;
+    #####:   70:    off_t scan_pos = file_size;
+    #####:   71:    off_t print_from = 0; /* default: from beginning */
+        -:   72:
+    #####:   73:    while (scan_pos > 0 && newlines_found <= n) {
+    #####:   74:        off_t block_start = scan_pos - TAIL_SEEK_CHUNK;
+    #####:   75:        if (block_start < 0) block_start = 0;
+    #####:   76:        size_t block_size = (size_t)(scan_pos - block_start);
+        -:   77:
+    #####:   78:        if (fseeko(fp, block_start, SEEK_SET) != 0) {
+    #####:   79:            free(buf);
+    #####:   80:            return -1;
+        -:   81:        }
+    #####:   82:        size_t nr = fread(buf, 1, block_size, fp);
+    #####:   83:        if (nr == 0 || ferror(fp)) {
+    #####:   84:            free(buf);
+    #####:   85:            return -1;
+        -:   86:        }
+        -:   87:
+        -:   88:        /* Scan backward for newlines */
+    #####:   89:        for (ssize_t k = (ssize_t)nr - 1; k >= 0; k--) {
+    #####:   90:            if (buf[k] == '\n') {
+    #####:   91:                newlines_found++;
+    #####:   92:                if (newlines_found == n + 1) {
+        -:   93:                    /* The byte just after this newline is where we print from */
+    #####:   94:                    print_from = block_start + (off_t)k + 1;
+    #####:   95:                    goto found_start;
+        -:   96:                }
+        -:   97:            }
+        -:   98:        }
+    #####:   99:        scan_pos = block_start;
+        -:  100:    }
+        -:  101:    /* Reached beginning of file without finding n+1 newlines → print all */
+    #####:  102:    print_from = 0;
+        -:  103:
+    #####:  104:found_start:
+    #####:  105:    free(buf);
+        -:  106:
+        -:  107:    /* Seek to print_from and copy to stdout */
+    #####:  108:    if (fseeko(fp, print_from, SEEK_SET) != 0) return -1;
+        -:  109:
+        -:  110:    {
+        -:  111:        char outbuf[65536];
+        -:  112:        size_t nr;
+    #####:  113:        while ((nr = fread(outbuf, 1, sizeof(outbuf), fp)) > 0) {
+    #####:  114:            if (fwrite(outbuf, 1, nr, stdout) != nr) return 1;
+        -:  115:        }
+    #####:  116:        if (ferror(fp)) return 1;
+        -:  117:    }
+    #####:  118:    return 0;
+        -:  119:}
+        -:  120:
+        -:  121:/*
+        -:  122: * Read entire fp into a heap buffer, then find the last n newline-terminated
+        -:  123: * lines (or all lines if n == 0 means "all").  Writes to stdout.
+        -:  124: * plus_mode: skip first (n-1) lines instead of last n.
+        -:  125: */
+    #####:  126:static int tail_lines(FILE *fp, long long n, int plus_mode)
+        -:  127:{
+        -:  128:    /*
+        -:  129:     * Fast path: for regular seekable files in last-N mode, seek backward
+        -:  130:     * from EOF instead of reading the whole file.
+        -:  131:     */
+    #####:  132:    if (!plus_mode && n > 0) {
+        -:  133:        struct stat st;
+    #####:  134:        if (fstat(fileno(fp), &st) == 0 && S_ISREG(st.st_mode)) {
+    #####:  135:            int r = tail_lines_seek(fp, n);
+    #####:  136:            if (r >= 0) return r;
+        -:  137:            /* r == -1 means seek failed; fall through to full-read path */
+    #####:  138:            rewind(fp);
+        -:  139:        }
+        -:  140:    }
+        -:  141:
+        -:  142:    /* Read entire file into memory */
+    #####:  143:    size_t used = 0, cap = 65536;
+    #####:  144:    char *data = malloc(cap);
+    #####:  145:    if (!data) { err_msg("tail", "out of memory"); return 1; }
+        -:  146:
+    #####:  147:    for (;;) {
+    #####:  148:        if (used == cap) {
+    #####:  149:            size_t newcap = cap * 2;
+    #####:  150:            if (newcap <= cap) {
+    #####:  151:                free(data);
+    #####:  152:                err_msg("tail", "file too large");
+    #####:  153:                return 1;
+        -:  154:            }
+    #####:  155:            char *tmp = realloc(data, newcap);
+    #####:  156:            if (!tmp) { free(data); err_msg("tail", "out of memory"); return 1; }
+    #####:  157:            data = tmp;
+    #####:  158:            cap = newcap;
+        -:  159:        }
+    #####:  160:        size_t nr = fread(data + used, 1, cap - used, fp);
+    #####:  161:        if (nr == 0) break;
+    #####:  162:        used += nr;
+        -:  163:    }
+    #####:  164:    if (ferror(fp)) { free(data); return 1; }
+        -:  165:
+    #####:  166:    if (used == 0) { free(data); return 0; }
+        -:  167:
+    #####:  168:    if (plus_mode) {
+        -:  169:        /* Skip first (n-1) lines, then print the rest */
+    #####:  170:        long long skip = (n > 0) ? n - 1 : 0;
+    #####:  171:        const char *p = data;
+    #####:  172:        const char *end = data + used;
+    #####:  173:        long long skipped = 0;
+    #####:  174:        while (skipped < skip && p < end) {
+    #####:  175:            const char *nl = memchr(p, '\n', (size_t)(end - p));
+    #####:  176:            if (!nl) break;
+    #####:  177:            p = nl + 1;
+    #####:  178:            skipped++;
+        -:  179:        }
+    #####:  180:        size_t print_len = (size_t)(end - p);
+    #####:  181:        if (print_len > 0) {
+    #####:  182:            if (fwrite(p, 1, print_len, stdout) != print_len) {
+    #####:  183:                free(data);
+    #####:  184:                return 1;
+        -:  185:            }
+        -:  186:        }
+    #####:  187:        free(data);
+    #####:  188:        return 0;
+        -:  189:    }
+        -:  190:
+        -:  191:    /* Last-N mode: build array of line start offsets */
+        -:  192:    /* Count newlines to determine how many lines total */
+    #####:  193:    long long total_lines = 0;
+    #####:  194:    for (size_t k = 0; k < used; k++) {
+    #####:  195:        if (data[k] == '\n') total_lines++;
+        -:  196:    }
+        -:  197:    /* If file doesn't end with newline, last partial line counts */
+    #####:  198:    if (used > 0 && data[used - 1] != '\n') total_lines++;
+        -:  199:
+    #####:  200:    long long print_from_line = (n >= total_lines) ? 0 : (total_lines - n);
+        -:  201:
+        -:  202:    /* Walk lines again and print those from print_from_line onwards */
+    #####:  203:    const char *p = data;
+    #####:  204:    const char *end_p = data + used;
+    #####:  205:    long long lineno = 0;
+    #####:  206:    while (p < end_p) {
+    #####:  207:        const char *nl = memchr(p, '\n', (size_t)(end_p - p));
+    #####:  208:        const char *line_end = nl ? nl + 1 : end_p;
+    #####:  209:        if (lineno >= print_from_line) {
+    #####:  210:            size_t llen = (size_t)(line_end - p);
+    #####:  211:            if (fwrite(p, 1, llen, stdout) != llen) {
+    #####:  212:                free(data);
+    #####:  213:                return 1;
+        -:  214:            }
+        -:  215:        }
+    #####:  216:        lineno++;
+    #####:  217:        p = line_end;
+        -:  218:    }
+        -:  219:
+    #####:  220:    free(data);
+    #####:  221:    return 0;
+        -:  222:}
+        -:  223:
+        -:  224:/* ---- last-N-bytes ---------------------------------------------------------- */
+        -:  225:
+    #####:  226:static int tail_bytes(FILE *fp, long long n, int plus_mode)
+        -:  227:{
+        -:  228:    /*
+        -:  229:     * Fast path: for regular seekable files in last-N-bytes mode, seek
+        -:  230:     * directly to (file_size - n) and copy from there.
+        -:  231:     */
+    #####:  232:    if (!plus_mode && n > 0) {
+        -:  233:        struct stat st;
+    #####:  234:        if (fstat(fileno(fp), &st) == 0 && S_ISREG(st.st_mode)) {
+    #####:  235:            off_t file_size = st.st_size;
+    #####:  236:            off_t seek_pos = (n >= (long long)file_size) ? 0 : (file_size - (off_t)n);
+    #####:  237:            if (fseeko(fp, seek_pos, SEEK_SET) == 0) {
+        -:  238:                char outbuf[65536];
+        -:  239:                size_t nr;
+    #####:  240:                while ((nr = fread(outbuf, 1, sizeof(outbuf), fp)) > 0) {
+    #####:  241:                    if (fwrite(outbuf, 1, nr, stdout) != nr) return 1;
+        -:  242:                }
+    #####:  243:                return ferror(fp) ? 1 : 0;
+        -:  244:            }
+        -:  245:            /* Seek failed — fall through */
+    #####:  246:            rewind(fp);
+        -:  247:        }
+        -:  248:    }
+        -:  249:
+    #####:  250:    size_t used = 0, cap = 65536;
+    #####:  251:    char *data = malloc(cap);
+    #####:  252:    if (!data) { err_msg("tail", "out of memory"); return 1; }
+        -:  253:
+    #####:  254:    for (;;) {
+    #####:  255:        if (used == cap) {
+    #####:  256:            size_t newcap = cap * 2;
+    #####:  257:            if (newcap <= cap) {
+    #####:  258:                free(data);
+    #####:  259:                err_msg("tail", "file too large");
+    #####:  260:                return 1;
+        -:  261:            }
+    #####:  262:            char *tmp = realloc(data, newcap);
+    #####:  263:            if (!tmp) { free(data); err_msg("tail", "out of memory"); return 1; }
+    #####:  264:            data = tmp;
+    #####:  265:            cap = newcap;
+        -:  266:        }
+    #####:  267:        size_t nr = fread(data + used, 1, cap - used, fp);
+    #####:  268:        if (nr == 0) break;
+    #####:  269:        used += nr;
+        -:  270:    }
+    #####:  271:    if (ferror(fp)) { free(data); return 1; }
+        -:  272:
+        -:  273:    const char *start;
+        -:  274:    size_t print_len;
+        -:  275:
+    #####:  276:    if (plus_mode) {
+        -:  277:        /* Skip first (n-1) bytes */
+    #####:  278:        long long skip = (n > 0) ? n - 1 : 0;
+    #####:  279:        if (skip >= (long long)used) {
+    #####:  280:            free(data);
+    #####:  281:            return 0;
+        -:  282:        }
+    #####:  283:        start = data + skip;
+    #####:  284:        print_len = used - (size_t)skip;
+        -:  285:    } else {
+        -:  286:        /* Last n bytes */
+    #####:  287:        if (n >= (long long)used) {
+    #####:  288:            start = data;
+    #####:  289:            print_len = used;
+        -:  290:        } else {
+    #####:  291:            start = data + used - (size_t)n;
+    #####:  292:            print_len = (size_t)n;
+        -:  293:        }
+        -:  294:    }
+        -:  295:
+    #####:  296:    if (print_len > 0) {
+    #####:  297:        if (fwrite(start, 1, print_len, stdout) != print_len) {
+    #####:  298:            free(data);
+    #####:  299:            return 1;
+        -:  300:        }
+        -:  301:    }
+    #####:  302:    free(data);
+    #####:  303:    return 0;
+        -:  304:}
+        -:  305:
+        -:  306:/* ---- follow mode via inotify ----------------------------------------------- */
+        -:  307:
+        -:  308:/*
+        -:  309: * Try to check if process pid is still alive.
+        -:  310: * Returns 1 if alive, 0 if dead (ESRCH).
+        -:  311: */
+    #####:  312:static int pid_alive(pid_t pid)
+        -:  313:{
+    #####:  314:    if (kill(pid, 0) == 0) return 1;
+    #####:  315:    if (errno == ESRCH) return 0;
+    #####:  316:    return 1; /* other error (EPERM etc.) — assume alive */
+        -:  317:}
+        -:  318:
+        -:  319:/*
+        -:  320: * Drain and print any new data from fp starting at *offset.
+        -:  321: * Updates *offset to the current file size.
+        -:  322: * Returns 0 on success, 1 on error.
+        -:  323: */
+    #####:  324:static int drain_new_data(const char *fname, long long *offset)
+        -:  325:{
+    #####:  326:    FILE *fp = fopen(fname, "r");
+    #####:  327:    if (!fp) return 0; /* file may have been briefly unavailable */
+        -:  328:
+    #####:  329:    if (fseeko(fp, (off_t)*offset, SEEK_SET) != 0) {
+    #####:  330:        fclose(fp);
+    #####:  331:        return 0;
+        -:  332:    }
+        -:  333:
+        -:  334:    char buf[4096];
+        -:  335:    size_t nr;
+    #####:  336:    while ((nr = fread(buf, 1, sizeof(buf), fp)) > 0) {
+    #####:  337:        if (fwrite(buf, 1, nr, stdout) != nr) {
+    #####:  338:            fclose(fp);
+    #####:  339:            return 1;
+        -:  340:        }
+    #####:  341:        *offset += (long long)nr;
+        -:  342:    }
+    #####:  343:    fflush(stdout);
+    #####:  344:    fclose(fp);
+    #####:  345:    return 0;
+        -:  346:}
+        -:  347:
+    #####:  348:static int follow_file(const char *fname, long long *offset, pid_t watch_pid)
+        -:  349:{
+    #####:  350:    int ifd = inotify_init1(IN_NONBLOCK);
+    #####:  351:    if (ifd < 0) {
+        -:  352:        /* Fall back to poll loop */
+    #####:  353:        for (;;) {
+    #####:  354:            if (watch_pid > 0 && !pid_alive(watch_pid)) return 0;
+    #####:  355:            if (drain_new_data(fname, offset) != 0) return 1;
+    #####:  356:            struct timespec ts = {0, 200000000L}; /* 200 ms */
+    #####:  357:            nanosleep(&ts, NULL);
+        -:  358:        }
+        -:  359:    }
+        -:  360:
+    #####:  361:    int wd = inotify_add_watch(ifd, fname,
+        -:  362:                               IN_MODIFY | IN_CLOSE_WRITE | IN_MOVE_SELF | IN_DELETE_SELF);
+    #####:  363:    if (wd < 0) {
+    #####:  364:        close(ifd);
+        -:  365:        /* Fallback: poll */
+    #####:  366:        for (;;) {
+    #####:  367:            if (watch_pid > 0 && !pid_alive(watch_pid)) return 0;
+    #####:  368:            if (drain_new_data(fname, offset) != 0) return 1;
+    #####:  369:            struct timespec ts = {0, 200000000L};
+    #####:  370:            nanosleep(&ts, NULL);
+        -:  371:        }
+        -:  372:    }
+        -:  373:
+        -:  374:    char evbuf[sizeof(struct inotify_event) + NAME_MAX + 1];
+    #####:  375:    struct pollfd pfd = { .fd = ifd, .events = POLLIN };
+        -:  376:
+    #####:  377:    for (;;) {
+    #####:  378:        if (watch_pid > 0 && !pid_alive(watch_pid)) break;
+        -:  379:
+    #####:  380:        int ready = poll(&pfd, 1, 200); /* 200 ms timeout */
+    #####:  381:        if (ready < 0) {
+    #####:  382:            if (errno == EINTR) continue;
+    #####:  383:            break;
+        -:  384:        }
+        -:  385:
+    #####:  386:        if (ready > 0 && (pfd.revents & POLLIN)) {
+        -:  387:            ssize_t nbytes;
+    #####:  388:            while ((nbytes = read(ifd, evbuf, sizeof(evbuf))) > 0) {
+        -:  389:                /* Process events — just drain new data after any event */
+        -:  390:                (void)nbytes;
+        -:  391:            }
+    #####:  392:            if (drain_new_data(fname, offset) != 0) break;
+        -:  393:        }
+        -:  394:    }
+        -:  395:
+    #####:  396:    inotify_rm_watch(ifd, wd);
+    #####:  397:    close(ifd);
+    #####:  398:    return 0;
+        -:  399:}
+        -:  400:
+        -:  401:/* ---- applet entry ---------------------------------------------------------- */
+        -:  402:
+    #####:  403:int applet_tail(int argc, char **argv)
+        -:  404:{
+    #####:  405:    long long count  = 10;
+    #####:  406:    int plus_mode    = 0;
+    #####:  407:    int use_bytes    = 0;
+    #####:  408:    int opt_f        = 0;
+    #####:  409:    int opt_q        = 0;
+    #####:  410:    int opt_v        = 0;
+    #####:  411:    pid_t watch_pid  = 0;
+    #####:  412:    int ret          = 0;
+        -:  413:    int i;
+        -:  414:
+    #####:  415:    for (i = 1; i < argc; i++) {
+    #####:  416:        const char *arg = argv[i];
+        -:  417:
+    #####:  418:        if (strcmp(arg, "--") == 0) { i++; break; }
+    #####:  419:        if (arg[0] != '-' || arg[1] == '\0') break;
+        -:  420:
+    #####:  421:        if (strcmp(arg, "--follow") == 0)  { opt_f = 1; continue; }
+    #####:  422:        if (strcmp(arg, "--quiet") == 0 ||
+    #####:  423:            strcmp(arg, "--silent") == 0)  { opt_q = 1; continue; }
+    #####:  424:        if (strcmp(arg, "--verbose") == 0) { opt_v = 1; continue; }
+        -:  425:
+    #####:  426:        if (strncmp(arg, "--lines=", 8) == 0) {
+    #####:  427:            if (parse_count(arg + 8, &count, &plus_mode) != 0) {
+    #####:  428:                err_msg("tail", "invalid number of lines: '%s'", arg + 8);
+    #####:  429:                return 1;
+        -:  430:            }
+    #####:  431:            use_bytes = 0;
+    #####:  432:            continue;
+        -:  433:        }
+    #####:  434:        if (strncmp(arg, "--bytes=", 8) == 0) {
+    #####:  435:            if (parse_count(arg + 8, &count, &plus_mode) != 0) {
+    #####:  436:                err_msg("tail", "invalid number of bytes: '%s'", arg + 8);
+    #####:  437:                return 1;
+        -:  438:            }
+    #####:  439:            use_bytes = 1;
+    #####:  440:            continue;
+        -:  441:        }
+    #####:  442:        if (strncmp(arg, "--pid=", 6) == 0) {
+        -:  443:            char *end;
+    #####:  444:            long pv = strtol(arg + 6, &end, 10);
+    #####:  445:            if (*end != '\0' || pv <= 0) {
+    #####:  446:                err_msg("tail", "invalid --pid value: '%s'", arg + 6);
+    #####:  447:                return 1;
+        -:  448:            }
+    #####:  449:            watch_pid = (pid_t)pv;
+    #####:  450:            continue;
+        -:  451:        }
+    #####:  452:        if (strcmp(arg, "--pid") == 0) {
+    #####:  453:            i++;
+    #####:  454:            if (i >= argc) {
+    #####:  455:                err_usage("tail", "[-n N] [-c N] [-fqv] [--pid PID] [FILE...]");
+    #####:  456:                return 1;
+        -:  457:            }
+        -:  458:            char *end;
+    #####:  459:            long pv = strtol(argv[i], &end, 10);
+    #####:  460:            if (*end != '\0' || pv <= 0) {
+    #####:  461:                err_msg("tail", "invalid --pid value: '%s'", argv[i]);
+    #####:  462:                return 1;
+        -:  463:            }
+    #####:  464:            watch_pid = (pid_t)pv;
+    #####:  465:            continue;
+        -:  466:        }
+        -:  467:
+        -:  468:        /* Short flags */
+    #####:  469:        const char *p = arg + 1;
+    #####:  470:        int stop = 0;
+    #####:  471:        while (*p && !stop) {
+    #####:  472:            switch (*p) {
+    #####:  473:            case 'f': opt_f = 1; break;
+    #####:  474:            case 'q': opt_q = 1; break;
+    #####:  475:            case 'v': opt_v = 1; break;
+    #####:  476:            case 'n': {
+        -:  477:                const char *val;
+    #####:  478:                if (p[1]) { val = p + 1; stop = 1; }
+        -:  479:                else {
+    #####:  480:                    i++;
+    #####:  481:                    if (i >= argc) {
+    #####:  482:                        err_usage("tail", "[-n N] [-c N] [-fqv] [--pid PID] [FILE...]");
+    #####:  483:                        return 1;
+        -:  484:                    }
+    #####:  485:                    val = argv[i];
+        -:  486:                }
+    #####:  487:                if (parse_count(val, &count, &plus_mode) != 0) {
+    #####:  488:                    err_msg("tail", "invalid number of lines: '%s'", val);
+    #####:  489:                    return 1;
+        -:  490:                }
+    #####:  491:                use_bytes = 0;
+    #####:  492:                stop = 1;
+    #####:  493:                break;
+        -:  494:            }
+    #####:  495:            case 'c': {
+        -:  496:                const char *val;
+    #####:  497:                if (p[1]) { val = p + 1; stop = 1; }
+        -:  498:                else {
+    #####:  499:                    i++;
+    #####:  500:                    if (i >= argc) {
+    #####:  501:                        err_usage("tail", "[-n N] [-c N] [-fqv] [--pid PID] [FILE...]");
+    #####:  502:                        return 1;
+        -:  503:                    }
+    #####:  504:                    val = argv[i];
+        -:  505:                }
+    #####:  506:                if (parse_count(val, &count, &plus_mode) != 0) {
+    #####:  507:                    err_msg("tail", "invalid number of bytes: '%s'", val);
+    #####:  508:                    return 1;
+        -:  509:                }
+    #####:  510:                use_bytes = 1;
+    #####:  511:                stop = 1;
+    #####:  512:                break;
+        -:  513:            }
+    #####:  514:            default:
+    #####:  515:                err_msg("tail", "unrecognized option '-%c'", *p);
+    #####:  516:                err_usage("tail", "[-n N] [-c N] [-fqv] [--pid PID] [FILE...]");
+    #####:  517:                return 1;
+        -:  518:            }
+    #####:  519:            p++;
+        -:  520:        }
+        -:  521:    }
+        -:  522:
+    #####:  523:    int nfiles = argc - i;
+        -:  524:
+    #####:  525:    if (nfiles == 0) {
+        -:  526:        /* stdin */
+    #####:  527:        if (opt_v)
+    #####:  528:            fprintf(stdout, "==> standard input <==\n");
+    #####:  529:        if (use_bytes)
+    #####:  530:            ret = tail_bytes(stdin, count, plus_mode);
+        -:  531:        else
+    #####:  532:            ret = tail_lines(stdin, count, plus_mode);
+    #####:  533:        return ret;
+        -:  534:    }
+        -:  535:
+    #####:  536:    for (int j = i; j < argc; j++) {
+    #####:  537:        const char *fname = argv[j];
+        -:  538:
+    #####:  539:        int print_header = opt_v || (!opt_q && nfiles > 1);
+    #####:  540:        if (print_header) {
+    #####:  541:            if (j > i) fputc('\n', stdout);
+    #####:  542:            fprintf(stdout, "==> %s <==\n", fname);
+        -:  543:        }
+        -:  544:
+        -:  545:        FILE *fp;
+    #####:  546:        if (strcmp(fname, "-") == 0) {
+    #####:  547:            fp = stdin;
+        -:  548:        } else {
+    #####:  549:            fp = fopen(fname, "r");
+    #####:  550:            if (!fp) {
+    #####:  551:                err_sys("tail", "cannot open '%s'", fname);
+    #####:  552:                ret = 1;
+    #####:  553:                continue;
+        -:  554:            }
+        -:  555:        }
+        -:  556:
+        -:  557:        int rc;
+    #####:  558:        if (use_bytes)
+    #####:  559:            rc = tail_bytes(fp, count, plus_mode);
+        -:  560:        else
+    #####:  561:            rc = tail_lines(fp, count, plus_mode);
+        -:  562:
+    #####:  563:        if (rc != 0) ret = 1;
+        -:  564:
+        -:  565:        /* In follow mode we need the file offset after the initial read */
+    #####:  566:        long long offset = 0;
+    #####:  567:        if (opt_f && fp != stdin) {
+    #####:  568:            offset = (long long)ftello(fp);
+    #####:  569:            fclose(fp);
+    #####:  570:            fflush(stdout);
+    #####:  571:            if (follow_file(fname, &offset, watch_pid) != 0)
+    #####:  572:                ret = 1;
+        -:  573:        } else {
+    #####:  574:            if (fp != stdin) fclose(fp);
+        -:  575:        }
+        -:  576:    }
+        -:  577:
+    #####:  578:    return ret;
+        -:  579:}

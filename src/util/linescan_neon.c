@@ -1,8 +1,4 @@
-/* linescan_neon.c — NEON vectorised newline scanner (aarch64)
- *
- * Compiled only on aarch64.  Processes 16 bytes per iteration.
- * Falls back to scalar tail for the remaining bytes.
- */
+/* linescan_neon.c — NEON vectorised newline scanner (aarch64) */
 
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L

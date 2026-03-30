@@ -299,6 +299,16 @@ int applet_head(int argc, char **argv)
                 break;
             }
             default:
+                /* Legacy: -NUM as shorthand for -n NUM */
+                if (*p >= '0' && *p <= '9') {
+                    if (parse_count(p, &count, &negative) != 0) {
+                        err_msg("head", "invalid number: '%s'", p);
+                        return 1;
+                    }
+                    use_bytes = 0;
+                    stop = 1;
+                    break;
+                }
                 err_msg("head", "unrecognized option '-%c'", *p);
                 err_usage("head", "[-n N] [-c N] [-qv] [FILE...]");
                 return 1;

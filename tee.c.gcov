@@ -1,0 +1,101 @@
+        -:    0:Source:src/core/tee.c
+        -:    1:/* tee.c — tee builtin: read stdin, write to stdout and files */
+        -:    2:
+        -:    3:#ifndef _POSIX_C_SOURCE
+        -:    4:#define _POSIX_C_SOURCE 200809L
+        -:    5:#endif
+        -:    6:
+        -:    7:#include "../util/error.h"
+        -:    8:
+        -:    9:#include <fcntl.h>
+        -:   10:#include <stdio.h>
+        -:   11:#include <stdlib.h>
+        -:   12:#include <string.h>
+        -:   13:#include <unistd.h>
+        -:   14:
+        -:   15:#define TEE_BUFSZ (65536)
+        -:   16:
+    #####:   17:int applet_tee(int argc, char **argv)
+        -:   18:{
+    #####:   19:    int opt_a = 0;   /* -a: append mode */
+    #####:   20:    int opt_i = 0;   /* -i: ignore SIGINT */
+        -:   21:    int i;
+        -:   22:
+    #####:   23:    for (i = 1; i < argc; i++) {
+    #####:   24:        const char *arg = argv[i];
+    #####:   25:        if (strcmp(arg, "--") == 0) { i++; break; }
+    #####:   26:        if (arg[0] != '-' || arg[1] == '\0') break;
+        -:   27:
+    #####:   28:        const char *p = arg + 1;
+    #####:   29:        while (*p) {
+    #####:   30:            switch (*p) {
+    #####:   31:            case 'a': opt_a = 1; break;
+    #####:   32:            case 'i': opt_i = 1; break;
+    #####:   33:            default:
+    #####:   34:                err_msg("tee", "unrecognized option '-%c'", *p);
+    #####:   35:                err_usage("tee", "[-ai] [FILE]...");
+    #####:   36:                return 1;
+        -:   37:            }
+    #####:   38:            p++;
+        -:   39:        }
+        -:   40:    }
+        -:   41:
+        -:   42:    (void)opt_i;  /* signal handling not needed in subprocess context */
+        -:   43:
+    #####:   44:    int nfiles = argc - i;
+    #####:   45:    int *fds = NULL;
+    #####:   46:    if (nfiles > 0) {
+    #####:   47:        fds = malloc((size_t)nfiles * sizeof(int));
+    #####:   48:        if (!fds) {
+    #####:   49:            err_msg("tee", "out of memory");
+    #####:   50:            return 1;
+        -:   51:        }
+    #####:   52:        int flags = O_WRONLY | O_CREAT | (opt_a ? O_APPEND : O_TRUNC);
+    #####:   53:        for (int k = 0; k < nfiles; k++) {
+    #####:   54:            fds[k] = open(argv[i + k], flags, 0666);
+    #####:   55:            if (fds[k] < 0) {
+    #####:   56:                err_msg("tee", "cannot open '%s'", argv[i + k]);
+        -:   57:                /* keep going — POSIX says continue */
+    #####:   58:                fds[k] = -1;
+        -:   59:            }
+        -:   60:        }
+        -:   61:    }
+        -:   62:
+    #####:   63:    char *buf = malloc(TEE_BUFSZ);
+    #####:   64:    if (!buf) {
+    #####:   65:        err_msg("tee", "out of memory");
+    #####:   66:        free(fds);
+    #####:   67:        return 1;
+        -:   68:    }
+        -:   69:
+    #####:   70:    int ret = 0;
+        -:   71:    ssize_t n;
+    #####:   72:    while ((n = read(STDIN_FILENO, buf, TEE_BUFSZ)) > 0) {
+        -:   73:        /* Write to stdout */
+    #####:   74:        ssize_t written = 0;
+    #####:   75:        while (written < n) {
+    #####:   76:            ssize_t w = write(STDOUT_FILENO, buf + written, (size_t)(n - written));
+    #####:   77:            if (w < 0) { ret = 1; break; }
+    #####:   78:            written += w;
+        -:   79:        }
+        -:   80:        /* Write to each file */
+    #####:   81:        for (int k = 0; k < nfiles; k++) {
+    #####:   82:            if (fds[k] < 0) { ret = 1; continue; }
+    #####:   83:            ssize_t fw = 0;
+    #####:   84:            while (fw < n) {
+    #####:   85:                ssize_t w = write(fds[k], buf + fw, (size_t)(n - fw));
+    #####:   86:                if (w < 0) { ret = 1; break; }
+    #####:   87:                fw += w;
+        -:   88:            }
+        -:   89:        }
+        -:   90:    }
+    #####:   91:    if (n < 0)
+    #####:   92:        ret = 1;
+        -:   93:
+    #####:   94:    for (int k = 0; k < nfiles; k++)
+    #####:   95:        if (fds[k] >= 0) close(fds[k]);
+        -:   96:
+    #####:   97:    free(buf);
+    #####:   98:    free(fds);
+    #####:   99:    return ret;
+        -:  100:}

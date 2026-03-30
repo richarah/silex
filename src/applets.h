@@ -45,6 +45,13 @@ int applet_install(int argc, char **argv);
 int applet_tr(int argc, char **argv);
 int applet_cut(int argc, char **argv);
 
+/* Phase 4: new builtins */
+int applet_mktemp(int argc, char **argv);
+int applet_tee(int argc, char **argv);
+int applet_env(int argc, char **argv);
+int applet_realpath(int argc, char **argv);
+int applet_sha256sum(int argc, char **argv);
+
 /* Global applet table (defined in main.c) */
 extern const applet_t applet_table[];
 

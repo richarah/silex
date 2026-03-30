@@ -1,9 +1,8 @@
-/* basename.c -- basename builtin: strip directory and suffix from filenames */
+/* basename.c — basename builtin: strip directory and suffix from filenames */
 
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
-/* basename.c — basename builtin */
 
 #include "../util/error.h"
 #include "../util/path.h"
