@@ -141,7 +141,7 @@ static int cat_fd(int fd, const char *name, const struct cat_opts *opts)
                                     break;
                                 }
                                 close(pfd[0]); close(pfd[1]);
-                                err_sys("cat", "write error");
+                                if (errno != EPIPE) err_sys("cat", "write error");
                                 return 1;
                             }
                             if (n == 0) break;
@@ -166,7 +166,7 @@ static int cat_fd(int fd, const char *name, const struct cat_opts *opts)
             while (rem > 0) {
                 ssize_t nw = write(STDOUT_FILENO, p, (size_t)rem);
                 if (nw < 0) {
-                    err_sys("cat", "write error");
+                    if (errno != EPIPE) err_sys("cat", "write error");
                     return 1;
                 }
                 p += nw;
@@ -219,7 +219,7 @@ static int cat_fd(int fd, const char *name, const struct cat_opts *opts)
                     if (!is_blank) {
                         lineno_nb++;
                         if (printf("%6ld\t", lineno_nb) < 0) {
-                            err_sys("cat", "write error");
+                            if (errno != EPIPE) err_sys("cat", "write error");
                             ret = 1;
                             goto done;
                         }
@@ -227,7 +227,7 @@ static int cat_fd(int fd, const char *name, const struct cat_opts *opts)
                 } else if (opts->number_all) {
                     lineno++;
                     if (printf("%6ld\t", lineno) < 0) {
-                        err_sys("cat", "write error");
+                        if (errno != EPIPE) err_sys("cat", "write error");
                         ret = 1;
                         goto done;
                     }
@@ -240,18 +240,18 @@ static int cat_fd(int fd, const char *name, const struct cat_opts *opts)
                         if (lc == '\t') {
                             if (opts->show_tabs) {
                                 if (putchar('^') == EOF || putchar('I') == EOF) {
-                                    err_sys("cat", "write error");
+                                    if (errno != EPIPE) err_sys("cat", "write error");
                                     ret = 1; goto done;
                                 }
                             } else {
                                 if (putchar('\t') == EOF) {
-                                    err_sys("cat", "write error");
+                                    if (errno != EPIPE) err_sys("cat", "write error");
                                     ret = 1; goto done;
                                 }
                             }
                         } else {
                             if (print_visible(lc, opts->show_tabs) < 0) {
-                                err_sys("cat", "write error");
+                                if (errno != EPIPE) err_sys("cat", "write error");
                                 ret = 1; goto done;
                             }
                         }
@@ -261,12 +261,12 @@ static int cat_fd(int fd, const char *name, const struct cat_opts *opts)
                         unsigned char lc = (unsigned char)line[k];
                         if (lc == '\t') {
                             if (putchar('^') == EOF || putchar('I') == EOF) {
-                                err_sys("cat", "write error");
+                                if (errno != EPIPE) err_sys("cat", "write error");
                                 ret = 1; goto done;
                             }
                         } else {
                             if (putchar((char)lc) == EOF) {
-                                err_sys("cat", "write error");
+                                if (errno != EPIPE) err_sys("cat", "write error");
                                 ret = 1; goto done;
                             }
                         }
@@ -277,7 +277,7 @@ static int cat_fd(int fd, const char *name, const struct cat_opts *opts)
                      * so that line-number prefixes and content remain ordered. */
                     if (line_len > 0) {
                         if (fwrite(line, 1, line_len, stdout) != line_len) {
-                            err_sys("cat", "write error");
+                            if (errno != EPIPE) err_sys("cat", "write error");
                             ret = 1; goto done;
                         }
                     }
@@ -286,13 +286,13 @@ static int cat_fd(int fd, const char *name, const struct cat_opts *opts)
                 /* -E: print $ before newline */
                 if (opts->show_ends) {
                     if (putchar('$') == EOF) {
-                        err_sys("cat", "write error");
+                        if (errno != EPIPE) err_sys("cat", "write error");
                         ret = 1; goto done;
                     }
                 }
 
                 if (putchar('\n') == EOF) {
-                    err_sys("cat", "write error");
+                    if (errno != EPIPE) err_sys("cat", "write error");
                     ret = 1; goto done;
                 }
 
@@ -308,7 +308,7 @@ static int cat_fd(int fd, const char *name, const struct cat_opts *opts)
                     while (rem2 > 0) {
                         ssize_t nw = write(STDOUT_FILENO, lp, rem2);
                         if (nw < 0) {
-                            err_sys("cat", "write error");
+                            if (errno != EPIPE) err_sys("cat", "write error");
                             ret = 1; goto done;
                         }
                         lp  += nw;
@@ -333,18 +333,18 @@ static int cat_fd(int fd, const char *name, const struct cat_opts *opts)
                 unsigned char lc = (unsigned char)line[k];
                 if (opts->show_nonprint) {
                     if (print_visible(lc, opts->show_tabs) < 0) {
-                        err_sys("cat", "write error");
+                        if (errno != EPIPE) err_sys("cat", "write error");
                         ret = 1; goto done;
                     }
                 } else {
                     if (lc == '\t') {
                         if (putchar('^') == EOF || putchar('I') == EOF) {
-                            err_sys("cat", "write error");
+                            if (errno != EPIPE) err_sys("cat", "write error");
                             ret = 1; goto done;
                         }
                     } else {
                         if (putchar((char)lc) == EOF) {
-                            err_sys("cat", "write error");
+                            if (errno != EPIPE) err_sys("cat", "write error");
                             ret = 1; goto done;
                         }
                     }
@@ -352,7 +352,7 @@ static int cat_fd(int fd, const char *name, const struct cat_opts *opts)
             }
         } else {
             if (fwrite(line, 1, line_len, stdout) != line_len) {
-                err_sys("cat", "write error");
+                if (errno != EPIPE) err_sys("cat", "write error");
                 ret = 1; goto done;
             }
         }

@@ -9,6 +9,7 @@
 #include "redirect.h"
 #include "shell.h"
 #include "../applets.h"
+#include "../cache/fscache.h"
 #include "../util/arena.h"
 #include "../util/section.h"
 #include "../util/strbuf.h"
@@ -321,11 +322,16 @@ int exec_simple_cmd(shell_ctx_t *sh, char **words, char **assigns, redir_t *redi
     int nassigns = 0;
     if (assigns) while (assigns[nassigns]) nassigns++;
 
-    /* Expand all assign values up front */
+    /* Expand all assign values up front.
+     * Track cmd-sub exit status: per POSIX, assignment-only commands exit with
+     * the status of the last command substitution (or 0 if none). */
     char **anames = NULL, **avals = NULL;
+    int cmdsub_exit = 0;
     if (nassigns > 0) {
         anames = malloc((size_t)nassigns * sizeof(char *));
         avals  = malloc((size_t)nassigns * sizeof(char *));
+        int prev_exit = sh->last_exit;
+        sh->last_exit = 0;  /* default: 0 unless cmd-sub sets it */
         for (int i = 0; i < nassigns; i++) {
             const char *eq = strchr(assigns[i], '=');
             if (!eq) { anames[i] = NULL; avals[i] = NULL; continue; }
@@ -333,6 +339,8 @@ int exec_simple_cmd(shell_ctx_t *sh, char **words, char **assigns, redir_t *redi
             anames[i] = strndup(assigns[i], nlen);
             avals[i]  = expand_word(sh, eq + 1);
         }
+        cmdsub_exit = sh->last_exit;  /* 0 or last cmd-sub exit */
+        sh->last_exit = prev_exit;    /* restore for with-command path */
     }
 
     /* If no command words, apply to shell scope */
@@ -349,7 +357,8 @@ int exec_simple_cmd(shell_ctx_t *sh, char **words, char **assigns, redir_t *redi
             redirect_apply(sh, redirs, &rctx);
             redirect_restore(&rctx);
         }
-        return assign_err;
+        /* Return cmd-sub exit status (POSIX: last cmd-sub exit, or 0 if none) */
+        return assign_err ? 1 : cmdsub_exit;
     }
 
     /* With command: set env temporarily (will be cleaned up after command) */
@@ -440,6 +449,38 @@ int exec_simple_cmd(shell_ctx_t *sh, char **words, char **assigns, redir_t *redi
     /* 5. Check for applet (run in-process, apply redirects) */
     const applet_t *ap = find_applet_by_name(cmd);
     if (ap) {
+        /*
+         * B-8: XC-02 Dead command elimination.
+         * Skip `mkdir -p PATH...` when all PATH arguments are already
+         * confirmed existing directories with written_by_matchbox=1
+         * in fscache (i.e. we created them in this run).
+         * Only safe when there are no redirections.
+         */
+        if (!redirs && strcmp(cmd, "mkdir") == 0 && argc >= 2) {
+            int has_p = 0;
+            for (int i = 1; i < argc; i++) {
+                const char *a = expanded[i];
+                if (!a) break;
+                if (strcmp(a, "--") == 0) break;
+                if (a[0] == '-') {
+                    for (const char *f = a + 1; *f && *f != '-'; f++)
+                        if (*f == 'p') { has_p = 1; break; }
+                }
+            }
+            if (has_p) {
+                int all_done = 1;
+                for (int i = 1; i < argc && all_done; i++) {
+                    const char *a = expanded[i];
+                    if (!a) break;
+                    if (a[0] == '-' || strcmp(a, "--") == 0) continue;
+                    struct stat st;
+                    if (!fscache_written_by_matchbox(a) ||
+                        fscache_stat(a, &st) != 0 || !S_ISDIR(st.st_mode))
+                        all_done = 0;
+                }
+                if (all_done) { cmd_rc = 0; goto cmd_done; }
+            }
+        }
         /* 'sh' applet may call exit(); run it in a fork so the parent survives.
          * Also exports vars so they are visible to the sub-shell. */
         if (strcmp(cmd, "sh") == 0) {
@@ -532,6 +573,8 @@ int exec_simple_cmd(shell_ctx_t *sh, char **words, char **assigns, redir_t *redi
     else
         cmd_rc = 1;
     sh->last_exit = cmd_rc;
+    /* B-1: external command may have changed filesystem state — invalidate all */
+    fscache_invalidate_all();
     }
     } /* end command dispatch block */
 
@@ -626,6 +669,15 @@ int exec_pipeline(shell_ctx_t *sh, node_t *node)
             int saved_stdin = -1;
             if (i > 0) {
                 saved_stdin = dup(STDIN_FILENO);
+                /* Flush stdio stdin buffer before dup2: if the shell read the
+                 * script from stdin via fgetc/fgets, the buffer may contain
+                 * unread script bytes.  After dup2, fd 0 points to the pipe,
+                 * but the buffered bytes would be returned first by getchar()
+                 * et al., giving the builtin stale data.  fflush(stdin) on
+                 * glibc discards the read buffer, preventing this stale-read
+                 * bug in builtins that use stdio (e.g. tr with getchar()). */
+                fflush(stdin);
+                clearerr(stdin);
                 dup2(pipes[i - 1][0], STDIN_FILENO);
                 close(pipes[i - 1][0]);
                 close(pipes[i - 1][1]);
@@ -815,6 +867,13 @@ int exec_node(shell_ctx_t *sh, node_t *node)
             if (node->u.redir_node.redirs)
                 redirect_apply(sh, node->u.redir_node.redirs, &rctx);
             int r = exec_node(sh, node->u.redir_node.body);
+            sh->last_exit = r;
+            /* Fire EXIT trap if set (POSIX: subshell EXIT trap runs on exit) */
+            const char *exit_act = sh->traps[0].action;
+            if (exit_act != SHELL_TRAP_DEFAULT && exit_act[0] != '\0') {
+                sh->traps[0].action = SHELL_TRAP_DEFAULT;
+                shell_run_string(sh, exit_act);
+            }
             fflush(NULL);
             _exit(r);
         }
@@ -904,7 +963,7 @@ int exec_node(shell_ctx_t *sh, node_t *node)
             wlist = expand_words(sh, node->u.for_node.words);
         } else {
             /* `for x; do` with no `in` clause: iterate $@ */
-            wlist = arena_alloc(&sh->parse_arena,
+            wlist = arena_alloc(&sh->scratch_arena,
                                 (size_t)(sh->positional_n + 1) * sizeof(char *));
             for (int i = 0; i < sh->positional_n; i++)
                 wlist[i] = sh->positional[i];

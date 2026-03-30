@@ -59,4 +59,11 @@ int mb_regex_match(const mb_regex *re, const char *s, size_t n, mb_match *m);
  */
 void mb_regex_free(mb_regex *re);
 
+/*
+ * Return the required first literal byte for this pattern (0 if unknown).
+ * If non-zero, any input that does not contain this byte cannot match.
+ * Used by grep as a memchr prefilter before running the NFA.
+ */
+unsigned char mb_regex_first_char(const mb_regex *re);
+
 #endif /* MATCHBOX_REGEX_H */

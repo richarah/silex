@@ -10,6 +10,7 @@
 
 #include "../util/error.h"
 #include "../util/path.h"
+#include "../cache/fscache.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -343,6 +344,12 @@ static int cp_path(const char *src, const char *dst,
 
     int ret = copy_file_fd(src_fd, dst, &src_st, opts);
     close(src_fd);
+    if (ret == 0) {
+        /* B-7: insert dest stat into fscache (written_by_matchbox=1) */
+        struct stat fresh;
+        if (stat(dst, &fresh) == 0)
+            fscache_insert(dst, &fresh);
+    }
     return ret;
 }
 

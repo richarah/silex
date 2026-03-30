@@ -19,9 +19,10 @@
  * when a path is a symlink.
  */
 typedef struct {
-    const char *path;      /* interned path (for collision detection; owned by intern table) */
-    struct stat st;        /* full cached stat result                  */
-    time_t      cached_at; /* unix time of population                  */
+    const char *path;          /* interned path (for collision detection; owned by intern table) */
+    struct stat st;            /* full cached stat result                  */
+    time_t      cached_at;     /* unix time of population                  */
+    unsigned    written_by_matchbox : 1; /* set after builtin write op (XC-01/XC-02) */
 } fscache_entry_t;
 
 /* High-bit flag distinguishing lstat entries from stat entries */
@@ -43,5 +44,15 @@ int fscache_lstat(const char *path, struct stat *out);
 
 /* Invalidate a path and its parent */
 void fscache_invalidate(const char *path);
+
+/* Invalidate ALL cached entries (call after fork+exec of external commands) */
+void fscache_invalidate_all(void);
+
+/* Insert/update a stat result (called after successful builtin writes) */
+void fscache_insert(const char *path, const struct stat *st);
+
+/* Returns 1 if path is cached with written_by_matchbox=1 and not expired.
+ * Used by XC-02 dead command elimination. */
+int fscache_written_by_matchbox(const char *path);
 
 #endif /* MATCHBOX_FSCACHE_H */

@@ -256,6 +256,65 @@ static void invalidate_one(const char *p)
     }
 }
 
+/*
+ * Invalidate ALL cached entries.  Call after fork+exec of an external command
+ * because the external command may have changed arbitrary filesystem state.
+ */
+void fscache_invalidate_all(void)
+{
+    if (!g_fscache.map.slots)
+        return;
+    /* Free all entries, then reinitialise the hashmap to a clean state */
+    for (size_t i = 0; i < g_fscache.map.cap; i++) {
+        hm_slot_t *s = &g_fscache.map.slots[i];
+        if (s->used == 1 && s->value) {
+            free(s->value);
+        }
+        s->value = NULL;
+        s->used  = 0;  /* SLOT_EMPTY */
+    }
+    g_fscache.map.count = 0;
+}
+
+/*
+ * Insert a freshly-observed stat result (called after successful builtin ops).
+ * Sets written_by_matchbox = 1 to allow XC-01/XC-02 optimisations.
+ */
+void fscache_insert(const char *path, const struct stat *st)
+{
+    if (g_fscache.ttl <= 0 || !path || !st)
+        return;
+    uint64_t key = fnv1a_path(path);
+    fscache_entry_t *entry = (fscache_entry_t *)hm_get(&g_fscache.map, key);
+    if (!entry) {
+        if (g_fscache.map.count >= FSCACHE_MAX_ENTRIES)
+            return;
+        entry = malloc(sizeof(*entry));
+        if (!entry)
+            return;
+        entry->path = intern_cstr(path);
+        hm_put(&g_fscache.map, key, entry);
+    } else if (strcmp(entry->path, path) != 0) {
+        entry->path = intern_cstr(path);
+    }
+    entry->st                 = *st;
+    entry->cached_at          = time(NULL);
+    entry->written_by_matchbox = 1;
+}
+
+int fscache_written_by_matchbox(const char *path)
+{
+    if (!path || g_fscache.ttl <= 0)
+        return 0;
+    uint64_t key = fnv1a_path(path);
+    fscache_entry_t *e = (fscache_entry_t *)hm_get(&g_fscache.map, key);
+    if (!e || strcmp(e->path, path) != 0)
+        return 0;
+    if (time(NULL) - e->cached_at >= (time_t)g_fscache.ttl)
+        return 0;
+    return e->written_by_matchbox ? 1 : 0;
+}
+
 WARM void fscache_invalidate(const char *path)
 {
     if (!path) return;

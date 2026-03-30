@@ -5,6 +5,7 @@
 #endif
 
 #include "../util/error.h"
+#include "../cache/fscache.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -223,6 +224,12 @@ static int touch_path(const char *path,
     if (utimensat(AT_FDCWD, path, times, 0) != 0) {
         err_sys("touch", "setting times on '%s'", path);
         return 1;
+    }
+    /* B-7: update fscache with fresh stat (written_by_matchbox=1) */
+    {
+        struct stat fresh;
+        if (stat(path, &fresh) == 0)
+            fscache_insert(path, &fresh);
     }
     return 0;
 }

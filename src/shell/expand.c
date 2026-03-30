@@ -46,17 +46,17 @@ static const char *sh_getvar(shell_ctx_t *sh, const char *name)
         switch (name[0]) {
         case '?':
             snprintf(buf, sizeof(buf), "%d", sh->last_exit);
-            return arena_strdup(&sh->parse_arena, buf);
+            return arena_strdup(&sh->scratch_arena, buf);
         case '$':
             snprintf(buf, sizeof(buf), "%ld", (long)getpid());
-            return arena_strdup(&sh->parse_arena, buf);
+            return arena_strdup(&sh->scratch_arena, buf);
         case '!':
             if (sh->last_bg_pid == 0) return "";
             snprintf(buf, sizeof(buf), "%ld", (long)sh->last_bg_pid);
-            return arena_strdup(&sh->parse_arena, buf);
+            return arena_strdup(&sh->scratch_arena, buf);
         case '#':
             snprintf(buf, sizeof(buf), "%d", sh->positional_n);
-            return arena_strdup(&sh->parse_arena, buf);
+            return arena_strdup(&sh->scratch_arena, buf);
         case '-': {
             /* Return current option flags */
             strbuf_t sb;
@@ -66,7 +66,7 @@ static const char *sh_getvar(shell_ctx_t *sh, const char *name)
             if (sh->opt_x) sb_appendc(&sb, 'x');
             if (sh->opt_f) sb_appendc(&sb, 'f');
             if (sh->opt_n) sb_appendc(&sb, 'n');
-            char *r = arena_strdup(&sh->parse_arena, sb_str(&sb));
+            char *r = arena_strdup(&sh->scratch_arena, sb_str(&sb));
             sb_free(&sb);
             return r;
         }
@@ -81,7 +81,7 @@ static const char *sh_getvar(shell_ctx_t *sh, const char *name)
                 if (i > 0) sb_appendc(&sb, ' ');
                 sb_append(&sb, sh->positional[i]);
             }
-            char *r = arena_strdup(&sh->parse_arena, sb_str(&sb));
+            char *r = arena_strdup(&sh->scratch_arena, sb_str(&sb));
             sb_free(&sb);
             return r;
         }
@@ -109,7 +109,7 @@ static const char *sh_getvar(shell_ctx_t *sh, const char *name)
     if (strcmp(name, "LINENO") == 0) {
         char buf[32];
         snprintf(buf, sizeof(buf), "0");
-        return arena_strdup(&sh->parse_arena, buf);
+        return arena_strdup(&sh->scratch_arena, buf);
     }
 
     return vars_get(&sh->vars, name);
@@ -278,7 +278,7 @@ static char *expand_braced(shell_ctx_t *sh, const char *body)
         const char *val = sh_getvar(sh, varname);
         char buf[32];
         snprintf(buf, sizeof(buf), "%zu", val ? strlen(val) : (size_t)0);
-        return arena_strdup(&sh->parse_arena, buf);
+        return arena_strdup(&sh->scratch_arena, buf);
     }
 
     /* Find operator position.
@@ -304,7 +304,7 @@ static char *expand_braced(shell_ctx_t *sh, const char *body)
 
     /* No operator: plain ${VAR} */
     if (*p == '\0') {
-        return arena_strdup(&sh->parse_arena, val ? val : "");
+        return arena_strdup(&sh->scratch_arena, val ? val : "");
     }
 
     /* ${VAR:-word}, ${VAR:+word}, ${VAR:=word}, ${VAR:?word} */
@@ -347,8 +347,8 @@ static char *expand_braced(shell_ctx_t *sh, const char *body)
                 if (sub_len >= 0 && sub_len < avail) avail = sub_len;
                 else if (sub_len < 0) avail += sub_len;  /* trim from end */
             }
-            if (avail <= 0) return arena_strdup(&sh->parse_arena, "");
-            return arena_strndup(&sh->parse_arena, s + off, (size_t)avail);
+            if (avail <= 0) return arena_strdup(&sh->scratch_arena, "");
+            return arena_strndup(&sh->scratch_arena, s + off, (size_t)avail);
         }
     }
 
@@ -368,11 +368,11 @@ static char *expand_braced(shell_ctx_t *sh, const char *body)
                 strbuf_t sb;
                 sb_init(&sb, 64);
                 expand_into(sh, word_part, &sb, 0);
-                char *r = arena_strdup(&sh->parse_arena, sb_str(&sb));
+                char *r = arena_strdup(&sh->scratch_arena, sb_str(&sb));
                 sb_free(&sb);
                 return r;
             }
-            return arena_strdup(&sh->parse_arena, val ? val : "");
+            return arena_strdup(&sh->scratch_arena, val ? val : "");
 
         case '+':
             if (!condition) {
@@ -380,11 +380,11 @@ static char *expand_braced(shell_ctx_t *sh, const char *body)
                 strbuf_t sb;
                 sb_init(&sb, 64);
                 expand_into(sh, word_part, &sb, 0);
-                char *r = arena_strdup(&sh->parse_arena, sb_str(&sb));
+                char *r = arena_strdup(&sh->scratch_arena, sb_str(&sb));
                 sb_free(&sb);
                 return r;
             }
-            return arena_strdup(&sh->parse_arena, "");
+            return arena_strdup(&sh->scratch_arena, "");
 
         case '=':
             if (condition) {
@@ -393,11 +393,11 @@ static char *expand_braced(shell_ctx_t *sh, const char *body)
                 expand_into(sh, word_part, &sb, 0);
                 const char *newval = sb_str(&sb);
                 vars_set(&sh->vars, varname, newval);
-                char *r = arena_strdup(&sh->parse_arena, newval);
+                char *r = arena_strdup(&sh->scratch_arena, newval);
                 sb_free(&sb);
                 return r;
             }
-            return arena_strdup(&sh->parse_arena, val ? val : "");
+            return arena_strdup(&sh->scratch_arena, val ? val : "");
 
         case '?':
             if (condition) {
@@ -409,7 +409,7 @@ static char *expand_braced(shell_ctx_t *sh, const char *body)
                 sb_free(&sb);
                 exit(1);
             }
-            return arena_strdup(&sh->parse_arena, val ? val : "");
+            return arena_strdup(&sh->scratch_arena, val ? val : "");
 
         default:
             break;
@@ -428,8 +428,8 @@ static char *expand_braced(shell_ctx_t *sh, const char *body)
         const char *s   = val ? val : "";
         int off = greedy ? match_prefix(s, pat) : match_prefix_shortest(s, pat);
         if (off < 0)
-            return arena_strdup(&sh->parse_arena, s);
-        return arena_strdup(&sh->parse_arena, s + off);
+            return arena_strdup(&sh->scratch_arena, s);
+        return arena_strdup(&sh->scratch_arena, s + off);
     }
 
     if (op == '%') {
@@ -440,9 +440,9 @@ static char *expand_braced(shell_ctx_t *sh, const char *body)
         const char *s   = val ? val : "";
         int off = greedy ? match_suffix(s, pat) : match_suffix_shortest(s, pat);
         if (off < 0)
-            return arena_strdup(&sh->parse_arena, s);
+            return arena_strdup(&sh->scratch_arena, s);
         /* Remove suffix starting at off */
-        return arena_strndup(&sh->parse_arena, s, (size_t)off);
+        return arena_strndup(&sh->scratch_arena, s, (size_t)off);
     }
 
     /* ${VAR/pat/repl}, ${VAR//pat/repl} */
@@ -501,13 +501,13 @@ static char *expand_braced(shell_ctx_t *sh, const char *body)
                 break;
             }
         }
-        char *r = arena_strdup(&sh->parse_arena, sb_str(&sb));
+        char *r = arena_strdup(&sh->scratch_arena, sb_str(&sb));
         sb_free(&sb);
         return r;
     }
 
     /* Fallback: return raw value */
-    return arena_strdup(&sh->parse_arena, val ? val : "");
+    return arena_strdup(&sh->scratch_arena, val ? val : "");
 }
 
 /* -------------------------------------------------------------------------
@@ -521,7 +521,7 @@ static char *cmd_subst(shell_ctx_t *sh, const char *cmd)
     fflush(NULL);   /* flush all buffers before fork so child doesn't inherit pending output */
     if (pipe(pipefd) < 0) {
         perror("pipe");
-        return arena_strdup(&sh->parse_arena, "");
+        return arena_strdup(&sh->scratch_arena, "");
     }
 
     pid_t pid = fork();
@@ -529,7 +529,7 @@ static char *cmd_subst(shell_ctx_t *sh, const char *cmd)
         perror("fork");
         close(pipefd[0]);
         close(pipefd[1]);
-        return arena_strdup(&sh->parse_arena, "");
+        return arena_strdup(&sh->scratch_arena, "");
     }
 
     if (pid == 0) {
@@ -575,7 +575,7 @@ static char *cmd_subst(shell_ctx_t *sh, const char *cmd)
         sb.buf[sb.len] = '\0';
     }
 
-    char *result = arena_strdup(&sh->parse_arena, sb_str(&sb));
+    char *result = arena_strdup(&sh->scratch_arena, sb_str(&sb));
     sb_free(&sb);
     return result;
 }
@@ -667,9 +667,26 @@ static long arith_primary(arith_ctx_t *ac)
         return ~arith_primary(ac);
     }
 
-    /* $ variable reference */
+    /* $ variable reference or command substitution */
     if (c == '$') {
         ac->pos++;
+        /* $(cmd) command substitution inside arithmetic */
+        if (ac->src[ac->pos] == '(') {
+            ac->pos++;  /* skip '(' */
+            const char *start = ac->src + ac->pos;
+            int d = 1;
+            while (ac->src[ac->pos] && d > 0) {
+                if (ac->src[ac->pos] == '(') d++;
+                else if (ac->src[ac->pos] == ')') d--;
+                if (d > 0) ac->pos++;
+                else ac->pos++;
+            }
+            size_t clen = (size_t)(ac->src + ac->pos - 1 - start);
+            char *cmd = strndup(start, clen);
+            char *result = cmd_subst(ac->sh, cmd ? cmd : "");
+            free(cmd);
+            return result ? strtol(result, NULL, 10) : 0L;
+        }
         /* Could be ${VAR} or $VAR */
         char namebuf[256];
         size_t ni = 0;
@@ -746,8 +763,12 @@ static long arith_primary(arith_ctx_t *ac)
             case 1:  result = cur_val + rhs; break;
             case 2:  result = cur_val - rhs; break;
             case 3:  result = cur_val * rhs; break;
-            case 4:  result = rhs ? cur_val / rhs : 0; break;
-            case 5:  result = rhs ? cur_val % rhs : 0; break;
+            case 4:
+                if (!rhs) { fprintf(stderr, "matchbox: sh: arithmetic expression: division by zero\n"); exit(2); }
+                result = cur_val / rhs; break;
+            case 5:
+                if (!rhs) { fprintf(stderr, "matchbox: sh: arithmetic expression: division by zero\n"); exit(2); }
+                result = cur_val % rhs; break;
             case 6:  result = cur_val << rhs; break;
             case 7:  result = cur_val >> rhs; break;
             case 8:  result = cur_val & rhs; break;
@@ -786,8 +807,19 @@ static long arith_mul(arith_ctx_t *ac)
         ac->pos++;
         long right = arith_primary(ac);
         if (op == '*') left *= right;
-        else if (op == '/') left = right ? left / right : 0;
-        else left = right ? left % right : 0;
+        else if (op == '/') {
+            if (!right) {
+                fprintf(stderr, "matchbox: sh: arithmetic expression: division by zero\n");
+                exit(2);
+            }
+            left /= right;
+        } else {
+            if (!right) {
+                fprintf(stderr, "matchbox: sh: arithmetic expression: division by zero\n");
+                exit(2);
+            }
+            left %= right;
+        }
     }
     return left;
 }
@@ -979,6 +1011,72 @@ long expand_arith(shell_ctx_t *sh, const char *expr)
 }
 
 /* -------------------------------------------------------------------------
+ * skip_dquote_end: advance p from first char after opening '"' to just past
+ * the matching '"'.  Properly handles $(...), ${...}, $((...)), backticks.
+ * ------------------------------------------------------------------------- */
+static const char *skip_dquote_end(const char *p)
+{
+    while (*p) {
+        if (*p == '"')
+            return p + 1;
+        if (*p == '\\') {
+            if (p[1]) p += 2; else p++;
+            continue;
+        }
+        if (*p == '$') {
+            p++;
+            if (*p == '(' && p[1] == '(') {
+                /* $(( )) arithmetic */
+                p += 2;
+                int d = 2;
+                while (*p && d > 0) {
+                    if (*p == '(') d++;
+                    else if (*p == ')') d--;
+                    p++;
+                }
+            } else if (*p == '(') {
+                /* $( ) cmd substitution — may contain nested "..." */
+                p++;
+                int d = 1;
+                while (*p && d > 0) {
+                    if (*p == '\\') { if (p[1]) p += 2; else p++; continue; }
+                    if (*p == '\'') {
+                        p++;
+                        while (*p && *p != '\'') p++;
+                        if (*p) p++;
+                        continue;
+                    }
+                    if (*p == '"') { p = skip_dquote_end(p + 1); continue; }
+                    if (*p == '(') d++;
+                    else if (*p == ')') d--;
+                    p++;
+                }
+            } else if (*p == '{') {
+                p++;
+                int d = 1;
+                while (*p && d > 0) {
+                    if (*p == '{') d++;
+                    else if (*p == '}') d--;
+                    p++;
+                }
+            }
+            continue;
+        }
+        if (*p == '`') {
+            p++;
+            while (*p && *p != '`') {
+                if (*p == '\\') { if (p[1]) p += 2; else p++; continue; }
+                p++;
+            }
+            if (*p == '`') p++;
+            continue;
+        }
+        p++;
+    }
+    return p;
+}
+
+/* -------------------------------------------------------------------------
  * Core expand_into: walk 'word', handle quoting / substitutions,
  * append expanded text to 'out'.
  * in_dquote: 1 when inside "..."
@@ -1003,15 +1101,10 @@ static void expand_into(shell_ctx_t *sh, const char *word, strbuf_t *out,
         if (*p == '"' && !in_dquote) {
             p++; /* skip opening " */
             expand_into(sh, p, out, 1);
-            /* Find matching closing quote */
-            int depth = 1;
-            while (*p && depth > 0) {
-                if (*p == '"') depth--;
-                else if (*p == '\\' && (p[1] == '"' || p[1] == '\\' ||
-                                        p[1] == '$' || p[1] == '`'))
-                    p++;
-                p++;
-            }
+            /* Advance p past the double-quoted content (skip_dquote_end handles
+             * nested $(...), ${...}, $((...)). expand_into already output the
+             * content; we just need to advance the outer pointer. */
+            p = skip_dquote_end(p);
             continue;
         }
 
@@ -1199,7 +1292,7 @@ static void expand_into(shell_ctx_t *sh, const char *word, strbuf_t *out,
 
 char *expand_word(shell_ctx_t *sh, const char *word)
 {
-    if (!word) return arena_strdup(&sh->parse_arena, "");
+    if (!word) return arena_strdup(&sh->scratch_arena, "");
 
     /* Tilde expansion first */
     char *tilded = expand_tilde(sh, word);
@@ -1210,7 +1303,7 @@ char *expand_word(shell_ctx_t *sh, const char *word)
     expand_into(sh, src, &sb, 0);
     free(tilded);
 
-    char *result = arena_strdup(&sh->parse_arena, sb_str(&sb));
+    char *result = arena_strdup(&sh->scratch_arena, sb_str(&sb));
     sb_free(&sb);
     return result;
 }
@@ -1229,7 +1322,7 @@ expand_result_t expand_word_full(shell_ctx_t *sh, const char *word)
 
     char *expanded = expand_word(sh, word);
     if (!expanded) {
-        char **arr = arena_alloc(&sh->parse_arena, sizeof(char *));
+        char **arr = arena_alloc(&sh->scratch_arena, sizeof(char *));
         arr[0] = NULL;
         res.words = arr;
         return res;
@@ -1246,15 +1339,15 @@ expand_result_t expand_word_full(shell_ctx_t *sh, const char *word)
                 if (*cp2 == '\x01') {
                     *cp2 = '\0';
                     if (n2 >= cap2) { cap2 *= 2; f2 = realloc(f2, (size_t)cap2 * sizeof(char *)); }
-                    if (f2) f2[n2++] = arena_strdup(&sh->parse_arena, tok2);
+                    if (f2) f2[n2++] = arena_strdup(&sh->scratch_arena, tok2);
                     tok2 = cp2 + 1;
                 }
                 cp2++;
             }
             if (f2) {
                 if (n2 >= cap2) { cap2 *= 2; f2 = realloc(f2, (size_t)cap2 * sizeof(char *)); }
-                if (f2) f2[n2++] = arena_strdup(&sh->parse_arena, tok2);
-                char **arr = arena_alloc(&sh->parse_arena, (size_t)(n2 + 1) * sizeof(char *));
+                if (f2) f2[n2++] = arena_strdup(&sh->scratch_arena, tok2);
+                char **arr = arena_alloc(&sh->scratch_arena, (size_t)(n2 + 1) * sizeof(char *));
                 for (int i = 0; i < n2; i++) arr[i] = f2[i];
                 arr[n2] = NULL;
                 res.words = arr;
@@ -1285,7 +1378,7 @@ expand_result_t expand_word_full(shell_ctx_t *sh, const char *word)
     /* Count fields */
     char *copy = strdup(expanded);
     if (!copy) {
-        char **arr = arena_alloc(&sh->parse_arena, 2 * sizeof(char *));
+        char **arr = arena_alloc(&sh->scratch_arena, 2 * sizeof(char *));
         arr[0] = expanded;
         arr[1] = NULL;
         res.words = arr;
@@ -1302,7 +1395,6 @@ expand_result_t expand_word_full(shell_ctx_t *sh, const char *word)
     while (*cp) {
         if (strchr(ifs, (unsigned char)*cp)) {
             if (cp > tok) {
-                /* Non-IFS-whitespace separators split even empty fields */
                 *cp = '\0';
                 if (nfields >= cap) {
                     cap = cap ? cap * 2 : 8;
@@ -1310,9 +1402,22 @@ expand_result_t expand_word_full(shell_ctx_t *sh, const char *word)
                     if (!tmp) { free(copy); goto glob_phase; }
                     fields = tmp;
                 }
-                fields[nfields++] = arena_strdup(&sh->parse_arena, tok);
+                fields[nfields++] = arena_strdup(&sh->scratch_arena, tok);
                 tok = cp + 1;
             } else {
+                /* cp == tok: potential empty field.
+                 * POSIX: non-whitespace IFS chars preserve empty fields;
+                 * whitespace IFS chars collapse (skip empty). */
+                if (!isspace((unsigned char)*cp)) {
+                    if (nfields >= cap) {
+                        cap = cap ? cap * 2 : 8;
+                        char **tmp = realloc(fields, (size_t)cap * sizeof(char *));
+                        if (!tmp) { free(copy); goto glob_phase; }
+                        fields = tmp;
+                    }
+                    if (nfields < cap)
+                        fields[nfields++] = arena_strdup(&sh->scratch_arena, "");
+                }
                 tok = cp + 1;
             }
         }
@@ -1326,7 +1431,7 @@ expand_result_t expand_word_full(shell_ctx_t *sh, const char *word)
             if (tmp) { fields = tmp; }
         }
         if (nfields < cap)
-            fields[nfields++] = arena_strdup(&sh->parse_arena, tok);
+            fields[nfields++] = arena_strdup(&sh->scratch_arena, tok);
     }
     free(copy);
     }
@@ -1359,7 +1464,7 @@ glob_phase:
                         if (!tmp) { globfree(&g); goto done; }
                         final = tmp;
                     }
-                    final[nfinal++] = arena_strdup(&sh->parse_arena, g.gl_pathv[gi]);
+                    final[nfinal++] = arena_strdup(&sh->scratch_arena, g.gl_pathv[gi]);
                 }
                 globfree(&g);
                 continue;
@@ -1374,7 +1479,7 @@ glob_phase:
             if (!tmp) goto done;
             final = tmp;
         }
-        final[nfinal++] = arena_strdup(&sh->parse_arena, f);
+        final[nfinal++] = arena_strdup(&sh->scratch_arena, f);
     }
 
 done:
@@ -1389,7 +1494,7 @@ done:
     if (final) final[nfinal] = NULL;
 
     /* Move into arena */
-    char **arena_arr = arena_alloc(&sh->parse_arena,
+    char **arena_arr = arena_alloc(&sh->scratch_arena,
                                    (size_t)(nfinal + 1) * sizeof(char *));
     if (final) {
         memcpy(arena_arr, final, (size_t)(nfinal + 1) * sizeof(char *));
@@ -1406,7 +1511,7 @@ done:
 char **expand_words(shell_ctx_t *sh, char **words)
 {
     if (!words) {
-        char **arr = arena_alloc(&sh->parse_arena, sizeof(char *));
+        char **arr = arena_alloc(&sh->scratch_arena, sizeof(char *));
         arr[0] = NULL;
         return arr;
     }
@@ -1420,7 +1525,7 @@ char **expand_words(shell_ctx_t *sh, char **words)
 
     expand_result_t *results = malloc((size_t)nw * sizeof(expand_result_t));
     if (!results) {
-        char **arr = arena_alloc(&sh->parse_arena, sizeof(char *));
+        char **arr = arena_alloc(&sh->scratch_arena, sizeof(char *));
         arr[0] = NULL;
         return arr;
     }
@@ -1430,7 +1535,7 @@ char **expand_words(shell_ctx_t *sh, char **words)
         total += results[i].count;
     }
 
-    char **out = arena_alloc(&sh->parse_arena,
+    char **out = arena_alloc(&sh->scratch_arena,
                              (size_t)(total + 1) * sizeof(char *));
     int idx = 0;
     for (int i = 0; i < nw; i++) {

@@ -15,53 +15,58 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-/* The full applet table.  Terminated by {NULL, NULL, NULL}. */
+/*
+ * B-4: applet table kept in lexicographic order so find_applet() can use
+ * binary search — O(log₂ 32) = 5 comparisons worst-case vs O(32) linear.
+ * KEEP THIS LIST SORTED when adding new applets.
+ */
 const applet_t applet_table[] = {
-    /* Phase 1 */
-    { "cp",       applet_cp,       "cp [-rRpfivLHPantuT] SOURCE... DEST"        },
-    { "echo",     applet_echo,     "echo [-neE] [STRING]..."                     },
-    { "mkdir",    applet_mkdir,    "mkdir [-pvm MODE] DIR..."                    },
-    /* Phase 2: shell */
-    { "sh",       applet_sh,       "sh [-ceiuxo] [SCRIPT] [ARG]..."             },
-    /* Phase 3: core builtins */
-    { "cat",      applet_cat,      "cat [-nbsvAet] [FILE]..."                    },
-    { "chmod",    applet_chmod,    "chmod [-Rv] [--reference=RFILE] MODE FILE..."  },
-    { "mv",       applet_mv,       "mv [-finuvT] SOURCE... DEST"                  },
-    { "rm",       applet_rm,       "rm [-rRfiv] FILE..."                          },
-    { "ln",       applet_ln,       "ln [-sfvnrT] TARGET LINK_NAME"               },
-    { "touch",    applet_touch,    "touch [-acmt] [-r REF] [-d DATE] FILE..."    },
-    { "head",     applet_head,     "head [-n N] [-c N] [-qv] [FILE]..."          },
-    { "tail",     applet_tail,     "tail [-n N] [-c N] [-fqv] [FILE]..."         },
-    { "wc",       applet_wc,       "wc [-clwmL] [FILE]..."                       },
-    { "sort",     applet_sort,     "sort [-bdfginrsu] [-o FILE] [-t SEP] [-k KEY] [FILE]..." },
-    { "grep",     applet_grep,     "grep [-EFciln qsvwr] [-e PAT] [-f FILE] PATTERN [FILE]..." },
-    { "sed",      applet_sed,      "sed [-nEi] [-e SCRIPT] [-f FILE] [FILE]..."  },
-    { "find",     applet_find,     "find [PATH...] [EXPRESSION]"                 },
-    { "xargs",    applet_xargs,    "xargs [-0rP N] [-n N] [-I REPL] [-d DELIM] CMD..." },
-    { "basename", applet_basename, "basename NAME [SUFFIX] | -a [-s SUFFIX] NAME..." },
-    { "dirname",  applet_dirname,  "dirname NAME..."                              },
-    { "readlink", applet_readlink, "readlink [-femn qz] FILE..."                  },
-    { "stat",     applet_stat,     "stat [-c FORMAT] [-ft] FILE..."              },
-    { "date",     applet_date,     "date [-u] [-d DATE] [+FORMAT]"               },
-    { "printf",   applet_printf,   "printf FORMAT [ARG]..."                      },
-    { "install",  applet_install,  "install [-d] [-m MODE] [-o OWN] [-g GRP] [-vs] SRC DEST" },
-    { "tr",        applet_tr,        "tr [-dsc] SET1 [SET2]"                                  },
-    { "cut",       applet_cut,       "cut [-bcf] [-d DELIM] [-s] FIELDS [FILE]..."             },
-    /* Phase 4: new builtins */
-    { "mktemp",    applet_mktemp,    "mktemp [-d] [-p DIR] [TEMPLATE]"                         },
-    { "tee",       applet_tee,       "tee [-ai] [FILE]..."                                      },
+    { "basename",  applet_basename,  "basename NAME [SUFFIX] | -a [-s SUFFIX] NAME..."         },
+    { "cat",       applet_cat,       "cat [-nbsvAet] [FILE]..."                                 },
+    { "chmod",     applet_chmod,     "chmod [-Rv] [--reference=RFILE] MODE FILE..."             },
+    { "cp",        applet_cp,        "cp [-rRpfivLHPantuT] SOURCE... DEST"                      },
+    { "cut",       applet_cut,       "cut [-bcf] [-d DELIM] [-s] FIELDS [FILE]..."              },
+    { "date",      applet_date,      "date [-u] [-d DATE] [+FORMAT]"                            },
+    { "dirname",   applet_dirname,   "dirname NAME..."                                           },
+    { "echo",      applet_echo,      "echo [-neE] [STRING]..."                                  },
     { "env",       applet_env,       "env [-i] [-u NAME] [NAME=VAL]... [CMD [ARG]...]"          },
+    { "find",      applet_find,      "find [PATH...] [EXPRESSION]"                              },
+    { "grep",      applet_grep,      "grep [-EFciln qsvwr] [-e PAT] [-f FILE] PATTERN [FILE]..." },
+    { "head",      applet_head,      "head [-n N] [-c N] [-qv] [FILE]..."                       },
+    { "install",   applet_install,   "install [-d] [-m MODE] [-o OWN] [-g GRP] [-vs] SRC DEST" },
+    { "ln",        applet_ln,        "ln [-sfvnrT] TARGET LINK_NAME"                            },
+    { "mkdir",     applet_mkdir,     "mkdir [-pvm MODE] DIR..."                                 },
+    { "mktemp",    applet_mktemp,    "mktemp [-d] [-p DIR] [TEMPLATE]"                          },
+    { "mv",        applet_mv,        "mv [-finuvT] SOURCE... DEST"                              },
+    { "printf",    applet_printf,    "printf FORMAT [ARG]..."                                   },
+    { "readlink",  applet_readlink,  "readlink [-femn qz] FILE..."                              },
     { "realpath",  applet_realpath,  "realpath [-m] [--relative-to=DIR] PATH..."                },
+    { "rm",        applet_rm,        "rm [-rRfiv] FILE..."                                      },
+    { "sed",       applet_sed,       "sed [-nEi] [-e SCRIPT] [-f FILE] [FILE]..."               },
+    { "sh",        applet_sh,        "sh [-ceiuxo] [SCRIPT] [ARG]..."                           },
     { "sha256sum", applet_sha256sum, "sha256sum [-c] [FILE]..."                                 },
+    { "sort",      applet_sort,      "sort [-bdfginrsu] [-o FILE] [-t SEP] [-k KEY] [FILE]..."  },
+    { "stat",      applet_stat,      "stat [-c FORMAT] [-ft] FILE..."                           },
+    { "tail",      applet_tail,      "tail [-n N] [-c N] [-fqv] [FILE]..."                      },
+    { "tee",       applet_tee,       "tee [-ai] [FILE]..."                                      },
+    { "touch",     applet_touch,     "touch [-acmt] [-r REF] [-d DATE] FILE..."                 },
+    { "tr",        applet_tr,        "tr [-dsc] SET1 [SET2]"                                    },
+    { "wc",        applet_wc,        "wc [-clwmL] [FILE]..."                                    },
+    { "xargs",     applet_xargs,     "xargs [-0rP N] [-n N] [-I REPL] [-d DELIM] CMD..."        },
     { NULL, NULL, NULL }
 };
 
-/* Find an applet by name.  Returns NULL if not found. */
+/* B-4: binary search — O(log n) applet dispatch. */
 const applet_t *find_applet(const char *name)
 {
-    for (const applet_t *a = applet_table; a->name; a++) {
-        if (strcmp(a->name, name) == 0)
-            return a;
+    int lo = 0;
+    int hi = (int)(sizeof(applet_table) / sizeof(applet_table[0])) - 2; /* exclude NULL sentinel */
+    while (lo <= hi) {
+        int mid = lo + (hi - lo) / 2;
+        int cmp = strcmp(applet_table[mid].name, name);
+        if (cmp == 0) return &applet_table[mid];
+        if (cmp < 0)  lo = mid + 1;
+        else          hi = mid - 1;
     }
     return NULL;
 }
@@ -167,6 +172,13 @@ int main(int argc, char **argv)
     /* If invoked as "matchbox" directly, handle meta-commands */
     if (strcmp(invname, "matchbox") == 0) {
         if (argc < 2 || strcmp(argv[1], "--help") == 0) {
+            /* When stdin is not a tty, act as a shell (POSIX sh semantics).
+             * This allows: echo "echo hello" | matchbox
+             *              matchbox < script.sh */
+            if (argc < 2 && !isatty(STDIN_FILENO)) {
+                const applet_t *sh = find_applet("sh");
+                if (sh) return sh->fn(argc, argv);
+            }
             print_help();
             return 0;
         }

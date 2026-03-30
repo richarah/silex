@@ -142,6 +142,7 @@ UTIL_SRCS = \
     $(SRCDIR)/util/platform.c \
     $(SRCDIR)/util/charclass.c \
     $(SRCDIR)/util/intern.c \
+    $(SRCDIR)/util/vcsignore.c \
     $(LINESCAN_SRC) \
     $(REGEX_SRCS)
 

@@ -9,6 +9,7 @@
 #include "../util/strbuf.h"
 #include "../util/charclass.h"
 #include "../util/regex/regex.h"
+#include "../util/vcsignore.h"
 
 #include <ctype.h>
 #include <dirent.h>
@@ -67,6 +68,16 @@ typedef struct {
     int   n_include;
     char *exclude_globs[MAX_GLOBS];
     int   n_exclude;
+
+    /* Prefilter: required first literal byte (0 = disabled) */
+    unsigned char prefilter_char;
+
+    /* --vcs: skip VCS dirs, hidden files, binary files */
+    int opt_vcs;
+    /* -S: smart case (case-insensitive when pattern is all-lowercase) */
+    int opt_smart;
+    /* VCS ignore context (loaded when opt_vcs) */
+    vcsignore_t *vcs_ign;
 } grep_opts_t;
 
 /* ------------------------------------------------------------------ */
@@ -183,6 +194,18 @@ static int regex_match(const mb_regex *re, const char *line, int opt_w)
 /* Compile all patterns into mb_compiled[]. */
 static int compile_patterns(grep_opts_t *g)
 {
+    /* Smart case (-S): if all patterns are all-lowercase, enable -i.
+     * Explicit -i always wins. */
+    if (g->opt_smart && !g->opt_i) {
+        int all_lower = 1;
+        for (int j = 0; j < g->npatterns && all_lower; j++) {
+            for (const char *c = g->patterns[j]; *c; c++) {
+                if (isupper((unsigned char)*c)) { all_lower = 0; break; }
+            }
+        }
+        if (all_lower) g->opt_i = 1;
+    }
+
     int mb_flags = MB_REG_NOSUB;
     if (g->opt_E)
         mb_flags |= MB_REG_ERE;
@@ -199,6 +222,11 @@ static int compile_patterns(grep_opts_t *g)
         }
         g->compiled_ok[i] = 1;
     }
+
+    /* Prefilter: single pattern, not inverted, not case-insensitive */
+    if (g->npatterns == 1 && !g->opt_v && !g->opt_i && g->compiled_ok[0])
+        g->prefilter_char = mb_regex_first_char(g->mb_compiled[0]);
+
     return 0;
 }
 
@@ -408,6 +436,19 @@ static int grep_stream(FILE *fp, const char *filename,
             linelen--;
         }
 
+        /* Prefilter: if required first char is absent, line cannot match */
+        if (g->prefilter_char &&
+            !memchr(linebuf, g->prefilter_char, (size_t)linelen)) {
+            if (ctx_B > 0) {
+                free(before_buf[before_pos]);
+                before_buf[before_pos]  = strdup(linebuf);
+                before_lnum[before_pos] = linenum;
+                before_pos = (before_pos + 1) % ctx_B;
+                if (!before_full && before_pos == 0) before_full = 1;
+            }
+            continue;
+        }
+
         int matched = line_matches_any(linebuf, g);
         if (g->opt_v) matched = !matched;
 
@@ -608,6 +649,25 @@ static int grep_dir(const char *dirpath, const grep_opts_t *g)
         if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0)
             continue;
 
+        /* --vcs: skip hidden entries and VCS/noise dirs */
+        if (g->opt_vcs) {
+            if (ent->d_name[0] == '.') continue; /* hidden */
+            int is_dir = 0;
+#ifdef DT_DIR
+            if (ent->d_type == DT_DIR)      is_dir = 1;
+            else if (ent->d_type == DT_UNKNOWN) {
+                struct stat st2;
+                char tmp[PATH_MAX];
+                if (path_join(dirpath, ent->d_name, tmp) && lstat(tmp, &st2) == 0)
+                    is_dir = S_ISDIR(st2.st_mode);
+            }
+#endif
+            if (vcsignore_skip_name(ent->d_name, is_dir)) continue;
+            /* Check .gitignore rules against basename (handles *.ext, dir/) */
+            if (g->vcs_ign && vcsignore_match(g->vcs_ign, ent->d_name, is_dir))
+                continue;
+        }
+
         char child[PATH_MAX];
         if (!path_join(dirpath, ent->d_name, child)) {
             err_msg("grep", "path too long: %s/%s", dirpath, ent->d_name);
@@ -654,12 +714,35 @@ static int grep_path(const char *path, int show_fname, const grep_opts_t *g)
     if (glob_excluded(path_basename(path), g))
         return 1;
 
+    /* --vcs: skip hidden files and noise extensions */
+    if (g->opt_vcs) {
+        const char *base = path_basename(path);
+        if (base[0] == '.') return 1;  /* hidden */
+        if (vcsignore_skip_name(base, 0)) return 1;
+        /* Check .gitignore rules against basename */
+        if (g->vcs_ign && vcsignore_match(g->vcs_ign, base, 0)) return 1;
+    }
+
+    /* --vcs: silently skip binary files (null-byte check in first 512 bytes).
+     * Use raw read(2) before fopen to avoid stdio buffering interactions. */
+    if (g->opt_vcs) {
+        int bfd = open(path, O_RDONLY);
+        if (bfd >= 0) {
+            char probe[512];
+            ssize_t nr = read(bfd, probe, sizeof(probe));
+            close(bfd);
+            if (nr > 0 && memchr(probe, '\0', (size_t)nr))
+                return 1; /* binary: skip silently */
+        }
+    }
+
     FILE *fp = fopen(path, "r");
     if (!fp) {
         if (!g->opt_s)
             err_sys("grep", "%s", path);
         return 2;
     }
+
     posix_fadvise(fileno(fp), 0, 0, POSIX_FADV_SEQUENTIAL); /* advisory */
     /* Enlarge stdio read buffer to reduce getline() syscall overhead.
      * Must supply an explicit buffer — passing NULL to setvbuf() still uses
@@ -723,6 +806,7 @@ static void grep_opts_free(grep_opts_t *g)
         if (g->compiled_ok[i] && g->mb_compiled[i])
             mb_regex_free(g->mb_compiled[i]);
     }
+    if (g->vcs_ign) { vcsignore_free(g->vcs_ign); g->vcs_ign = NULL; }
 }
 
 /* ------------------------------------------------------------------ */
@@ -733,6 +817,10 @@ int applet_grep(int argc, char **argv)
 {
     grep_opts_t g;
     memset(&g, 0, sizeof(g));
+
+    /* MATCHBOX_SMART=1: enable smart-case and VCS-aware mode by default */
+    if (getenv("MATCHBOX_SMART") && strcmp(getenv("MATCHBOX_SMART"), "1") == 0)
+        g.opt_smart = 1;
 
     /* --color: only if stdout is a tty */
     int color_auto = isatty(STDOUT_FILENO);
@@ -763,6 +851,8 @@ int applet_grep(int argc, char **argv)
         if (strcmp(arg, "--invert-match")    == 0)   { g.opt_v = 1; continue; }
         if (strcmp(arg, "--word-regexp")     == 0)   { g.opt_w = 1; continue; }
         if (strcmp(arg, "--recursive")       == 0)   { g.opt_r = 1; continue; }
+        if (strcmp(arg, "--vcs")             == 0)   { g.opt_vcs = 1; g.opt_r = 1; continue; }
+        if (strcmp(arg, "--smart-case")      == 0)   { g.opt_smart = 1; continue; }
         if (strcmp(arg, "--color")           == 0 ||
             strcmp(arg, "--colour")          == 0 ||
             strcmp(arg, "--color=always")    == 0 ||
@@ -834,6 +924,7 @@ int applet_grep(int argc, char **argv)
             case 'w': g.opt_w = 1; break;
             case 'r': case 'R': g.opt_r = 1; break;
             case 'o': g.opt_o = 1; break;
+            case 'S': g.opt_smart = 1; break;
             case 'm': {
                 const char *val;
                 if (p[1]) { val = p + 1; stop = 1; }
@@ -949,6 +1040,24 @@ int applet_grep(int argc, char **argv)
         }
         g.npatterns = 1;
         i++;
+    }
+
+    /* MATCHBOX_SMART: when smart mode is active and recursive, enable --vcs */
+    if (g.opt_smart && g.opt_r && !g.opt_vcs)
+        g.opt_vcs = 1;
+
+    /* Load VCS ignore rules when --vcs.
+     * Use the first directory argument as the root, falling back to ".". */
+    if (g.opt_vcs) {
+        const char *vcs_root = ".";
+        for (int k = i; k < argc; k++) {
+            struct stat vst;
+            if (stat(argv[k], &vst) == 0 && S_ISDIR(vst.st_mode)) {
+                vcs_root = argv[k];
+                break;
+            }
+        }
+        g.vcs_ign = vcsignore_load(vcs_root);
     }
 
     /* Compile regex patterns unless -F */

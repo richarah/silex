@@ -295,6 +295,71 @@ static int dfa_find_or_create(dfa_cache_t *cache, const mb_prog *prog,
     return -1;
 }
 
+/* ---- O(n*k) fast search for match-only queries --------------------------- */
+
+/*
+ * Classic Thompson NFA leftmost-match: instead of restarting from every start
+ * position (O(n^2*k)), add the start state at each position and carry live
+ * threads forward.  This is O(n*k) where k = NFA states.
+ *
+ * Only called when out==NULL (no match position needed) and anchor_bol==0
+ * (unanchored search).  Anchored patterns (^foo) are handled naturally: the
+ * I_BOL instruction in the NFA won't advance unless we're at a BOL position.
+ */
+HOT static int thompson_search_nosub(const mb_prog *prog, int flags,
+                                      const char *text, size_t n)
+{
+    int newline_mode = (flags & MB_REG_NEWLINE) != 0;
+    nfa_list list_a, list_b;
+    nfa_list *pclist = &list_a, *pnlist = &list_b;
+
+    /* Check for zero-length match at position 0 (empty pattern, etc.) */
+    pclist->n   = 0;
+    pclist->gen = ++global_gen;
+    memset(state_last, 0, (size_t)prog->len * sizeof(int));
+    addstate(prog, pclist, 0, 0);
+    process_assertions(prog, flags, pclist, /*at_bol=*/1, n == 0);
+    if (contains_match(prog, pclist)) return 1;
+    if (n == 0) return 0;
+
+    /* Reset for main pass; new gen makes old state_last entries stale */
+    pclist->n   = 0;
+    pclist->gen = ++global_gen;
+
+    for (size_t i = 0; i < n; i++) {
+        int at_bol = (i == 0) ||
+                     (newline_mode && i > 0 && text[i - 1] == '\n');
+
+        /* Start a new match attempt from position i */
+        addstate(prog, pclist, 0, 0);
+        if (at_bol)
+            process_assertions(prog, flags, pclist, /*at_bol=*/1, 0);
+
+        unsigned char c = (unsigned char)text[i];
+        step(prog, flags, pclist, c, pnlist, 0);
+
+        int at_eol_next = (i + 1 >= n) ||
+                          (newline_mode && text[i + 1] == '\n');
+        int at_bol_next = newline_mode && c == '\n';
+        process_assertions(prog, flags, pnlist, at_bol_next, at_eol_next);
+
+        if (contains_match(prog, pnlist)) return 1;
+
+        /* Swap pointers instead of copying 16 KB of state data */
+        nfa_list *tmp = pclist;
+        pclist = pnlist;
+        pnlist = tmp;
+    }
+
+    /* EOL assertion at end of string */
+    if (pclist->n > 0) {
+        process_assertions(prog, flags, pclist, 0, 1);
+        if (contains_match(prog, pclist)) return 1;
+    }
+
+    return 0;
+}
+
 /* ---- Main search function ------------------------------------------------- */
 
 HOT int mb_thompson_search(const mb_prog *prog, int flags,
@@ -302,6 +367,10 @@ HOT int mb_thompson_search(const mb_prog *prog, int flags,
                             mb_match *out, int anchor_bol)
 {
     if (!prog || prog->len == 0) return 0;
+
+    /* Fast O(n*k) path for match-only, unanchored queries (grep hot path) */
+    if (out == NULL && !anchor_bol)
+        return thompson_search_nosub(prog, flags, text, n);
 
     int newline_mode = (flags & MB_REG_NEWLINE) != 0;
 

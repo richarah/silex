@@ -65,6 +65,7 @@ int shell_init(shell_ctx_t *sh, int argc, char **argv)
     memset(sh, 0, sizeof(*sh));
 
     arena_init(&sh->parse_arena);
+    arena_init(&sh->scratch_arena);
     vars_init(&sh->vars, &sh->parse_arena);
     job_list_init(&sh->jobs);
 
@@ -162,6 +163,8 @@ int shell_run_string(shell_ctx_t *sh, const char *script)
         if (!sh->opt_n) {
             rc = exec_node(sh, node);
             sh->last_exit = rc;
+            /* Reclaim scratch expansion memory after each top-level command */
+            arena_reset(&sh->scratch_arena);
             if (errexit_should_stop(sh, rc))
                 break;
         }
@@ -199,6 +202,7 @@ int shell_run_file(shell_ctx_t *sh, const char *path)
         if (!sh->opt_n) {
             rc = exec_node(sh, node);
             sh->last_exit = rc;
+            arena_reset(&sh->scratch_arena);
             if (errexit_should_stop(sh, rc))
                 break;
         }
@@ -242,6 +246,7 @@ int shell_run_stdin(shell_ctx_t *sh)
         if (!sh->opt_n) {
             rc = exec_node(sh, node);
             sh->last_exit = rc;
+            arena_reset(&sh->scratch_arena);
             if (errexit_should_stop(sh, rc))
                 break;
         }
@@ -267,6 +272,7 @@ void shell_free(shell_ctx_t *sh)
 {
     path_cache_clear(sh);
     arena_free(&sh->parse_arena);
+    arena_free(&sh->scratch_arena);
     /* job list nodes were malloc'd */
     job_t *j = sh->jobs.head;
     while (j) {

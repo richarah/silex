@@ -12,6 +12,7 @@
 #include "../util/path.h"
 #include "../util/section.h"
 #include "../util/strbuf.h"
+#include "../util/vcsignore.h"
 
 #include <ctype.h>
 #include <dirent.h>
@@ -49,13 +50,14 @@ typedef enum {
     PRED_PERM,
     PRED_USER,
     PRED_GROUP,
-    PRED_EXEC,       /* -exec ... ; */
-    PRED_EXEC_PLUS,  /* -exec ... + */
-    PRED_MAXDEPTH,   /* not a predicate, stored separately */
+    PRED_EXEC,          /* -exec ... ; */
+    PRED_EXEC_PLUS,     /* -exec ... + */
+    PRED_MAXDEPTH,      /* not a predicate, stored separately */
     PRED_MINDEPTH,
     PRED_AND,
     PRED_OR,
     PRED_NOT,
+    PRED_CHANGED_WITHIN, /* --changed-within TIME_SPEC */
 } pred_type_t;
 
 /* Size unit */
@@ -91,8 +93,9 @@ typedef struct expr_node {
     /* PRED_TYPE */
     char         ftype; /* f/d/l/b/c/p/s */
 
-    /* PRED_NEWER */
+    /* PRED_NEWER / PRED_CHANGED_WITHIN */
     time_t       newer_mtime;
+    time_t       changed_within_secs; /* seconds threshold */
 
     /* PRED_MTIME / PRED_ATIME */
     cmp_t        time_cmp;
@@ -134,6 +137,9 @@ typedef struct {
     int    follow_symlinks; /* -L */
     int    has_action;      /* did user specify -print, -exec, -delete, etc. */
     unsigned int statx_mask; /* O-11: minimal statx mask for this query */
+    int    opt_vcs;          /* --vcs: skip VCS dirs and hidden entries */
+    int    opt_smart;        /* -S: smart case for -name (all-lower -> -iname) */
+    vcsignore_t *vcs_ign;    /* loaded when opt_vcs */
 } find_args_t;
 
 /* ------------------------------------------------------------------ */
@@ -321,7 +327,15 @@ static expr_node_t *parse_primary(find_args_t *fa)
     if (strcmp(arg, "-name") == 0) {
         const char *pat = next_arg(fa);
         if (!pat) { err_msg("find", "-name requires argument"); return NULL; }
-        expr_node_t *n = node_new(PRED_NAME);
+        /* -S smart case: if pattern is all-lowercase, treat as -iname */
+        pred_type_t ntype = PRED_NAME;
+        if (fa->opt_smart) {
+            int has_upper = 0;
+            for (const char *c = pat; *c; c++)
+                if (isupper((unsigned char)*c)) { has_upper = 1; break; }
+            if (!has_upper) ntype = PRED_INAME;
+        }
+        expr_node_t *n = node_new(ntype);
         if (!n) return NULL;
         n->pattern = strdup(pat);
         if (!n->pattern) { err_msg("find", "out of memory"); node_free(n); return NULL; }
@@ -374,6 +388,33 @@ static expr_node_t *parse_primary(find_args_t *fa)
         expr_node_t *n = node_new(PRED_NEWER);
         if (!n) return NULL;
         n->newer_mtime = st.st_mtime;
+        return n;
+    }
+
+    if (strcmp(arg, "--changed-within") == 0) {
+        const char *val = next_arg(fa);
+        if (!val) { err_msg("find", "--changed-within requires argument"); return NULL; }
+        /* Parse TIME_SPEC: e.g. 30s, 10m, 2h, 1d, 1w */
+        char *end;
+        long n_val = strtol(val, &end, 10);
+        if (end == val || n_val <= 0) {
+            err_msg("find", "--changed-within: invalid time spec '%s'", val);
+            return NULL;
+        }
+        long secs;
+        switch (*end) {
+        case 's': case 'S': case '\0': secs = n_val; break;
+        case 'm': case 'M':            secs = n_val * 60; break;
+        case 'h': case 'H':            secs = n_val * 3600; break;
+        case 'd': case 'D':            secs = n_val * 86400; break;
+        case 'w': case 'W':            secs = n_val * 604800; break;
+        default:
+            err_msg("find", "--changed-within: unknown unit '%c' (use s/m/h/d/w)", *end);
+            return NULL;
+        }
+        expr_node_t *n = node_new(PRED_CHANGED_WITHIN);
+        if (!n) return NULL;
+        n->changed_within_secs = (time_t)secs;
         return n;
     }
 
@@ -524,6 +565,10 @@ static expr_node_t *parse_primary(find_args_t *fa)
         n->exec_plus_braces_idx = braces_idx;
         return n;
     }
+
+    /* Global flags consumed during pre-scan; ignore if encountered in expr */
+    if (strcmp(arg, "--vcs") == 0 || strcmp(arg, "-S") == 0)
+        return node_new(PRED_TRUE);
 
     /* Unknown primary */
     err_msg("find", "unknown primary '%s'", arg);
@@ -709,6 +754,11 @@ static HOT int eval_expr(expr_node_t *n, const char *path, const char *basename_
     case PRED_NEWER:
         return st->st_mtime > n->newer_mtime;
 
+    case PRED_CHANGED_WITHIN: {
+        time_t now = time(NULL);
+        return st->st_mtime >= (now - n->changed_within_secs);
+    }
+
     case PRED_MTIME: {
         time_t now = time(NULL);
         long days = (long)((now - st->st_mtime) / 86400);
@@ -795,7 +845,7 @@ static unsigned int compute_needed_mask(const expr_node_t *n)
     switch (n->type) {
     case PRED_SIZE:
         mask |= STATX_SIZE; break;
-    case PRED_MTIME: case PRED_NEWER:
+    case PRED_MTIME: case PRED_NEWER: case PRED_CHANGED_WITHIN:
         mask |= STATX_MTIME; break;
     case PRED_ATIME:
         mask |= STATX_ATIME; break;
@@ -940,6 +990,30 @@ static void walk_dir(const char *path, int depth, walk_ctx_t *ctx)
         if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0)
             continue;
 
+        /* --vcs: skip hidden entries and VCS/noise directories */
+        if (ctx->fa->opt_vcs) {
+            if (ent->d_name[0] == '.') continue;
+            int is_dir = 0;
+#ifdef DT_DIR
+            if (ent->d_type == DT_DIR)
+                is_dir = 1;
+            else if (ent->d_type == DT_UNKNOWN) {
+                /* probe with stat only for potential dirs */
+                char probe[PATH_MAX];
+                if (path_join(path, ent->d_name, probe)) {
+                    struct stat pst;
+                    if (lstat(probe, &pst) == 0)
+                        is_dir = S_ISDIR(pst.st_mode);
+                }
+            }
+#endif
+            if (vcsignore_skip_name(ent->d_name, is_dir)) continue;
+            /* Check .gitignore rules against basename */
+            if (ctx->fa->vcs_ign &&
+                vcsignore_match(ctx->fa->vcs_ign, ent->d_name, is_dir))
+                continue;
+        }
+
         char child[PATH_MAX];
         if (!path_join(path, ent->d_name, child)) {
             err_msg("find", "path too long: %s/%s", path, ent->d_name);
@@ -994,6 +1068,12 @@ int applet_find(int argc, char **argv)
     fa.maxdepth = -1; /* unlimited */
     fa.mindepth = 0;
 
+    /* MATCHBOX_SMART=1: enable VCS-aware traversal and smart-case by default */
+    if (getenv("MATCHBOX_SMART") && strcmp(getenv("MATCHBOX_SMART"), "1") == 0) {
+        fa.opt_smart = 1;
+        fa.opt_vcs   = 1;
+    }
+
     /* Collect start paths and locate start of expression */
     int i = 1;
     int n_starts = 0;
@@ -1009,14 +1089,19 @@ int applet_find(int argc, char **argv)
         i++;
     }
 
-    /* Handle -L/-H/-P symlink flags that may appear before paths */
-    /* Re-scan argv[1..] for -L etc. before we set up fa */
+    /* Handle -L/-H/-P symlink flags and global flags (--vcs, -S) that may
+     * appear before paths or anywhere in the expression */
     for (int k = 1; k < argc; k++) {
         if (strcmp(argv[k], "-L") == 0) { fa.follow_symlinks = 1; }
         else if (strcmp(argv[k], "-H") == 0) { fa.follow_symlinks = 0; }
         else if (strcmp(argv[k], "-P") == 0) { fa.follow_symlinks = 0; }
-        else break;
+        else if (strcmp(argv[k], "--vcs") == 0) { fa.opt_vcs = 1; }
+        else if (strcmp(argv[k], "-S") == 0)    { fa.opt_smart = 1; }
     }
+
+    /* Load vcsignore rules if --vcs was requested (use first start path) */
+    if (fa.opt_vcs)
+        fa.vcs_ign = vcsignore_load(n_starts > 0 ? starts[0] : ".");
 
     /* Default start: current directory */
     if (n_starts == 0) {
@@ -1071,5 +1156,6 @@ int applet_find(int argc, char **argv)
     }
 
     node_free(expr);
+    if (fa.vcs_ign) vcsignore_free(fa.vcs_ign);
     return ctx.ret;
 }

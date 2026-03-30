@@ -1,7 +1,7 @@
 # matchbox — Status Audit
 
-**Date:** 2026-03-30 (v0.2.0 released; post-release polish and v0.3.0 prep)
-**Binary:** `build/bin/matchbox` — ~1.6 MB musl static (release), ~318 KB glibc dynamic PIE
+**Date:** 2026-03-31 (v0.2.0 + Verify & Optimise pass)
+**Binary:** `build/bin/matchbox` — ~1.6 MB musl static (release), ~327 KB glibc dynamic PIE
 **Version:** 0.2.0 (released 2026-03-30)
 
 ---
@@ -12,13 +12,13 @@
 |-----------|-------------------|
 | Core builtins | 27 (`src/core/`) |
 | Shell | 8 (`src/shell/`) |
-| Utilities | 14 (`src/util/`) |
+| Utilities | 15 (`src/util/`) |
 | Regex engine | 6 (`src/util/regex/`) |
 | Module system | 2 (`src/module/`) |
 | Batch I/O | 3 (`src/batch/`) |
 | Cache | 2 (`src/cache/`) |
 | Main | 1 (`src/main.c`) |
-| **Total** | **63** |
+| **Total** | **64** |
 
 Headers: matching `.h` for every `.c` plus `matchbox_module.h` (public module API).
 
@@ -93,6 +93,18 @@ Remaining gap:
 | F-03 | `likely()`/`unlikely()` hints in arena, exec, fork | DONE |
 | F-05 | PATH FNV-1a cache with `execv` instead of `execvp` | DONE |
 | L-02 | `cat \| applet` pipe elimination (trivial cat, no fork/pipe) | DONE |
+| V-01 | `vcsignore` gitignore(5) parser (`src/util/vcsignore.c`) | DONE |
+| V-02 | `grep --vcs` / `-S` smart case | DONE |
+| V-03 | `find --vcs` / `-S` / `--changed-within` | DONE |
+| E-01 | `MATCHBOX_SMART=1` env var | DONE |
+| B-1 | `fscache_invalidate_all()` after fork+exec of external commands | DONE |
+| B-2 | `written_by_matchbox` flag + `fscache_insert()` in fscache | DONE |
+| B-3 | Dual arena: `scratch_arena` for expansion temps, reset after each top-level cmd | DONE |
+| B-4 | Sorted applet table + binary search dispatch (O(log n)) | DONE |
+| B-5 | SWAR scalar linescan: 8-byte/cycle newline scanner in `linescan_scalar.c` | DONE |
+| B-7 | `mkdir`/`cp`/`chmod`/`touch` insert stat into fscache after successful write | DONE |
+| B-8 | XC-02 dead command elimination: `mkdir -p` skipped when dirs confirmed in fscache | DONE |
+| B-9 | io_uring: skip for single-op batches (use direct syscall) | DONE |
 
 Regex classifier dispatch order: BMH (literal) → prefix-anchor → full Thompson NFA.
 
@@ -106,7 +118,7 @@ Audit performed 2026-03-30. All FAIL/MISSING items were fixed.
 |-----------|-------|--------|-------|
 | Arena allocator | Max size cap | MISSING | FIXED: `ARENA_MAX_BYTES = 64 MB` in arena.h; abort on excess |
 | Arena allocator | `total_bytes` tracking | MISSING | FIXED: field in `arena_t`; incremented in `arena_alloc` |
-| Arena allocator | Reset between shell commands | FAIL (causes UAF with lexer lookahead) | MITIGATED: 64 MB cap prevents unbounded growth; reset not safe |
+| Arena allocator | Reset between shell commands | FAIL (causes UAF with lexer lookahead) | FIXED (B-3): `scratch_arena` separate from `parse_arena`; scratch reset after each top-level command; parse_arena never reset until shell exit |
 | `strbuf_t` | Max capacity | MISSING | FIXED: `SB_MAX_CAP = 64 MB`; `sb_grow` returns -1 on excess |
 | Intern table | Entry count cap | MISSING | FIXED: `INTERN_MAX_ENTRIES = 1 000 000`; returns original ptr at cap |
 | Intern table | String length bound | MISSING | FIXED: rejects `n > PATH_MAX`; returns original ptr |
@@ -121,6 +133,31 @@ Audit performed 2026-03-30. All FAIL/MISSING items were fixed.
 | Stack usage | `alloca()` | PASS | None present |
 
 **Note:** Makefile now uses `-MMD -MP` to generate header dependency files. This prevents stale object files when headers change (was the root cause of the stack-smashing regression found and fixed this session).
+
+---
+
+## 5c. Conformance Test Suite (2026-03-31)
+
+All results recorded in `tests/conformance/`.
+
+| Suite | Cases | Result | File |
+|-------|-------|--------|------|
+| Quoting/Expansion Q-01..Q-08 | 54 | **54/54 PASS** | quoting-results.md |
+| GNU tool comparison (GNU-01) | 42 | **42/42 PASS** | gnu-compare-results.md |
+| Self-hosting (CONF-04) | 1 | **PASS** | selfhost-results.md |
+| Security tests (SEC-01/02/03) | 12 | **PASS** | security-results.md |
+| Error-path coverage (MUT-03) | 5 | **PASS** | mutation-results.md |
+| Crash inputs (SEC-03) | 7 | **PASS** | crash-test-results.md |
+| Optimisation verification (OPT) | 5 | **PASS** | optimisation-verification.md |
+| Stress tests (STRESS-01/02/03) | 3 | **PASS** | security-results.md |
+
+Key bugs found and fixed during conformance testing:
+- **stdio stdin EOF in pipeline last-stage**: `clearerr(stdin)` + `fflush(stdin)` before `dup2` in `exec_pipeline()` — Q-05-4 (heredoc piped) and Q-08-2 (eval pipeline) now pass.
+- **Division by zero**: `$((1/0))` now prints error to stderr and exits 2 (matches dash).
+- **sort --bogus-flag exit code**: fixed from 1 to 2 (usage error convention).
+- **EPIPE in cat builtin**: silent (matches system cat behaviour in pipelines).
+- **Subshell EXIT trap**: now fires in N_SUBSHELL children before _exit().
+- **Assignment exit code `x=$(false)`**: now propagates cmd-sub exit code (was 0).
 
 ---
 
@@ -210,6 +247,7 @@ No musl-gcc on this machine. `make` builds glibc dynamic PIE.
 | Shell: test_errexit | `tests/unit/shell/test_errexit.sh` | **10** | **0** | 10 |
 | Shell: test_trap | `tests/unit/shell/test_trap.sh` | **8** | **0** | 8 |
 | **Shell total** | — | **203** | **1** | **204** |
+| VCS/smart features | `tests/unit/test_vcs.sh` | **26** | **0** | **26** |
 
 **Compat: 167/167 (all passing)** (up from 54 in v0.2.0; 113 new tests added for previously-uncovered builtins)
 
@@ -233,6 +271,7 @@ No musl-gcc on this machine. `make` builds glibc dynamic PIE.
 | Post-v0.2.0 FP | **COMPLETE** | sha256sum error format; header comments; MARCH→x86-64-v2; build reproducibility verified |
 | Post-v0.2.0 L-01 | **COMPLETE** | `docs/TAR_FEASIBILITY.md` written |
 | Post-v0.2.0 L-02 | **COMPLETE** | `cat \| applet` pipe elimination in exec_pipeline; `docs/PIPE_ELIMINATION.md` |
+| Modern Techniques | **COMPLETE** | `grep --vcs/-S`, `find --vcs/-S/--changed-within`, `MATCHBOX_SMART=1`, `vcsignore` parser; 26/26 tests |
 | Thread-based pipeline | v0.3.0 | Design in PIPE_ELIMINATION.md |
 | tar builtin | v0.3.0 | Design in TAR_FEASIBILITY.md |
 

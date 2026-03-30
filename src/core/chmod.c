@@ -11,6 +11,7 @@
 
 #include "../util/error.h"
 #include "../util/path.h"
+#include "../cache/fscache.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -326,6 +327,13 @@ static void do_chmod(const char *path, const struct stat *st)
         err_sys("chmod", "changing permissions of '%s'", path);
         g_any_error = 1;
         return;
+    }
+
+    /* B-7: update fscache entry with fresh stat (written_by_matchbox=1) */
+    {
+        struct stat fresh;
+        if (stat(path, &fresh) == 0)
+            fscache_insert(path, &fresh);
     }
 
     if (g_verbose) {

@@ -189,6 +189,35 @@ int mb_regex_match(const mb_regex *re, const char *s, size_t n, mb_match *m)
     return 1;
 }
 
+/* ---- mb_regex_first_char -------------------------------------------------- */
+
+unsigned char mb_regex_first_char(const mb_regex *re)
+{
+    if (!re) return 0;
+    switch (re->class) {
+    case MB_CLASS_FIXED:
+    case MB_CLASS_PREFIX:
+    case MB_CLASS_ANCHORED:
+        return re->fixed_len > 0 ? (unsigned char)re->fixed_str[0] : 0;
+    case MB_CLASS_SIMPLE:
+    case MB_CLASS_CHARCLASS:
+        if (re->prog.len > 0) {
+            const mb_instr *in = &re->prog.instrs[0];
+            if (in->op == I_CHAR)
+                return (unsigned char)in->arg.c;
+            /* Skip a leading BOL assertion if the next state is a literal */
+            if (in->op == I_BOL && in->x >= 0 && in->x < re->prog.len) {
+                const mb_instr *in2 = &re->prog.instrs[in->x];
+                if (in2->op == I_CHAR)
+                    return (unsigned char)in2->arg.c;
+            }
+        }
+        return 0;
+    default:
+        return 0;
+    }
+}
+
 /* ---- mb_regex_free -------------------------------------------------------- */
 
 void mb_regex_free(mb_regex *re)

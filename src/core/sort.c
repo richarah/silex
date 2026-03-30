@@ -766,6 +766,13 @@ int applet_sort(int argc, char **argv)
             continue;
         }
 
+        /* Unrecognized long option */
+        if (arg[1] == '-') {
+            err_msg("sort", "unrecognized option '%s'", arg);
+            err_usage("sort", "[-bdfginrsuvz] [-t SEP] [-k KEY] [-o FILE] [FILE...]");
+            return 2;
+        }
+
         /* Short flags (clustered) */
         const char *p = arg + 1;
         int stop = 0;
@@ -841,7 +848,7 @@ int applet_sort(int argc, char **argv)
             default:
                 err_msg("sort", "unrecognized option '-%c'", *p);
                 err_usage("sort", "[-bdfginrsuvz] [-t SEP] [-k KEY] [-o FILE] [FILE...]");
-                return 1;
+                return 2;
             }
             p++;
         }

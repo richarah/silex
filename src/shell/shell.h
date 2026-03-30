@@ -19,7 +19,8 @@
 
 typedef struct shell_ctx {
     vars_t      vars;
-    arena_t     parse_arena;
+    arena_t     parse_arena;   /* persistent: AST, tokens, func defs, traps */
+    arena_t     scratch_arena; /* scratch: expansion temporaries; reset between top-level commands */
     job_list_t  jobs;
     int         last_exit;   /* $? */
     int         opt_e;       /* set -e */

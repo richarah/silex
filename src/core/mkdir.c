@@ -110,7 +110,13 @@ static int mkdir_p(const char *path, mode_t mode, int verbose)
                             }
                             /* EEXIST: created by another process; OK */
                         } else {
-                            fscache_invalidate(tmp);
+                            /* B-7: insert fresh stat into fscache (written_by_matchbox=1)
+                             * so subsequent fscache_stat() calls return a cache hit. */
+                            struct stat newst;
+                            if (stat(tmp, &newst) == 0)
+                                fscache_insert(tmp, &newst);
+                            else
+                                fscache_invalidate(tmp);
                             if (verbose)
                                 printf("mkdir: created directory '%s'\n", tmp);
                         }
