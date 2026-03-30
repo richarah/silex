@@ -31,10 +31,13 @@ typedef struct {
 /*
  * Count statistics for stream fp.
  * Uses fread() into a buffer and scan_newline() for the line-count hot path.
- * Word and max-line-length counting still require byte-by-byte inspection
- * of each character, but we avoid repeated getc() call overhead.
+ *
+ * need_words: 1 when word/maxline counting is also required.
+ * When need_words == 0, the inner per-byte loop is skipped entirely: we
+ * only call scan_newline() to jump between newlines, counting them as we go.
+ * This matches GNU wc's performance for "wc -l" (line-count-only) workloads.
  */
-static int wc_count(FILE *fp, wc_counts_t *c)
+static int wc_count(FILE *fp, wc_counts_t *c, int need_words)
 {
     static char buf[WC_BUF_SIZE];  /* static: avoids large stack alloc */
     memset(c, 0, sizeof(*c));
@@ -53,29 +56,46 @@ static int wc_count(FILE *fp, wc_counts_t *c)
         const char *p   = buf;
         const char *end = buf + nr;
 
-        while (p < end) {
-            /* Jump to the next newline using vectorised scan */
-            const char *nl = scan_newline(p, (size_t)(end - p));
-
-            /* Process bytes between p and nl (none contain '\n') */
-            while (p < nl) {
-                unsigned char ch = (unsigned char)*p++;
-                cur_line_len++;
-                if (isspace(ch)) {
-                    in_word = 0;
+        if (!need_words) {
+            /*
+             * Fast path: line-count (and byte-count) only.
+             * Skip the per-byte word/maxline loop; use scan_newline() to
+             * jump directly to each '\n', increment lines, and continue.
+             */
+            while (p < end) {
+                const char *nl = scan_newline(p, (size_t)(end - p));
+                if (nl < end) {
+                    c->lines++;
+                    p = nl + 1;
                 } else {
-                    if (!in_word) { c->words++; in_word = 1; }
+                    break;
                 }
             }
+        } else {
+            while (p < end) {
+                /* Jump to the next newline using vectorised scan */
+                const char *nl = scan_newline(p, (size_t)(end - p));
 
-            if (p < end) {
-                /* *p == '\n' */
-                c->lines++;
-                if (cur_line_len > c->maxline)
-                    c->maxline = cur_line_len;
-                cur_line_len = 0;
-                in_word = 0;
-                p++;   /* skip the newline */
+                /* Process bytes between p and nl (none contain '\n') */
+                while (p < nl) {
+                    unsigned char ch = (unsigned char)*p++;
+                    cur_line_len++;
+                    if (isspace(ch)) {
+                        in_word = 0;
+                    } else {
+                        if (!in_word) { c->words++; in_word = 1; }
+                    }
+                }
+
+                if (p < end) {
+                    /* *p == '\n' */
+                    c->lines++;
+                    if (cur_line_len > c->maxline)
+                        c->maxline = cur_line_len;
+                    cur_line_len = 0;
+                    in_word = 0;
+                    p++;   /* skip the newline */
+                }
             }
         }
     }
@@ -177,12 +197,15 @@ int applet_wc(int argc, char **argv)
         opt_l = opt_w = opt_c = 1;
     }
 
+    /* need_words: 1 if any of word/maxline/char counting is requested */
+    int need_words = (opt_w || opt_m || opt_L);
+
     int nfiles = argc - i;
 
     if (nfiles == 0) {
         /* stdin only */
         wc_counts_t c;
-        if (wc_count(stdin, &c) != 0) {
+        if (wc_count(stdin, &c, need_words) != 0) {
             err_sys("wc", "read error");
             ret = 1;
         }
@@ -217,7 +240,7 @@ int applet_wc(int argc, char **argv)
             }
             posix_fadvise(fileno(fp), 0, 0, POSIX_FADV_SEQUENTIAL);
         }
-        if (wc_count(fp, &counts[j]) != 0) {
+        if (wc_count(fp, &counts[j], need_words) != 0) {
             err_sys("wc", "read error on '%s'", fname);
             ret = 1;
         }
