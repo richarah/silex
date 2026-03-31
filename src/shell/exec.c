@@ -875,6 +875,10 @@ int exec_node(shell_ctx_t *sh, node_t *node)
             if (node->u.redir_node.redirs)
                 redirect_apply(sh, node->u.redir_node.redirs, &rctx);
             int r = exec_node(sh, node->u.redir_node.body);
+            /* FLOW_RETURN in subshell acts like exit with sh->last_exit */
+            if (r == FLOW_RETURN) r = sh->last_exit;
+            /* Normalize other flow control to 0 (break/continue outside loop) */
+            if (r >= FLOW_BREAK) r = 0;
             sh->last_exit = r;
             /* Fire EXIT trap if set (POSIX: subshell EXIT trap runs on exit) */
             const char *exit_act = sh->traps[0].action;
