@@ -545,6 +545,7 @@ static char *cmd_subst(shell_ctx_t *sh, const char *cmd)
         sub.positional   = sh->positional;
         sub.positional_n = sh->positional_n;
         sub.script_name  = sh->script_name;
+        sub.last_exit    = sh->last_exit;  /* inherit $? */
         memcpy(sub.funcs, sh->funcs, sizeof(sh->funcs)); /* inherit functions */
         shell_run_string(&sub, cmd);
         int ex = sub.last_exit;
@@ -566,8 +567,10 @@ static char *cmd_subst(shell_ctx_t *sh, const char *cmd)
 
     int status;
     waitpid(pid, &status, 0);
-    if (WIFEXITED(status))
-        sh->last_exit = WEXITSTATUS(status);
+    /* Note: We intentionally do NOT update sh->last_exit here.
+     * POSIX says command substitution in word expansion context (e.g., in
+     * case word) should not affect $? until after the word is fully expanded.
+     * The exit status of the substitution is discarded in this context. */
 
     /* Strip trailing newlines (POSIX) */
     while (sb.len > 0 && sb.buf[sb.len - 1] == '\n') {
