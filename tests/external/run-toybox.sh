@@ -71,9 +71,9 @@ if [ -f "scripts/test.sh" ]; then
     echo "$TEST_OUTPUT" | tail -50
 
     # Parse results from output
-    # toybox test.sh prints: "PASS: N FAIL: M" or similar
-    PASS=$(echo "$TEST_OUTPUT" | grep -oE 'PASS.*[0-9]+' | tail -1 | grep -oE '[0-9]+' || echo 0)
-    FAIL=$(echo "$TEST_OUTPUT" | grep -oE 'FAIL.*[0-9]+' | tail -1 | grep -oE '[0-9]+' || echo 0)
+    # toybox test.sh prints one line per test: "PASS: test name" or "FAIL: test name"
+    PASS=$(echo "$TEST_OUTPUT" | grep -cE '^PASS:' || echo 0)
+    FAIL=$(echo "$TEST_OUTPUT" | grep -cE '^FAIL:' || echo 0)
     TOTAL=$((PASS + FAIL))
 
     # If parsing failed, count test files as fallback
