@@ -1213,6 +1213,14 @@ static void expand_into(shell_ctx_t *sh, const char *word, strbuf_t *out,
                         if (pi > 0) sb_appendc(out, '\x01');
                         sb_append(out, sh->positional[pi]);
                     }
+                } else if (*p == '*' && in_dquote) {
+                    /* "$*": join with first char of IFS */
+                    const char *ifs = sh_getvar(sh, "IFS");
+                    char sep = (ifs && ifs[0]) ? ifs[0] : ' ';
+                    for (int pi = 0; pi < sh->positional_n; pi++) {
+                        if (pi > 0) sb_appendc(out, sep);
+                        sb_append(out, sh->positional[pi]);
+                    }
                 } else {
                     char spec[2] = { *p, '\0' };
                     const char *v = sh_getvar(sh, spec);
