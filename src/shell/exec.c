@@ -315,6 +315,20 @@ static char *path_resolve(shell_ctx_t *sh, const char *name,
 
 int exec_simple_cmd(shell_ctx_t *sh, char **words, char **assigns, redir_t *redirs)
 {
+    /* POSIX: expand redirections BEFORE command arguments
+     * This ensures that variable assignments in redirect targets
+     * (like 2>${x=redir}) happen before argument expansions (like ${x=assign}) */
+    for (redir_t *r = redirs; r != NULL; r = r->next) {
+        if (r->op != TOK_DLESS && r->op != TOK_DLESSDASH) {
+            /* Pre-expand redirect target to trigger any variable assignments */
+            char *target = expand_word(sh, r->target);
+            /* Store expanded target back (will be used by redirect_apply later) */
+            if (target && target != r->target) {
+                r->target = arena_strdup(&sh->scratch_arena, target);
+            }
+        }
+    }
+
     /* 1. Expand + apply variable assignments.
      * When no command follows, set in shell scope (normal assignment).
      * When a command follows, set in environment only (env-prefix), cleaned up after. */
