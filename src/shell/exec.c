@@ -887,12 +887,7 @@ int exec_node(shell_ctx_t *sh, node_t *node)
             /* Normalize other flow control to 0 (break/continue outside loop) */
             if (r >= FLOW_BREAK) r = 0;
             sh->last_exit = r;
-            /* Fire EXIT trap if set (POSIX: subshell EXIT trap runs on exit) */
-            const char *exit_act = sh->traps[0].action;
-            if (exit_act != SHELL_TRAP_DEFAULT && exit_act[0] != '\0') {
-                sh->traps[0].action = SHELL_TRAP_DEFAULT;
-                shell_run_string(sh, exit_act);
-            }
+            /* POSIX: EXIT traps do NOT run in subshells, only in the main shell */
             fflush(NULL);
             _exit(r);
         }
