@@ -11,6 +11,7 @@
 #include "../util/error.h"
 #include "../util/path.h"
 #include "../cache/fscache.h"
+#include "../module/registry.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -433,7 +434,15 @@ int applet_cp(int argc, char **argv)
                 opts.follow_cmd = 0;
                 break;
             default:
-                /* Unknown flag: in Phase 1 we fall through to PATH (Phase 4 does module) */
+                /* Try module lookup before error */
+                {
+                    char flag_str[3] = {'-', *p, '\0'};
+                    silex_module_t *mod = registry_lookup("cp", flag_str);
+                    if (mod) {
+                        return mod->handler(argc, argv, 1);
+                    }
+                }
+                /* Unknown flag */
                 fprintf(stderr, "silex: cp: unrecognized option '-%c'\n", *p);
                 fprintf(stderr, "silex: cp: unsupported flag -%c. "
                         "Install silex-gnu-cp module or GNU coreutils.\n", *p);

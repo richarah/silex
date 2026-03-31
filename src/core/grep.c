@@ -10,6 +10,7 @@
 #include "../util/charclass.h"
 #include "../util/regex/regex.h"
 #include "../util/vcsignore.h"
+#include "../module/registry.h"
 
 #include <ctype.h>
 #include <dirent.h>
@@ -43,6 +44,7 @@ typedef struct {
     int opt_l;           /* -l: list filenames only */
     int opt_L;           /* -L: list files with NO match */
     int opt_H;           /* -H: always print filename prefix */
+    int opt_h;           /* -h: never print filename prefix */
     int opt_n;           /* -n: print line numbers */
     int opt_q;           /* -q: quiet */
     int opt_s;           /* -s: suppress file errors */
@@ -51,6 +53,9 @@ typedef struct {
     int opt_r;           /* -r/-R: recursive */
     int opt_color;       /* --color: ANSI highlight */
     int opt_o;           /* -o: only matching portion */
+    int opt_x;           /* -x: match whole line */
+    int opt_b;           /* -b: print byte offset */
+    int opt_Z;           /* -Z: NUL-terminate filenames */
     int max_matches;     /* -m N: stop after N matches (0 = unlimited) */
     int context_A;       /* -A N: N lines of after-context */
     int context_B;       /* -B N: N lines of before-context */
@@ -130,11 +135,22 @@ static int is_word_char(char c)
  * Returns 1 if matched.
  */
 static int fixed_match(const char *line, const char *pattern,
-                       int opt_i, int opt_w)
+                       int opt_i, int opt_w, int opt_x)
 {
     size_t plen = strlen(pattern);
     if (plen == 0)
         return 1;
+
+    /* -x: require exact match of entire line */
+    if (opt_x) {
+        size_t llen = strlen(line);
+        if (llen != plen)
+            return 0;
+        if (opt_i)
+            return strncasecmp(line, pattern, plen) == 0;
+        else
+            return strncmp(line, pattern, plen) == 0;
+    }
 
     const char *p = line;
     for (;;) {
@@ -159,9 +175,17 @@ static int fixed_match(const char *line, const char *pattern,
  * Respects -w (word boundaries checked manually).
  * Returns 1 if matched.
  */
-static int regex_match(const mb_regex *re, const char *line, int opt_w)
+static int regex_match(const mb_regex *re, const char *line, int opt_w, int opt_x)
 {
     size_t len = strlen(line);
+    mb_match m;
+
+    /* -x: require match of entire line */
+    if (opt_x) {
+        if (!mb_regex_search(re, line, len, &m))
+            return 0;
+        return (m.start == line && m.end == line + len);
+    }
 
     if (!opt_w) {
         return mb_regex_search(re, line, len, NULL);
@@ -172,7 +196,6 @@ static int regex_match(const mb_regex *re, const char *line, int opt_w)
     size_t      rem = len;
 
     for (;;) {
-        mb_match m;
         if (!mb_regex_search(re, p, rem, &m))
             return 0;
         int ms = (int)(m.start - line);
@@ -239,11 +262,11 @@ static int line_matches_any(const char *line, const grep_opts_t *g)
     for (int i = 0; i < g->npatterns; i++) {
         int m;
         if (g->opt_F) {
-            m = fixed_match(line, g->patterns[i], g->opt_i, g->opt_w);
+            m = fixed_match(line, g->patterns[i], g->opt_i, g->opt_w, g->opt_x);
         } else {
             if (!g->compiled_ok[i])
                 continue;
-            m = regex_match(g->mb_compiled[i], line, g->opt_w);
+            m = regex_match(g->mb_compiled[i], line, g->opt_w, g->opt_x);
         }
         if (m)
             return 1;
@@ -309,9 +332,9 @@ static void print_line_color_regex(const mb_regex *re, const char *line)
     if (*p != '\0') fputs(p, stdout);
 }
 
-/* Print the line prefix (filename + linenum) into strbuf out */
+/* Print the line prefix (filename + linenum + byte offset) into strbuf out */
 static int grep_print_prefix(strbuf_t *out, const char *filename,
-                              int show_fname, long linenum,
+                              int show_fname, long linenum, long byte_offset,
                               const grep_opts_t *g, int is_context)
 {
     if (show_fname && filename) {
@@ -324,6 +347,10 @@ static int grep_print_prefix(strbuf_t *out, const char *filename,
             if (sb_append(out, filename) != 0) return -1;
             if (sb_appendc(out, is_context ? '-' : ':') != 0) return -1;
         }
+    }
+    if (g->opt_b) {
+        if (sb_appendf(out, "%ld%c", byte_offset,
+                       is_context ? '-' : ':') != 0) return -1;
     }
     if (g->opt_n) {
         if (g->opt_color) {
@@ -387,6 +414,7 @@ static int grep_stream(FILE *fp, const char *filename,
     size_t   linecap = 0;
     ssize_t  linelen;
     long     linenum  = 0;
+    long     byte_offset = 0;  /* -b: track byte position */
     long     count    = 0;
     int      binary   = 0;
     int      result   = 1; /* assume no match */
@@ -399,13 +427,15 @@ static int grep_stream(FILE *fp, const char *filename,
 
     char  **before_buf  = NULL;
     long   *before_lnum = NULL;
+    long   *before_boff = NULL;  /* byte offsets for -b */
     int     before_pos  = 0;
     int     before_full = 0;
     if (ctx_B > 0) {
         before_buf  = calloc((size_t)ctx_B, sizeof(char *));
         before_lnum = calloc((size_t)ctx_B, sizeof(long));
-        if (!before_buf || !before_lnum) {
-            free(before_buf); free(before_lnum);
+        before_boff = calloc((size_t)ctx_B, sizeof(long));
+        if (!before_buf || !before_lnum || !before_boff) {
+            free(before_buf); free(before_lnum); free(before_boff);
             err_msg("grep", "out of memory");
             return 2;
         }
@@ -414,13 +444,15 @@ static int grep_stream(FILE *fp, const char *filename,
     /* Use a strbuf to build output lines */
     strbuf_t out;
     if (sb_init(&out, 256) != 0) {
-        free(before_buf); free(before_lnum);
+        free(before_buf); free(before_lnum); free(before_boff);
         err_msg("grep", "out of memory");
         return 2;
     }
 
     while ((linelen = getline(&linebuf, &linecap, fp)) >= 0) {
+        long line_start_offset = byte_offset;  /* save offset at start of line */
         linenum++;
+        byte_offset += linelen;  /* track byte position (includes newline) */
 
         /* Binary detection: check for NUL bytes */
         if (!binary) {
@@ -443,6 +475,7 @@ static int grep_stream(FILE *fp, const char *filename,
                 free(before_buf[before_pos]);
                 before_buf[before_pos]  = strdup(linebuf);
                 before_lnum[before_pos] = linenum;
+                before_boff[before_pos] = line_start_offset;
                 before_pos = (before_pos + 1) % ctx_B;
                 if (!before_full && before_pos == 0) before_full = 1;
             }
@@ -457,7 +490,7 @@ static int grep_stream(FILE *fp, const char *filename,
             if (after_left > 0 && !g->opt_c && !g->opt_q && !g->opt_l && !g->opt_L) {
                 sb_reset(&out);
                 if (grep_print_prefix(&out, filename, show_fname,
-                                       linenum, g, 1) < 0) goto oom;
+                                       linenum, line_start_offset, g, 1) < 0) goto oom;
                 fputs(sb_str(&out), stdout);
                 fputs(linebuf, stdout);
                 putchar('\n');
@@ -469,6 +502,7 @@ static int grep_stream(FILE *fp, const char *filename,
                 free(before_buf[before_pos]);
                 before_buf[before_pos]  = strdup(linebuf);
                 before_lnum[before_pos] = linenum;
+                before_boff[before_pos] = line_start_offset;
                 before_pos = (before_pos + 1) % ctx_B;
                 if (!before_full && before_pos == 0) before_full = 1;
             }
@@ -489,7 +523,11 @@ static int grep_stream(FILE *fp, const char *filename,
         if (g->opt_q) goto done;
         if (g->opt_L) continue; /* suppress output; track match status only */
         if (g->opt_l) {
-            printf("%s\n", filename ? filename : "(stdin)");
+            if (g->opt_Z && filename) {
+                printf("%s%c", filename, '\0');
+            } else {
+                printf("%s\n", filename ? filename : "(stdin)");
+            }
             goto done;
         }
         if (g->opt_c) {
@@ -497,6 +535,7 @@ static int grep_stream(FILE *fp, const char *filename,
                 free(before_buf[before_pos]);
                 before_buf[before_pos]  = strdup(linebuf);
                 before_lnum[before_pos] = linenum;
+                before_boff[before_pos] = line_start_offset;
                 before_pos = (before_pos + 1) % ctx_B;
                 if (!before_full && before_pos == 0) before_full = 1;
             }
@@ -518,21 +557,22 @@ static int grep_stream(FILE *fp, const char *filename,
                 if (!before_buf[idx] || before_lnum[idx] <= last_printed) continue;
                 sb_reset(&out);
                 if (grep_print_prefix(&out, filename, show_fname,
-                                       before_lnum[idx], g, 1) < 0) goto oom;
+                                       before_lnum[idx], before_boff[idx], g, 1) < 0) goto oom;
                 fputs(sb_str(&out), stdout);
                 fputs(before_buf[idx], stdout);
                 putchar('\n');
                 last_printed = before_lnum[idx];
             }
             for (int k = 0; k < ctx_B; k++) {
-                free(before_buf[k]); before_buf[k] = NULL; before_lnum[k] = 0;
+                free(before_buf[k]); before_buf[k] = NULL;
+                before_lnum[k] = 0; before_boff[k] = 0;
             }
             before_pos = 0; before_full = 0;
         }
 
         /* Build prefix for this matched line */
         sb_reset(&out);
-        if (grep_print_prefix(&out, filename, show_fname, linenum, g, 0) < 0)
+        if (grep_print_prefix(&out, filename, show_fname, linenum, line_start_offset, g, 0) < 0)
             goto oom;
         const char *prefix_str = sb_str(&out);
 
@@ -556,6 +596,7 @@ static int grep_stream(FILE *fp, const char *filename,
             free(before_buf[before_pos]);
             before_buf[before_pos]  = strdup(linebuf);
             before_lnum[before_pos] = linenum;
+            before_boff[before_pos] = line_start_offset;
             before_pos = (before_pos + 1) % ctx_B;
             if (!before_full && before_pos == 0) before_full = 1;
         }
@@ -590,7 +631,7 @@ static int grep_stream(FILE *fp, const char *filename,
 done:
     if (ctx_B > 0) {
         for (int k = 0; k < ctx_B; k++) free(before_buf[k]);
-        free(before_buf); free(before_lnum);
+        free(before_buf); free(before_lnum); free(before_boff);
     }
     sb_free(&out);
     free(linebuf);
@@ -601,7 +642,7 @@ oom:
 cleanup_err:
     if (ctx_B > 0) {
         for (int k = 0; k < ctx_B; k++) free(before_buf[k]);
-        free(before_buf); free(before_lnum);
+        free(before_buf); free(before_lnum); free(before_boff);
     }
     sb_free(&out);
     free(linebuf);
@@ -755,7 +796,11 @@ static int grep_path(const char *path, int show_fname, const grep_opts_t *g)
     fclose(fp);
     /* -L: print filename of files with NO match */
     if (g->opt_L && r == 1) {
-        printf("%s\n", path);
+        if (g->opt_Z) {
+            printf("%s%c", path, '\0');
+        } else {
+            printf("%s\n", path);
+        }
         return 1; /* still "no match" for exit status */
     }
     return r;
@@ -902,6 +947,17 @@ int applet_grep(int argc, char **argv)
             continue;
         }
 
+        /* Unknown long option: try module lookup */
+        if (arg[0] == '-' && arg[1] == '-') {
+            silex_module_t *mod = registry_lookup("grep", arg);
+            if (mod) {
+                grep_opts_free(&g);
+                return mod->handler(argc, argv, i);
+            }
+            err_msg("grep", "unrecognized option '%s'", arg);
+            return 2;
+        }
+
         if (arg[0] != '-' || arg[1] == '\0')
             break;
 
@@ -917,6 +973,7 @@ int applet_grep(int argc, char **argv)
             case 'l': g.opt_l = 1; break;
             case 'L': g.opt_L = 1; break;
             case 'H': g.opt_H = 1; break;
+            case 'h': g.opt_h = 1; break;
             case 'n': g.opt_n = 1; break;
             case 'q': g.opt_q = 1; break;
             case 's': g.opt_s = 1; break;
@@ -924,6 +981,9 @@ int applet_grep(int argc, char **argv)
             case 'w': g.opt_w = 1; break;
             case 'r': case 'R': g.opt_r = 1; break;
             case 'o': g.opt_o = 1; break;
+            case 'x': g.opt_x = 1; break;
+            case 'b': g.opt_b = 1; break;
+            case 'Z': g.opt_Z = 1; break;
             case 'S': g.opt_smart = 1; break;
             case 'm': {
                 const char *val;
@@ -1020,6 +1080,15 @@ int applet_grep(int argc, char **argv)
                 break;
             }
             default:
+                /* Try module lookup before error */
+                {
+                    char flag_str[3] = {'-', *p, '\0'};
+                    silex_module_t *mod = registry_lookup("grep", flag_str);
+                    if (mod) {
+                        grep_opts_free(&g);
+                        return mod->handler(argc, argv, i);
+                    }
+                }
                 err_msg("grep", "unrecognized option '-%c'", *p);
                 return 2;
             }
@@ -1080,6 +1149,7 @@ int applet_grep(int argc, char **argv)
             final_result = 2;
     } else {
         int show_fname = (nfiles > 1) || g.opt_r || g.opt_H;
+        if (g.opt_h) show_fname = 0;  /* -h overrides */
         for (int j = i; j < argc; j++) {
             int r = grep_path(argv[j], show_fname, &g);
             if (r == 0)

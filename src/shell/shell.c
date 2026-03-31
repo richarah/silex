@@ -119,6 +119,11 @@ int shell_init(shell_ctx_t *sh, int argc, char **argv)
     const char *pwd = getenv("PWD");
     if (pwd) vars_set(&sh->vars, "PWD", pwd);
 
+    /* POSIX: PPID shall be set to the decimal value of the parent process ID */
+    char ppid_buf[32];
+    snprintf(ppid_buf, sizeof(ppid_buf), "%d", (int)getppid());
+    vars_set(&sh->vars, "PPID", ppid_buf);
+
     /* Initialise all traps to default */
     for (int i = 0; i < NSIG; i++)
         sh->traps[i].action = SHELL_TRAP_DEFAULT;

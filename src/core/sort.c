@@ -9,6 +9,7 @@
 #endif
 
 #include "../util/error.h"
+#include "../module/registry.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -37,6 +38,8 @@ typedef struct {
     int reverse;          /* -r */
     int unique;           /* -u */
     int zero_term;        /* -z */
+    int check_only;       /* -c: check if sorted */
+    int random_sort;      /* -R: random sort */
     char field_sep;       /* -t SEP, '\0' = whitespace */
     int have_sep;         /* 1 if -t was given */
     const char *outfile;  /* -o FILE */
@@ -426,6 +429,19 @@ static int qsort_cmp(const void *pa, const void *pb)
     return compare_lines(la, lb);
 }
 
+/* Random comparison for -R: use original index as tie-breaker with random multiplier */
+static int qsort_cmp_random(const void *pa, const void *pb)
+{
+    const line_t *la = (const line_t *)pa;
+    const line_t *lb = (const line_t *)pb;
+    /* Simple pseudo-random comparison based on line indices */
+    unsigned long ha = (la->idx * 1103515245UL + 12345UL) & 0x7fffffffUL;
+    unsigned long hb = (lb->idx * 1103515245UL + 12345UL) & 0x7fffffffUL;
+    if (ha < hb) return -1;
+    if (ha > hb) return  1;
+    return 0;
+}
+
 /* ---- key definition parser ------------------------------------------------ */
 
 /*
@@ -766,8 +782,12 @@ int applet_sort(int argc, char **argv)
             continue;
         }
 
-        /* Unrecognized long option */
+        /* Unrecognized long option: try module lookup */
         if (arg[1] == '-') {
+            silex_module_t *mod = registry_lookup("sort", arg);
+            if (mod) {
+                return mod->handler(argc, argv, i);
+            }
             err_msg("sort", "unrecognized option '%s'", arg);
             err_usage("sort", "[-bdfginrsuvz] [-t SEP] [-k KEY] [-o FILE] [FILE...]");
             return 2;
@@ -791,6 +811,8 @@ int applet_sort(int argc, char **argv)
             case 'u': g_opts.unique = 1; break;
             case 's': break; /* stable — already our default */
             case 'z': g_opts.zero_term = 1; break;
+            case 'c': g_opts.check_only = 1; break;
+            case 'R': g_opts.random_sort = 1; break;
             case 't': {
                 const char *sep;
                 if (p[1]) { sep = p + 1; stop = 1; }
@@ -846,6 +868,14 @@ int applet_sort(int argc, char **argv)
                 break;
             }
             default:
+                /* Try module lookup before error */
+                {
+                    char flag_str[3] = {'-', *p, '\0'};
+                    silex_module_t *mod = registry_lookup("sort", flag_str);
+                    if (mod) {
+                        return mod->handler(argc, argv, i);
+                    }
+                }
                 err_msg("sort", "unrecognized option '-%c'", *p);
                 err_usage("sort", "[-bdfginrsuvz] [-t SEP] [-k KEY] [-o FILE] [FILE...]");
                 return 2;
@@ -896,7 +926,27 @@ int applet_sort(int argc, char **argv)
 
     if (nlines > 0) {
         g_lines_ptr = lines;
-        qsort(lines, nlines, sizeof(line_t), qsort_cmp);
+
+        /* -c: check if sorted, do not output */
+        if (g_opts.check_only) {
+            for (size_t k = 1; k < nlines; k++) {
+                if (compare_lines(&lines[k - 1], &lines[k]) > 0) {
+                    /* Not sorted */
+                    ret = 1;
+                    goto cleanup;
+                }
+            }
+            /* Sorted: exit 0, no output */
+            ret = 0;
+            goto cleanup;
+        }
+
+        /* Sort: use random comparator if -R, else normal */
+        if (g_opts.random_sort) {
+            qsort(lines, nlines, sizeof(line_t), qsort_cmp_random);
+        } else {
+            qsort(lines, nlines, sizeof(line_t), qsort_cmp);
+        }
 
         if (g_opts.unique)
             nlines = dedup_lines(lines, nlines);

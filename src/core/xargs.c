@@ -6,6 +6,7 @@
 
 #include "../util/error.h"
 #include "../util/strbuf.h"
+#include "../module/registry.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -27,6 +28,7 @@
 typedef struct {
     int    opt_0;       /* -0: NUL delimiter */
     int    opt_r;       /* -r: no-run-if-empty */
+    int    opt_t;       /* -t: trace (print command before execution) */
     int    opt_n;       /* -n MAX: max args per invocation */
     int    opt_P;       /* -P MAX_PROCS: parallel */
     char  *opt_I;       /* -I REPL: replace string */
@@ -337,7 +339,7 @@ static char *replace_str(const char *tmpl, const char *repl, const char *item)
 static int flush_items(char **cmd_argv, int cmd_argc,
                        char **items, int n_items,
                        char **run_av, int av_cap,
-                       int max_procs)
+                       int max_procs, int opt_t)
 {
     int ac = cmd_argc + n_items;
     if (ac + 1 > av_cap) {
@@ -350,6 +352,15 @@ static int flush_items(char **cmd_argv, int cmd_argc,
     for (int k = 0; k < n_items; k++)
         run_av[cmd_argc + k] = items[k];
     run_av[ac] = NULL;
+
+    /* -t: print command to stderr before execution */
+    if (opt_t) {
+        for (int k = 0; k < ac; k++) {
+            if (k > 0) fputc(' ', stderr);
+            fputs(run_av[k], stderr);
+        }
+        fputc('\n', stderr);
+    }
 
     return exec_cmd_parallel(run_av, ac, max_procs);
 }
@@ -383,6 +394,10 @@ int applet_xargs(int argc, char **argv)
         if (strcmp(arg, "-r") == 0 ||
             strcmp(arg, "--no-run-if-empty") == 0) {
             opts.opt_r = 1; continue;
+        }
+
+        if (strcmp(arg, "-t") == 0) {
+            opts.opt_t = 1; continue;
         }
 
         if (strcmp(arg, "-n") == 0) {
@@ -468,6 +483,11 @@ int applet_xargs(int argc, char **argv)
         }
 
         if (arg[0] == '-') {
+            /* Try module lookup for unknown options */
+            silex_module_t *mod = registry_lookup("xargs", arg);
+            if (mod) {
+                return mod->handler(argc, argv, i);
+            }
             err_msg("xargs", "unrecognized option '%s'", arg);
             return 1;
         }
@@ -601,6 +621,15 @@ int applet_xargs(int argc, char **argv)
             if (!ok) break;
             sub_av[sub_ac] = NULL;
 
+            /* -t: print command to stderr before execution */
+            if (opts.opt_t) {
+                for (int k = 0; k < sub_ac; k++) {
+                    if (k > 0) fputc(' ', stderr);
+                    fputs(sub_av[k], stderr);
+                }
+                fputc('\n', stderr);
+            }
+
             int rc = exec_cmd_parallel(sub_av, sub_ac, opts.opt_P);
             if (rc > worst) worst = rc;
 
@@ -631,7 +660,7 @@ int applet_xargs(int argc, char **argv)
             }
 
             int rc = flush_items(cmd_argv, cmd_argc, items, n_items,
-                                 run_av, av_cap, opts.opt_P);
+                                 run_av, av_cap, opts.opt_P, opts.opt_t);
             if (rc > worst) worst = rc;
 
             for (int k = 0; k < n_items; k++) free(items[k]);
@@ -675,7 +704,7 @@ int applet_xargs(int argc, char **argv)
             run_av = tmp;
         }
         int rc = flush_items(cmd_argv, cmd_argc, items, n_items,
-                             run_av, av_cap, opts.opt_P);
+                             run_av, av_cap, opts.opt_P, opts.opt_t);
         if (rc > worst) worst = rc;
 
         for (int k = 0; k < n_items; k++) free(items[k]);
@@ -688,6 +717,16 @@ int applet_xargs(int argc, char **argv)
         for (int k = 0; k < cmd_argc; k++)
             run_av[k] = cmd_argv[k];
         run_av[cmd_argc] = NULL;
+
+        /* -t: print command to stderr before execution */
+        if (opts.opt_t) {
+            for (int k = 0; k < cmd_argc; k++) {
+                if (k > 0) fputc(' ', stderr);
+                fputs(run_av[k], stderr);
+            }
+            fputc('\n', stderr);
+        }
+
         int rc = exec_cmd_parallel(run_av, cmd_argc, opts.opt_P);
         if (rc > worst) worst = rc;
     }

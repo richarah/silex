@@ -13,6 +13,7 @@
 #include "../util/section.h"
 #include "../util/strbuf.h"
 #include "../util/vcsignore.h"
+#include "../module/registry.h"
 
 #include <ctype.h>
 #include <dirent.h>
@@ -569,6 +570,18 @@ static expr_node_t *parse_primary(find_args_t *fa)
     /* Global flags consumed during pre-scan; ignore if encountered in expr */
     if (strcmp(arg, "--vcs") == 0 || strcmp(arg, "-S") == 0)
         return node_new(PRED_TRUE);
+
+    /* Try module lookup for unknown primaries */
+    {
+        silex_module_t *mod = registry_lookup("find", arg);
+        if (mod) {
+            /* Module found, but find uses a different execution model.
+             * For now, we note the module exists but cannot integrate
+             * it into the predicate tree. Return NULL to trigger error.
+             * Future: extend module API to support predicate injection. */
+            (void)mod;
+        }
+    }
 
     /* Unknown primary */
     err_msg("find", "unknown primary '%s'", arg);

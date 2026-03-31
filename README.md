@@ -71,6 +71,52 @@ are verified for ownership and permissions before load.
     make release-glibc    # glibc, dynamic, ~400KB
     make test
 
+## Testing
+
+silex includes comprehensive test suites for validation:
+
+    make test              # Unit tests (C + shell)
+    make compat-test       # Compatibility tests vs GNU tools
+    make integration-test  # Integration tests
+    make security-test     # Security validation
+    make edge-test         # Edge case handling
+
+### External Test Suites
+
+silex integrates 10 battle-tested external test suites for
+conformance validation:
+
+    make external-fetch    # One-time setup (~500MB, 5-10 min)
+    make external-test     # Run all external suites
+
+Suites included:
+
+- **Oils/OSH** (~1500 POSIX shell spec tests)
+- **Smoosh** (157 tests from formal Coq semantics)
+- **modernish** (shell bug catalogue, FTL count must be 0)
+- **mksh** (MirBSD Korn Shell regression tests)
+- **GNU coreutils** (645 tests - the canonical test suite)
+- **GNU grep** (200+ pattern matching tests)
+- **GNU sed** (100+ stream editing tests)
+- **toybox** (upstream tests)
+- **ShellSpec** (BDD framework meta-test)
+- **Autoconf** (real-world configure scripts: curl, CPython, OpenSSL, SQLite, zlib)
+
+Critical requirements enforced in CI:
+- modernish fatal bug (FTL) count must be 0
+- All Autoconf configure scripts must pass (100%)
+
+Individual suites can be run:
+
+    tests/external/run-oils-spec.sh
+    tests/external/run-modernish.sh
+    tests/external/run-configure.sh
+    # ... etc
+
+Results are saved to `tests/external/results/` for triage:
+
+    tests/external/triage.sh results/oils-spec-TIMESTAMP.txt
+
 ## Environment
 
     SILEX_MODULE_PATH   extra module directories

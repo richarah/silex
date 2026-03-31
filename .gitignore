@@ -38,3 +38,7 @@ vgcore.*
 *.gcda
 *.gcno
 coverage/
+
+# External test suites (fetched on demand, not committed)
+tests/external/repos/
+tests/external/results/

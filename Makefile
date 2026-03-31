@@ -255,7 +255,8 @@ TARGET = $(BINDIR)/silex
         bench integration-test fuzz fuzz-run \
         analyze cppcheck test-valgrind cross-check \
         size-check install-hooks musl \
-        stress-test edge-test
+        stress-test edge-test external-test external-fetch \
+        external-test-docker external-fetch-docker
 
 all: RELEASE_OPT = 1
 all: $(TARGET)
@@ -402,6 +403,41 @@ stress-test: $(TARGET)
 edge-test: $(TARGET)
 	@echo "=== Running edge case tests ==="
 	@bash tests/edge/run_edge.sh $(TARGET)
+
+# External test suites (requires prior: make external-fetch)
+# Runs 10 battle-tested external test suites for conformance validation
+external-test: $(TARGET)
+	@echo "=== Running external test suites ==="
+	@if [ ! -d tests/external/repos/oil ]; then \
+	    echo "ERROR: External test repos not found."; \
+	    echo "Run: make external-fetch"; \
+	    exit 1; \
+	fi
+	@bash tests/external/run-all.sh $(TARGET)
+
+# Fetch external test repositories (one-time setup, ~500MB, ~5-10 min)
+external-fetch:
+	@echo "=== Fetching external test suites ==="
+	@bash tests/external/fetch-all.sh
+
+# Docker-based external tests (works on WSL, Mac, Linux, everywhere)
+# Runs all 10 suites in parallel in a real Linux environment
+external-test-docker:
+	@echo "=== Building Docker test image ==="
+	docker build -t silex-test -f tests/external/Dockerfile .
+	@echo "=== Running external tests in Docker ==="
+	docker run --rm \
+	    -v $(PWD)/tests/external/repos:/silex/tests/external/repos \
+	    -v $(PWD)/tests/external/results:/silex/tests/external/results \
+	    silex-test bash tests/external/docker-run.sh
+
+# Fetch repos via Docker (cached via volume mount)
+external-fetch-docker:
+	@echo "=== Fetching external repos via Docker ==="
+	docker build -t silex-test -f tests/external/Dockerfile .
+	docker run --rm \
+	    -v $(PWD)/tests/external/repos:/silex/tests/external/repos \
+	    silex-test make external-fetch
 
 check: $(TARGET)
 	@sh check.sh

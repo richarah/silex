@@ -23,6 +23,7 @@ run_suite() {
 DIR="$(dirname "$0")"
 run_suite "Quoting/Expansion (Q-01..Q-08)" "$DIR/quoting_test.sh"
 run_suite "GNU Tool Comparison (GNU-01)"   "$DIR/gnu_compare.sh"
+run_suite "New GNU Flags (GNU-02)"         "$DIR/new_flags_test.sh"
 
 printf '\nOverall: %d suites passed, %d suites failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

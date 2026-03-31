@@ -6,6 +6,7 @@
 
 #include "../util/error.h"
 #include "../util/path.h"
+#include "../module/registry.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -239,6 +240,7 @@ static int mkdirs(const char *path, mode_t mode)
 int applet_install(int argc, char **argv)
 {
     int opt_d       = 0;
+    int opt_D       = 0;   /* -D: create all leading directories */
     int opt_v       = 0;
     int opt_p       = 0;   /* -p: preserve timestamps */
     int opt_s       = 0;   /* -s: strip */
@@ -283,6 +285,7 @@ int applet_install(int argc, char **argv)
         while (*p && !stop) {
             switch (*p) {
             case 'd': opt_d = 1; break;
+            case 'D': opt_D = 1; break;
             case 'v': opt_v = 1; break;
             case 'p': opt_p = 1; break;
             case 's': opt_s = 1; break;
@@ -356,6 +359,14 @@ int applet_install(int argc, char **argv)
                 break;
             }
             default:
+                /* Try module lookup before error */
+                {
+                    char flag_str[3] = {'-', *p, '\0'};
+                    silex_module_t *mod = registry_lookup("install", flag_str);
+                    if (mod) {
+                        return mod->handler(argc, argv, 1);
+                    }
+                }
                 err_msg("install", "unrecognized option '-%c'", *p);
                 err_usage("install", "[-dvps] [-m MODE] [-o OWNER] [-g GROUP] SRC... DST");
                 return 1;
@@ -383,6 +394,12 @@ int applet_install(int argc, char **argv)
             }
         }
         return ret;
+    }
+
+    /* If -D: ensure we're copying files (not directory creation) */
+    if (opt_D && opt_d) {
+        err_msg("install", "cannot specify both -d and -D");
+        return 1;
     }
 
     /* Normal install: SRC... DST  or  -t DIR SRC... */
@@ -416,6 +433,16 @@ int applet_install(int argc, char **argv)
                 ret = 1;
                 continue;
             }
+
+            /* -D: create leading directories */
+            if (opt_D) {
+                char dir[PATH_MAX];
+                path_dirname(dst, dir);
+                if (mkdirs(dir, 0755) != 0) {
+                    ret = 1; continue;
+                }
+            }
+
             if (opt_suffix && make_backup(dst, opt_suffix) != 0) {
                 ret = 1; continue;
             }
@@ -487,6 +514,15 @@ int applet_install(int argc, char **argv)
                 continue;
             }
             memcpy(dst, dst_arg, len + 1);
+        }
+
+        /* -D: create leading directories */
+        if (opt_D) {
+            char dir[PATH_MAX];
+            path_dirname(dst, dir);
+            if (mkdirs(dir, 0755) != 0) {
+                ret = 1; continue;
+            }
         }
 
         if (opt_suffix && make_backup(dst, opt_suffix) != 0) {

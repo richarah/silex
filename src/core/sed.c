@@ -11,6 +11,7 @@
 #include "../util/error.h"
 #include "../util/path.h"
 #include "../util/strbuf.h"
+#include "../module/registry.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -1329,6 +1330,12 @@ int applet_sed(int argc, char **argv)
         }
 
         if (arg[0] == '-') {
+            /* Try module lookup for unknown options */
+            silex_module_t *mod = registry_lookup("sed", arg);
+            if (mod) {
+                sb_free(&script_buf);
+                return mod->handler(argc, argv, i);
+            }
             err_msg("sed", "unrecognized option '%s'", arg);
             sb_free(&script_buf);
             return 2;
