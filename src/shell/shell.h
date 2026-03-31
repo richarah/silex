@@ -40,6 +40,8 @@ typedef struct shell_ctx {
     } traps[NSIG];
     /* Function definitions: name -> node_t* */
     void       *funcs[256];  /* var_entry_t* array for func lookup */
+    /* Alias definitions: name -> expansion string */
+    void       *aliases[256]; /* alias_entry_t* array for alias lookup */
     pid_t       last_bg_pid; /* $! */
     int         call_depth;  /* function call nesting depth (recursion guard) */
     int         trace_level; /* SILEX_TRACE=1: +cmd, =2: +[builtin/fork/module] tag */

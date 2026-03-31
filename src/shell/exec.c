@@ -194,6 +194,60 @@ static void func_unregister(shell_ctx_t *sh, const char *name)
 }
 
 /* -------------------------------------------------------------------------
+ * Alias registry helpers
+ * Store alias definitions as (name, expansion) pairs.
+ * sh->aliases[256] is used as a simple open-addressing hash.
+ * ------------------------------------------------------------------------- */
+
+typedef struct alias_entry {
+    char *name;
+    char *expansion;
+    struct alias_entry *next;
+} alias_entry_t;
+
+static void alias_register(shell_ctx_t *sh, const char *name, const char *expansion)
+{
+    unsigned int idx = func_hash(name);
+    alias_entry_t *e = sh->aliases[idx];
+    while (e) {
+        if (strcmp(e->name, name) == 0) {
+            e->expansion = arena_strdup(&sh->parse_arena, expansion);
+            return;
+        }
+        e = e->next;
+    }
+    alias_entry_t *ne = arena_alloc(&sh->parse_arena, sizeof(alias_entry_t));
+    ne->name = arena_strdup(&sh->parse_arena, name);
+    ne->expansion = arena_strdup(&sh->parse_arena, expansion);
+    ne->next = sh->aliases[idx];
+    sh->aliases[idx] = ne;
+}
+
+static const char *alias_lookup(shell_ctx_t *sh, const char *name)
+{
+    unsigned int idx = func_hash(name);
+    alias_entry_t *e = sh->aliases[idx];
+    while (e) {
+        if (strcmp(e->name, name) == 0) return e->expansion;
+        e = e->next;
+    }
+    return NULL;
+}
+
+static void alias_unregister(shell_ctx_t *sh, const char *name)
+{
+    unsigned int idx = func_hash(name);
+    alias_entry_t **pp = (alias_entry_t **)&sh->aliases[idx];
+    while (*pp) {
+        if (strcmp((*pp)->name, name) == 0) {
+            *pp = (*pp)->next;
+            return;
+        }
+        pp = &(*pp)->next;
+    }
+}
+
+/* -------------------------------------------------------------------------
  * PATH lookup cache (F-03)
  * Maps command name → resolved absolute path.
  * Invalidated automatically when PATH changes (FNV-1a hash comparison).
