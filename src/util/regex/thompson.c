@@ -79,7 +79,7 @@ HOT const char *mb_bmh_search_icase(const char *haystack, size_t hlen,
 
 /* ---- NFA state list ------------------------------------------------------- */
 
-#define MAX_NFA_STATES MB_MAX_INSTRS
+#define MAX_NFA_STATES SX_MAX_INSTRS
 
 typedef struct {
     int  states[MAX_NFA_STATES];
@@ -95,12 +95,12 @@ static int global_gen = 0;
  * Add state 's' to list 'l', following SPLIT and JUMP transitions recursively.
  * Uses global_gen to avoid adding the same state twice.
  * 'depth' guards against stack overflow from pathological epsilon-closure chains;
- * the cap is MB_MAX_INSTRS (4096) since no chain can be longer than the program.
+ * the cap is SX_MAX_INSTRS (4096) since no chain can be longer than the program.
  */
 static void addstate(const mb_prog *prog, nfa_list *l, int s, int depth)
 {
     if (s < 0 || s >= prog->len) return;
-    if (depth >= MB_MAX_INSTRS) return;        /* recursion depth guard */
+    if (depth >= SX_MAX_INSTRS) return;        /* recursion depth guard */
     if (state_last[s] == l->gen) return;       /* already in list */
     state_last[s] = l->gen;
 
@@ -130,7 +130,7 @@ HOT static void step(const mb_prog *prog, int flags,
     nlist->gen = ++global_gen;
     (void)is_newline_prev;
 
-    int newline_mode = (flags & MB_REG_NEWLINE) != 0;
+    int newline_mode = (flags & SX_REG_NEWLINE) != 0;
 
     for (int i = 0; i < clist->n; i++) {
         int s = clist->states[i];
@@ -194,7 +194,7 @@ HOT static int contains_match(const mb_prog *prog, const nfa_list *l)
 static void process_assertions(const mb_prog *prog, int flags,
                                 nfa_list *l, int at_bol, int at_eol)
 {
-    int newline_mode = (flags & MB_REG_NEWLINE) != 0;
+    int newline_mode = (flags & SX_REG_NEWLINE) != 0;
     (void)newline_mode;
 
     /* Expand BOL/EOL states */
@@ -309,7 +309,7 @@ static int dfa_find_or_create(dfa_cache_t *cache, const mb_prog *prog,
 HOT static int thompson_search_nosub(const mb_prog *prog, int flags,
                                       const char *text, size_t n)
 {
-    int newline_mode = (flags & MB_REG_NEWLINE) != 0;
+    int newline_mode = (flags & SX_REG_NEWLINE) != 0;
     nfa_list list_a, list_b;
     nfa_list *pclist = &list_a, *pnlist = &list_b;
 
@@ -372,7 +372,7 @@ HOT int mb_thompson_search(const mb_prog *prog, int flags,
     if (out == NULL && !anchor_bol)
         return thompson_search_nosub(prog, flags, text, n);
 
-    int newline_mode = (flags & MB_REG_NEWLINE) != 0;
+    int newline_mode = (flags & SX_REG_NEWLINE) != 0;
 
     /* State lists (two-list simulation) */
     nfa_list clist, nlist;

@@ -13,12 +13,12 @@
  */
 mb_class_t mb_classify(const char *pat, int flags)
 {
-    int ere  = (flags & MB_REG_ERE) != 0;
-    int icase = (flags & MB_REG_ICASE) != 0;
+    int ere  = (flags & SX_REG_ERE) != 0;
+    int icase = (flags & SX_REG_ICASE) != 0;
     (void)icase;
 
     if (!pat || *pat == '\0')
-        return MB_CLASS_SIMPLE;  /* empty pattern: always matches */
+        return SX_CLASS_SIMPLE;  /* empty pattern: always matches */
 
     /* Scan for metacharacters */
     int has_meta   = 0;
@@ -103,31 +103,31 @@ mb_class_t mb_classify(const char *pat, int flags)
 
     /* Classify */
     if (has_backref)
-        return MB_CLASS_BACKREF;
+        return SX_CLASS_BACKREF;
 
     if (!has_meta) {
         /* No metacharacters (just literal chars, possibly with anchors) */
         if (has_anchor_bol && has_anchor_eol)
-            return MB_CLASS_ANCHORED;
+            return SX_CLASS_ANCHORED;
         if (has_anchor_bol)
-            return MB_CLASS_PREFIX;
+            return SX_CLASS_PREFIX;
         if (!has_anchor_eol)
-            return MB_CLASS_FIXED;
+            return SX_CLASS_FIXED;
         /* has trailing $ but no ^ (e.g. "abc$"): fall through to Thompson NFA */
     }
 
     /* Has metacharacters but no backrefs */
     if (!has_meta && has_charclass)
-        return MB_CLASS_CHARCLASS;
+        return SX_CLASS_CHARCLASS;
 
-    return MB_CLASS_SIMPLE;
+    return SX_CLASS_SIMPLE;
 }
 
 /*
  * Extract fixed string from a classified pattern.
- * For MB_CLASS_FIXED: returns the literal string.
- * For MB_CLASS_PREFIX: returns string after '^'.
- * For MB_CLASS_ANCHORED: returns string between '^' and '$'.
+ * For SX_CLASS_FIXED: returns the literal string.
+ * For SX_CLASS_PREFIX: returns string after '^'.
+ * For SX_CLASS_ANCHORED: returns string between '^' and '$'.
  * Result stored in buf (buf_size bytes), NUL-terminated.
  * Returns length, or -1 on error.
  */
@@ -138,13 +138,13 @@ int mb_extract_fixed(const char *pat, mb_class_t class,
     size_t len = strlen(pat);
 
     /* Skip leading ^ */
-    if (class == MB_CLASS_PREFIX || class == MB_CLASS_ANCHORED) {
+    if (class == SX_CLASS_PREFIX || class == SX_CLASS_ANCHORED) {
         if (*src == '^') src++;
     }
 
     /* Strip trailing $ */
     size_t src_len = strlen(src);
-    if (class == MB_CLASS_ANCHORED && src_len > 0 && src[src_len - 1] == '$')
+    if (class == SX_CLASS_ANCHORED && src_len > 0 && src[src_len - 1] == '$')
         src_len--;
 
     if (src_len >= buf_size)

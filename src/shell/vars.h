@@ -1,6 +1,6 @@
 /* vars.h — shell variable store */
-#ifndef MATCHBOX_VARS_H
-#define MATCHBOX_VARS_H
+#ifndef SILEX_VARS_H
+#define SILEX_VARS_H
 
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
@@ -40,4 +40,4 @@ int          vars_unset(vars_t *v, const char *name);
 void         vars_export_env(vars_t *v);    /* call setenv for all exported vars */
 void         vars_import_env(vars_t *v);    /* import all environ vars as exported */
 
-#endif /* MATCHBOX_VARS_H */
+#endif /* SILEX_VARS_H */

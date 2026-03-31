@@ -8,8 +8,8 @@ ulimit -d 2097152   # 2 GB data segment
 # Measures grep performance for fixed-string and regex patterns over
 # various file sizes, compared to system grep.
 #
-# Usage: ./bench_grep.sh [MATCHBOX_BINARY] [ITERATIONS]
-#   MATCHBOX_BINARY  path to matchbox binary (default: build/bin/matchbox)
+# Usage: ./bench_grep.sh [SILEX_BINARY] [ITERATIONS]
+#   SILEX_BINARY  path to silex binary (default: build/bin/silex)
 #   ITERATIONS       number of iterations per scenario (default: 200)
 #
 # Output: TSV format
@@ -17,11 +17,11 @@ ulimit -d 2097152   # 2 GB data segment
 
 set -uo pipefail
 
-MATCHBOX="${1:-build/bin/matchbox}"
+SILEX="${1:-build/bin/silex}"
 N="${2:-200}"
 
-if [ ! -x "$MATCHBOX" ]; then
-    echo "ERROR: matchbox binary not found: $MATCHBOX" >&2
+if [ ! -x "$SILEX" ]; then
+    echo "ERROR: silex binary not found: $SILEX" >&2
     exit 1
 fi
 
@@ -38,11 +38,11 @@ printf 'Generating test files...\n' >&2
 python3 -c "
 import sys
 for i in range(10000):
-    print('line %d: foo=bar baz=qux hello world matchbox pattern_here' % i)
+    print('line %d: foo=bar baz=qux hello world silex pattern_here' % i)
 " > "$TMPDIR_GREP/10k.txt" 2>/dev/null || {
     # Fallback without python3
     for i in $(seq 1 10000); do
-        printf 'line %d: foo=bar baz=qux hello world matchbox pattern_here\n' "$i"
+        printf 'line %d: foo=bar baz=qux hello world silex pattern_here\n' "$i"
     done > "$TMPDIR_GREP/10k.txt"
 }
 
@@ -50,10 +50,10 @@ for i in range(10000):
 python3 -c "
 import sys
 for i in range(100000):
-    print('2024-01-01T%02d:%02d:%02d INFO line %d: foo=bar baz=qux hello matchbox' % (i//3600%24, i//60%60, i%60, i))
+    print('2024-01-01T%02d:%02d:%02d INFO line %d: foo=bar baz=qux hello silex' % (i//3600%24, i//60%60, i%60, i))
 " > "$TMPDIR_GREP/100k.txt" 2>/dev/null || {
     for i in $(seq 1 100000); do
-        printf '2024-01-01 INFO line %d: foo=bar baz=qux hello matchbox\n' "$i"
+        printf '2024-01-01 INFO line %d: foo=bar baz=qux hello silex\n' "$i"
     done > "$TMPDIR_GREP/100k.txt"
 }
 
@@ -117,7 +117,7 @@ SGREP=$(command -v grep 2>/dev/null || echo "")
 printf '# grep benchmark: %d iterations per scenario\n' "$N"
 printf '# System: %s\n' "$(uname -srm)"
 printf '# Date:   %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-printf '# matchbox: %s\n' "$MATCHBOX"
+printf '# silex: %s\n' "$SILEX"
 printf '#\n'
 printf 'command\tscenario\tmean_ms\tmin_ms\tmax_ms\tstddev_ms\n'
 
@@ -129,24 +129,24 @@ for size_tag in "10k:$TMPDIR_GREP/10k.txt" "100k:$TMPDIR_GREP/100k.txt"; do
     tag="${size_tag%%:*}"
     file="${size_tag##*:}"
 
-    bench_command "matchbox-grep" \
-        "\"$MATCHBOX\" grep -F 'matchbox' \"$file\"" \
+    bench_command "silex-grep" \
+        "\"$SILEX\" grep -F 'silex' \"$file\"" \
         "$N" "fixed-str-${tag}"
 
     if [ -n "$SGREP" ]; then
         bench_command "system-grep" \
-            "\"$SGREP\" -F 'matchbox' \"$file\"" \
+            "\"$SGREP\" -F 'silex' \"$file\"" \
             "$N" "fixed-str-${tag}"
     fi
 
     # -i case-insensitive fixed string
-    bench_command "matchbox-grep" \
-        "\"$MATCHBOX\" grep -Fi 'MATCHBOX' \"$file\"" \
+    bench_command "silex-grep" \
+        "\"$SILEX\" grep -Fi 'SILEX' \"$file\"" \
         "$N" "fixed-icase-${tag}"
 
     if [ -n "$SGREP" ]; then
         bench_command "system-grep" \
-            "\"$SGREP\" -Fi 'MATCHBOX' \"$file\"" \
+            "\"$SGREP\" -Fi 'SILEX' \"$file\"" \
             "$N" "fixed-icase-${tag}"
     fi
 done
@@ -159,8 +159,8 @@ for size_tag in "10k:$TMPDIR_GREP/10k.txt" "100k:$TMPDIR_GREP/100k.txt"; do
     tag="${size_tag%%:*}"
     file="${size_tag##*:}"
 
-    bench_command "matchbox-grep" \
-        "\"$MATCHBOX\" grep 'line [0-9][0-9]*:' \"$file\"" \
+    bench_command "silex-grep" \
+        "\"$SILEX\" grep 'line [0-9][0-9]*:' \"$file\"" \
         "$N" "bre-${tag}"
 
     if [ -n "$SGREP" ]; then
@@ -169,8 +169,8 @@ for size_tag in "10k:$TMPDIR_GREP/10k.txt" "100k:$TMPDIR_GREP/100k.txt"; do
             "$N" "bre-${tag}"
     fi
 
-    bench_command "matchbox-grep" \
-        "\"$MATCHBOX\" grep -E 'foo=(bar|baz)' \"$file\"" \
+    bench_command "silex-grep" \
+        "\"$SILEX\" grep -E 'foo=(bar|baz)' \"$file\"" \
         "$N" "ere-${tag}"
 
     if [ -n "$SGREP" ]; then
@@ -184,8 +184,8 @@ done
 # No-match (worst case for grep: scans entire file)
 # ---------------------------------------------------------------------------
 
-bench_command "matchbox-grep" \
-    "\"$MATCHBOX\" grep -F 'xyzzy_no_match_here' \"$TMPDIR_GREP/100k.txt\"" \
+bench_command "silex-grep" \
+    "\"$SILEX\" grep -F 'xyzzy_no_match_here' \"$TMPDIR_GREP/100k.txt\"" \
     "$N" "no-match-100k"
 
 if [ -n "$SGREP" ]; then

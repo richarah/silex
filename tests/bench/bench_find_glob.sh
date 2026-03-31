@@ -4,10 +4,10 @@ ulimit -f 1048576   # 1 GB max file size
 ulimit -t 300       # 5 min CPU time per process
 ulimit -d 2097152   # 2 GB data segment
 # bench_find_glob.sh — benchmark find -name with suffix/literal/fnmatch patterns
-# Usage: bash bench_find_glob.sh <matchbox-binary> [iterations]
+# Usage: bash bench_find_glob.sh <silex-binary> [iterations]
 
 set -eu
-MATCHBOX=${1:-build/bin/matchbox}
+SILEX=${1:-build/bin/silex}
 ITERS=${2:-50}
 
 TMPBASE=$(mktemp -d /tmp/bench_find_glob_XXXXXX)
@@ -30,7 +30,7 @@ done
 echo "# find -name glob benchmark: $ITERS iterations, 1000-file tree"
 echo "# System: $(uname -srm)"
 echo "# Date:   $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-echo "# matchbox: $MATCHBOX"
+echo "# silex: $SILEX"
 echo "#"
 echo "command	pattern_type	mean_ms	min_ms	max_ms	stddev_ms"
 
@@ -57,12 +57,12 @@ bench() {
     echo "${label}	${ptype}	${mean}	${min}	${max}	${stdev}"
 }
 
-# matchbox: suffix pattern (*.c) — CGLOB_SUFFIX fast path
-bench "$MATCHBOX find" "suffix-*.c"  "$MATCHBOX" find "$TREE" -name "*.c"
-# matchbox: literal pattern (file0.h) — CGLOB_LITERAL fast path
-bench "$MATCHBOX find" "literal"     "$MATCHBOX" find "$TREE" -name "file0.h"
-# matchbox: full fnmatch ([sf]*.c) — CGLOB_FULL path
-bench "$MATCHBOX find" "fnmatch"     "$MATCHBOX" find "$TREE" -name "[sf]*.c"
+# silex: suffix pattern (*.c) — CGLOB_SUFFIX fast path
+bench "$SILEX find" "suffix-*.c"  "$SILEX" find "$TREE" -name "*.c"
+# silex: literal pattern (file0.h) — CGLOB_LITERAL fast path
+bench "$SILEX find" "literal"     "$SILEX" find "$TREE" -name "file0.h"
+# silex: full fnmatch ([sf]*.c) — CGLOB_FULL path
+bench "$SILEX find" "fnmatch"     "$SILEX" find "$TREE" -name "[sf]*.c"
 # system find for comparison
 bench "system find"    "suffix-*.c"  find "$TREE" -name "*.c"
 

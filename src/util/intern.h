@@ -1,6 +1,6 @@
 /* intern.h — string intern table: deduplicate immutable strings */
-#ifndef MATCHBOX_INTERN_H
-#define MATCHBOX_INTERN_H
+#ifndef SILEX_INTERN_H
+#define SILEX_INTERN_H
 
 #include <stddef.h>
 
@@ -26,4 +26,4 @@ void intern_reset(void);
 size_t intern_count(void);        /* number of distinct interned strings */
 size_t intern_bytes_saved(void);  /* bytes saved vs repeated strdup */
 
-#endif /* MATCHBOX_INTERN_H */
+#endif /* SILEX_INTERN_H */

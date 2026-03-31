@@ -1,6 +1,6 @@
 /* regex_internal.h — internal types shared across the regex engine modules */
-#ifndef MATCHBOX_REGEX_INTERNAL_H
-#define MATCHBOX_REGEX_INTERNAL_H
+#ifndef SILEX_REGEX_INTERNAL_H
+#define SILEX_REGEX_INTERNAL_H
 
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
@@ -16,12 +16,12 @@
 /* ---- Pattern classification --------------------------------------------- */
 
 typedef enum {
-    MB_CLASS_FIXED,      /* no metacharacters → Boyer-Moore-Horspool */
-    MB_CLASS_PREFIX,     /* ^literal → memcmp at line start */
-    MB_CLASS_ANCHORED,   /* ^literal$ → strcmp whole line */
-    MB_CLASS_CHARCLASS,  /* single [class] only → bitmap lookup */
-    MB_CLASS_SIMPLE,     /* no backrefs → Thompson NFA/DFA */
-    MB_CLASS_BACKREF,    /* has \1-\9 → regexec fallback */
+    SX_CLASS_FIXED,      /* no metacharacters → Boyer-Moore-Horspool */
+    SX_CLASS_PREFIX,     /* ^literal → memcmp at line start */
+    SX_CLASS_ANCHORED,   /* ^literal$ → strcmp whole line */
+    SX_CLASS_CHARCLASS,  /* single [class] only → bitmap lookup */
+    SX_CLASS_SIMPLE,     /* no backrefs → Thompson NFA/DFA */
+    SX_CLASS_BACKREF,    /* has \1-\9 → regexec fallback */
 } mb_class_t;
 
 mb_class_t mb_classify(const char *pat, int flags);
@@ -48,7 +48,7 @@ static inline void mb_charclass_set(mb_charclass *cc, unsigned char c) {
 /* ---- NFA instruction set ------------------------------------------------- */
 
 /* Max instructions per compiled pattern */
-#define MB_MAX_INSTRS 4096
+#define SX_MAX_INSTRS 4096
 
 typedef enum {
     I_MATCH,    /* success */
@@ -121,17 +121,17 @@ struct mb_regex {
     mb_class_t  class;
     int         flags;
 
-    /* MB_CLASS_FIXED / PREFIX / ANCHORED: BMH data */
+    /* SX_CLASS_FIXED / PREFIX / ANCHORED: BMH data */
     char        fixed_str[512];
     size_t      fixed_len;
     size_t      bmh_skip[256];
 
-    /* MB_CLASS_SIMPLE / CHARCLASS: NFA program */
+    /* SX_CLASS_SIMPLE / CHARCLASS: NFA program */
     mb_prog     prog;
 
-    /* MB_CLASS_BACKREF: POSIX fallback */
+    /* SX_CLASS_BACKREF: POSIX fallback */
     regex_t     posix_re;
     int         posix_ok;
 };
 
-#endif /* MATCHBOX_REGEX_INTERNAL_H */
+#endif /* SILEX_REGEX_INTERNAL_H */

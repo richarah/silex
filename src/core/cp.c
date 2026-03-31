@@ -283,7 +283,7 @@ static int cp_path(const char *src, const char *dst,
     /* Directory */
     if (S_ISDIR(src_st.st_mode)) {
         if (!opts->recursive) {
-            fprintf(stderr, "matchbox: cp: -r not specified; omitting directory '%s'\n", src);
+            fprintf(stderr, "silex: cp: -r not specified; omitting directory '%s'\n", src);
             return 1;
         }
 
@@ -324,7 +324,7 @@ static int cp_path(const char *src, const char *dst,
     if (opts->interactive) {
         struct stat dst_st;
         if (stat(dst, &dst_st) == 0) {
-            fprintf(stderr, "matchbox: cp: overwrite '%s'? ", dst);
+            fprintf(stderr, "silex: cp: overwrite '%s'? ", dst);
             char resp[8];
             if (fgets(resp, sizeof(resp), stdin) == NULL || resp[0] != 'y')
                 return 0;
@@ -434,8 +434,8 @@ int applet_cp(int argc, char **argv)
                 break;
             default:
                 /* Unknown flag: in Phase 1 we fall through to PATH (Phase 4 does module) */
-                fprintf(stderr, "matchbox: cp: unrecognized option '-%c'\n", *p);
-                fprintf(stderr, "matchbox: cp: unsupported flag -%c. "
+                fprintf(stderr, "silex: cp: unrecognized option '-%c'\n", *p);
+                fprintf(stderr, "silex: cp: unsupported flag -%c. "
                         "Install matchbox-gnu-cp module or GNU coreutils.\n", *p);
                 return 1;
             }
@@ -463,15 +463,15 @@ int applet_cp(int argc, char **argv)
     /* Multiple sources: dst must be directory */
     if (nsrc > 1 && !dst_is_dir) {
         if (dst_exists)
-            fprintf(stderr, "matchbox: cp: target '%s' is not a directory\n", dst);
+            fprintf(stderr, "silex: cp: target '%s' is not a directory\n", dst);
         else
-            fprintf(stderr, "matchbox: cp: target directory '%s': No such file or directory\n", dst);
+            fprintf(stderr, "silex: cp: target directory '%s': No such file or directory\n", dst);
         return 1;
     }
 
     /* -T: dst must NOT be an existing directory (or we'd put things inside) */
     if (opts.no_target && dst_is_dir) {
-        fprintf(stderr, "matchbox: cp: cannot overwrite directory '%s' with non-directory\n", dst);
+        fprintf(stderr, "silex: cp: cannot overwrite directory '%s' with non-directory\n", dst);
         return 1;
     }
 

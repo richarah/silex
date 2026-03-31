@@ -1,15 +1,15 @@
-# matchbox Compatibility Matrix
+# silex Compatibility Matrix
 
 This document lists each builtin tool with its supported flags.
 Columns: POSIX = POSIX-specified, GNU = GNU coreutils extension,
-Core = matchbox builtin, Module = available as loadable .so,
+Core = silex builtin, Module = available as loadable .so,
 Notes = known differences.
 
 Legend: Y = supported, N = not supported, - = not applicable
 
 ## Locale and Character Encoding
 
-matchbox operates in the **C/POSIX locale** for all text processing operations
+silex operates in the **C/POSIX locale** for all text processing operations
 (grep, sed, sort, tr, wc). This matches the expected behaviour in container build
 environments where locale-sensitive collation or multi-byte character handling
 is not required.
@@ -25,7 +25,7 @@ via an external command or install a locale module (v0.3.0 roadmap).
 
 ## POSIX Utility Conventions
 
-All matchbox builtins implement the following POSIX utility conventions:
+All silex builtins implement the following POSIX utility conventions:
 - **`--`**: ends option processing; remaining arguments are operands (all tools)
 - **`-` as stdin**: tools that read file arguments accept `-` to mean standard input
   (cat, grep, sed, sort, wc, head, tail)
@@ -34,7 +34,7 @@ All matchbox builtins implement the following POSIX utility conventions:
 
 ## Shell (sh)
 
-| Feature | POSIX | GNU/bash | matchbox | Notes |
+| Feature | POSIX | GNU/bash | silex | Notes |
 |---------|-------|----------|----------|-------|
 | -c CMD | Y | Y | Y | |
 | -e (errexit) | Y | Y | Y | |
@@ -63,7 +63,7 @@ All matchbox builtins implement the following POSIX utility conventions:
 
 ## cp
 
-| Flag | POSIX | GNU | matchbox | Module | Notes |
+| Flag | POSIX | GNU | silex | Module | Notes |
 |------|-------|-----|----------|--------|-------|
 | -r/-R | Y | Y | Y | - | |
 | -p | Y | Y | Y | - | |
@@ -80,7 +80,7 @@ All matchbox builtins implement the following POSIX utility conventions:
 
 ## echo
 
-| Flag | POSIX | GNU | matchbox | Module | Notes |
+| Flag | POSIX | GNU | silex | Module | Notes |
 |------|-------|-----|----------|--------|-------|
 | -n | Y | Y | Y | - | |
 | -e | N | Y | Y | - | |
@@ -88,7 +88,7 @@ All matchbox builtins implement the following POSIX utility conventions:
 
 ## mkdir
 
-| Flag | POSIX | GNU | matchbox | Module | Notes |
+| Flag | POSIX | GNU | silex | Module | Notes |
 |------|-------|-----|----------|--------|-------|
 | -p | Y | Y | Y | - | |
 | -v | N | Y | Y | - | |
@@ -96,7 +96,7 @@ All matchbox builtins implement the following POSIX utility conventions:
 
 ## cat
 
-| Flag | POSIX | GNU | matchbox | Module | Notes |
+| Flag | POSIX | GNU | silex | Module | Notes |
 |------|-------|-----|----------|--------|-------|
 | -n | N | Y | Y | - | |
 | -b | N | Y | Y | - | |
@@ -107,7 +107,7 @@ All matchbox builtins implement the following POSIX utility conventions:
 
 ## chmod
 
-| Flag | POSIX | GNU | matchbox | Module | Notes |
+| Flag | POSIX | GNU | silex | Module | Notes |
 |------|-------|-----|----------|--------|-------|
 | octal mode | Y | Y | Y | - | |
 | symbolic mode | Y | Y | Y | - | |
@@ -117,7 +117,7 @@ All matchbox builtins implement the following POSIX utility conventions:
 
 ## mv
 
-| Flag | POSIX | GNU | matchbox | Module | Notes |
+| Flag | POSIX | GNU | silex | Module | Notes |
 |------|-------|-----|----------|--------|-------|
 | -f | Y | Y | Y | - | |
 | -i | Y | Y | Y | - | |
@@ -129,7 +129,7 @@ All matchbox builtins implement the following POSIX utility conventions:
 
 ## rm
 
-| Flag | POSIX | GNU | matchbox | Module | Notes |
+| Flag | POSIX | GNU | silex | Module | Notes |
 |------|-------|-----|----------|--------|-------|
 | -r/-R | Y | Y | Y | - | |
 | -f | Y | Y | Y | - | |
@@ -140,7 +140,7 @@ All matchbox builtins implement the following POSIX utility conventions:
 
 ## ln
 
-| Flag | POSIX | GNU | matchbox | Module | Notes |
+| Flag | POSIX | GNU | silex | Module | Notes |
 |------|-------|-----|----------|--------|-------|
 | -s | Y | Y | Y | - | |
 | -f | Y | Y | Y | - | |
@@ -151,7 +151,7 @@ All matchbox builtins implement the following POSIX utility conventions:
 
 ## touch
 
-| Flag | POSIX | GNU | matchbox | Module | Notes |
+| Flag | POSIX | GNU | silex | Module | Notes |
 |------|-------|-----|----------|--------|-------|
 | -a | Y | Y | Y | - | |
 | -m | Y | Y | Y | - | |
@@ -162,7 +162,7 @@ All matchbox builtins implement the following POSIX utility conventions:
 
 ## head
 
-| Flag | POSIX | GNU | matchbox | Module | Notes |
+| Flag | POSIX | GNU | silex | Module | Notes |
 |------|-------|-----|----------|--------|-------|
 | -n N | Y | Y | Y | - | |
 | -n -N | N | Y | Y | - | all-but-last-N |
@@ -171,7 +171,7 @@ All matchbox builtins implement the following POSIX utility conventions:
 
 ## tail
 
-| Flag | POSIX | GNU | matchbox | Module | Notes |
+| Flag | POSIX | GNU | silex | Module | Notes |
 |------|-------|-----|----------|--------|-------|
 | -n N | Y | Y | Y | - | |
 | -n +N | Y | Y | Y | - | |
@@ -182,7 +182,7 @@ All matchbox builtins implement the following POSIX utility conventions:
 
 ## wc
 
-| Flag | POSIX | GNU | matchbox | Module | Notes |
+| Flag | POSIX | GNU | silex | Module | Notes |
 |------|-------|-----|----------|--------|-------|
 | -c | Y | Y | Y | - | |
 | -l | Y | Y | Y | - | |
@@ -192,7 +192,7 @@ All matchbox builtins implement the following POSIX utility conventions:
 
 ## sort
 
-| Flag | POSIX | GNU | matchbox | Module | Notes |
+| Flag | POSIX | GNU | silex | Module | Notes |
 |------|-------|-----|----------|--------|-------|
 | -b/-d/-f/-i/-n/-r/-u | Y | Y | Y | - | |
 | -o FILE | Y | Y | Y | - | |
@@ -204,7 +204,7 @@ All matchbox builtins implement the following POSIX utility conventions:
 
 ## grep
 
-| Flag | POSIX | GNU | matchbox | Module | Notes |
+| Flag | POSIX | GNU | silex | Module | Notes |
 |------|-------|-----|----------|--------|-------|
 | -E/-F | Y | Y | Y | - | |
 | -c/-i/-l/-n/-q/-s/-v | Y | Y | Y | - | |
@@ -217,7 +217,7 @@ All matchbox builtins implement the following POSIX utility conventions:
 
 ## sed
 
-| Flag | POSIX | GNU | matchbox | Module | Notes |
+| Flag | POSIX | GNU | silex | Module | Notes |
 |------|-------|-----|----------|--------|-------|
 | -n | Y | Y | Y | - | |
 | -e/-f | Y | Y | Y | - | |
@@ -231,7 +231,7 @@ All matchbox builtins implement the following POSIX utility conventions:
 
 ## find
 
-| Flag | POSIX | GNU | matchbox | Module | Notes |
+| Flag | POSIX | GNU | silex | Module | Notes |
 |------|-------|-----|----------|--------|-------|
 | -name/-iname | Y | Y | Y | - | |
 | -type | Y | Y | Y | - | |
@@ -246,7 +246,7 @@ All matchbox builtins implement the following POSIX utility conventions:
 
 ## xargs
 
-| Flag | POSIX | GNU | matchbox | Module | Notes |
+| Flag | POSIX | GNU | silex | Module | Notes |
 |------|-------|-----|----------|--------|-------|
 | -0 | N | Y | Y | - | |
 | -I REPL | Y | Y | Y | - | |
@@ -299,7 +299,7 @@ or missing required arguments; the tool prints a message to stderr and exits 2.
 
 **grep exit codes** match POSIX strictly: 0 if any line matched, 1 if no line matched,
 2 if an error occurred (file not found, bad pattern, etc.). This differs from GNU grep
-only in that matchbox grep does not use exit code 2 for `--quiet` suppression.
+only in that silex grep does not use exit code 2 for `--quiet` suppression.
 
 **Shell (sh) exit codes**: the shell exits with the exit status of the last command
 executed. With `set -e`, the shell exits immediately when any command exits non-zero

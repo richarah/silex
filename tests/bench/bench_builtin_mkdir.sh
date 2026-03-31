@@ -6,22 +6,22 @@ ulimit -d 2097152   # 2 GB data segment
 # tests/bench/bench_builtin_mkdir.sh — mkdir builtin benchmark
 # chmod +x tests/bench/bench_builtin_mkdir.sh
 #
-# Usage: ./bench_builtin_mkdir.sh [MATCHBOX_BINARY] [ITERATIONS]
-#   MATCHBOX_BINARY  path to matchbox binary (default: build/bin/matchbox)
+# Usage: ./bench_builtin_mkdir.sh [SILEX_BINARY] [ITERATIONS]
+#   SILEX_BINARY  path to silex binary (default: build/bin/silex)
 #   ITERATIONS       iterations (default: 10000)
 #
-# Benchmarks: matchbox mkdir -p a/b/c/d/e vs /bin/mkdir -p
+# Benchmarks: silex mkdir -p a/b/c/d/e vs /bin/mkdir -p
 # Cleans up between each run.
 # Output: TSV format
 #   command <tab> test_case <tab> mean_ms <tab> min_ms <tab> max_ms <tab> stddev_ms
 
 set -uo pipefail
 
-MATCHBOX="${1:-build/bin/matchbox}"
+SILEX="${1:-build/bin/silex}"
 N="${2:-10000}"
 
-if [ ! -x "$MATCHBOX" ]; then
-    echo "ERROR: matchbox binary not found: $MATCHBOX" >&2
+if [ ! -x "$SILEX" ]; then
+    echo "ERROR: silex binary not found: $SILEX" >&2
     exit 1
 fi
 
@@ -94,7 +94,7 @@ SYSTEM_MKDIR="/bin/mkdir"
 printf '# mkdir benchmark: %d iterations per (command x case)\n' "$N"
 printf '# System: %s\n' "$(uname -srm)"
 printf '# Date:   %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-printf '# matchbox: %s\n' "$MATCHBOX"
+printf '# silex: %s\n' "$SILEX"
 printf '#\n'
 printf 'command\ttest_case\tmean_ms\tmin_ms\tmax_ms\tstddev_ms\n'
 
@@ -104,21 +104,21 @@ printf 'command\ttest_case\tmean_ms\tmin_ms\tmax_ms\tstddev_ms\n'
 
 # Case 1: shallow single directory
 SHALLOW="$TMPDIR_MKDIR/singledir"
-bench_mkdir "matchbox-mkdir" "$MATCHBOX mkdir" "$SHALLOW" "$N" "single-dir"
+bench_mkdir "silex-mkdir" "$SILEX mkdir" "$SHALLOW" "$N" "single-dir"
 if [ -n "$SYSTEM_MKDIR" ] && [ -x "$SYSTEM_MKDIR" ]; then
     bench_mkdir "system-mkdir" "$SYSTEM_MKDIR" "$SHALLOW" "$N" "single-dir"
 fi
 
 # Case 2: mkdir -p deep: a/b/c/d/e (5 levels)
 DEEP5="$TMPDIR_MKDIR/a/b/c/d/e"
-bench_mkdir "matchbox-mkdir-p" "$MATCHBOX mkdir -p" "$DEEP5" "$N" "depth-5"
+bench_mkdir "silex-mkdir-p" "$SILEX mkdir -p" "$DEEP5" "$N" "depth-5"
 if [ -n "$SYSTEM_MKDIR" ] && [ -x "$SYSTEM_MKDIR" ]; then
     bench_mkdir "system-mkdir-p" "$SYSTEM_MKDIR -p" "$DEEP5" "$N" "depth-5"
 fi
 
 # Case 3: mkdir -p very deep: a/b/c/d/e/f/g/h/i/j (10 levels)
 DEEP10="$TMPDIR_MKDIR/a/b/c/d/e/f/g/h/i/j"
-bench_mkdir "matchbox-mkdir-p" "$MATCHBOX mkdir -p" "$DEEP10" "$N" "depth-10"
+bench_mkdir "silex-mkdir-p" "$SILEX mkdir -p" "$DEEP10" "$N" "depth-10"
 if [ -n "$SYSTEM_MKDIR" ] && [ -x "$SYSTEM_MKDIR" ]; then
     bench_mkdir "system-mkdir-p" "$SYSTEM_MKDIR -p" "$DEEP10" "$N" "depth-10"
 fi
@@ -167,7 +167,7 @@ bench_mkdir_existing() {
     }'
 }
 
-bench_mkdir_existing "matchbox-mkdir-p" "$MATCHBOX mkdir -p" "$EXISTING" "$N" "existing-path"
+bench_mkdir_existing "silex-mkdir-p" "$SILEX mkdir -p" "$EXISTING" "$N" "existing-path"
 if [ -n "$SYSTEM_MKDIR" ] && [ -x "$SYSTEM_MKDIR" ]; then
     bench_mkdir_existing "system-mkdir-p" "$SYSTEM_MKDIR -p" "$EXISTING" "$N" "existing-path"
 fi
@@ -206,7 +206,7 @@ bench_mkdir_many() {
 
 MANY_BASE="$TMPDIR_MKDIR/many_siblings"
 MANY_N=500   # Reduced from 10000 for single-call benchmark (10000 calls total)
-bench_mkdir_many "matchbox-mkdir-many" "$MATCHBOX mkdir" "$MANY_BASE/mb" "$MANY_N" "many-siblings"
+bench_mkdir_many "silex-mkdir-many" "$SILEX mkdir" "$MANY_BASE/mb" "$MANY_N" "many-siblings"
 if [ -n "$SYSTEM_MKDIR" ] && [ -x "$SYSTEM_MKDIR" ]; then
     bench_mkdir_many "system-mkdir-many" "$SYSTEM_MKDIR" "$MANY_BASE/sys" "$MANY_N" "many-siblings"
 fi

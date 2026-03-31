@@ -1,9 +1,9 @@
 #!/bin/sh
-# tests/unit/shell/test_redirects.sh — shell redirection tests for matchbox
+# tests/unit/shell/test_redirects.sh — shell redirection tests for silex
 # chmod +x tests/unit/shell/test_redirects.sh
-# Usage: ./test_redirects.sh [path/to/matchbox]
+# Usage: ./test_redirects.sh [path/to/silex]
 
-MATCHBOX="${1:-build/bin/matchbox}"
+SILEX="${1:-build/bin/silex}"
 PASS=0
 FAIL=0
 
@@ -49,7 +49,7 @@ check_file() {
     check "$desc" "$got" "$expected"
 }
 
-MB="$MATCHBOX"
+MB="$SILEX"
 T="$TMPDIR_REDIR"
 
 # --- > create/overwrite ---
@@ -126,7 +126,7 @@ else
 fi
 
 # --- &> both stdout and stderr (bash extension) ---
-# SKIP: &> is a bash extension, not POSIX; matchbox targets POSIX sh
+# SKIP: &> is a bash extension, not POSIX; silex targets POSIX sh
 echo "SKIP: &> is bash extension (not POSIX)"
 PASS=$((PASS + 1))
 

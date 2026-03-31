@@ -1,15 +1,15 @@
 #!/bin/sh
 # tests/edge/run_edge.sh — master runner for edge case tests
-# Usage: run_edge.sh [path/to/matchbox]
+# Usage: run_edge.sh [path/to/silex]
 
-MATCHBOX="${1:-build/bin/matchbox}"
+SILEX="${1:-build/bin/silex}"
 PASS=0
 FAIL=0
 TOTAL_PASS=0
 TOTAL_FAIL=0
 
-if [ ! -x "$MATCHBOX" ]; then
-    echo "ERROR: matchbox binary not found at $MATCHBOX"
+if [ ! -x "$SILEX" ]; then
+    echo "ERROR: silex binary not found at $SILEX"
     exit 1
 fi
 
@@ -18,7 +18,7 @@ SCRIPTDIR=$(dirname "$0")
 run_suite() {
     local script="$1"
     echo "--- $(basename $script) ---"
-    if bash "$script" "$MATCHBOX"; then
+    if bash "$script" "$SILEX"; then
         TOTAL_PASS=$(( TOTAL_PASS + 1 ))
     else
         TOTAL_FAIL=$(( TOTAL_FAIL + 1 ))

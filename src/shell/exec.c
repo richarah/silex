@@ -412,7 +412,7 @@ int exec_simple_cmd(shell_ctx_t *sh, char **words, char **assigns, redir_t *redi
     node_t *fnbody = func_lookup(sh, cmd);
     if (fnbody) {
         if (sh->call_depth >= SHELL_MAX_CALL_DEPTH) {
-            fprintf(stderr, "matchbox: sh: %s: maximum call depth (%d) exceeded\n",
+            fprintf(stderr, "silex: sh: %s: maximum call depth (%d) exceeded\n",
                     cmd, SHELL_MAX_CALL_DEPTH);
             cmd_rc = 1;
             goto cmd_done;
@@ -532,7 +532,7 @@ int exec_simple_cmd(shell_ctx_t *sh, char **words, char **assigns, redir_t *redi
     }
 
     if (!exec_path) {
-        fprintf(stderr, "matchbox: %s: command not found\n", cmd);
+        fprintf(stderr, "silex: %s: command not found\n", cmd);
         sh->last_exit = 127;
         cmd_rc = 127;
         goto cmd_done;
@@ -1196,7 +1196,7 @@ static int exec_builtin_cd(shell_ctx_t *sh, int argc, char **argv)
     if (argc < 2) {
         dir = vars_get(&sh->vars, "HOME");
         if (!dir) {
-            fprintf(stderr, "matchbox: cd: HOME not set\n");
+            fprintf(stderr, "silex: cd: HOME not set\n");
             return 1;
         }
     } else {
@@ -1221,7 +1221,7 @@ static int exec_builtin_shift(shell_ctx_t *sh, int argc, char **argv)
     int n = 1;
     if (argc >= 2) n = atoi(argv[1]);
     if (n < 0 || n > sh->positional_n) {
-        fprintf(stderr, "matchbox: shift: %d: too many\n", n);
+        fprintf(stderr, "silex: shift: %d: too many\n", n);
         return 1;
     }
     sh->positional   += n;
@@ -1449,7 +1449,7 @@ static int exec_builtin_test(shell_ctx_t *sh, int argc, char **argv)
     /* Strip trailing ] for [ invocation */
     if (bracket) {
         if (argc < 2 || strcmp(argv[argc - 1], "]") != 0) {
-            fprintf(stderr, "matchbox: test: missing ]\n");
+            fprintf(stderr, "silex: test: missing ]\n");
             return 2;
         }
         argc--;
@@ -1569,7 +1569,7 @@ static int exec_builtin_wait(shell_ctx_t *sh, int argc, char **argv)
 static int exec_builtin_source(shell_ctx_t *sh, int argc, char **argv)
 {
     if (argc < 2) {
-        fprintf(stderr, "matchbox: .: filename argument required\n");
+        fprintf(stderr, "silex: .: filename argument required\n");
         return 1;
     }
     return shell_run_file(sh, argv[1]);
@@ -1616,7 +1616,7 @@ static int exec_builtin_umask(shell_ctx_t *sh, int argc, char **argv)
     char *end;
     unsigned long val = strtoul(argv[i], &end, 8);
     if (*end != '\0' || val > 0777) {
-        fprintf(stderr, "matchbox: umask: invalid mode: %s\n", argv[i]);
+        fprintf(stderr, "silex: umask: invalid mode: %s\n", argv[i]);
         return 1;
     }
     umask((mode_t)val);
@@ -1672,7 +1672,7 @@ static int exec_builtin_command(shell_ctx_t *sh, int argc, char **argv)
                 free(path_copy);
             }
         }
-        if (verbose) fprintf(stderr, "matchbox: command: %s: not found\n", name);
+        if (verbose) fprintf(stderr, "silex: command: %s: not found\n", name);
         return 1;
     }
 
@@ -1716,7 +1716,7 @@ static int exec_builtin_type(shell_ctx_t *sh, int argc, char **argv)
             }
         }
         if (!found) {
-            fprintf(stderr, "matchbox: type: %s: not found\n", name);
+            fprintf(stderr, "silex: type: %s: not found\n", name);
             ret = 1;
         }
     }
@@ -1726,7 +1726,7 @@ static int exec_builtin_type(shell_ctx_t *sh, int argc, char **argv)
 static int exec_builtin_getopts(shell_ctx_t *sh, int argc, char **argv)
 {
     if (argc < 3) {
-        fprintf(stderr, "matchbox: getopts: usage: getopts optstring name [arg...]\n");
+        fprintf(stderr, "silex: getopts: usage: getopts optstring name [arg...]\n");
         return 1;
     }
     const char *optstring = argv[1];
@@ -1799,7 +1799,7 @@ static int exec_builtin_getopts(shell_ctx_t *sh, int argc, char **argv)
     const char *p = strchr(optstring, opt);
     if (!p) {
         /* Unknown option */
-        if (!silent) fprintf(stderr, "matchbox: getopts: illegal option -- %c\n", opt);
+        if (!silent) fprintf(stderr, "silex: getopts: illegal option -- %c\n", opt);
         vars_set(&sh->vars, varname, "?");
         vars_set(&sh->vars, "OPTARG", opt_str);
     } else {
@@ -1814,7 +1814,7 @@ static int exec_builtin_getopts(shell_ctx_t *sh, int argc, char **argv)
                 optind++;
                 optpos = 1;
                 if (optind > nargs) {
-                    if (!silent) fprintf(stderr, "matchbox: getopts: option requires an argument -- %c\n", opt);
+                    if (!silent) fprintf(stderr, "silex: getopts: option requires an argument -- %c\n", opt);
                     vars_set(&sh->vars, varname, silent ? ":" : "?");
                     vars_set(&sh->vars, "OPTARG", opt_str);
                 } else {

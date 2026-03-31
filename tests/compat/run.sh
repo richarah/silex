@@ -1,17 +1,17 @@
 #!/bin/bash
 # tests/compat/run.sh — TAP-format compatibility test runner
-# Compares matchbox output against GNU coreutils
+# Compares silex output against GNU coreutils
 # chmod +x tests/compat/run.sh
 #
-# Usage: ./run.sh [MATCHBOX_BINARY] [TOOL]
-#   MATCHBOX_BINARY  path to matchbox binary (default: build/bin/matchbox)
+# Usage: ./run.sh [SILEX_BINARY] [TOOL]
+#   SILEX_BINARY  path to silex binary (default: build/bin/silex)
 #   TOOL             only run tests for this tool (e.g., echo, cp, mkdir)
 #
 # Output: TAP format (https://testanything.org/)
 
 set -u
 
-MATCHBOX="${1:-build/bin/matchbox}"
+SILEX="${1:-build/bin/silex}"
 TOOL="${2:-}"
 PASS=0
 FAIL=0
@@ -22,8 +22,8 @@ TOTAL=0
 TMPDIR_COMPAT=$(mktemp -d)
 trap 'rm -rf "$TMPDIR_COMPAT"' EXIT INT TERM
 
-if [ ! -x "$MATCHBOX" ]; then
-    echo "Bail out! matchbox binary not found or not executable: $MATCHBOX"
+if [ ! -x "$SILEX" ]; then
+    echo "Bail out! silex binary not found or not executable: $SILEX"
     exit 1
 fi
 
@@ -33,7 +33,7 @@ fi
 
 run_test() {
     local desc="$1"
-    local mb_cmd="$2"       # command string passed to matchbox (no binary prefix)
+    local mb_cmd="$2"       # command string passed to silex (no binary prefix)
     local ref_cmd="$3"      # full reference command string (using system tools)
     local tool_name="${4:-}"
 
@@ -45,7 +45,7 @@ run_test() {
     TOTAL=$((TOTAL + 1))
 
     local got expected exit_got exit_expected
-    got=$(eval "$MATCHBOX $mb_cmd" 2>&1)
+    got=$(eval "$SILEX $mb_cmd" 2>&1)
     exit_got=$?
     expected=$(eval "$ref_cmd" 2>&1)
     exit_expected=$?
@@ -78,7 +78,7 @@ run_test_exitcode() {
 
     TOTAL=$((TOTAL + 1))
 
-    eval "$MATCHBOX $mb_cmd" > /dev/null 2>&1
+    eval "$SILEX $mb_cmd" > /dev/null 2>&1
     local exit_got=$?
     eval "$ref_cmd" > /dev/null 2>&1
     local exit_expected=$?
@@ -172,7 +172,7 @@ run_test "cp: overwrite destination" \
     "cp $T/lines.txt $T/ref_cp1.txt" \
     "cp"
 
-# Error message format differs (matchbox prefix); only exit code matters
+# Error message format differs (silex prefix); only exit code matters
 run_test_exitcode "cp: nonexistent source exits nonzero" \
     "cp $T/nosuchfile.txt $T/compat_cp2.txt" \
     "cp $T/nosuchfile.txt $T/ref_cp2.txt" \
@@ -190,7 +190,7 @@ run_test "cp: -r recursive directory" \
 run_test "cat: single file"           "cat $T/hello.txt"             "cat $T/hello.txt"          "cat"
 run_test "cat: multiple files"        "cat $T/hello.txt $T/words.txt" "cat $T/hello.txt $T/words.txt" "cat"
 run_test "cat: empty file"            "cat $T/empty.txt"             "cat $T/empty.txt"          "cat"
-# Error message format differs (matchbox prefix vs uutils "(os error N)"); only exit code matters
+# Error message format differs (silex prefix vs uutils "(os error N)"); only exit code matters
 run_test_exitcode "cat: nonexistent exits 1" "cat $T/nosuchfile.txt" "cat $T/nosuchfile.txt" "cat"
 run_test "cat: -n number lines"       "cat -n $T/lines.txt"          "cat -n $T/lines.txt"       "cat"
 run_test "cat: file with no newline"  "cat $T/nonewline.txt"         "cat $T/nonewline.txt"      "cat"
@@ -608,7 +608,7 @@ run_test "install: -d create directory" \
 
 if [ -z "$TOOL" ] || [ "$TOOL" = "mktemp" ]; then
     TOTAL=$((TOTAL + 1))
-    _tf=$(eval "$MATCHBOX mktemp" 2>&1)
+    _tf=$(eval "$SILEX mktemp" 2>&1)
     _ec=$?
     if [ "$_ec" -eq 0 ] && [ -f "$_tf" ]; then
         echo "ok $TOTAL - mktemp: creates temp file"
@@ -621,7 +621,7 @@ if [ -z "$TOOL" ] || [ "$TOOL" = "mktemp" ]; then
     fi
 
     TOTAL=$((TOTAL + 1))
-    _td=$(eval "$MATCHBOX mktemp -d" 2>&1)
+    _td=$(eval "$SILEX mktemp -d" 2>&1)
     _ec=$?
     if [ "$_ec" -eq 0 ] && [ -d "$_td" ]; then
         echo "ok $TOTAL - mktemp: -d creates temp directory"
@@ -634,7 +634,7 @@ if [ -z "$TOOL" ] || [ "$TOOL" = "mktemp" ]; then
     fi
 
     TOTAL=$((TOTAL + 1))
-    _tf=$(eval "$MATCHBOX mktemp -p $T" 2>&1)
+    _tf=$(eval "$SILEX mktemp -p $T" 2>&1)
     _ec=$?
     if [ "$_ec" -eq 0 ] && [ -f "$_tf" ]; then
         echo "ok $TOTAL - mktemp: -p uses given directory"

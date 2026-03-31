@@ -1,13 +1,13 @@
 # tar builtin: feasibility study
 
 **Date:** 2026-03-30
-**Author:** matchbox project
+**Author:** silex project
 
 ---
 
 ## Summary
 
-This document evaluates the feasibility of adding a `tar` builtin to matchbox. The conclusion is:
+This document evaluates the feasibility of adding a `tar` builtin to silex. The conclusion is:
 
 > **Feasible with a self-contained POSIX.1-2001 implementation (~2,000 lines C). Deferred to v0.3.0. Compression codec integration deferred further.**
 
@@ -32,7 +32,7 @@ Container image layers and toolchain distribution archives use a small subset of
 
 ### Conclusion on compression
 
-Container builds pipe tar through `gzip`, `zstd`, or `xz`. matchbox does not need an internal codec if it delegates via subprocess (e.g. `tar czf` opens `gzip -c`). This is what GNU tar itself does for many formats. A `tar` builtin that opens a child `gzip`/`zstd` process avoids a codec library dependency.
+Container builds pipe tar through `gzip`, `zstd`, or `xz`. silex does not need an internal codec if it delegates via subprocess (e.g. `tar czf` opens `gzip -c`). This is what GNU tar itself does for many formats. A `tar` builtin that opens a child `gzip`/`zstd` process avoids a codec library dependency.
 
 ---
 
@@ -52,13 +52,13 @@ Implement the POSIX ustar header format (512-byte blocks) in C, with:
 
 **Pros:**
 - No external library dependency
-- Fits matchbox architecture (self-contained, `~2,000` lines of C11)
+- Fits silex architecture (self-contained, `~2,000` lines of C11)
 - Handles 99%+ of container build layer archives
 - Reproducible: no libarchive version differences
 
 **Cons:**
 - GNU tar extensions (sparse, multi-volume) not supported
-- Compression requires subprocess (acceptable: `gzip` is also a matchbox builtin)
+- Compression requires subprocess (acceptable: `gzip` is also a silex builtin)
 
 **Estimated LOC:** 1,800–2,200 lines (ustar read/write + PAX long-name extension)
 
@@ -81,9 +81,9 @@ Link against `libarchive` (`-larchive`) and wrap `archive_read_*` / `archive_wri
 
 ### Option C: External `tar` subprocess via exec
 
-When `tar` is invoked inside matchbox scripts, exec the system `tar`. This is the current behavior (fallthrough to system PATH).
+When `tar` is invoked inside silex scripts, exec the system `tar`. This is the current behavior (fallthrough to system PATH).
 
-**Cons:** Requires system `tar` installed; breaks "single binary" goal; no `#!/usr/bin/matchbox tar` shebang.
+**Cons:** Requires system `tar` installed; breaks "single binary" goal; no `#!/usr/bin/silex tar` shebang.
 
 **Verdict: Not a builtin — status quo, acceptable as interim.**
 
@@ -155,7 +155,7 @@ PAX extended header (type='x') precedes the entry it describes and contains
 | Binary size impact | Low (~15 KB compiled, within budget) |
 | Dependency footprint | Zero (self-contained) |
 
-**Recommendation:** Implement Option A (self-contained ustar + PAX) in v0.3.0 as a new `src/core/tar.c`. Compression via subprocess (gzip is already a matchbox builtin, so `tar czf` works in-process when gzip is available on PATH).
+**Recommendation:** Implement Option A (self-contained ustar + PAX) in v0.3.0 as a new `src/core/tar.c`. Compression via subprocess (gzip is already a silex builtin, so `tar czf` works in-process when gzip is available on PATH).
 
 ---
 

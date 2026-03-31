@@ -1,7 +1,7 @@
 #!/bin/sh
 # tests/edge/test_filenames.sh — special filename edge cases
 
-MATCHBOX="${1:-build/bin/matchbox}"
+SILEX="${1:-build/bin/silex}"
 PASS=0
 FAIL=0
 TMPDIR_EDGE=$(mktemp -d)
@@ -38,13 +38,13 @@ check_rc() {
 # Filename with spaces
 SPACEFILE="$TMPDIR_EDGE/file with spaces.txt"
 printf 'hello spaces\n' > "$SPACEFILE"
-got=$("$MATCHBOX" cat "$SPACEFILE")
+got=$("$SILEX" cat "$SPACEFILE")
 check "cat: filename with spaces" "$got" "hello spaces"
 
 # Filename with leading dash (use --)
 DASHFILE="$TMPDIR_EDGE/-leading-dash.txt"
 printf 'dash content\n' > "$DASHFILE"
-got=$("$MATCHBOX" cat -- "$DASHFILE")
+got=$("$SILEX" cat -- "$DASHFILE")
 check "cat: filename with leading dash (--)" "$got" "dash content"
 
 # Filename with newline (if filesystem supports it)
@@ -53,24 +53,24 @@ NLFILE="$TMPDIR_EDGE/file
 with
 newline.txt"
 if printf 'newline name\n' > "$NLFILE" 2>/dev/null; then
-    got=$("$MATCHBOX" cat "$NLFILE")
+    got=$("$SILEX" cat "$NLFILE")
     check "cat: filename with embedded newlines" "$got" "newline name"
 fi
 
 # Filename with special shell chars (no glob expansion needed since we quote)
 SPECFILE="$TMPDIR_EDGE/file[special].txt"
 printf 'special\n' > "$SPECFILE"
-got=$("$MATCHBOX" cat "$SPECFILE")
+got=$("$SILEX" cat "$SPECFILE")
 check "cat: filename with [] chars" "$got" "special"
 
 # Filename with unicode characters
 UNIFILE="$TMPDIR_EDGE/файл.txt"
 printf 'unicode\n' > "$UNIFILE"
-got=$("$MATCHBOX" cat "$UNIFILE")
+got=$("$SILEX" cat "$UNIFILE")
 check "cat: unicode filename" "$got" "unicode"
 
 # wc on file with spaces in name
-got=$("$MATCHBOX" wc -l "$SPACEFILE")
+got=$("$SILEX" wc -l "$SPACEFILE")
 # wc output format: "N filename" — just check it includes 1
 case "$got" in
     *1*) check "wc: filename with spaces" "ok" "ok" ;;
@@ -78,7 +78,7 @@ case "$got" in
 esac
 
 # grep on file with leading dash
-got=$("$MATCHBOX" grep -- 'dash' -- "$DASHFILE")
+got=$("$SILEX" grep -- 'dash' -- "$DASHFILE")
 check "grep: filename with leading dash" "$got" "dash content"
 
 echo ""

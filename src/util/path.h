@@ -1,7 +1,7 @@
 /* path.h — path canonicalisation and validation utilities */
 
-#ifndef MATCHBOX_PATH_H
-#define MATCHBOX_PATH_H
+#ifndef SILEX_PATH_H
+#define SILEX_PATH_H
 
 /* Enable POSIX definitions (PATH_MAX, realpath, etc.) */
 #ifndef _POSIX_C_SOURCE
@@ -32,4 +32,4 @@ char *path_dirname(const char *path, char dst[PATH_MAX]);
  * Returns dst on success, NULL if result would overflow. */
 char *path_join(const char *dir, const char *base, char dst[PATH_MAX]);
 
-#endif /* MATCHBOX_PATH_H */
+#endif /* SILEX_PATH_H */

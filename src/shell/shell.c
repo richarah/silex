@@ -124,7 +124,7 @@ int shell_init(shell_ctx_t *sh, int argc, char **argv)
         sh->traps[i].action = SHELL_TRAP_DEFAULT;
 
     /* MATCHBOX_TRACE: tracing/debugging mode */
-    const char *trace_env = getenv("MATCHBOX_TRACE");
+    const char *trace_env = getenv("SILEX_TRACE");
     if (trace_env) {
         sh->trace_level = atoi(trace_env);
         if (sh->trace_level < 0) sh->trace_level = 0;

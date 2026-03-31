@@ -206,11 +206,11 @@ static int compile_patterns(grep_opts_t *g)
         if (all_lower) g->opt_i = 1;
     }
 
-    int mb_flags = MB_REG_NOSUB;
+    int mb_flags = SX_REG_NOSUB;
     if (g->opt_E)
-        mb_flags |= MB_REG_ERE;
+        mb_flags |= SX_REG_ERE;
     if (g->opt_i)
-        mb_flags |= MB_REG_ICASE;
+        mb_flags |= SX_REG_ICASE;
 
     for (int i = 0; i < g->npatterns; i++) {
         const char *err = NULL;
@@ -819,7 +819,7 @@ int applet_grep(int argc, char **argv)
     memset(&g, 0, sizeof(g));
 
     /* MATCHBOX_SMART=1: enable smart-case and VCS-aware mode by default */
-    if (getenv("MATCHBOX_SMART") && strcmp(getenv("MATCHBOX_SMART"), "1") == 0)
+    if (getenv("SILEX_SMART") && strcmp(getenv("SILEX_SMART"), "1") == 0)
         g.opt_smart = 1;
 
     /* --color: only if stdout is a tty */

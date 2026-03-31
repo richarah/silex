@@ -78,7 +78,7 @@ void lexer_init_str(lexer_t *l, const char *input, arena_t *a)
     l->wordbuf_cap = 256;
     l->wordbuf     = malloc(l->wordbuf_cap);
     if (!l->wordbuf) {
-        perror("matchbox: lexer_init_str: malloc");
+        perror("silex: lexer_init_str: malloc");
         abort();
     }
     l->wordbuf_len = 0;
@@ -99,7 +99,7 @@ void lexer_init_fp(lexer_t *l, FILE *fp, arena_t *a)
     l->wordbuf_cap = 256;
     l->wordbuf     = malloc(l->wordbuf_cap);
     if (!l->wordbuf) {
-        perror("matchbox: lexer_init_fp: malloc");
+        perror("silex: lexer_init_fp: malloc");
         abort();
     }
     l->wordbuf_len = 0;
@@ -159,7 +159,7 @@ static void wordbuf_append(lexer_t *l, char c)
         size_t newcap = l->wordbuf_cap * 2;
         char  *newbuf = realloc(l->wordbuf, newcap);
         if (!newbuf) {
-            perror("matchbox: lexer wordbuf realloc");
+            perror("silex: lexer wordbuf realloc");
             abort();
         }
         l->wordbuf     = newbuf;

@@ -57,7 +57,7 @@ static int is_root_path(const char *path)
  * ------------------------------------------------------------------------- */
 static int prompt_user(const char *question, const char *path)
 {
-    fprintf(stderr, "matchbox: rm: %s '%s'? ", question, path);
+    fprintf(stderr, "silex: rm: %s '%s'? ", question, path);
     fflush(stderr);
     char resp[8];
     if (fgets(resp, sizeof(resp), stdin) == NULL)

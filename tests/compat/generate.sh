@@ -6,11 +6,11 @@
 #   output_dir  where to write generated test files (default: tests/compat/generated)
 #
 # For each builtin, creates test inputs of various sizes and generates
-# TAP-format test cases comparing matchbox output against system coreutils.
+# TAP-format test cases comparing silex output against system coreutils.
 
 set -euo pipefail
 
-MATCHBOX="${MATCHBOX:-build/bin/matchbox}"
+SILEX="${SILEX:-build/bin/silex}"
 OUTDIR="${1:-tests/compat/generated}"
 TMPDIR_GEN=$(mktemp -d)
 trap 'rm -rf "$TMPDIR_GEN"' EXIT INT TERM
@@ -83,7 +83,7 @@ tap_test() {
 
     TOTAL=$((TOTAL + 1))
     local got expected exit_got exit_expected
-    got=$(eval "$MATCHBOX $mb_cmd" 2>&1)
+    got=$(eval "$SILEX $mb_cmd" 2>&1)
     exit_got=$?
     expected=$(eval "$ref_cmd" 2>&1)
     exit_expected=$?

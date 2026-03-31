@@ -1,9 +1,9 @@
 #!/bin/sh
-# tests/unit/shell/test_advanced.sh — advanced shell feature tests for matchbox
+# tests/unit/shell/test_advanced.sh — advanced shell feature tests for silex
 # Targets coverage gaps in redirect.c, job.c, expand.c, exec.c
-# Usage: ./test_advanced.sh [path/to/matchbox]
+# Usage: ./test_advanced.sh [path/to/silex]
 
-MATCHBOX="${1:-build/bin/matchbox}"
+SILEX="${1:-build/bin/silex}"
 PASS=0
 FAIL=0
 
@@ -33,7 +33,7 @@ check_exit() {
 }
 
 T="$TMPDIR_ADV"
-MB="$MATCHBOX"
+MB="$SILEX"
 
 # -----------------------------------------------------------------------
 # Numbered fd redirections

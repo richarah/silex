@@ -1,5 +1,5 @@
-#ifndef MATCHBOX_URING_H
-#define MATCHBOX_URING_H
+#ifndef SILEX_URING_H
+#define SILEX_URING_H
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
@@ -29,4 +29,4 @@ void        batch_op_free(batch_op_t *op);
    If io_uring available, use batching. Otherwise sequential. */
 int batch_exec(batch_op_t *ops);
 
-#endif /* MATCHBOX_URING_H */
+#endif /* SILEX_URING_H */

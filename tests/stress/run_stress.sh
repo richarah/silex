@@ -6,10 +6,10 @@
 set -e
 
 LOOPS=${1:-100}
-MATCHBOX="${2:-build/bin/matchbox}"
+SILEX="${2:-build/bin/silex}"
 
-if [ ! -x "$MATCHBOX" ]; then
-    echo "ERROR: matchbox binary not found at $MATCHBOX"
+if [ ! -x "$SILEX" ]; then
+    echo "ERROR: silex binary not found at $SILEX"
     exit 1
 fi
 
@@ -18,13 +18,13 @@ echo "Starting stress test: $LOOPS iterations"
 i=1
 while [ "$i" -le "$LOOPS" ]; do
     # Unit tests
-    if ! bash tests/unit/run_tests.sh "$MATCHBOX" >/dev/null 2>&1; then
+    if ! bash tests/unit/run_tests.sh "$SILEX" >/dev/null 2>&1; then
         echo "FAIL: unit tests on iteration $i"
         exit 1
     fi
 
     # Integration tests
-    if ! bash tests/integration/run_integration.sh "$MATCHBOX" >/dev/null 2>&1; then
+    if ! bash tests/integration/run_integration.sh "$SILEX" >/dev/null 2>&1; then
         echo "FAIL: integration tests on iteration $i"
         exit 1
     fi

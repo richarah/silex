@@ -5,11 +5,11 @@ ulimit -t 300       # 5 min CPU time per process
 ulimit -d 2097152   # 2 GB data segment
 # tests/bench/bench_batch.sh — batch operation benchmark (io_uring path)
 #
-# Measures batch rm (BATCH_RM_FILE) performance: matchbox batch-rm vs
+# Measures batch rm (BATCH_RM_FILE) performance: silex batch-rm vs
 # sequential shell loop, exercising the io_uring acceleration path.
 #
-# Usage: ./bench_batch.sh [MATCHBOX_BINARY] [ITERATIONS]
-#   MATCHBOX_BINARY  path to matchbox binary (default: build/bin/matchbox)
+# Usage: ./bench_batch.sh [SILEX_BINARY] [ITERATIONS]
+#   SILEX_BINARY  path to silex binary (default: build/bin/silex)
 #   ITERATIONS       number of outer iterations (default: 100)
 #
 # Each iteration creates N_FILES files, then removes them via the
@@ -20,11 +20,11 @@ ulimit -d 2097152   # 2 GB data segment
 
 set -uo pipefail
 
-MATCHBOX="${1:-build/bin/matchbox}"
+SILEX="${1:-build/bin/silex}"
 N="${2:-100}"
 
-if [ ! -x "$MATCHBOX" ]; then
-    echo "ERROR: matchbox binary not found: $MATCHBOX" >&2
+if [ ! -x "$SILEX" ]; then
+    echo "ERROR: silex binary not found: $SILEX" >&2
     exit 1
 fi
 
@@ -108,19 +108,19 @@ make_files() {
 printf '# batch benchmark: %d iterations per scenario\n' "$N"
 printf '# System: %s\n' "$(uname -srm)"
 printf '# Date:   %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-printf '# matchbox: %s\n' "$MATCHBOX"
+printf '# silex: %s\n' "$SILEX"
 printf '#\n'
 printf 'method\tn_files\tmean_ms\tmin_ms\tmax_ms\tstddev_ms\n'
 
 # ---------------------------------------------------------------------------
-# Benchmarks: matchbox rm vs system rm vs shell loop
+# Benchmarks: silex rm vs system rm vs shell loop
 # ---------------------------------------------------------------------------
 
 for n_files in 10 50 100 200; do
-    # matchbox rm (exercises batch_exec / io_uring path)
-    bench_scenario "matchbox-rm" "$n_files" \
+    # silex rm (exercises batch_exec / io_uring path)
+    bench_scenario "silex-rm" "$n_files" \
         "make_files $n_files" \
-        "\"$MATCHBOX\" rm -f \"$BATCH_DIR\"/file_*" \
+        "\"$SILEX\" rm -f \"$BATCH_DIR\"/file_*" \
         "$N"
 
     # system rm (for comparison)
@@ -131,10 +131,10 @@ for n_files in 10 50 100 200; do
             "$N"
     fi
 
-    # matchbox sh -c loop (sequential via shell)
-    bench_scenario "matchbox-sh-loop" "$n_files" \
+    # silex sh -c loop (sequential via shell)
+    bench_scenario "silex-sh-loop" "$n_files" \
         "make_files $n_files" \
-        "\"$MATCHBOX\" sh -c 'for f in \"$BATCH_DIR\"/file_*; do rm -f \"\$f\"; done'" \
+        "\"$SILEX\" sh -c 'for f in \"$BATCH_DIR\"/file_*; do rm -f \"\$f\"; done'" \
         "$N"
 done
 
@@ -147,10 +147,10 @@ rm_batch_dir() {
 }
 
 for n_dirs in 10 50 100; do
-    # matchbox mkdir -p
-    bench_scenario "matchbox-mkdir-p" "$n_dirs" \
+    # silex mkdir -p
+    bench_scenario "silex-mkdir-p" "$n_dirs" \
         "rm_batch_dir" \
-        "for i in \$(seq 1 $n_dirs); do \"$MATCHBOX\" mkdir -p \"$BATCH_DIR/d\$(printf '%04d' \$i)/sub\"; done" \
+        "for i in \$(seq 1 $n_dirs); do \"$SILEX\" mkdir -p \"$BATCH_DIR/d\$(printf '%04d' \$i)/sub\"; done" \
         "$N"
 
     if command -v mkdir > /dev/null 2>&1; then

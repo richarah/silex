@@ -1,10 +1,10 @@
 #!/bin/bash
 # test_echo.sh — unit tests for the echo builtin
-# Usage: test_echo.sh [path/to/matchbox]
+# Usage: test_echo.sh [path/to/silex]
 
 set -euo pipefail
 
-MB="${1:-build/bin/matchbox}"
+MB="${1:-build/bin/silex}"
 ECHO="$MB echo"
 GNU_ECHO="/bin/echo"
 

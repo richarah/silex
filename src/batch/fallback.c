@@ -37,7 +37,7 @@ int fallback_exec_seq(batch_op_t *ops)
 
     for (batch_op_t *op = ops; op; op = op->next) {
         if (!op->path) {
-            fprintf(stderr, "matchbox: batch op with NULL path; skipping\n");
+            fprintf(stderr, "silex: batch op with NULL path; skipping\n");
             ret = 1;
             continue;
         }
@@ -46,7 +46,7 @@ int fallback_exec_seq(batch_op_t *ops)
 
         case BATCH_MKDIR:
             if (mkdir(op->path, (mode_t)op->mode) != 0) {
-                fprintf(stderr, "matchbox: batch mkdir '%s': %s\n",
+                fprintf(stderr, "silex: batch mkdir '%s': %s\n",
                         op->path, strerror(errno));
                 ret = 1;
             }
@@ -54,7 +54,7 @@ int fallback_exec_seq(batch_op_t *ops)
 
         case BATCH_CHMOD:
             if (chmod(op->path, (mode_t)op->mode) != 0) {
-                fprintf(stderr, "matchbox: batch chmod '%s': %s\n",
+                fprintf(stderr, "silex: batch chmod '%s': %s\n",
                         op->path, strerror(errno));
                 ret = 1;
             }
@@ -66,7 +66,7 @@ int fallback_exec_seq(batch_op_t *ops)
              * both atime and mtime to the current time.
              */
             if (utimensat(AT_FDCWD, op->path, NULL, 0) != 0) {
-                fprintf(stderr, "matchbox: batch touch '%s': %s\n",
+                fprintf(stderr, "silex: batch touch '%s': %s\n",
                         op->path, strerror(errno));
                 ret = 1;
             }
@@ -74,14 +74,14 @@ int fallback_exec_seq(batch_op_t *ops)
 
         case BATCH_RM_FILE:
             if (unlink(op->path) != 0) {
-                fprintf(stderr, "matchbox: batch rm '%s': %s\n",
+                fprintf(stderr, "silex: batch rm '%s': %s\n",
                         op->path, strerror(errno));
                 ret = 1;
             }
             break;
 
         default:
-            fprintf(stderr, "matchbox: unknown batch op type %d for '%s'; skipping\n",
+            fprintf(stderr, "silex: unknown batch op type %d for '%s'; skipping\n",
                     (int)op->type, op->path);
             ret = 1;
             break;

@@ -2,10 +2,10 @@
 # tests/stress/run_load_stress.sh — run tests once under CPU load
 # Spawns background CPU load, runs tests, cleans up.
 
-MATCHBOX="${1:-build/bin/matchbox}"
+SILEX="${1:-build/bin/silex}"
 
-if [ ! -x "$MATCHBOX" ]; then
-    echo "ERROR: matchbox binary not found at $MATCHBOX"
+if [ ! -x "$SILEX" ]; then
+    echo "ERROR: silex binary not found at $SILEX"
     exit 1
 fi
 
@@ -24,12 +24,12 @@ done
 
 # Run tests under load
 RC=0
-if ! bash tests/unit/run_tests.sh "$MATCHBOX" >/dev/null 2>&1; then
+if ! bash tests/unit/run_tests.sh "$SILEX" >/dev/null 2>&1; then
     echo "FAIL: unit tests under load"
     RC=1
 fi
 if [ "$RC" -eq 0 ]; then
-    if ! bash tests/integration/run_integration.sh "$MATCHBOX" >/dev/null 2>&1; then
+    if ! bash tests/integration/run_integration.sh "$SILEX" >/dev/null 2>&1; then
         echo "FAIL: integration tests under load"
         RC=1
     fi

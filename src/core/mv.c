@@ -237,7 +237,7 @@ static int do_mv(const char *src, const char *dst, const struct mv_opts *opts)
 
         /* -i: interactive prompt */
         if (opts->interactive && !opts->force) {
-            fprintf(stderr, "matchbox: mv: overwrite '%s'? ", dst);
+            fprintf(stderr, "silex: mv: overwrite '%s'? ", dst);
             char resp[8];
             if (fgets(resp, sizeof(resp), stdin) == NULL || resp[0] != 'y')
                 return 0;
@@ -344,15 +344,15 @@ int applet_mv(int argc, char **argv)
     /* Multiple sources require dst to be a directory */
     if (nsrc > 1 && !dst_is_dir) {
         if (dst_exists)
-            fprintf(stderr, "matchbox: mv: target '%s' is not a directory\n", dst);
+            fprintf(stderr, "silex: mv: target '%s' is not a directory\n", dst);
         else
-            fprintf(stderr, "matchbox: mv: target directory '%s': No such file or directory\n", dst);
+            fprintf(stderr, "silex: mv: target directory '%s': No such file or directory\n", dst);
         return 1;
     }
 
     /* -T: dst must not be a directory */
     if (opts.no_target && dst_is_dir) {
-        fprintf(stderr, "matchbox: mv: cannot overwrite directory '%s' with non-directory\n", dst);
+        fprintf(stderr, "silex: mv: cannot overwrite directory '%s' with non-directory\n", dst);
         return 1;
     }
 

@@ -1,9 +1,9 @@
 #!/bin/sh
-# tests/unit/shell/test_variables.sh — shell variable tests for matchbox
+# tests/unit/shell/test_variables.sh — shell variable tests for silex
 # chmod +x tests/unit/shell/test_variables.sh
-# Usage: ./test_variables.sh [path/to/matchbox]
+# Usage: ./test_variables.sh [path/to/silex]
 
-MATCHBOX="${1:-build/bin/matchbox}"
+SILEX="${1:-build/bin/silex}"
 PASS=0
 FAIL=0
 
@@ -37,7 +37,7 @@ check_exit() {
     fi
 }
 
-MB="$MATCHBOX"
+MB="$SILEX"
 
 # --- Simple assignment and expansion ---
 got=$("$MB" -c 'X=hello; echo $X')

@@ -1,9 +1,9 @@
-# Makefile -- matchbox container build runtime
+# Makefile -- silex container build runtime
 # Dual build: musl-static (release) and glibc-dynamic (release-glibc).
 # Auto-detects compiler and libc; defaults to glibc if musl-gcc is absent.
 
 # --- Version ------------------------------------------------------------------
-VERSION := 0.2.0
+VERSION := 0.3.0
 
 # --- Compiler selection -------------------------------------------------------
 MUSL_GCC := $(shell command -v musl-gcc 2>/dev/null)
@@ -38,17 +38,17 @@ endif
 
 # --- Libc detection -----------------------------------------------------------
 ifeq ($(CC),musl-gcc)
-    LIBC_DEFINE = -DMATCHBOX_LIBC_MUSL=1
+    LIBC_DEFINE = -DSILEX_LIBC_MUSL=1
 else ifneq (,$(wildcard /lib/ld-musl-*.so*))
-    LIBC_DEFINE = -DMATCHBOX_LIBC_MUSL=1
+    LIBC_DEFINE = -DSILEX_LIBC_MUSL=1
 else
-    LIBC_DEFINE = -DMATCHBOX_LIBC_GLIBC=1
+    LIBC_DEFINE = -DSILEX_LIBC_GLIBC=1
 endif
 
 # --- Flags --------------------------------------------------------------------
 CFLAGS_COMMON  = -std=c11 -Wall -Wextra -Werror -pedantic \
                  -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE \
-                 -DMATCHBOX_VERSION=\"$(VERSION)\" \
+                 -DSILEX_VERSION=\"$(VERSION)\" \
                  -fstack-protector-strong \
                  $(LIBC_DEFINE)
 
@@ -72,7 +72,7 @@ CFLAGS ?= $(CFLAGS_RELEASE)
 # --- Reproducible builds: pass SOURCE_DATE_EPOCH as build date ----------------
 ifdef SOURCE_DATE_EPOCH
     CFLAGS_COMMON += -Wdate-time \
-        -DMATCHBOX_BUILD_DATE=\"$(shell \
+        -DSILEX_BUILD_DATE=\"$(shell \
             date -u -d @$(SOURCE_DATE_EPOCH) '+%Y-%m-%d' 2>/dev/null || \
             date -u -r $(SOURCE_DATE_EPOCH) '+%Y-%m-%d')\"
 endif
@@ -248,7 +248,7 @@ $(HOT_OBJS):  PERFILE_OPT = $(if $(RELEASE_OPT),-O3)
 $(COLD_OBJS): PERFILE_OPT = $(if $(RELEASE_OPT),-Os)
 
 # --- Targets ------------------------------------------------------------------
-TARGET = $(BINDIR)/matchbox
+TARGET = $(BINDIR)/silex
 
 .PHONY: all clean debug release release-glibc release-docker test install check \
         test-asan compat-test shell-test security-test \
@@ -267,14 +267,14 @@ $(TARGET): $(OBJS) | $(BINDIR)
 
 # --- Release targets ----------------------------------------------------------
 
-release: CFLAGS = $(CFLAGS_RELEASE) -DMATCHBOX_BUILD_STATIC=1 -DMATCHBOX_LIBC_MUSL=1
+release: CFLAGS = $(CFLAGS_RELEASE) -DSILEX_BUILD_STATIC=1 -DSILEX_LIBC_MUSL=1
 release: LDFLAGS = $(LDFLAGS_MUSL)
 release: RELEASE_OPT = 1
 release: $(TARGET)
 	strip -s $(TARGET)
 	@echo "Release (musl static): $$(wc -c < $(TARGET)) bytes"
 
-release-glibc: CFLAGS = $(CFLAGS_RELEASE) -DMATCHBOX_BUILD_DYNAMIC=1 -DMATCHBOX_LIBC_GLIBC=1
+release-glibc: CFLAGS = $(CFLAGS_RELEASE) -DSILEX_BUILD_DYNAMIC=1 -DSILEX_LIBC_GLIBC=1
 release-glibc: LDFLAGS = $(LDFLAGS_GLIBC)
 release-glibc: RELEASE_OPT = 1
 release-glibc: $(TARGET)
@@ -315,7 +315,7 @@ PREFIX ?= /usr/local
 
 install: $(TARGET)
 	install -d $(DESTDIR)$(PREFIX)/bin
-	install -m 755 $(TARGET) $(DESTDIR)$(PREFIX)/bin/matchbox
+	install -m 755 $(TARGET) $(DESTDIR)$(PREFIX)/bin/silex
 	$(TARGET) --install $(DESTDIR)$(PREFIX)/bin
 
 # --- Tests --------------------------------------------------------------------
@@ -414,7 +414,7 @@ MODULE_SOS  = $(patsubst $(MODULES_DIR)/%.c,$(MODULES_OUT)/%.so,$(MODULE_SRCS))
 
 modules: $(MODULE_SOS)
 
-$(MODULES_OUT)/%.so: $(MODULES_DIR)/%.c matchbox_module.h | $(MODULES_OUT)
+$(MODULES_OUT)/%.so: $(MODULES_DIR)/%.c silex_module.h | $(MODULES_OUT)
 	$(CC) -shared -fPIC -O2 -std=c11 -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE \
 	      -I$(SRCDIR) -o $@ $<
 
@@ -422,8 +422,8 @@ $(MODULES_OUT):
 	mkdir -p $(MODULES_OUT)
 
 install-modules: modules
-	install -d $(DESTDIR)/usr/lib/matchbox/modules
-	install -m 644 $(MODULES_OUT)/*.so $(DESTDIR)/usr/lib/matchbox/modules/
+	install -d $(DESTDIR)/usr/lib/silex/modules
+	install -m 644 $(MODULES_OUT)/*.so $(DESTDIR)/usr/lib/silex/modules/
 
 clean-modules:
 	rm -rf $(MODULES_OUT)
@@ -506,7 +506,7 @@ size-check: release
 PGO_DIR      = $(PWD)/pgo
 PGO_RAW_DIR  = $(PGO_DIR)/profiles/raw
 PGO_MERGED   = $(PGO_DIR)/profiles/merged.profdata
-PGO_BINARY   = $(BINDIR)/matchbox-instrumented
+PGO_BINARY   = $(BINDIR)/silex-instrumented
 
 pgo-instrument: clean
 	$(MAKE) CC=$(CC) CFLAGS="$(CFLAGS_RELEASE) -fprofile-generate=$(PGO_RAW_DIR)" \
@@ -523,10 +523,10 @@ pgo-build: pgo-merge
 	        CFLAGS="$(CFLAGS_RELEASE) -fprofile-use=$(PGO_MERGED) -fprofile-correction" all
 
 pgo-report:
-	cd $(PGO_DIR) && TARGET=$(BINDIR)/matchbox $(MAKE) report
+	cd $(PGO_DIR) && TARGET=$(BINDIR)/silex $(MAKE) report
 
 pgo-validate:
-	cd $(PGO_DIR) && TARGET=$(BINDIR)/matchbox $(MAKE) validate
+	cd $(PGO_DIR) && TARGET=$(BINDIR)/silex $(MAKE) validate
 
 pgo: pgo-instrument pgo-collect pgo-build
 	@echo "PGO build complete."

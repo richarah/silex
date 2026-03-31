@@ -6,7 +6,7 @@
 
 #include "registry.h"
 #include "loader.h"
-#include "../../matchbox_module.h"
+#include "../../silex_module.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -24,7 +24,7 @@
  *
  * Modules are discovered by scanning directories listed in the
  * MATCHBOX_MODULE_PATH environment variable (colon-separated), falling back
- * to /usr/lib/matchbox/modules/.
+ * to /usr/lib/silex/modules/.
  *
  * Registry entries are hashed by "tool:flag" using FNV-1a and stored in
  * 64 buckets.  The directory mtime is checked on each lookup to detect new
@@ -33,13 +33,13 @@
 
 #define REGISTRY_BUCKETS     64
 #define REGISTRY_MAX_ENTRIES 1024   /* hard cap: stop loading beyond this many modules */
-#define DEFAULT_MODULE_DIR   "/usr/lib/matchbox/modules"
+#define DEFAULT_MODULE_DIR   "/usr/lib/silex/modules"
 
 typedef struct reg_entry {
     char               *tool;
     char               *flag;
     char               *so_path;
-    matchbox_module_t  *mod;
+    silex_module_t  *mod;
     struct reg_entry   *next;
 } reg_entry_t;
 
@@ -99,7 +99,7 @@ static void registry_clear(void)
  */
 static void first_module_dir(char out[PATH_MAX])
 {
-    const char *env = getenv("MATCHBOX_MODULE_PATH");
+    const char *env = getenv("SILEX_MODULE_PATH");
     if (env && *env) {
         /* Take first colon-separated component */
         const char *colon = strchr(env, ':');
@@ -133,7 +133,7 @@ void registry_check_invalidate(void)
     }
 }
 
-matchbox_module_t *registry_find(const char *tool, const char *flag)
+silex_module_t *registry_find(const char *tool, const char *flag)
 {
     size_t idx = bucket_index(tool, flag);
     for (reg_entry_t *e = buckets[idx]; e; e = e->next) {
@@ -144,7 +144,7 @@ matchbox_module_t *registry_find(const char *tool, const char *flag)
 }
 
 void registry_register(const char *tool, const char *flag,
-                        const char *so_path, matchbox_module_t *mod)
+                        const char *so_path, silex_module_t *mod)
 {
     size_t idx = bucket_index(tool, flag);
 
@@ -200,14 +200,14 @@ static int so_passes_scan_checks(const char *path)
  * Scan one directory for a module supporting (tool, flag).
  * Returns the first matching module pointer, or NULL.
  */
-static matchbox_module_t *scan_dir(const char *dir,
+static silex_module_t *scan_dir(const char *dir,
                                     const char *tool, const char *flag)
 {
     DIR *d = opendir(dir);
     if (!d) return NULL;
 
     struct dirent *ent;
-    matchbox_module_t *found = NULL;
+    silex_module_t *found = NULL;
 
     while (!found && (ent = readdir(d)) != NULL) {
         const char *name = ent->d_name;
@@ -225,7 +225,7 @@ static matchbox_module_t *scan_dir(const char *dir,
         if (!so_passes_scan_checks(so_path))
             continue;
 
-        matchbox_module_t *mod = module_load(so_path);
+        silex_module_t *mod = module_load(so_path);
         if (!mod)
             continue;
 
@@ -259,18 +259,18 @@ static matchbox_module_t *scan_dir(const char *dir,
     return found;
 }
 
-matchbox_module_t *registry_lookup(const char *tool, const char *flag)
+silex_module_t *registry_lookup(const char *tool, const char *flag)
 {
     /* Invalidate stale cache first */
     registry_check_invalidate();
 
     /* Check in-memory registry first */
-    matchbox_module_t *cached = registry_find(tool, flag);
+    silex_module_t *cached = registry_find(tool, flag);
     if (cached)
         return cached;
 
     /* Scan all module directories in MATCHBOX_MODULE_PATH */
-    const char *env = getenv("MATCHBOX_MODULE_PATH");
+    const char *env = getenv("SILEX_MODULE_PATH");
     if (env && *env) {
         /* Make a mutable copy to tokenise */
         char *env_copy = strdup(env);
@@ -279,7 +279,7 @@ matchbox_module_t *registry_lookup(const char *tool, const char *flag)
         char *saveptr = NULL;
         char *token = strtok_r(env_copy, ":", &saveptr);
         while (token) {
-            matchbox_module_t *mod = scan_dir(token, tool, flag);
+            silex_module_t *mod = scan_dir(token, tool, flag);
             if (mod) {
                 free(env_copy);
                 return mod;
@@ -289,7 +289,7 @@ matchbox_module_t *registry_lookup(const char *tool, const char *flag)
         free(env_copy);
     } else {
         /* Fall back to default module directory */
-        matchbox_module_t *mod = scan_dir(DEFAULT_MODULE_DIR, tool, flag);
+        silex_module_t *mod = scan_dir(DEFAULT_MODULE_DIR, tool, flag);
         if (mod)
             return mod;
     }

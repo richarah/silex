@@ -11,8 +11,8 @@
  * All three implementations must produce identical results; see
  * tests/unit/test_linescan.c for cross-validation.
  */
-#ifndef MATCHBOX_LINESCAN_H
-#define MATCHBOX_LINESCAN_H
+#ifndef SILEX_LINESCAN_H
+#define SILEX_LINESCAN_H
 
 #include <stddef.h>
 
@@ -24,4 +24,4 @@
  */
 const char *scan_newline(const char *buf, size_t len);
 
-#endif /* MATCHBOX_LINESCAN_H */
+#endif /* SILEX_LINESCAN_H */

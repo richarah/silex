@@ -1,14 +1,14 @@
-# matchbox Security
+# silex Security
 
 ## Threat Model
 
-matchbox is designed to run inside container build environments (Docker, OCI).
+silex is designed to run inside container build environments (Docker, OCI).
 The primary threat is an attacker who controls:
 - Container filesystem contents (Dockerfile COPY/ADD layers)
 - Environment variables passed to RUN steps
 - Filenames in the build context
 
-matchbox does NOT aim to sandbox arbitrary user code. It is a build tool, not
+silex does NOT aim to sandbox arbitrary user code. It is a build tool, not
 a security boundary. However, it avoids a number of dangerous patterns common
 in ad hoc shell scripts.
 
@@ -82,7 +82,7 @@ These are not enabled by default because they conflict with `-static` linking.
 
 ## Resource Exhaustion Caps
 
-matchbox enforces hard limits to prevent resource exhaustion from malicious or
+silex enforces hard limits to prevent resource exhaustion from malicious or
 pathological inputs:
 
 | Resource | Limit | Location |
@@ -152,12 +152,12 @@ immune to LD_PRELOAD injection, and portable across any Linux kernel >= 3.17.
 The glibc build is suitable for development and for container base images that already
 include glibc (Debian, Ubuntu, RHEL, Alpine with glibc compatibility layer).
 
-Module libc tagging (`matchbox_module_t.libc`) prevents loading a musl-compiled .so
+Module libc tagging (`silex_module_t.libc`) prevents loading a musl-compiled .so
 into a glibc build and vice versa, avoiding subtle ABI mismatches.
 
 ## Privilege Handling
 
-matchbox does not call `setuid()`, `setgid()`, `seteuid()`, or `setegid()`. It does
+silex does not call `setuid()`, `setgid()`, `seteuid()`, or `setegid()`. It does
 not drop or acquire privileges at runtime.
 
 Specific tools that interact with ownership:
@@ -173,13 +173,13 @@ Specific tools that interact with ownership:
 - **rm**: calls `unlink(2)` / `rmdir(2)`. Fails with exit code 1 if the process
   lacks write permission on the containing directory.
 
-Recommendation: run matchbox as the same user as the container build process (typically
-root inside a container, or a dedicated build user). Do not run matchbox as a more
+Recommendation: run silex as the same user as the container build process (typically
+root inside a container, or a dedicated build user). Do not run silex as a more
 privileged user than the build requires.
 
 ## Environment Variable Handling
 
-matchbox reads the following environment variables:
+silex reads the following environment variables:
 
 | Variable | Purpose | Security note |
 |----------|---------|---------------|
@@ -187,15 +187,15 @@ matchbox reads the following environment variables:
 | HOME | Tilde expansion (~) | Accepted as provided; no validation |
 | IFS | Word splitting in the shell | A hostile IFS affects expansion; this is expected POSIX behaviour |
 | PWD | Working directory hint | Overridden by `getcwd()` if inconsistent |
-| MATCHBOX_MODULE_PATH | Extra module search directory | Validated with same security checks as default module dir |
-| MATCHBOX_FSCACHE_TTL | Filesystem cache TTL in seconds | Validated as a non-negative integer; invalid values use the default |
-| MATCHBOX_TRACE | Shell tracing level (1 or 2) | Informational only; no privilege escalation; output goes to stderr |
-| MATCHBOX_FORCE_FALLBACKS | Disable io_uring/inotify (set to any value) | For testing only; disables performance features, not security controls |
+| SILEX_MODULE_PATH | Extra module search directory | Validated with same security checks as default module dir |
+| SILEX_FSCACHE_TTL | Filesystem cache TTL in seconds | Validated as a non-negative integer; invalid values use the default |
+| SILEX_TRACE | Shell tracing level (1 or 2) | Informational only; no privilege escalation; output goes to stderr |
+| SILEX_FORCE_FALLBACKS | Disable io_uring/inotify (set to any value) | For testing only; disables performance features, not security controls |
 
 **LD_PRELOAD**: mitigated completely in the musl static build (static binaries ignore
 LD_PRELOAD). The glibc dynamic build is susceptible to LD_PRELOAD injection, which is
 the same risk as any other dynamically linked binary running inside the container.
-This is not a matchbox-specific vulnerability; it is a property of dynamic linking.
+This is not a silex-specific vulnerability; it is a property of dynamic linking.
 
 **IFS safety**: the shell does not apply IFS splitting to literal (unquoted) command
 words; IFS only applies when `$variable` is expanded without quotes. A hostile
@@ -206,7 +206,7 @@ This matches the behaviour of dash, bash, and all POSIX shells.
 resolved binary paths. Cache entries are invalidated when the directory's mtime
 changes. Entries are verified with `stat()` at lookup time before `execv()`.
 
-matchbox is not a security boundary. It runs inside an already-sandboxed container
+silex is not a security boundary. It runs inside an already-sandboxed container
 build environment where the container runtime (Docker, containerd, etc.) provides
 the primary isolation.
 
@@ -222,7 +222,7 @@ make release SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
 Properties:
 
 - No `__DATE__` or `__TIME__` macros are used in `src/` (verified: `grep -r '__DATE__\|__TIME__' src/` returns no matches).
-- The `MATCHBOX_BUILD_DATE` macro is only defined when `SOURCE_DATE_EPOCH` is set,
+- The `SILEX_BUILD_DATE` macro is only defined when `SOURCE_DATE_EPOCH` is set,
   so builds without it are not affected.
 - `--build-id=sha1` produces a content-based build ID: identical input produces
   identical output on the same compiler.
@@ -230,9 +230,9 @@ Properties:
 
 To verify reproducibility:
 ```sh
-B1=$(make release SOURCE_DATE_EPOCH=1700000000 2>/dev/null && sha256sum build/bin/matchbox)
+B1=$(make release SOURCE_DATE_EPOCH=1700000000 2>/dev/null && sha256sum build/bin/silex)
 make clean
-B2=$(make release SOURCE_DATE_EPOCH=1700000000 2>/dev/null && sha256sum build/bin/matchbox)
+B2=$(make release SOURCE_DATE_EPOCH=1700000000 2>/dev/null && sha256sum build/bin/silex)
 [ "$B1" = "$B2" ] && echo "Reproducible" || echo "NOT reproducible"
 ```
 

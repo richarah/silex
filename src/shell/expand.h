@@ -1,5 +1,5 @@
-#ifndef MATCHBOX_EXPAND_H
-#define MATCHBOX_EXPAND_H
+#ifndef SILEX_EXPAND_H
+#define SILEX_EXPAND_H
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif

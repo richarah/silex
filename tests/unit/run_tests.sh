@@ -1,13 +1,13 @@
 #!/bin/bash
-# run_tests.sh — run all matchbox Phase 1 unit tests
-# Usage: run_tests.sh [path/to/matchbox]
+# run_tests.sh — run all silex Phase 1 unit tests
+# Usage: run_tests.sh [path/to/silex]
 
 set -euo pipefail
 
-MATCHBOX="${1:-build/bin/matchbox}"
+SILEX="${1:-build/bin/silex}"
 
-if [ ! -x "$MATCHBOX" ]; then
-    echo "ERROR: matchbox binary not found at '$MATCHBOX'" >&2
+if [ ! -x "$SILEX" ]; then
+    echo "ERROR: silex binary not found at '$SILEX'" >&2
     exit 1
 fi
 
@@ -18,7 +18,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 run_suite() {
     local suite="$1"
     echo "--- $suite ---"
-    if bash "$SCRIPT_DIR/$suite" "$MATCHBOX"; then
+    if bash "$SCRIPT_DIR/$suite" "$SILEX"; then
         echo "PASS: $suite"
         PASS=$((PASS + 1))
     else

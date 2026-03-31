@@ -1,16 +1,16 @@
 #!/bin/sh
 # quoting_test.sh — Q-01 through Q-08: quoting/expansion/subshell tests
-# Runs each case through matchbox AND dash, diffs output.
-# Any diff where dash is correct = matchbox bug.
+# Runs each case through silex AND dash, diffs output.
+# Any diff where dash is correct = silex bug.
 
-MATCHBOX="${MATCHBOX:-$(dirname "$0")/../../build/bin/matchbox}"
+SILEX="${SILEX:-$(dirname "$0")/../../build/bin/silex}"
 DASH="${DASH:-/usr/bin/dash}"
 PASS=0; FAIL=0; SKIP=0
 
 run_case() {
     local id="$1" desc="$2" script="$3"
     local mb_out dash_out
-    mb_out=$(echo "$script" | "$MATCHBOX" sh 2>&1)
+    mb_out=$(echo "$script" | "$SILEX" sh 2>&1)
     dash_out=$(echo "$script" | "$DASH" 2>&1)
     if [ "$mb_out" = "$dash_out" ]; then
         printf 'PASS [%s] %s\n' "$id" "$desc"
@@ -18,7 +18,7 @@ run_case() {
     else
         printf 'FAIL [%s] %s\n' "$id" "$desc"
         printf '  dash:    %s\n' "$dash_out"
-        printf '  matchbox:%s\n' "$mb_out"
+        printf '  silex:%s\n' "$mb_out"
         FAIL=$((FAIL+1))
     fi
 }

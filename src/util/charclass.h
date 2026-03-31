@@ -7,8 +7,8 @@
  * All helpers take `unsigned char` to avoid signed-extension bugs; callers
  * must cast: is_name_char((unsigned char)c).
  */
-#ifndef MATCHBOX_CHARCLASS_H
-#define MATCHBOX_CHARCLASS_H
+#ifndef SILEX_CHARCLASS_H
+#define SILEX_CHARCLASS_H
 
 #include <stdint.h>
 
@@ -56,4 +56,4 @@ static inline int is_shell_ws(unsigned char c)
     return (char_class[c] & (CC_SPACE | CC_NEWLINE)) != 0;
 }
 
-#endif /* MATCHBOX_CHARCLASS_H */
+#endif /* SILEX_CHARCLASS_H */

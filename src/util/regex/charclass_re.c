@@ -51,7 +51,7 @@ static int apply_posix_class(mb_charclass *cc, const char *name, int negate)
 int mb_charclass_parse(const char *pat, const char *end,
                        mb_charclass *out, int flags)
 {
-    int icase = (flags & MB_REG_ICASE) != 0;
+    int icase = (flags & SX_REG_ICASE) != 0;
     memset(out->bits, 0, sizeof(out->bits));
 
     const char *p = pat;

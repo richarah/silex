@@ -1,5 +1,5 @@
-#ifndef MATCHBOX_HASHMAP_H
-#define MATCHBOX_HASHMAP_H
+#ifndef SILEX_HASHMAP_H
+#define SILEX_HASHMAP_H
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
@@ -24,4 +24,4 @@ void    *hm_get(hashmap_t *m, uint64_t key);
 void     hm_put(hashmap_t *m, uint64_t key, void *value);
 void     hm_delete(hashmap_t *m, uint64_t key);
 
-#endif /* MATCHBOX_HASHMAP_H */
+#endif /* SILEX_HASHMAP_H */

@@ -188,8 +188,8 @@ static int tokenize(tokenizer_t *t, const char *pat, int flags,
 {
     t->p      = pat;
     t->end    = pat + strlen(pat);
-    t->ere    = (flags & MB_REG_ERE) != 0;
-    t->icase  = (flags & MB_REG_ICASE) != 0;
+    t->ere    = (flags & SX_REG_ERE) != 0;
+    t->icase  = (flags & SX_REG_ICASE) != 0;
     t->flags  = flags;
     t->errstr = errstr;
     t->n      = 0;
@@ -644,7 +644,7 @@ int mb_parse(const char *pat, int flags, mb_prog *prog,
      * This ensures callers can always start execution at prog->instrs[0]. */
     if (e.start != 0) {
         /* Grow program by 1 at front */
-        if (prog->len >= MB_MAX_INSTRS) {
+        if (prog->len >= SX_MAX_INSTRS) {
             if (errstr) *errstr = "pattern too complex";
             return -1;
         }

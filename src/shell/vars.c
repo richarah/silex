@@ -92,7 +92,7 @@ int vars_set(vars_t *v, const char *name, const char *value)
         var_entry_t *e = scope_find(s, name, idx);
         if (e) {
             if (e->readonly) {
-                fprintf(stderr, "matchbox: %s: readonly variable\n", name);
+                fprintf(stderr, "silex: %s: readonly variable\n", name);
                 return 1;
             }
             e->value = arena_strdup(v->arena, value);
@@ -119,7 +119,7 @@ int vars_set_local(vars_t *v, const char *name, const char *value)
     var_entry_t *e = scope_find(v->scope, name, idx);
     if (e) {
         if (e->readonly) {
-            fprintf(stderr, "matchbox: %s: readonly variable\n", name);
+            fprintf(stderr, "silex: %s: readonly variable\n", name);
             return 1;
         }
         e->value = arena_strdup(v->arena, value);
@@ -166,7 +166,7 @@ int vars_unset(vars_t *v, const char *name)
             var_entry_t *e = *pp;
             if (strcmp(e->name, name) == 0) {
                 if (e->readonly) {
-                    fprintf(stderr, "matchbox: %s: readonly variable\n", name);
+                    fprintf(stderr, "silex: %s: readonly variable\n", name);
                     return 1;
                 }
                 *pp = e->next;

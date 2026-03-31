@@ -1,5 +1,5 @@
-#ifndef MATCHBOX_SECTION_H
-#define MATCHBOX_SECTION_H
+#ifndef SILEX_SECTION_H
+#define SILEX_SECTION_H
 
 /*
  * section.h — binary layout hints for GCC/Clang.
@@ -28,4 +28,4 @@
 #  define unlikely(x) (x)
 #endif
 
-#endif /* MATCHBOX_SECTION_H */
+#endif /* SILEX_SECTION_H */

@@ -175,7 +175,7 @@ static long long arg_to_llong(const char *s)
         if (endp != s)
             return (long long)uval;
         /* Non-numeric: return 0, print warning */
-        fprintf(stderr, "matchbox: printf: '%s': invalid number\n", s);
+        fprintf(stderr, "silex: printf: '%s': invalid number\n", s);
         return 0;
     }
     return val;
@@ -190,7 +190,7 @@ static unsigned long long arg_to_ullong(const char *s)
     errno = 0;
     unsigned long long val = strtoull(s, &endp, 0);
     if (errno != 0 || endp == s) {
-        fprintf(stderr, "matchbox: printf: '%s': invalid number\n", s);
+        fprintf(stderr, "silex: printf: '%s': invalid number\n", s);
         return 0;
     }
     return val;
@@ -204,7 +204,7 @@ static double arg_to_double(const char *s)
     char *endp;
     double val = strtod(s, &endp);
     if (endp == s) {
-        fprintf(stderr, "matchbox: printf: '%s': invalid number\n", s);
+        fprintf(stderr, "silex: printf: '%s': invalid number\n", s);
         return 0.0;
     }
     return val;

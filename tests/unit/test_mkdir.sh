@@ -1,10 +1,10 @@
 #!/bin/bash
 # test_mkdir.sh — unit tests for the mkdir builtin
-# Usage: test_mkdir.sh [path/to/matchbox]
+# Usage: test_mkdir.sh [path/to/silex]
 
 set -euo pipefail
 
-MB="${1:-build/bin/matchbox}"
+MB="${1:-build/bin/silex}"
 MKDIR="$MB mkdir"
 
 PASS=0

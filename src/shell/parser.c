@@ -51,7 +51,7 @@ void parser_init(parser_t *p, lexer_t *l, arena_t *a)
 void parser_error(parser_t *p, const char *msg)
 {
     token_t t = lexer_peek(p->lexer);
-    fprintf(stderr, "matchbox: parse error at line %d: %s\n", t.lineno, msg);
+    fprintf(stderr, "silex: parse error at line %d: %s\n", t.lineno, msg);
     p->error = 1;
 }
 
@@ -94,7 +94,7 @@ static void wl_push(word_list_t *wl, char *w)
         size_t newcap = wl->cap ? wl->cap * 2 : 8;
         char **newbuf = realloc(wl->items, newcap * sizeof(char *));
         if (!newbuf) {
-            perror("matchbox: parser word_list realloc");
+            perror("silex: parser word_list realloc");
             abort();
         }
         wl->items = newbuf;

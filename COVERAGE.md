@@ -1,4 +1,4 @@
-# matchbox Code Coverage
+# silex Code Coverage
 
 **Generated:** 2026-03-30
 **Version:** 0.2.0
@@ -110,7 +110,7 @@ The shell subsystem has the highest coverage because all 203 shell conformance t
 | path.c | 94 | **18.09%** |
 | platform.c | 17 | **0.00%** |
 
-`platform.c` (0%): io_uring and inotify detection — the coverage binary does not run as root and `MATCHBOX_FORCE_FALLBACKS` skips detection entirely during security tests. `path.c` (18%): `path_canon()` (full `realpath`) is exercised only by rm safety tests; `path_normalize()` lexical path is rarely triggered by test scripts.
+`platform.c` (0%): io_uring and inotify detection — the coverage binary does not run as root and `SILEX_FORCE_FALLBACKS` skips detection entirely during security tests. `path.c` (18%): `path_canon()` (full `realpath`) is exercised only by rm safety tests; `path_normalize()` lexical path is rarely triggered by test scripts.
 
 ---
 
@@ -127,8 +127,8 @@ The shell subsystem has the highest coverage because all 203 shell conformance t
 | detect.c | 30 | **0.00%** |
 | fallback.c | 38 | **0.00%** |
 
-- **Module loader/registry (0%):** module loading requires `.so` files in `/usr/lib/matchbox/modules/`. Test environment has no installed modules.
-- **io_uring / inotify (0%):** not exercised in the coverage environment (rootless, no CAP_SYS_RAWIO; falls back gracefully via `MATCHBOX_FORCE_FALLBACKS`).
+- **Module loader/registry (0%):** module loading requires `.so` files in `/usr/lib/silex/modules/`. Test environment has no installed modules.
+- **io_uring / inotify (0%):** not exercised in the coverage environment (rootless, no CAP_SYS_RAWIO; falls back gracefully via `SILEX_FORCE_FALLBACKS`).
 - **fscache (29%):** basic stat caching exercised by integration tests; TTL invalidation and mtime paths not triggered.
 
 ---
@@ -150,16 +150,16 @@ The shell subsystem has the highest coverage because all 203 shell conformance t
 1. **Add compat tests for new v0.2.0 builtins** (`env`, `mktemp`, `tee`, `realpath`, `sha256sum`) — high-value, low-effort
 2. **Add compat tests for file operation builtins** (`chmod`, `mv`, `ln`, `touch`, `install`, `tail`, `find`) — large uncovered surface
 3. **Exercise charclass_re.c** via grep bracket expression tests (`grep '[[:alpha:]]'`)
-4. **Module loading** requires test infrastructure: build a minimal `.so`, run with `MATCHBOX_MODULE_PATH`
-5. **io_uring / fallback paths** require `MATCHBOX_FORCE_FALLBACKS=0` with appropriate kernel support
+4. **Module loading** requires test infrastructure: build a minimal `.so`, run with `SILEX_MODULE_PATH`
+5. **io_uring / fallback paths** require `SILEX_FORCE_FALLBACKS=0` with appropriate kernel support
 
 ### How to regenerate
 
 ```sh
 make clean
-make CFLAGS='-std=c11 -Wall -Wextra -Werror -pedantic -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -DMATCHBOX_VERSION=\"0.2.0\" -fstack-protector-strong -DMATCHBOX_LIBC_GLIBC=1 --coverage -g -O0' LDFLAGS='-pie --coverage'
+make CFLAGS='-std=c11 -Wall -Wextra -Werror -pedantic -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -DSILEX_VERSION=\"0.2.0\" -fstack-protector-strong -DSILEX_LIBC_GLIBC=1 --coverage -g -O0' LDFLAGS='-pie --coverage'
 make test && make compat-test && make integration-test && make security-test
-for f in tests/unit/shell/test_*.sh; do sh "$f" build/bin/matchbox; done
+for f in tests/unit/shell/test_*.sh; do sh "$f" build/bin/silex; done
 gcov -o build/obj/core build/obj/core/*.o
 gcov build/obj/shell/*.o build/obj/util/*.o build/obj/util/regex/*.o
 gcov build/obj/module/*.o build/obj/batch/*.o build/obj/cache/*.o build/obj/main.o

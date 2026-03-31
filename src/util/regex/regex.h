@@ -1,4 +1,4 @@
-/* regex.h — matchbox Thompson NFA/DFA regex engine public API
+/* regex.h — silex Thompson NFA/DFA regex engine public API
  *
  * Drop-in replacement for POSIX regcomp()/regexec() in grep and sed.
  * Provides O(n*m) worst-case Thompson NFA simulation with a lazy DFA cache
@@ -6,8 +6,8 @@
  * Boyer-Moore-Horspool (O(n/m) average). For patterns with back-references,
  * falls back to POSIX regexec().
  */
-#ifndef MATCHBOX_REGEX_H
-#define MATCHBOX_REGEX_H
+#ifndef SILEX_REGEX_H
+#define SILEX_REGEX_H
 
 #include <stddef.h>
 #include <regex.h>  /* for regex_t fallback */
@@ -24,10 +24,10 @@ typedef struct {
 /* Compilation flags */
 enum mb_regex_flags {
     MB_REG_BRE     = 0,        /* POSIX BRE (default) */
-    MB_REG_ERE     = 1 << 0,   /* POSIX ERE (-E) */
-    MB_REG_ICASE   = 1 << 1,   /* case-insensitive */
-    MB_REG_NEWLINE = 1 << 2,   /* ^ and $ match embedded newlines */
-    MB_REG_NOSUB   = 1 << 3,   /* no submatch extraction needed */
+    SX_REG_ERE     = 1 << 0,   /* POSIX ERE (-E) */
+    SX_REG_ICASE   = 1 << 1,   /* case-insensitive */
+    SX_REG_NEWLINE = 1 << 2,   /* ^ and $ match embedded newlines */
+    SX_REG_NOSUB   = 1 << 3,   /* no submatch extraction needed */
 };
 
 /* ---- Public API ---------------------------------------------------------- */
@@ -66,4 +66,4 @@ void mb_regex_free(mb_regex *re);
  */
 unsigned char mb_regex_first_char(const mb_regex *re);
 
-#endif /* MATCHBOX_REGEX_H */
+#endif /* SILEX_REGEX_H */

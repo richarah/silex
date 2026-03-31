@@ -1,20 +1,20 @@
 #!/bin/bash
 # tests/integration/run_integration.sh -- Integration test runner
 #
-# Builds sample shell scripts using matchbox as /bin/sh, comparing output
+# Builds sample shell scripts using silex as /bin/sh, comparing output
 # against dash as reference. Validates exit codes and stdout equivalence.
 #
-# Usage: ./run_integration.sh [MATCHBOX_BINARY]
+# Usage: ./run_integration.sh [SILEX_BINARY]
 
 set -uo pipefail
 
-MATCHBOX="${1:-build/bin/matchbox}"
+SILEX="${1:-build/bin/silex}"
 PASS=0
 FAIL=0
 SKIP=0
 
-if [ ! -x "$MATCHBOX" ]; then
-    echo "ERROR: matchbox binary not found: $MATCHBOX" >&2
+if [ ! -x "$SILEX" ]; then
+    echo "ERROR: silex binary not found: $SILEX" >&2
     exit 1
 fi
 
@@ -33,7 +33,7 @@ tap_test() {
 
     local mb_out mb_exit ref_out ref_exit
 
-    mb_out=$(echo "$script" | "$MATCHBOX" /dev/stdin 2>&1)
+    mb_out=$(echo "$script" | "$SILEX" /dev/stdin 2>&1)
     mb_exit=$?
     ref_out=$(echo "$script" | "$REF_SH" 2>&1)
     ref_exit=$?
@@ -55,8 +55,8 @@ tap_test() {
 }
 
 echo "TAP version 13"
-echo "# Integration tests: matchbox vs $REF_SH"
-echo "# matchbox: $MATCHBOX"
+echo "# Integration tests: silex vs $REF_SH"
+echo "# silex: $SILEX"
 
 # ---------------------------------------------------------------------------
 # Basic shell scripts

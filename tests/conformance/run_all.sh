@@ -2,11 +2,11 @@
 # run_all.sh — Master conformance test runner
 # Runs all conformance test scripts and reports a summary.
 
-MATCHBOX="${MATCHBOX:-$(dirname "$0")/../../build/bin/matchbox}"
+SILEX="${SILEX:-$(dirname "$0")/../../build/bin/silex}"
 PASS=0; FAIL=0
 
-echo "=== matchbox conformance suite ==="
-echo "Binary: $MATCHBOX"
+echo "=== silex conformance suite ==="
+echo "Binary: $SILEX"
 echo ""
 
 run_suite() {

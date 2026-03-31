@@ -8,8 +8,8 @@ ulimit -d 2097152   # 2 GB data segment
 # Benchmarks key coreutil builtins (wc, sort, sed, tr, cut, awk)
 # against their system equivalents.
 #
-# Usage: ./bench_builtins.sh [MATCHBOX_BINARY] [ITERATIONS]
-#   MATCHBOX_BINARY  path to matchbox binary (default: build/bin/matchbox)
+# Usage: ./bench_builtins.sh [SILEX_BINARY] [ITERATIONS]
+#   SILEX_BINARY  path to silex binary (default: build/bin/silex)
 #   ITERATIONS       number of iterations (default: 300)
 #
 # Output: TSV format
@@ -17,11 +17,11 @@ ulimit -d 2097152   # 2 GB data segment
 
 set -uo pipefail
 
-MATCHBOX="${1:-build/bin/matchbox}"
+SILEX="${1:-build/bin/silex}"
 N="${2:-300}"
 
-if [ ! -x "$MATCHBOX" ]; then
-    echo "ERROR: matchbox binary not found: $MATCHBOX" >&2
+if [ ! -x "$SILEX" ]; then
+    echo "ERROR: silex binary not found: $SILEX" >&2
     exit 1
 fi
 
@@ -93,15 +93,15 @@ SHUFFLED="$TMPDIR_BUILTINS/shuffled.txt"
 printf '# builtins benchmark: %d iterations each\n' "$N"
 printf '# System: %s\n' "$(uname -srm)"
 printf '# Date:   %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-printf '# matchbox: %s\n' "$MATCHBOX"
+printf '# silex: %s\n' "$SILEX"
 printf '#\n'
 printf 'command\tbuiltin\tmean_ms\tmin_ms\tmax_ms\tstddev_ms\n'
 
 # ---------------------------------------------------------------------------
 # wc -l
 # ---------------------------------------------------------------------------
-bench_command "matchbox" "wc-l" \
-    "\"$MATCHBOX\" wc -l \"$INPUT\"" "$N"
+bench_command "silex" "wc-l" \
+    "\"$SILEX\" wc -l \"$INPUT\"" "$N"
 if command -v wc > /dev/null 2>&1; then
     bench_command "system" "wc-l" "wc -l \"$INPUT\"" "$N"
 fi
@@ -109,8 +109,8 @@ fi
 # ---------------------------------------------------------------------------
 # sort
 # ---------------------------------------------------------------------------
-bench_command "matchbox" "sort" \
-    "\"$MATCHBOX\" sort \"$SHUFFLED\"" "$N"
+bench_command "silex" "sort" \
+    "\"$SILEX\" sort \"$SHUFFLED\"" "$N"
 if command -v sort > /dev/null 2>&1; then
     bench_command "system" "sort" "sort \"$SHUFFLED\"" "$N"
 fi
@@ -118,8 +118,8 @@ fi
 # ---------------------------------------------------------------------------
 # sed s///
 # ---------------------------------------------------------------------------
-bench_command "matchbox" "sed-subst" \
-    "\"$MATCHBOX\" sed 's/alpha/ALPHA/g' \"$INPUT\"" "$N"
+bench_command "silex" "sed-subst" \
+    "\"$SILEX\" sed 's/alpha/ALPHA/g' \"$INPUT\"" "$N"
 if command -v sed > /dev/null 2>&1; then
     bench_command "system" "sed-subst" "sed 's/alpha/ALPHA/g' \"$INPUT\"" "$N"
 fi
@@ -127,8 +127,8 @@ fi
 # ---------------------------------------------------------------------------
 # tr
 # ---------------------------------------------------------------------------
-bench_command "matchbox" "tr-upper" \
-    "\"$MATCHBOX\" sh -c '\"$MATCHBOX\" cat \"$INPUT\" | \"$MATCHBOX\" tr a-z A-Z'" "$N"
+bench_command "silex" "tr-upper" \
+    "\"$SILEX\" sh -c '\"$SILEX\" cat \"$INPUT\" | \"$SILEX\" tr a-z A-Z'" "$N"
 if command -v tr > /dev/null 2>&1; then
     bench_command "system" "tr-upper" "tr a-z A-Z < \"$INPUT\"" "$N"
 fi
@@ -136,8 +136,8 @@ fi
 # ---------------------------------------------------------------------------
 # cut
 # ---------------------------------------------------------------------------
-bench_command "matchbox" "cut-f2" \
-    "\"$MATCHBOX\" cut -d' ' -f2 \"$INPUT\"" "$N"
+bench_command "silex" "cut-f2" \
+    "\"$SILEX\" cut -d' ' -f2 \"$INPUT\"" "$N"
 if command -v cut > /dev/null 2>&1; then
     bench_command "system" "cut-f2" "cut -d' ' -f2 \"$INPUT\"" "$N"
 fi
@@ -145,8 +145,8 @@ fi
 # ---------------------------------------------------------------------------
 # grep -c (line count mode, exercises line scanning without output)
 # ---------------------------------------------------------------------------
-bench_command "matchbox" "grep-count" \
-    "\"$MATCHBOX\" grep -c 'alpha' \"$INPUT\"" "$N"
+bench_command "silex" "grep-count" \
+    "\"$SILEX\" grep -c 'alpha' \"$INPUT\"" "$N"
 if command -v grep > /dev/null 2>&1; then
     bench_command "system" "grep-count" "grep -c 'alpha' \"$INPUT\"" "$N"
 fi
@@ -154,8 +154,8 @@ fi
 # ---------------------------------------------------------------------------
 # echo (shell builtin dispatch overhead)
 # ---------------------------------------------------------------------------
-bench_command "matchbox" "echo" \
-    "\"$MATCHBOX\" echo hello world" "$N"
+bench_command "silex" "echo" \
+    "\"$SILEX\" echo hello world" "$N"
 if command -v echo > /dev/null 2>&1; then
     bench_command "system" "echo" "/bin/echo hello world" "$N"
 fi

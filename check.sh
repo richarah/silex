@@ -1,11 +1,11 @@
 #!/bin/sh
-# check.sh — matchbox quality audit script
+# check.sh — silex quality audit script
 # Usage: sh check.sh
 # Exits 0 if all checks pass, non-zero otherwise.
 
 set -e
 
-BINARY=build/bin/matchbox
+BINARY=build/bin/silex
 PASS=0
 FAIL=0
 WARN=0
@@ -53,7 +53,7 @@ fi
 header "Version"
 VERSION=$("$BINARY" --version 2>&1 | head -1)
 echo "  $VERSION"
-if echo "$VERSION" | grep -q "^matchbox"; then
+if echo "$VERSION" | grep -q "^silex"; then
     ok "--version output looks correct"
 else
     fail "--version output unexpected: $VERSION"

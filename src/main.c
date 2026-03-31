@@ -1,4 +1,4 @@
-/* main.c — matchbox multicall entry point: dispatch by argv[0] */
+/* main.c — silex multicall entry point: dispatch by argv[0] */
 
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
@@ -80,8 +80,8 @@ static int cmd_list(void)
 }
 
 /*
- * --install DIR: create symlinks DIR/<applet> -> matchbox_path.
- * matchbox_path is the absolute path to the running matchbox binary.
+ * --install DIR: create symlinks DIR/<applet> -> silex_path.
+ * silex_path is the absolute path to the running silex binary.
  */
 static int cmd_install(const char *dir)
 {
@@ -89,7 +89,7 @@ static int cmd_install(const char *dir)
     char self[PATH_MAX];
     ssize_t n = readlink("/proc/self/exe", self, sizeof(self) - 1);
     if (n < 0) {
-        perror("matchbox: readlink /proc/self/exe");
+        perror("silex: readlink /proc/self/exe");
         return 1;
     }
     self[n] = '\0';
@@ -97,7 +97,7 @@ static int cmd_install(const char *dir)
     /* Ensure directory exists */
     struct stat st;
     if (stat(dir, &st) != 0 || !S_ISDIR(st.st_mode)) {
-        fprintf(stderr, "matchbox: --install: '%s' is not a directory\n", dir);
+        fprintf(stderr, "silex: --install: '%s' is not a directory\n", dir);
         return 1;
     }
 
@@ -106,7 +106,7 @@ static int cmd_install(const char *dir)
         char link_path[PATH_MAX];
         int r = snprintf(link_path, sizeof(link_path), "%s/%s", dir, a->name);
         if (r < 0 || (size_t)r >= sizeof(link_path)) {
-            fprintf(stderr, "matchbox: path too long for symlink %s/%s\n", dir, a->name);
+            fprintf(stderr, "silex: path too long for symlink %s/%s\n", dir, a->name);
             ret = 1;
             continue;
         }
@@ -128,7 +128,7 @@ static int cmd_install(const char *dir)
 }
 
 /* Architecture string for --version */
-static const char *matchbox_arch(void)
+static const char *silex_arch(void)
 {
 #if defined(__x86_64__)
     return "x86_64";
@@ -145,16 +145,16 @@ static const char *matchbox_arch(void)
 #endif
 }
 
-/* Print help for matchbox itself */
+/* Print help for silex itself */
 static void print_help(void)
 {
-    printf("matchbox -- container build runtime\n\n");
+    printf("silex -- container build runtime\n\n");
     printf("Usage:\n");
-    printf("  matchbox --version             Show version\n");
-    printf("  matchbox --list                List available applets\n");
-    printf("  matchbox --install DIR         Install symlinks in DIR\n");
-    printf("  matchbox --help                Show this help\n");
-    printf("  <applet> [ARGS...]             Run applet (via argv[0] or symlink)\n\n");
+    printf("  silex --version             Show version\n");
+    printf("  silex --list                List available applets\n");
+    printf("  silex --install DIR         Install symlinks in DIR\n");
+    printf("  silex --help                Show this help\n");
+    printf("  <applet> [ARGS...]          Run applet (via argv[0] or symlink)\n\n");
     printf("Applets:\n");
     for (const applet_t *a = applet_table; a->name; a++)
         printf("  %-12s %s\n", a->name, a->usage);
@@ -169,12 +169,12 @@ int main(int argc, char **argv)
     const char *invname = strrchr(argv[0], '/');
     invname = invname ? invname + 1 : argv[0];
 
-    /* If invoked as "matchbox" directly, handle meta-commands */
-    if (strcmp(invname, "matchbox") == 0) {
+    /* If invoked as "silex" directly, handle meta-commands */
+    if (strcmp(invname, "silex") == 0) {
         if (argc < 2 || strcmp(argv[1], "--help") == 0) {
             /* When stdin is not a tty, act as a shell (POSIX sh semantics).
-             * This allows: echo "echo hello" | matchbox
-             *              matchbox < script.sh */
+             * This allows: echo "echo hello" | silex
+             *              silex < script.sh */
             if (argc < 2 && !isatty(STDIN_FILENO)) {
                 const applet_t *sh = find_applet("sh");
                 if (sh) return sh->fn(argc, argv);
@@ -183,36 +183,36 @@ int main(int argc, char **argv)
             return 0;
         }
         if (strcmp(argv[1], "--version") == 0) {
-#ifndef MATCHBOX_VERSION
-#define MATCHBOX_VERSION "unknown"
+#ifndef SILEX_VERSION
+#define SILEX_VERSION "unknown"
 #endif
-            printf("matchbox %s (glibc static-pie, %s, gcc %s)\n",
-                   MATCHBOX_VERSION, matchbox_arch(), __VERSION__);
+            printf("silex %s (glibc static-pie, %s, gcc %s)\n",
+                   SILEX_VERSION, silex_arch(), __VERSION__);
             return 0;
         }
         if (strcmp(argv[1], "--list") == 0)
             return cmd_list();
         if (strcmp(argv[1], "--install") == 0) {
             if (argc < 3) {
-                fprintf(stderr, "matchbox: --install requires a directory argument\n");
+                fprintf(stderr, "silex: --install requires a directory argument\n");
                 return 1;
             }
             return cmd_install(argv[2]);
         }
 
-        /* matchbox <applet> [args]: shift and dispatch */
+        /* silex <applet> [args]: shift and dispatch */
         const char *applet_name = argv[1];
         const applet_t *a = find_applet(applet_name);
         if (!a) {
             /* Not an applet name: treat as a shell script path or -c string.
-             * This allows: matchbox script.sh [args]
-             *              matchbox /dev/stdin
-             * which is the expected behaviour when matchbox is /bin/sh. */
+             * This allows: silex script.sh [args]
+             *              silex /dev/stdin
+             * which is the expected behaviour when silex is /bin/sh. */
             const applet_t *sh = find_applet("sh");
             if (sh)
                 return sh->fn(argc, argv);
-            fprintf(stderr, "matchbox: unknown applet '%s'\n", applet_name);
-            fprintf(stderr, "matchbox: run 'matchbox --list' for available applets\n");
+            fprintf(stderr, "silex: unknown applet '%s'\n", applet_name);
+            fprintf(stderr, "silex: run 'silex --list' for available applets\n");
             return 1;
         }
         /* Shift argv so applet sees argv[0] = applet name */
@@ -222,7 +222,7 @@ int main(int argc, char **argv)
     /* Invoked via symlink or as a known applet name */
     const applet_t *a = find_applet(invname);
     if (!a) {
-        fprintf(stderr, "matchbox: unknown applet '%s'\n", invname);
+        fprintf(stderr, "silex: unknown applet '%s'\n", invname);
         return 1;
     }
     return a->fn(argc, argv);

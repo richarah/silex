@@ -1,8 +1,8 @@
 #!/bin/sh
-# tests/unit/shell/test_trap.sh — trap built-in edge case tests for matchbox
-# Usage: ./test_trap.sh [path/to/matchbox]
+# tests/unit/shell/test_trap.sh — trap built-in edge case tests for silex
+# Usage: ./test_trap.sh [path/to/silex]
 
-MB="${1:-build/bin/matchbox}"
+MB="${1:-build/bin/silex}"
 PASS=0
 FAIL=0
 
@@ -65,7 +65,7 @@ check "trap multiple signals: both caught" "$got" "$(printf 'caught\ncaught\ndon
 # --- trap action is re-evaluated on each signal ---
 got=$("$MB" -c 'X=first; trap "echo $X" USR1; kill -USR1 $$; X=second; kill -USR1 $$')
 # Note: trap action string is captured at trap time in some shells,
-# re-evaluated at signal time in others. matchbox should re-evaluate.
+# re-evaluated at signal time in others. silex should re-evaluate.
 # Both "first first" and "first second" are defensible; test that it runs.
 if printf '%s' "$got" | grep -q "first"; then
     echo "PASS: trap action executed on signal"

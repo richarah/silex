@@ -32,12 +32,12 @@ void mb_prog_free(mb_prog *p)
 
 int mb_prog_emit(mb_prog *p, mb_instr instr)
 {
-    if (p->len >= MB_MAX_INSTRS)
+    if (p->len >= SX_MAX_INSTRS)
         return -1;
 
     if (p->len >= p->cap) {
         int newcap = p->cap ? p->cap * 2 : 64;
-        if (newcap > MB_MAX_INSTRS) newcap = MB_MAX_INSTRS;
+        if (newcap > SX_MAX_INSTRS) newcap = SX_MAX_INSTRS;
         mb_instr *tmp = realloc(p->instrs, (size_t)newcap * sizeof(mb_instr));
         if (!tmp)
             return -1;

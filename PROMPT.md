@@ -1,8 +1,8 @@
-# matchbox — Container Build Runtime
+# silex — Container Build Runtime
 
 ## What this is
 
-matchbox is a purpose-built container build runtime: a single static binary containing a minimal POSIX shell and common coreutils as builtins, optimised for the container build hot path. It is not a general-purpose userspace. It exists to make `RUN` steps in Dockerfiles faster.
+silex is a purpose-built container build runtime: a single static binary containing a minimal POSIX shell and common coreutils as builtins, optimised for the container build hot path. It is not a general-purpose userspace. It exists to make `RUN` steps in Dockerfiles faster.
 
 It is part of the Silex ecosystem but ships as a standalone binary you can drop into any container.
 
@@ -24,17 +24,17 @@ Use the latest stable tag at time of development.
 
 ### Multicall binary
 
-The compiled binary is called `matchbox`. It determines which tool to run by examining argv[0]:
+The compiled binary is called `silex`. It determines which tool to run by examining argv[0]:
 
 ```
-ln -s /usr/local/bin/matchbox /usr/local/bin/cp
-ln -s /usr/local/bin/matchbox /usr/local/bin/mv
-ln -s /usr/local/bin/matchbox /usr/local/bin/sh
+ln -s /usr/local/bin/silex /usr/local/bin/cp
+ln -s /usr/local/bin/silex /usr/local/bin/mv
+ln -s /usr/local/bin/silex /usr/local/bin/sh
 # etc.
 ```
 
-`matchbox --install /usr/local/bin` creates all symlinks automatically.
-`matchbox --list` prints all available applets.
+`silex --install /usr/local/bin` creates all symlinks automatically.
+`silex --list` prints all available applets.
 
 ### Language
 
@@ -46,18 +46,18 @@ Use C11 standard. Use `-Wall -Wextra -Werror -pedantic` at minimum.
 
 GNU Make. Not CMake, not meson. A single Makefile that:
 
-- Builds the static matchbox binary linked against musl
+- Builds the static silex binary linked against musl
 - Builds all modules as .so files
 - Runs the test suite
 - Supports cross-compilation for x86_64 and aarch64
 - Supports `make install PREFIX=/usr/local`
-- Supports `make matchbox-static` for fully static binary with no module support (embedded use)
+- Supports `make silex-static` for fully static binary with no module support (embedded use)
 
 Compiler: clang preferred, gcc supported. Use `-O2 -flto` for release builds. Use `-fsanitize=address,undefined` for debug builds.
 
 ### Static linking
 
-The main binary MUST be statically linked against musl libc. The module loader (dlopen) is the ONLY dynamic linking in the system and it is optional; if compiled with `MATCHBOX_STATIC=1`, module loading is disabled entirely and all unrecognised flags print a clear error message suggesting the user install the relevant module or GNU coreutils.
+The main binary MUST be statically linked against musl libc. The module loader (dlopen) is the ONLY dynamic linking in the system and it is optional; if compiled with `SILEX_STATIC=1`, module loading is disabled entirely and all unrecognised flags print a clear error message suggesting the user install the relevant module or GNU coreutils.
 
 ---
 
@@ -94,7 +94,7 @@ When the parser encounters bash syntax that POSIX sh does not support, check for
 - `module_bash_proc.so` — process substitution `<()`, `>()`
 - `module_bash_misc.so` — here-strings `<<<`, brace expansion `{a..z}`
 
-If the module is not present, print: `matchbox: syntax not supported in POSIX mode. Install matchbox-bash module for bash compatibility.`
+If the module is not present, print: `silex: syntax not supported in POSIX mode. Install silex-bash module for bash compatibility.`
 
 ### Performance target
 
@@ -178,13 +178,13 @@ Builtins MUST produce byte-identical output to GNU coreutils for the same input 
 
 ### Module directory
 
-Default: `/usr/lib/matchbox/modules/`
+Default: `/usr/lib/silex/modules/`
 
-MATCHBOX_MODULE_PATH environment variable can add ADDITIONAL directories (appended, not replacing the default). The default directory is always checked first.
+SILEX_MODULE_PATH environment variable can add ADDITIONAL directories (appended, not replacing the default). The default directory is always checked first.
 
 ### Security constraints on modules
 
-- Module .so files MUST be owned by root (uid 0) or the user running matchbox
+- Module .so files MUST be owned by root (uid 0) or the user running silex
 - Module .so files MUST NOT be world-writable
 - Module directory MUST NOT be world-writable
 - Symlinks in the module path are NOT followed (use realpath and verify)
@@ -193,14 +193,14 @@ MATCHBOX_MODULE_PATH environment variable can add ADDITIONAL directories (append
 ### Module interface
 
 ```c
-// matchbox_module.h — public header
+// silex_module.h — public header
 
 #include <stddef.h>
 
-#define MATCHBOX_MODULE_API_VERSION 1
+#define SILEX_MODULE_API_VERSION 1
 
 typedef struct {
-    int api_version;                    // must be MATCHBOX_MODULE_API_VERSION
+    int api_version;                    // must be SILEX_MODULE_API_VERSION
     const char *tool_name;              // e.g., "cp"
     const char *module_name;            // e.g., "cp_gnu_reflink"
     const char *description;            // human-readable, for --help
@@ -208,10 +208,10 @@ typedef struct {
     int (*handler)(int argc, char **argv, int flag_index);
     // flag_index: index into argv where the unrecognised flag was found
     // returns: 0 on success, >0 on error (propagated as exit code)
-} matchbox_module_t;
+} silex_module_t;
 
 // Every module .so exports this symbol:
-matchbox_module_t *matchbox_module_init(void);
+silex_module_t *silex_module_init(void);
 ```
 
 ### Module naming convention
@@ -223,10 +223,10 @@ matchbox_module_t *matchbox_module_init(void);
 ```
 1. Builtin encounters unsupported flag "--reflink" for tool "cp"
 2. Scan module directory for files matching "cp_*.so"
-3. For each: dlopen, call matchbox_module_init(), check extra_flags list
+3. For each: dlopen, call silex_module_init(), check extra_flags list
 4. Found match? → call handler with full argc/argv
 5. No match? → fall through to fork+exec of external "cp" from PATH
-6. No external "cp" in PATH? → print error: "matchbox: cp: unsupported flag --reflink. Install matchbox-gnu-cp module or GNU coreutils."
+6. No external "cp" in PATH? → print error: "silex: cp: unsupported flag --reflink. Install silex-gnu-cp module or GNU coreutils."
 ```
 
 ### Module caching
@@ -283,9 +283,9 @@ A hash map keyed by (device, inode) pairs. Values: file type (regular, directory
 ### Invalidation rules
 
 - Any write operation (create, delete, rename, chmod, chown, truncate, write) on a path invalidates that path's cache entry AND its parent directory's entry.
-- Any operation on a path not performed by matchbox itself (detected via inotify if available, or just invalidate conservatively) is not tracked. The cache is ONLY for operations matchbox itself performs.
+- Any operation on a path not performed by silex itself (detected via inotify if available, or just invalidate conservatively) is not tracked. The cache is ONLY for operations silex itself performs.
 - Cache is per-shell-process. Not shared between processes. Not persisted to disk.
-- Cache entries expire after 5 seconds as a safety net. This is configurable via MATCHBOX_FSCACHE_TTL=0 to disable entirely.
+- Cache entries expire after 5 seconds as a safety net. This is configurable via SILEX_FSCACHE_TTL=0 to disable entirely.
 
 ### Safety rule
 
@@ -333,11 +333,11 @@ The parser examines the sed/tr/cut expression BEFORE deciding whether to run it 
 ## File structure
 
 ```
-matchbox/
+silex/
 ├── README.md
 ├── LICENSE                  (BSD 2-clause)
 ├── Makefile
-├── matchbox_module.h        (public module API header)
+├── silex_module.h        (public module API header)
 ├── src/
 │   ├── main.c               (multicall entry, argv[0] dispatch)
 │   ├── shell/
@@ -409,8 +409,8 @@ matchbox/
 │   ├── bench/                  (benchmarks against busybox, GNU, dash)
 │   └── fuzz/                   (AFL/libFuzzer targets for parser, builtins)
 ├── docker/
-│   ├── Dockerfile.build        (build matchbox itself in a clean environment)
-│   ├── Dockerfile.test         (test matchbox in a real container build)
+│   ├── Dockerfile.build        (build silex itself in a clean environment)
+│   ├── Dockerfile.test         (test silex in a real container build)
 │   └── Dockerfile.bench        (benchmark container)
 └── scripts/
     ├── gen-symlinks.sh          (generate symlink install script)
@@ -433,13 +433,13 @@ Every builtin applet has unit tests covering:
 
 ### GNU compatibility tests
 
-For every builtin applet, run the same command with matchbox and with GNU coreutils. Diff the stdout, stderr, and exit code. Any difference is a bug.
+For every builtin applet, run the same command with silex and with GNU coreutils. Diff the stdout, stderr, and exit code. Any difference is a bug.
 
-Script: `tests/compat/run.sh` takes a file of test commands, runs each with matchbox and GNU, reports differences.
+Script: `tests/compat/run.sh` takes a file of test commands, runs each with silex and GNU, reports differences.
 
 ### Integration tests
 
-Real Dockerfiles from popular projects (node, python, golang, rust base images). Build with matchbox as /bin/sh. Build must succeed and produce identical image contents as building with dash/bash.
+Real Dockerfiles from popular projects (node, python, golang, rust base images). Build with silex as /bin/sh. Build must succeed and produce identical image contents as building with dash/bash.
 
 ### Security tests
 
@@ -463,7 +463,7 @@ AFL or libFuzzer targets for:
 ### Benchmarks
 
 `tests/bench/` contains:
-- `bench_startup.sh` — measure shell startup time (1000 iterations of `matchbox -c "true"`)
+- `bench_startup.sh` — measure shell startup time (1000 iterations of `silex -c "true"`)
 - `bench_builtins.sh` — measure builtin vs fork+exec for each applet
 - `bench_batch.sh` — measure io_uring batching vs sequential for mkdir/chmod sequences
 - `bench_dockerfile.sh` — measure real Dockerfile build times
@@ -506,18 +506,18 @@ Output as TSV for easy graphing.
 
 ## Implementation order
 
-This is the order in which to build matchbox. Each phase has a verification gate. Do NOT proceed to the next phase until the current phase passes its gate.
+This is the order in which to build silex. Each phase has a verification gate. Do NOT proceed to the next phase until the current phase passes its gate.
 
 ### Phase 1: Multicall skeleton + 3 builtins
 
 1. Set up the repo structure
 2. Implement main.c with argv[0] dispatch
 3. Implement echo, mkdir, cp (POSIX flags only)
-4. Implement `matchbox --install` and `matchbox --list`
+4. Implement `silex --install` and `silex --list`
 5. Write Makefile for static build with musl
 6. Write unit tests for the 3 builtins
 
-**Gate:** `matchbox --install /tmp/test && /tmp/test/mkdir -p /tmp/test/a/b/c && /tmp/test/cp /etc/hostname /tmp/test/a/ && /tmp/test/echo "hello"` works. Unit tests pass. Output matches GNU.
+**Gate:** `silex --install /tmp/test && /tmp/test/mkdir -p /tmp/test/a/b/c && /tmp/test/cp /etc/hostname /tmp/test/a/ && /tmp/test/echo "hello"` works. Unit tests pass. Output matches GNU.
 
 ### Phase 2: Minimal shell
 
@@ -545,7 +545,7 @@ This is the order in which to build matchbox. Each phase has a verification gate
 4. Implement fallback-to-PATH when no module found
 5. Write security tests for module loading
 
-**Gate:** `matchbox cp --reflink=auto a b` loads cp_reflink.so and works. Module from a world-writable directory is rejected. Missing module falls through to GNU cp in PATH.
+**Gate:** `silex cp --reflink=auto a b` loads cp_reflink.so and works. Module from a world-writable directory is rejected. Missing module falls through to GNU cp in PATH.
 
 ### Phase 5: Syscall batching
 
@@ -563,7 +563,7 @@ This is the order in which to build matchbox. Each phase has a verification gate
 3. Implement TTL expiry
 4. Write tests proving cache never causes different results than no cache
 
-**Gate:** a build script that does repeated stat checks is measurably faster with cache. A test that creates a file via an external process and immediately checks for it via matchbox does NOT get a stale cache hit.
+**Gate:** a build script that does repeated stat checks is measurably faster with cache. A test that creates a file via an external process and immediately checks for it via silex does NOT get a stale cache hit.
 
 ### Phase 7: Built-in string operations
 
@@ -572,11 +572,11 @@ This is the order in which to build matchbox. Each phase has a verification gate
 3. Implement detection of simple vs complex expressions
 4. Write tests
 
-**Gate:** `echo "hello world" | matchbox sed 's/hello/goodbye/'` runs in-process (verify via strace: no fork). `echo "hello" | matchbox sed '1{h;d};/pattern/{x;p}' ` forks to external sed (complex expression).
+**Gate:** `echo "hello world" | silex sed 's/hello/goodbye/'` runs in-process (verify via strace: no fork). `echo "hello" | silex sed '1{h;d};/pattern/{x;p}' ` forks to external sed (complex expression).
 
 ### Phase 8: Integration and benchmarks
 
-1. Build a real Docker image using matchbox as /bin/sh
+1. Build a real Docker image using silex as /bin/sh
 2. Run benchmarks against busybox, dash, bash, GNU
 3. Write README with results
 4. Publish

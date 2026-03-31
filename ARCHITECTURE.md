@@ -1,8 +1,8 @@
-# matchbox Architecture
+# silex Architecture
 
 ## Overview
 
-matchbox is a single static binary containing a minimal POSIX shell and
+silex is a single static binary containing a minimal POSIX shell and
 coreutils as in-process builtins. Its primary goal is to speed up container
 image builds by eliminating the fork/exec overhead of shell + coreutils for
 every RUN step in a Dockerfile.
@@ -11,7 +11,7 @@ every RUN step in a Dockerfile.
 
 ```
 +------------------------------------------------------------------+
-|                        matchbox binary                           |
+|                        silex binary                           |
 |                                                                  |
 |  +--------------------+     +------------------------------+    |
 |  |   multicall entry  |     |       POSIX shell            |    |
@@ -101,7 +101,7 @@ Heap allocations (`malloc`):
 
 ## Concurrency Model
 
-matchbox is single-threaded within a shell session. Concurrency arises from:
+silex is single-threaded within a shell session. Concurrency arises from:
 
 1. **Pipeline execution**: `fork()` per pipeline stage; parent waits for all
    children at the end of the pipeline.
@@ -124,7 +124,7 @@ Modules are `.so` files loaded via `dlopen()`. Security checks on every load:
 - Owned by root or the current user
 - Not world-writable
 - Module directory not world-writable
-- libc tag in `matchbox_module_t.libc` must match the runtime build (musl or glibc)
+- libc tag in `silex_module_t.libc` must match the runtime build (musl or glibc)
 
 The module registry caches `(tool, flag) -> so_path` mappings. The cache is
 invalidated when the module directory's mtime changes.
@@ -169,5 +169,5 @@ and print to stderr before returning.
 
 All non-API symbols are compiled with `-fvisibility=hidden` in release builds.
 Symbols that must be visible across translation units are declared in their
-respective header files. Module `.so` exports must use `MATCHBOX_EXPORT`
-(defined in `matchbox_module.h`) to override hidden visibility.
+respective header files. Module `.so` exports must use `SILEX_EXPORT`
+(defined in `silex_module.h`) to override hidden visibility.

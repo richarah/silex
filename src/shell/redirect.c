@@ -98,13 +98,13 @@ int redirect_apply(struct shell_ctx *sh, redir_t *redirs, redirect_ctx_t *ctx)
             } else {
                 /* Validate: target must be a non-negative decimal integer */
                 if (target[0] == '\0' || target[0] == '-') {
-                    fprintf(stderr, "matchbox: redirect: invalid fd: %s\n", target);
+                    fprintf(stderr, "silex: redirect: invalid fd: %s\n", target);
                     ctx->error = 1;
                     return -1;
                 }
                 for (const char *tp = target; *tp; tp++) {
                     if (*tp < '0' || *tp > '9') {
-                        fprintf(stderr, "matchbox: redirect: invalid fd: %s\n", target);
+                        fprintf(stderr, "silex: redirect: invalid fd: %s\n", target);
                         ctx->error = 1;
                         return -1;
                     }
@@ -125,13 +125,13 @@ int redirect_apply(struct shell_ctx *sh, redir_t *redirs, redirect_ctx_t *ctx)
             } else {
                 /* Validate: target must be a non-negative decimal integer */
                 if (target[0] == '\0' || target[0] == '-') {
-                    fprintf(stderr, "matchbox: redirect: invalid fd: %s\n", target);
+                    fprintf(stderr, "silex: redirect: invalid fd: %s\n", target);
                     ctx->error = 1;
                     return -1;
                 }
                 for (const char *tp = target; *tp; tp++) {
                     if (*tp < '0' || *tp > '9') {
-                        fprintf(stderr, "matchbox: redirect: invalid fd: %s\n", target);
+                        fprintf(stderr, "silex: redirect: invalid fd: %s\n", target);
                         ctx->error = 1;
                         return -1;
                     }

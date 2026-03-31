@@ -1069,7 +1069,7 @@ int applet_find(int argc, char **argv)
     fa.mindepth = 0;
 
     /* MATCHBOX_SMART=1: enable VCS-aware traversal and smart-case by default */
-    if (getenv("MATCHBOX_SMART") && strcmp(getenv("MATCHBOX_SMART"), "1") == 0) {
+    if (getenv("SILEX_SMART") && strcmp(getenv("SILEX_SMART"), "1") == 0) {
         fa.opt_smart = 1;
         fa.opt_vcs   = 1;
     }

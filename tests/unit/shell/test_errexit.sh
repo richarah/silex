@@ -1,8 +1,8 @@
 #!/bin/sh
-# tests/unit/shell/test_errexit.sh — set -e (errexit) edge case tests for matchbox
-# Usage: ./test_errexit.sh [path/to/matchbox]
+# tests/unit/shell/test_errexit.sh — set -e (errexit) edge case tests for silex
+# Usage: ./test_errexit.sh [path/to/silex]
 
-MB="${1:-build/bin/matchbox}"
+MB="${1:-build/bin/silex}"
 PASS=0
 FAIL=0
 

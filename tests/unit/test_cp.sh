@@ -1,10 +1,10 @@
 #!/bin/bash
 # test_cp.sh — unit tests for the cp builtin
-# Usage: test_cp.sh [path/to/matchbox]
+# Usage: test_cp.sh [path/to/silex]
 
 set -euo pipefail
 
-MB="${1:-build/bin/matchbox}"
+MB="${1:-build/bin/silex}"
 CP="$MB cp"
 
 PASS=0
@@ -48,22 +48,22 @@ check_fail() {
 
 # Setup: create a source file with known content
 SRC="$TMPDIR_LOCAL/src.txt"
-printf 'hello matchbox\n' > "$SRC"
+printf 'hello silex\n' > "$SRC"
 
 # --- Basic copy ---
 DST="$TMPDIR_LOCAL/dst.txt"
 check_ok "basic copy" "$CP '$SRC' '$DST'"
-check "basic copy: content" "$(cat "$DST")" "hello matchbox"
+check "basic copy: content" "$(cat "$DST")" "hello silex"
 
 # --- Copy to directory ---
 DDIR="$TMPDIR_LOCAL/destdir"
 mkdir -p "$DDIR"
 check_ok "copy to dir" "$CP '$SRC' '$DDIR/'"
-check "copy to dir: content" "$(cat "$DDIR/src.txt")" "hello matchbox"
+check "copy to dir: content" "$(cat "$DDIR/src.txt")" "hello silex"
 
 # --- Copy into existing dir (basename preserved) ---
 check_ok "copy into dir" "$CP '$SRC' '$DDIR'"
-check "copy into dir: basename" "$(cat "$DDIR/src.txt")" "hello matchbox"
+check "copy into dir: basename" "$(cat "$DDIR/src.txt")" "hello silex"
 
 # --- -v verbose output ---
 DST2="$TMPDIR_LOCAL/dst2.txt"
@@ -78,7 +78,7 @@ check "cp -n no overwrite" "$(cat "$TMPDIR_LOCAL/nc_dst.txt")" "original"
 # --- -f force (overwrite) ---
 printf 'original\n' > "$TMPDIR_LOCAL/force_dst.txt"
 $CP -f "$SRC" "$TMPDIR_LOCAL/force_dst.txt"
-check "cp -f overwrites" "$(cat "$TMPDIR_LOCAL/force_dst.txt")" "hello matchbox"
+check "cp -f overwrites" "$(cat "$TMPDIR_LOCAL/force_dst.txt")" "hello silex"
 
 # --- -u update: skip if dest is newer ---
 DST_U="$TMPDIR_LOCAL/update_dst.txt"
@@ -129,7 +129,7 @@ check_fail "nonexistent src" "$CP '$TMPDIR_LOCAL/nosuchfile' '$TMPDIR_LOCAL/out'
 # --- -T no-target-directory ---
 DST_T="$TMPDIR_LOCAL/t_dst.txt"
 check_ok "cp -T" "$CP -T '$SRC' '$DST_T'"
-check "cp -T: content" "$(cat "$DST_T")" "hello matchbox"
+check "cp -T: content" "$(cat "$DST_T")" "hello silex"
 
 # --- Symlink copy without -r (default -P: copy symlink itself) ---
 REAL="$TMPDIR_LOCAL/real.txt"

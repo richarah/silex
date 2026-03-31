@@ -1,11 +1,11 @@
 #!/bin/sh
 # tests/security/test_module_security.sh — module loading security tests
 # chmod +x tests/security/test_module_security.sh
-# Usage: ./test_module_security.sh [path/to/matchbox]
+# Usage: ./test_module_security.sh [path/to/silex]
 #
-# Tests that matchbox refuses to load modules from insecure locations.
+# Tests that silex refuses to load modules from insecure locations.
 
-MATCHBOX="${1:-build/bin/matchbox}"
+SILEX="${1:-build/bin/silex}"
 PASS=0
 FAIL=0
 
@@ -40,7 +40,7 @@ trap 'rm -rf "$TMPDIR_MOD"' EXIT INT TERM
 
 STDERR_FILE="$TMPDIR_MOD/stderr.txt"
 
-# Build a minimal stub .so that exports matchbox_module_init, for realistic tests.
+# Build a minimal stub .so that exports silex_module_init, for realistic tests.
 # If compilation fails (no compiler), we skip those tests gracefully.
 STUB_SO="$TMPDIR_MOD/stub.so"
 STUB_C="$TMPDIR_MOD/stub.c"
@@ -53,8 +53,8 @@ typedef struct {
     const char *description;
     const char **extra_flags;
     int (*handler)(int, char **, int);
-} matchbox_module_t;
-matchbox_module_t *matchbox_module_init(void) { return NULL; }
+} silex_module_t;
+silex_module_t *silex_module_init(void) { return NULL; }
 STUBEOF
 
 HAVE_COMPILER=0
@@ -73,7 +73,7 @@ chmod 0777 "$WRITABLE_DIR"
 if [ "$HAVE_COMPILER" -eq 1 ]; then
     cp "$STUB_SO" "$WRITABLE_DIR/test_module.so"
     chmod 0644 "$WRITABLE_DIR/test_module.so"
-    "$MATCHBOX" --load-module "$WRITABLE_DIR/test_module.so" > /dev/null 2>"$STDERR_FILE"
+    "$SILEX" --load-module "$WRITABLE_DIR/test_module.so" > /dev/null 2>"$STDERR_FILE"
     check_exit_nonzero "world-writable module dir: load rejected" "$?"
 else
     echo "SKIP: world-writable dir test (no C compiler available)"
@@ -103,7 +103,7 @@ if [ "$HAVE_COMPILER" -eq 1 ]; then
         # cannot write — use /tmp as a proxy test: /tmp is +t, world-writable.
         # The meaningful test is: file created by root that we try to load.
         # Since we cannot chown without sudo, test the security check description only.
-        "$MATCHBOX" --load-module "$WRONG_OWNER_SO" > /dev/null 2>"$STDERR_FILE"
+        "$SILEX" --load-module "$WRONG_OWNER_SO" > /dev/null 2>"$STDERR_FILE"
         GOT=$?
         # Either it loads (if owner check allows same user) or rejects.
         # We just document the behavior:
@@ -129,7 +129,7 @@ if [ "$HAVE_COMPILER" -eq 1 ] && [ -L "$LINK_DIR" ]; then
     cp "$STUB_SO" "$REAL_DIR/real_module.so"
     chmod 0644 "$REAL_DIR/real_module.so"
     # Load via symlinked directory path
-    "$MATCHBOX" --load-module "$LINK_DIR/real_module.so" > /dev/null 2>"$STDERR_FILE"
+    "$SILEX" --load-module "$LINK_DIR/real_module.so" > /dev/null 2>"$STDERR_FILE"
     check_exit_nonzero "symlink path to module: load rejected" "$?"
 elif [ ! -L "$LINK_DIR" ]; then
     echo "SKIP: symlink dir test (could not create symlink)"
@@ -147,7 +147,7 @@ if [ "$HAVE_COMPILER" -eq 1 ]; then
     chmod 0755 "$PERM_DIR"
     cp "$STUB_SO" "$PERM_DIR/group_write.so"
     chmod 0664 "$PERM_DIR/group_write.so"   # group-writable
-    "$MATCHBOX" --load-module "$PERM_DIR/group_write.so" > /dev/null 2>"$STDERR_FILE"
+    "$SILEX" --load-module "$PERM_DIR/group_write.so" > /dev/null 2>"$STDERR_FILE"
     check_exit_nonzero "group-writable module .so: load rejected" "$?"
 else
     echo "SKIP: group-writable module test (no C compiler)"
@@ -157,7 +157,7 @@ fi
 # Test 5: Non-existent module path must be rejected cleanly
 # ===========================================================================
 
-"$MATCHBOX" --load-module "$TMPDIR_MOD/nonexistent_module.so" > /dev/null 2>"$STDERR_FILE"
+"$SILEX" --load-module "$TMPDIR_MOD/nonexistent_module.so" > /dev/null 2>"$STDERR_FILE"
 check_exit_nonzero "nonexistent module path: clean rejection" "$?"
 
 # ===========================================================================
@@ -168,7 +168,7 @@ if [ "$HAVE_COMPILER" -eq 1 ]; then
     cp "$STUB_SO" "$TMPDIR_MOD/traversal_test.so"
     chmod 0644 "$TMPDIR_MOD/traversal_test.so"
     TRAVERSAL_PATH="$TMPDIR_MOD/subdir/../traversal_test.so"
-    "$MATCHBOX" --load-module "$TRAVERSAL_PATH" > /dev/null 2>"$STDERR_FILE"
+    "$SILEX" --load-module "$TRAVERSAL_PATH" > /dev/null 2>"$STDERR_FILE"
     # Should either canonicalise and load (if safe), or reject.
     # Document the result.
     echo "INFO: traversal path load exit=$? (expected: reject or canonicalise)"

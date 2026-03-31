@@ -1,7 +1,7 @@
-/* applets.h — applet declarations and registration table for matchbox */
+/* applets.h — applet declarations and registration table for silex */
 
-#ifndef MATCHBOX_APPLETS_H
-#define MATCHBOX_APPLETS_H
+#ifndef SILEX_APPLETS_H
+#define SILEX_APPLETS_H
 
 /* Applet function prototype: same signature as main() */
 typedef int (*applet_fn_t)(int argc, char **argv);
@@ -58,4 +58,4 @@ extern const applet_t applet_table[];
 /* Find applet by name; returns NULL if not found */
 const applet_t *find_applet(const char *name);
 
-#endif /* MATCHBOX_APPLETS_H */
+#endif /* SILEX_APPLETS_H */

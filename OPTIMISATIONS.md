@@ -35,9 +35,9 @@ measurements, and whether it was kept or reverted.
 | V-03 | find --vcs | Correctness/UX | find on repo tree | all entries visited | skips hidden/VCS/noise dirs | — | +0.3K | KEPT |
 | S-01 | grep -S smart case | UX | — | — | auto case-insensitive for lowercase patterns | — | +0.1K | KEPT |
 | S-02 | find -S smart case | UX | — | — | auto case-insensitive for -name patterns | — | +0.1K | KEPT |
-| E-01 | MATCHBOX_SMART env var | UX | — | — | enables --vcs + -S for interactive sessions | — | +0.1K | KEPT |
+| E-01 | SILEX_SMART env var | UX | — | — | enables --vcs + -S for interactive sessions | — | +0.1K | KEPT |
 | B-1  | fscache_invalidate_all after fork+exec | Correctness | strace: 0 stale cache hits after external cmd | n/a | n/a | safety fix | +0.1K | KEPT |
-| B-2  | written_by_matchbox flag + fscache_insert | Correctness | fscache_insert in builtin write ops | n/a | n/a | enables XC-01/02 | +0.1K | KEPT |
+| B-2  | written_by_silex flag + fscache_insert | Correctness | fscache_insert in builtin write ops | n/a | n/a | enables XC-01/02 | +0.1K | KEPT |
 | B-3  | Dual arena: scratch_arena for expansion temps | Alloc | RSS after 100k loop | 23.7 MB | 23.5 MB | reduces expansion arena growth | +0.1K | KEPT |
 | B-4  | Sorted applet table + binary search | CPU | find_applet() worst-case comparisons | 32 (linear) | 5 (binary) | O(n)→O(log n) | +0.1K | KEPT |
 | B-5  | SWAR scalar linescan (8 bytes/cycle) | CPU | scan_newline() on non-SIMD platforms | 1 byte/iter | 8 bytes/iter | 8x throughput for scalar fallback | +0.1K | KEPT |
@@ -49,7 +49,7 @@ measurements, and whether it was kept or reverted.
 
 ## Performance Gap Analysis vs System Tools (2026-03-30)
 
-Post-O-12 analysis: for each builtin, strace -c was run against both matchbox and the
+Post-O-12 analysis: for each builtin, strace -c was run against both silex and the
 system equivalent on the same input. Identified gaps were fixed. All fixes verified with
 88 unit + 36 integration + 41 security tests passing.
 
@@ -92,7 +92,7 @@ tail -c N: fseeko(fp, size-N, SEEK_SET) directly.
 
 ### Final Comparison Table (20-run average, 2026-03-30)
 
-| Tool | Benchmark | matchbox | system | ratio | Status |
+| Tool | Benchmark | silex | system | ratio | Status |
 |------|-----------|----------|--------|-------|--------|
 | cp | 10MB file | 6ms | 6ms | 1.00 | EQUAL |
 | grep | fixed-string 550KB | 4ms | 4ms | 1.00 | EQUAL |
@@ -114,12 +114,12 @@ tail -c N: fseeko(fp, size-N, SEEK_SET) directly.
 O-13 replaced POSIX regcomp/regexec with a Thompson NFA simulation + lazy DFA cache.
 Pattern classifier routes to fastest engine: BMH for fixed strings, memcmp for
 ^literal patterns, Thompson NFA for SIMPLE patterns, POSIX regexec for backrefs.
-Remaining gap vs GNU grep: GNU uses SIMD-accelerated DFA; matchbox uses scalar
+Remaining gap vs GNU grep: GNU uses SIMD-accelerated DFA; silex uses scalar
 Thompson simulation. Fixed-string and anchored patterns are now EQUAL.
 
 **sort large inputs (1.43x slower)**
 GNU sort uses merge-sort with optimised comparison functions, cache-friendly memory
-layout, and parallel merge. matchbox sort uses qsort(). O-16 eliminates the
+layout, and parallel merge. silex sort uses qsort(). O-16 eliminates the
 per-line malloc overhead for regular files ≥64KB by using mmap; remaining gap is
 in the comparator and sort algorithm, not I/O. For container workloads (small config
 files, package lists <10MB), the gap is <10ms and acceptable.
@@ -190,7 +190,7 @@ All symbols default to hidden in release builds. This:
 1. Allows the linker to inline and eliminate more functions (fewer exported symbols
    cannot be overridden, so the compiler can assume they are not).
 2. Reduces the GOT/PLT size.
-3. Requires module .so files to use MATCHBOX_EXPORT on matchbox_module_init() to
+3. Requires module .so files to use SILEX_EXPORT on silex_module_init() to
    override hidden visibility for the one symbol the loader needs.
 
 ---
@@ -200,30 +200,30 @@ All symbols default to hidden in release builds. This:
 ### bench_startup.sh (100 iter)
 | command | mean_ms | min_ms | max_ms | stddev_ms |
 |---------|---------|--------|--------|-----------|
-| matchbox -c true | 3.0969 | 2.6852 | 3.7182 | 0.2128 |
+| silex -c true | 3.0969 | 2.6852 | 3.7182 | 0.2128 |
 | dash -c true | 3.3260 | 2.8829 | 4.0210 | 0.2399 |
 | bash -c true | 3.9965 | 3.2347 | 13.6716 | 1.0819 |
 | sh -c true | 3.3865 | 2.9821 | 4.1811 | 0.2147 |
-| matchbox echo hello | 3.2360 | 2.8034 | 4.3869 | 0.2219 |
+| silex echo hello | 3.2360 | 2.8034 | 4.3869 | 0.2219 |
 | /bin/echo hello | 4.4565 | 3.8828 | 5.6106 | 0.2895 |
 
 ### bench_builtin_cp.sh (100 iter)
 | command | size | mean_ms | stddev_ms |
 |---------|------|---------|-----------|
-| matchbox-cp | 1KB | 3.3672 | 0.4909 |
-| matchbox-cp | 10KB | 3.4111 | 0.3667 |
-| matchbox-cp | 100KB | 3.3676 | 0.2337 |
-| matchbox-cp | 1MB | 3.8074 | 0.2551 |
+| silex-cp | 1KB | 3.3672 | 0.4909 |
+| silex-cp | 10KB | 3.4111 | 0.3667 |
+| silex-cp | 100KB | 3.3676 | 0.2337 |
+| silex-cp | 1MB | 3.8074 | 0.2551 |
 | system-cp | 1MB | 4.1181 | 0.2447 |
 
 ### bench_builtin_mkdir.sh (100 iter)
 | command | test_case | mean_ms | stddev_ms |
 |---------|-----------|---------|-----------|
-| matchbox-mkdir | single-dir | 3.2450 | 0.1936 |
-| matchbox-mkdir-p | depth-10 | 3.2601 | 0.2324 |
+| silex-mkdir | single-dir | 3.2450 | 0.1936 |
+| silex-mkdir-p | depth-10 | 3.2601 | 0.2324 |
 | system-mkdir-p | depth-10 | 4.7385 | 0.7453 |
-| matchbox-mkdir-p | existing-path | 3.2497 | 0.2293 |
-| matchbox-mkdir-many | many-siblings | 0.5395 | — |
+| silex-mkdir-p | existing-path | 3.2497 | 0.2293 |
+| silex-mkdir-many | many-siblings | 0.5395 | — |
 | system-mkdir-many | many-siblings | 1.9492 | — |
 
 ### bench_cache.sh (100 iter, warm cache)
@@ -237,48 +237,48 @@ All symbols default to hidden in release builds. This:
 ### bench_grep.sh (50 iter)
 | command | scenario | mean_ms | stddev_ms |
 |---------|----------|---------|-----------|
-| matchbox-grep | fixed-str-100k | 12.3395 | 0.5479 |
+| silex-grep | fixed-str-100k | 12.3395 | 0.5479 |
 | system-grep | fixed-str-100k | 3.7738 | 0.2351 |
-| matchbox-grep | fixed-icase-100k | 13.5815 | 0.5761 |
+| silex-grep | fixed-icase-100k | 13.5815 | 0.5761 |
 | system-grep | fixed-icase-100k | 3.8047 | 0.2399 |
-| matchbox-grep | bre-100k | 18.2439 | 0.6007 |
+| silex-grep | bre-100k | 18.2439 | 0.6007 |
 | system-grep | bre-100k | 3.7949 | 0.2055 |
-| matchbox-grep | no-match-100k | 9.4738 | 0.4090 |
+| silex-grep | no-match-100k | 9.4738 | 0.4090 |
 | system-grep | no-match-100k | 5.9793 | 3.6604 |
 
 ### bench_builtins.sh (100 iter)
 | command | builtin | mean_ms | stddev_ms |
 |---------|---------|---------|-----------|
-| matchbox | wc-l | 5.0954 | 0.2924 |
+| silex | wc-l | 5.0954 | 0.2924 |
 | system | wc-l | 5.1268 | 0.2686 |
-| matchbox | sort | 8.4566 | 0.5151 |
+| silex | sort | 8.4566 | 0.5151 |
 | system | sort | 8.7681 | 1.7119 |
-| matchbox | sed-subst | 6.3067 | 0.4053 |
+| silex | sed-subst | 6.3067 | 0.4053 |
 | system | sed-subst | 6.9034 | 0.3793 |
-| matchbox | grep-count | 4.3240 | 0.2948 |
+| silex | grep-count | 4.3240 | 0.2948 |
 | system | grep-count | 3.7494 | 0.2475 |
-| matchbox | echo | 3.3659 | 0.2845 |
+| silex | echo | 3.3659 | 0.2845 |
 | system | echo | 4.5055 | 0.3206 |
 
 ### bench_batch.sh (50 iter)
 | method | n_files | mean_ms | stddev_ms |
 |--------|---------|---------|-----------|
-| matchbox-rm | 100 | 4.4359 | 0.2326 |
+| silex-rm | 100 | 4.4359 | 0.2326 |
 | system-rm | 100 | 4.1651 | 0.2061 |
-| matchbox-mkdir-p | 10 dirs | 12.9214 | 0.7176 |
+| silex-mkdir-p | 10 dirs | 12.9214 | 0.7176 |
 | system-mkdir-p | 10 dirs | 27.1134 | 0.7605 |
-| matchbox-mkdir-p | 100 dirs | 89.6640 | 3.6608 |
+| silex-mkdir-p | 100 dirs | 89.6640 | 3.6608 |
 | system-mkdir-p | 100 dirs | 230.8366 | 6.7118 |
 
 ### bench_dockerfile.sh (50 iter)
 | command | scenario | mean_ms | stddev_ms |
 |---------|----------|---------|-----------|
-| matchbox-sh | apt-sim | 3.5197 | 0.3082 |
+| silex-sh | apt-sim | 3.5197 | 0.3082 |
 | dash | apt-sim | 17.7327 | 0.5765 |
 | bash | apt-sim | 19.4389 | 0.8098 |
-| matchbox-sh | sed-multi-file | 26.0101 | 2.0460 |
+| silex-sh | sed-multi-file | 26.0101 | 2.0460 |
 | dash | sed-multi-file | 39.8067 | 1.5569 |
-| matchbox-sh | mkdir-cp-rm | 3.4961 | 0.2844 |
+| silex-sh | mkdir-cp-rm | 3.4961 | 0.2844 |
 | dash | mkdir-cp-rm | 6.6555 | 0.3093 |
 
 ---
@@ -330,9 +330,9 @@ Status: KEPT (with sequential fallback)
 Benchmark: bench_batch_mkdir.sh (to be run at Phase 8)
 Before: N sequential mkdir syscalls, each requiring kernel round-trip
 After:  N SQEs submitted in one batch, N CQEs received in one io_uring_enter
-Speedup: Measured 2.57x for 100 independent mkdir-p (89.6640±3.6608ms matchbox vs
+Speedup: Measured 2.57x for 100 independent mkdir-p (89.6640±3.6608ms silex vs
   230.8366±6.7118ms system, bench_batch.sh 50 iter 2026-03-30).
-  Note: rm batching at 100 files shows 4.4359±0.2326ms matchbox vs 4.1651±0.2061ms
+  Note: rm batching at 100 files shows 4.4359±0.2326ms silex vs 4.1651±0.2061ms
   system — no speedup; io_uring overhead dominates at low file counts on this kernel.
 Reason kept: Reduces kernel round-trips for bulk operations. Safe because
   batch_ops_independent() conservatively detects ordering constraints.
@@ -343,7 +343,7 @@ Reason kept: Reduces kernel round-trips for bulk operations. Safe because
 ## OPT-004: Filesystem state cache (path-keyed)
 
 Date: Phase 6 implementation / fixed 2026-03-30
-Status: KEPT (TTL=5s default; disable with MATCHBOX_FSCACHE_TTL=0)
+Status: KEPT (TTL=5s default; disable with SILEX_FSCACHE_TTL=0)
 Benchmark: bench_cache.sh
 Before (broken):  fscache_stat() always called stat() to get dev/ino, then checked
   cache by (dev,ino) — stat() overhead was never avoided; cache was useless.
@@ -402,8 +402,8 @@ Before: Word-terminator check used an 11-way OR comparison on every character
 After:  256-byte `word_stop[]` table; single array lookup + branch:
     if (word_stop[(unsigned char)c])
   EOF is covered by word_stop[0xFF] = 1 ((unsigned char)(-1) == 0xFF).
-Speedup: Measured at 2026-03-30: matchbox -c true = 3.0969±0.2128ms
-  (vs dash 3.3260±0.2399ms = matchbox 6.9% faster than dash, bench_startup.sh 100 iter).
+Speedup: Measured at 2026-03-30: silex -c true = 3.0969±0.2128ms
+  (vs dash 3.3260±0.2399ms = silex 6.9% faster than dash, bench_startup.sh 100 iter).
   No before/after available (LUT implemented before baseline run). Lexer not isolated.
 Reason kept: Zero maintenance cost, simple table definition, no correctness risk.
   Combined with fscache fix, reduces per-command overhead for build scripts.
@@ -432,15 +432,15 @@ Status: PENDING (only if profiling shows lexer as hot path)
 Plan: Replace switch in lexer_read with GCC computed goto (label array).
 Speedup estimate: 5-15% lexer throughput (negligible unless lexer-bound).
 Decision criteria: Only implement if `perf report` shows lexer_read > 10% CPU.
-Baseline: matchbox -c true = 3.0969±0.2128ms (bench_startup.sh 100 iter 2026-03-30).
+Baseline: silex -c true = 3.0969±0.2128ms (bench_startup.sh 100 iter 2026-03-30).
 
 ---
 
 ## PENDING: SIMD for grep fixed-string
 
 Status: DEFERRED — confirmed bottleneck by bench_grep.sh (2026-03-30)
-Measurement: matchbox fixed-str-100k = 12.3395±0.5479ms vs system 3.7738±0.2351ms
-  = matchbox is 3.27x slower. matchbox no-match-100k = 9.4738±0.4090ms vs system
+Measurement: silex fixed-str-100k = 12.3395±0.5479ms vs system 3.7738±0.2351ms
+  = silex is 3.27x slower. silex no-match-100k = 9.4738±0.4090ms vs system
   5.9793±3.6604ms = 1.58x slower. Criterion was "2x slower" — THRESHOLD MET.
 Plan: Addressed by O-02 (vectorised newline scan) + O-09 (writev) in this release.
   SSE2 memmem approach remains an option if O-02/O-09 do not close the gap.
@@ -475,9 +475,9 @@ fnmatch() is only called for patterns with metacharacters that don't fit the
 simple categories (e.g., `[sf]*.c`, `foo?ar`).
 
 Benchmark result: 1000-file tree, 50 iterations:
-  matchbox suffix *.c:  5.14ms mean (100 matches from 1000 files)
-  matchbox literal:     4.98ms mean
-  matchbox fnmatch:     5.12ms mean
+  silex suffix *.c:  5.14ms mean (100 matches from 1000 files)
+  silex literal:     4.98ms mean
+  silex fnmatch:     5.12ms mean
   system find suffix:   4.40ms mean
 Note: ms-resolution is too coarse to isolate per-file pattern-match overhead
 at this scale. Benefit becomes measurable at ≥10,000 files. Syscall-level
@@ -534,8 +534,8 @@ Files: src/util/section.h (new), src/cache/fscache.c, src/util/intern.c,
        src/util/arena.c, src/util/linescan_avx2.c, src/util/error.c, src/core/find.c
 Benchmark: bench_startup.sh (100 iter)
 
-Before: 3.0969±0.2128ms (matchbox -c true)
-After:  3.0984±0.2266ms (matchbox -c true)
+Before: 3.0969±0.2128ms (silex -c true)
+After:  3.0984±0.2266ms (silex -c true)
 Speedup: ~1.00x — within measurement noise at startup scale.
 
 Annotations applied:
@@ -601,8 +601,8 @@ Files: src/util/intern.h (new), src/util/intern.c (new), src/shell/expand.c,
        src/cache/fscache.c, src/cache/fscache.h, Makefile
 Benchmark: bench_dockerfile.sh apt-sim (50 iter)
 
-Before: matchbox-sh apt-sim = 3.5197±0.3082ms
-After:  matchbox-sh apt-sim = 3.2871±0.1669ms
+Before: silex-sh apt-sim = 3.5197±0.3082ms
+After:  silex-sh apt-sim = 3.2871±0.1669ms
 
 Speedup: 1.07x (7.1%) on apt-sim; 1.09x on sed-multi-file (26.0→23.9ms)
 Binary delta: +4.3K (intern.o: ~3.8K + table metadata)
@@ -669,8 +669,8 @@ Category: IO — pre-allocates output file to reduce fragmentation and metadata 
 Files: src/core/cp.c
 Benchmark: bench_builtin_cp.sh (100 iter)
 
-Before (after O-03/O-04): matchbox-cp 1MB = 3.7653±0.2789ms
-After:                     matchbox-cp 1MB = 3.5885±0.2217ms
+Before (after O-03/O-04): silex-cp 1MB = 3.7653±0.2789ms
+After:                     silex-cp 1MB = 3.5885±0.2217ms
 
 Speedup: 1.049x (4.7%) at 1MB. Benefit grows with file size.
 Binary delta: +72 bytes
@@ -692,8 +692,8 @@ Files: src/core/cp.c, src/core/grep.c, src/core/wc.c, src/core/sort.c,
        src/core/cat.c, src/core/head.c, src/core/sed.c
 Benchmark: bench_grep.sh no-match-100k (50 iter, warm cache)
 
-Before: matchbox no-match-100k = 9.4738±0.4090ms
-After:  matchbox no-match-100k = 8.8975±0.3660ms
+Before: silex no-match-100k = 9.4738±0.4090ms
+After:  silex no-match-100k = 8.8975±0.3660ms
 
 Speedup: 1.065x (6.5%) on warm-cache full-file scan.
   Cold-cache benefit would be larger (not measurable without root/drop_caches).
@@ -719,8 +719,8 @@ After:
   1KB: 3.3349±0.2828ms  1MB: 3.7653±0.2789ms (1.1%, within noise on ext4/tmpfs)
 
 Manual large-file test (10 iterations, 2026-03-30):
-  10MB:  matchbox 6.0ms vs system 6.5ms   = 7.7% speedup  ← threshold met (>2%)
-  100MB: matchbox 53.2ms vs system 56.4ms = 5.7% speedup
+  10MB:  silex 6.0ms vs system 6.5ms   = 7.7% speedup  ← threshold met (>2%)
+  100MB: silex 53.2ms vs system 56.4ms = 5.7% speedup
 
 Speedup: 1.1% at 1MB (below 2% threshold), 5.7–7.7% for 10–100MB files.
   Primary benefit is for large file copies (tarball extraction, package installation).
@@ -749,8 +749,8 @@ Before (O-01 baseline):
 After:
   wc-l (builtins bench, ~100-line files): 3.6757±0.2448ms  ← 1.39x faster
   system wc-l:                            4.8757±0.2748ms
-  matchbox wc-l 1MB (bench_newline):  4.2101±0.2263ms vs system 4.8744±0.2591ms
-  matchbox wc-l 10MB (bench_newline): 11.7191±0.3951ms vs system 5.8663±0.5170ms
+  silex wc-l 1MB (bench_newline):  4.2101±0.2263ms vs system 4.8744±0.2591ms
+  silex wc-l 10MB (bench_newline): 11.7191±0.3951ms vs system 5.8663±0.5170ms
 
 Speedup: 1.39x on small files (dominant path: per-invocation overhead + scan).
   For 1MB file: 13.7% faster than system wc. For 10MB: 2.0x slower than system.
@@ -775,18 +775,18 @@ Benchmark: bench_builtins.sh (100 iter), bench_startup.sh (100 iter)
 
 Before (baseline 2026-03-30):
   grep-count: 4.3240±0.2948ms  wc-l: 5.0954±0.2924ms  sort: 8.4566±0.5151ms
-  startup (matchbox -c true): 3.0969±0.2128ms
+  startup (silex -c true): 3.0969±0.2128ms
 
 After (O-01 applied 2026-03-30):
   grep-count: 4.0676±0.1762ms  wc-l: 4.9079±0.3014ms  sort: 8.1352±0.3991ms
-  startup (matchbox -c true): 3.1410±0.2759ms
+  startup (silex -c true): 3.1410±0.2759ms
 
 Speedup: grep-count 1.06x (5.9%), wc-l 1.04x (3.7%), sort 1.04x (3.8%)
   Startup within noise (variation ≤ stddev). LUT benefits compound across builtins.
 Binary delta: +4136 bytes (+4.0K) for 256-byte table + code
 
 Note on wc.c and sort.c: isspace() calls for word/blank detection NOT replaced.
-  Baseline shows matchbox wc-l ≈ system (0.3% difference); locale-sensitivity
+  Baseline shows silex wc-l ≈ system (0.3% difference); locale-sensitivity
   risk outweighs marginal gain. Left as isspace() per plan criterion.
 Reason kept: Measurable improvement in grep and overall builtin throughput.
   Zero correctness risk. Tested by test_charclass (all 256 entries verified).
@@ -873,7 +873,7 @@ When stdout is a pipe, cat uses splice() to copy file content directly through
 the kernel without a user-space read buffer: fd → pipe[1] → pipe[0] → stdout.
 Fallback to read+write on EINVAL/ENOSYS (terminals, overlayfs, NFS).
 
-Measurement: cat 550KB to pipe: 3ms matchbox ≈ 3ms system (EQUAL).
+Measurement: cat 550KB to pipe: 3ms silex ≈ 3ms system (EQUAL).
 Reason kept: Zero-copy is correct and equivalent to system cat. No regression.
 
 ---
@@ -926,8 +926,8 @@ tail: for regular files, seeks backward from EOF in 64KB blocks counting newline
   tail -c N: fseeko(fp, size-N, SEEK_SET) directly.
   For non-seekable inputs (pipes), falls back to circular buffer.
 
-Measurement: head -n 10 from 550KB: 1ms matchbox vs 3ms system = 3x faster.
-             tail -n 10 from 550KB: 1ms matchbox vs 3ms system = 3x faster.
+Measurement: head -n 10 from 550KB: 1ms silex vs 3ms system = 3x faster.
+             tail -n 10 from 550KB: 1ms silex vs 3ms system = 3x faster.
 Reason kept: Core correctness optimisation; no tradeoffs.
 
 ---
@@ -940,7 +940,7 @@ Category: Syscall — avoids statx() for directory entries where d_type suffices
 Files: src/core/find.c
 
 GNU find uses getdents64() directly and checks d_type to determine file type without
-a separate stat() call. matchbox uses readdir() (which calls getdents64 internally)
+a separate stat() call. silex uses readdir() (which calls getdents64 internally)
 and checks ent->d_type before calling statx().
 
 When the predicate tree only requires STATX_TYPE|STATX_MODE (no -size/-mtime/-uid/etc.),
@@ -948,7 +948,7 @@ compute_needed_mask() returns the minimal mask, and do_stat() uses d_type to sho
 statx() for regular files and directories.
 
 Result: 600-file tree with `find -type f`: 621 statx → 1 statx.
-  matchbox: 1ms vs GNU find: 2ms (FASTER, as of O-18 + d_type opt).
+  silex: 1ms vs GNU find: 2ms (FASTER, as of O-18 + d_type opt).
 Reason kept: 620x fewer kernel calls. Correct: d_type from readdir is always set
   on ext4/overlayfs/tmpfs (the filesystems used in containers).
 
@@ -1110,12 +1110,12 @@ Unknown prefixes map to 0 (sort before January). Applied in `key_compare_strings
 
 ---
 
-### G-01: MATCHBOX_TRACE Observability
+### G-01: SILEX_TRACE Observability
 
 **Category**: Debuggability
 **Files**: `src/shell/shell.h`, `src/shell/shell.c`, `src/shell/exec.c`
 
-**Added**: `trace_level` field in `shell_ctx_t`. Initialized from `MATCHBOX_TRACE` env var.
+**Added**: `trace_level` field in `shell_ctx_t`. Initialized from `SILEX_TRACE` env var.
 
 - Level 1: prints `+ cmd arg…` to stderr before each command (equivalent to `set -x`)
 - Level 2: additionally prints `[builtin]` tag for builtin commands
@@ -1132,7 +1132,7 @@ Complements the shell's `set -x` option (which sets `opt_x` flag on the same pat
 **Problem 1 — O(n²) outer loop**:
 `mb_thompson_search` iterated from every start position, giving O(n²·k) complexity
 for unanchored regex on n-character lines with k NFA states. For `ERR.*wrong` on a
-100,001-line file, matchbox was 1551x slower than GNU grep.
+100,001-line file, silex was 1551x slower than GNU grep.
 
 **Problem 2 — 16 KB struct copy per iteration**:
 `nfa_list.states[MAX_NFA_STATES=4096]` is 16400 bytes. `clist = nlist` copied this
@@ -1187,12 +1187,12 @@ that character cannot possibly match — calling the NFA on them wastes ~400 ns/
 
 ---
 
-### H-01: MATCHBOX_FORCE_FALLBACKS
+### H-01: SILEX_FORCE_FALLBACKS
 
 **Category**: Testability / portability
 **Files**: `src/util/platform.c`
 
-**Added**: Environment variable `MATCHBOX_FORCE_FALLBACKS`. When set (any value),
+**Added**: Environment variable `SILEX_FORCE_FALLBACKS`. When set (any value),
 `platform_detect()` returns immediately with `g_uring_available = 0` and
 `g_inotify_available = 0`. This forces all code to use the portable fallback paths
 (no io_uring, no inotify) without recompiling.
@@ -1243,7 +1243,7 @@ Implementation notes:
 **Files**: `src/core/grep.c`
 **Binary delta**: +0.5K
 
-When `--vcs` is passed (or implied by `MATCHBOX_SMART=1` with `-r`):
+When `--vcs` is passed (or implied by `SILEX_SMART=1` with `-r`):
 
 1. **Hidden entries**: any file or directory whose name starts with `.` is skipped.
 2. **Hardcoded noise dirs**: `vcsignore_skip_name(name, is_dir)` checked in `grep_dir`.
@@ -1264,7 +1264,7 @@ reused by `fopen`, corrupting the probe with stale data).
 **Files**: `src/core/find.c`
 **Binary delta**: +0.3K
 
-When `--vcs` is in the expression (or `MATCHBOX_SMART=1`):
+When `--vcs` is in the expression (or `SILEX_SMART=1`):
 - `walk_dir` skips hidden entries (`.` prefix).
 - `vcsignore_skip_name` for hardcoded dir skip list.
 - `vcsignore_match` for `.gitignore` rules; root from `starts[0]`.
@@ -1300,18 +1300,18 @@ all-lowercase. If any uppercase letter is present, exact case matching is preser
 
 ---
 
-### E-01: MATCHBOX_SMART=1
+### E-01: SILEX_SMART=1
 
 **Category**: UX
 **Files**: `src/core/grep.c`, `src/core/find.c`
 **Binary delta**: +0.1K
 
-When `MATCHBOX_SMART=1` is set in the environment:
+When `SILEX_SMART=1` is set in the environment:
 - `grep`: enables `-S` (smart case); after argument parsing, if `-r` is active and
   `--vcs` was not explicitly disabled, enables `--vcs` automatically.
 - `find`: enables `-S` (smart case) and `--vcs` (VCS filtering).
 
-Intended for interactive shell sessions (e.g., `export MATCHBOX_SMART=1` in `.profile`).
+Intended for interactive shell sessions (e.g., `export SILEX_SMART=1` in `.profile`).
 Explicitly NOT recommended for Dockerfiles or CI scripts where deterministic,
 exhaustive traversal is required.
 

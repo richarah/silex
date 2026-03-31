@@ -1,8 +1,8 @@
 #!/bin/sh
-# gnu_compare.sh — GNU-01: Compare matchbox builtin output+exit codes vs GNU tools
+# gnu_compare.sh — GNU-01: Compare silex builtin output+exit codes vs GNU tools
 # Run representative args for each builtin, diff output against system tool.
 
-MATCHBOX="${MATCHBOX:-$(dirname "$0")/../../build/bin/matchbox}"
+SILEX="${SILEX:-$(dirname "$0")/../../build/bin/silex}"
 PASS=0; FAIL=0
 
 T=$(mktemp -d)
@@ -41,7 +41,7 @@ cmp_cmd() {
     local mb_cmd="$1"; shift
     local sys_cmd="$1"; shift
     local mb_out sys_out mb_rc sys_rc
-    mb_out=$("$MATCHBOX" $mb_cmd "$@" 2>&1); mb_rc=$?
+    mb_out=$("$SILEX" $mb_cmd "$@" 2>&1); mb_rc=$?
     sys_out=$($sys_cmd "$@" 2>&1); sys_rc=$?
     check "$desc" "$mb_out" "$sys_out" "$mb_rc" "$sys_rc"
 }
@@ -86,13 +86,13 @@ cmp_cmd "cut -c1-3"            cut cut -c1-3     "$T/words.txt"
 
 echo "--- tr ---"
 check "tr translate" \
-    "$(printf 'hello\n' | "$MATCHBOX" tr a-z A-Z)" \
+    "$(printf 'hello\n' | "$SILEX" tr a-z A-Z)" \
     "$(printf 'hello\n' | tr a-z A-Z)" "0" "0"
 check "tr -d" \
-    "$(printf 'hello\n' | "$MATCHBOX" tr -d 'l')" \
+    "$(printf 'hello\n' | "$SILEX" tr -d 'l')" \
     "$(printf 'hello\n' | tr -d 'l')" "0" "0"
 check "tr -s" \
-    "$(printf 'aabbcc\n' | "$MATCHBOX" tr -s 'a-c')" \
+    "$(printf 'aabbcc\n' | "$SILEX" tr -s 'a-c')" \
     "$(printf 'aabbcc\n' | tr -s 'a-c')" "0" "0"
 
 echo "--- basename/dirname ---"
@@ -104,13 +104,13 @@ cmp_cmd "dirname root"         dirname dirname    "/"
 echo "--- find ---"
 # Sort output for determinism
 check "find -name *.c" \
-    "$("$MATCHBOX" find "$T/dir" -name '*.c' 2>/dev/null | sort)" \
+    "$("$SILEX" find "$T/dir" -name '*.c' 2>/dev/null | sort)" \
     "$(find "$T/dir" -name '*.c' 2>/dev/null | sort)" "0" "0"
 check "find -type f" \
-    "$("$MATCHBOX" find "$T/dir" -type f 2>/dev/null | sort)" \
+    "$("$SILEX" find "$T/dir" -type f 2>/dev/null | sort)" \
     "$(find "$T/dir" -type f 2>/dev/null | sort)" "0" "0"
 check "find -type d" \
-    "$("$MATCHBOX" find "$T/dir" -type d 2>/dev/null | sort)" \
+    "$("$SILEX" find "$T/dir" -type d 2>/dev/null | sort)" \
     "$(find "$T/dir" -type d 2>/dev/null | sort)" "0" "0"
 
 echo "--- cat ---"
@@ -118,23 +118,23 @@ cmp_cmd "cat single file"      cat cat           "$T/single.txt"
 cmp_cmd "cat multiple files"   cat cat           "$T/single.txt" "$T/single.txt"
 
 echo "--- cp (exit code tests) ---"
-"$MATCHBOX" cp /nonexistent_src /tmp/dest_mb 2>/dev/null; mb_rc=$?
+"$SILEX" cp /nonexistent_src /tmp/dest_mb 2>/dev/null; mb_rc=$?
 cp /nonexistent_src /tmp/dest_sys 2>/dev/null; sys_rc=$?
 check "cp nonexistent exit code" "" "" "$mb_rc" "$sys_rc"
 
 echo "--- mkdir (exit code tests) ---"
-"$MATCHBOX" mkdir /proc/impossible_mb 2>/dev/null; mb_rc=$?
+"$SILEX" mkdir /proc/impossible_mb 2>/dev/null; mb_rc=$?
 mkdir /proc/impossible_sys 2>/dev/null; sys_rc=$?
 check "mkdir impossible exit code" "" "" "$mb_rc" "$sys_rc"
 
 echo "--- env ---"
 # env no args: both print environment — just check it has PATH=
 check "env has PATH" \
-    "$("$MATCHBOX" env | grep '^PATH=' | head -1 | cut -c1-5)" \
+    "$("$SILEX" env | grep '^PATH=' | head -1 | cut -c1-5)" \
     "$(env | grep '^PATH=' | head -1 | cut -c1-5)" "0" "0"
 
 echo "--- stat (exit codes) ---"
-"$MATCHBOX" stat /nonexistent_stat 2>/dev/null; mb_rc=$?
+"$SILEX" stat /nonexistent_stat 2>/dev/null; mb_rc=$?
 stat /nonexistent_stat 2>/dev/null; sys_rc=$?
 check "stat nonexistent exit code" "" "" "$mb_rc" "$sys_rc"
 

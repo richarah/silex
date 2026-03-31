@@ -1,5 +1,5 @@
-#ifndef MATCHBOX_LEXER_H
-#define MATCHBOX_LEXER_H
+#ifndef SILEX_LEXER_H
+#define SILEX_LEXER_H
 
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
@@ -79,4 +79,4 @@ token_t lexer_next(lexer_t *l);
 token_t lexer_peek(lexer_t *l);
 void    lexer_consume(lexer_t *l);
 
-#endif /* MATCHBOX_LEXER_H */
+#endif /* SILEX_LEXER_H */

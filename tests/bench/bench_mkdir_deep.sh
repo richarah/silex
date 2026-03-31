@@ -4,11 +4,11 @@ ulimit -f 1048576   # 1 GB max file size
 ulimit -t 300       # 5 min CPU time per process
 ulimit -d 2097152   # 2 GB data segment
 # bench_mkdir_deep.sh — benchmark mkdir -p where first 5 of 10 levels already exist.
-# Usage: bash bench_mkdir_deep.sh <matchbox-binary> [iterations]
+# Usage: bash bench_mkdir_deep.sh <silex-binary> [iterations]
 # This tests the O-08 skip-existing-prefix optimisation.
 
 set -eu
-MATCHBOX=${1:-build/bin/matchbox}
+SILEX=${1:-build/bin/silex}
 ITERS=${2:-100}
 
 TMPBASE=$(mktemp -d /tmp/bench_mkdir_deep_XXXXXX)
@@ -17,7 +17,7 @@ trap 'rm -rf "$TMPBASE"' EXIT
 echo "# mkdir -p deep benchmark: $ITERS iterations"
 echo "# System: $(uname -srm)"
 echo "# Date:   $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-echo "# matchbox: $MATCHBOX"
+echo "# silex: $SILEX"
 echo "#"
 echo "command	scenario	mean_ms	min_ms	max_ms	stddev_ms"
 
@@ -54,8 +54,8 @@ bench() {
     echo "${label}	${scenario}	${mean}	${min}	${max}	${stdev}"
 }
 
-# matchbox mkdir -p: 5 existing levels, 5 new levels
-bench "$MATCHBOX mkdir-p" "depth10-5exist" "$MATCHBOX" mkdir -p
+# silex mkdir -p: 5 existing levels, 5 new levels
+bench "$SILEX mkdir-p" "depth10-5exist" "$SILEX" mkdir -p
 
 # system mkdir -p for comparison
 bench "system mkdir-p" "depth10-5exist" mkdir -p

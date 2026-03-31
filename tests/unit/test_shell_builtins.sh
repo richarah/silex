@@ -1,9 +1,9 @@
 #!/bin/bash
 # test_shell_builtins.sh — shell builtin integration tests
 # Covers: applet short-circuit regression, umask, command, type, getopts
-# Usage: test_shell_builtins.sh [path/to/matchbox]
+# Usage: test_shell_builtins.sh [path/to/silex]
 
-MATCHBOX="${1:-build/bin/matchbox}"
+SILEX="${1:-build/bin/silex}"
 PASS=0; FAIL=0
 
 check() {
@@ -21,83 +21,83 @@ check() {
 # If the old 3-entry stub were reintroduced, these would fork-exec externals or fail
 check "applet: wc via shell" \
     "3" \
-    "$("$MATCHBOX" sh -c 'printf "a\nb\nc\n" | wc -l' | tr -d ' ')"
+    "$("$SILEX" sh -c 'printf "a\nb\nc\n" | wc -l' | tr -d ' ')"
 
 check "applet: sort via shell" \
     "$(printf 'a\nb\nc')" \
-    "$("$MATCHBOX" sh -c 'printf "c\na\nb\n" | sort')"
+    "$("$SILEX" sh -c 'printf "c\na\nb\n" | sort')"
 
 check "applet: grep via shell" \
     "bb" \
-    "$("$MATCHBOX" sh -c 'printf "aa\nbb\ncc\n" | grep bb')"
+    "$("$SILEX" sh -c 'printf "aa\nbb\ncc\n" | grep bb')"
 
 check "applet: sed via shell" \
     "world" \
-    "$("$MATCHBOX" sh -c 'echo hello | sed s/hello/world/')"
+    "$("$SILEX" sh -c 'echo hello | sed s/hello/world/')"
 
 check "applet: tr via shell" \
     "HELLO" \
-    "$("$MATCHBOX" sh -c 'echo hello | tr a-z A-Z')"
+    "$("$SILEX" sh -c 'echo hello | tr a-z A-Z')"
 
 check "applet: cut via shell" \
     "b" \
-    "$("$MATCHBOX" sh -c 'echo a:b:c | cut -d: -f2')"
+    "$("$SILEX" sh -c 'echo a:b:c | cut -d: -f2')"
 
 check "applet: basename via shell" \
     "bin" \
-    "$("$MATCHBOX" sh -c 'basename /usr/local/bin')"
+    "$("$SILEX" sh -c 'basename /usr/local/bin')"
 
 check "applet: dirname via shell" \
     "/usr/local" \
-    "$("$MATCHBOX" sh -c 'dirname /usr/local/bin')"
+    "$("$SILEX" sh -c 'dirname /usr/local/bin')"
 
 # umask
 check "umask: set and print" \
     "0022" \
-    "$("$MATCHBOX" sh -c 'umask 022; umask')"
+    "$("$SILEX" sh -c 'umask 022; umask')"
 
 check "umask: -S flag has =" \
     "1" \
-    "$("$MATCHBOX" sh -c 'umask -S' | grep -c '=')"
+    "$("$SILEX" sh -c 'umask -S' | grep -c '=')"
 
 check "umask: print is 4 octal digits" \
     "1" \
-    "$("$MATCHBOX" sh -c 'umask 0177; umask' | grep -c '^[0-7][0-7][0-7][0-7]$')"
+    "$("$SILEX" sh -c 'umask 0177; umask' | grep -c '^[0-7][0-7][0-7][0-7]$')"
 
 # command -v
 check "command -v builtin" \
     "echo" \
-    "$("$MATCHBOX" sh -c 'command -v echo')"
+    "$("$SILEX" sh -c 'command -v echo')"
 
 check "command -v external finds path" \
     "1" \
-    "$("$MATCHBOX" sh -c 'command -v ls' | grep -c '/')"
+    "$("$SILEX" sh -c 'command -v ls' | grep -c '/')"
 
 check "command -v notfound exits 1" \
     "1" \
-    "$("$MATCHBOX" sh -c 'command -v _doesnotexist_xyz_ >/dev/null 2>&1; echo $?')"
+    "$("$SILEX" sh -c 'command -v _doesnotexist_xyz_ >/dev/null 2>&1; echo $?')"
 
 # type
 check "type builtin" \
     "1" \
-    "$("$MATCHBOX" sh -c 'type echo' | grep -c builtin)"
+    "$("$SILEX" sh -c 'type echo' | grep -c builtin)"
 
 check "type external finds path" \
     "1" \
-    "$("$MATCHBOX" sh -c 'type ls' | grep -c '/')"
+    "$("$SILEX" sh -c 'type ls' | grep -c '/')"
 
 # getopts
 check "getopts: basic single flag" \
     "a" \
-    "$("$MATCHBOX" sh -c 'getopts ab opt -a; echo $opt')"
+    "$("$SILEX" sh -c 'getopts ab opt -a; echo $opt')"
 
 check "getopts: option with argument" \
     "x" \
-    "$("$MATCHBOX" sh -c 'getopts a: opt -a x; echo $OPTARG')"
+    "$("$SILEX" sh -c 'getopts a: opt -a x; echo $OPTARG')"
 
 check "getopts: loop over multiple flags" \
     "abc" \
-    "$("$MATCHBOX" sh -c 'OPTIND=1; while getopts abc opt -a -b -c; do printf "%s" "$opt"; done; echo')"
+    "$("$SILEX" sh -c 'OPTIND=1; while getopts abc opt -a -b -c; do printf "%s" "$opt"; done; echo')"
 
 echo ""
 echo "shell_builtins: $PASS passed, $FAIL failed"

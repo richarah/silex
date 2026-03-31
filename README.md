@@ -1,105 +1,101 @@
-# matchbox
+# silex
 
-A purpose-built container build runtime: a single static binary containing a minimal POSIX shell and 32 coreutils as builtins, optimised for the container build hot path.
+Shell and coreutils for container builds.
 
-matchbox makes `RUN` steps in Dockerfiles faster by executing common commands in-process — no fork, no exec, no dynamic-linking overhead for every `cp`, `mkdir`, or `echo`.
+The Unix process model forks a new process for every
+command. In a container build invoking 500 commands per
+minute, half the wall time is process creation.
 
-## Quick start
+silex is one process. Commands run as builtins
+inside a persistent shell. No fork, no exec, no load.
+Flags the builtins don't handle are loaded from modules
+at runtime or forwarded to the external tool in PATH.
 
-```sh
-make
-./build/bin/matchbox --install /usr/local/bin
-```
+## Usage
 
-This installs symlinks so `cp`, `echo`, `mkdir`, etc. all invoke the matchbox binary.
+    COPY --from=silex /bin/silex /bin/silex
+    RUN silex --install /usr/local/bin
+
+Or use a pre-built base image:
+
+    FROM silex:alpine
+
+Existing scripts work unchanged.
+
+## What's inside
+
+A POSIX sh. Thirty-two coreutils as builtins. A module
+loader. A regex engine. An arena allocator. An
+io_uring submission path for batching independent
+filesystem operations. A filesystem state cache.
+
+The builtins handle POSIX flags and the GNU flags
+that appear in container workloads. Everything else
+delegates.
+
+## Performance
+
+Measured on Alpine 3.21, x86_64. Mean of 3 runs.
+
+    wc -l           3-4x faster than GNU wc
+    find -name      2x faster than GNU find
+    head, tail      3x faster
+    sort            1.5x faster
+    cp, cat, sed    equal (syscall-bound)
+
+2-3x on real Dockerfile RUN steps. Compilation
+time is unchanged; silex replaces the shell
+around your compiler, not the compiler.
+
+## Images
+
+    silex:latest     FROM scratch, just the binary (<2MB)
+    silex:alpine     Alpine + silex as /bin/sh
+    silex:debian     Debian slim + silex as /bin/sh
+    silex:ubuntu     Ubuntu + silex as /bin/sh
+
+For the full build SDK with clang, mold, ninja,
+sccache, and zstd: see silex-sdk.
+
+## Modules
+
+When the argument parser encounters a flag the
+builtin doesn't handle, it scans /usr/lib/silex/modules/
+for a .so that claims the flag. Found: dlopen, call,
+close. Not found: fork to external tool. Module files
+are verified for ownership and permissions before load.
 
 ## Building
 
-**Container images (musl static, smallest binary):**
-```sh
-make release          # requires musl-gcc; see release-docker on glibc hosts
-make release-docker   # builds inside Alpine via Docker (no local musl-gcc needed)
-```
+    make release          # musl, static, ~1MB
+    make release-glibc    # glibc, dynamic, ~400KB
+    make test
 
-**For glibc-based images (Debian, Ubuntu, Silex):**
-```sh
-make release-glibc
-```
+## Environment
 
-**Development (ASan/UBSan):**
-```sh
-make debug
-make test
-```
+    SILEX_MODULE_PATH   extra module directories
+    SILEX_FSCACHE_TTL   cache lifetime (seconds, default 5)
+    SILEX_PROFILE       print summary on exit
+    SILEX_TRACE         trace command dispatch
 
-Both `release` and `release-glibc` produce `build/bin/matchbox` with identical features.
-The musl static build is stripped and self-contained; the glibc dynamic build links
-against the host libc.
+## Limitations
 
-**Architecture note:** x86-64 binaries require AVX2 (Intel Haswell 2013+,
-AMD Excavator 2015+). For older hardware:
-```sh
-make release MARCH=x86-64-v2
-```
+POSIX sh only. Bash syntax requires modules.
+LC_ALL=C always. No interactive use. grep BRE is
+within 1.5x of GNU; backreferences fall back to
+libc. sort is faster on small inputs, slower on
+inputs exceeding memory.
 
-Requires: C11 compiler (gcc or clang), GNU Make, linux-headers.
+## Requirements
 
-## Builtins (v0.2.0 — 32 applets)
+x86_64 (AVX2) or aarch64. Linux 4.5+.
+Older kernels work with reduced optimisation.
 
-| Category | Applets |
-|----------|---------|
-| File ops | `cp`, `mv`, `rm`, `ln`, `mkdir`, `install`, `touch`, `chmod` |
-| Text | `cat`, `echo`, `printf`, `head`, `tail`, `grep`, `sed`, `sort`, `cut`, `tr`, `wc` |
-| System | `stat`, `readlink`, `realpath`, `find`, `xargs`, `date`, `basename`, `dirname` |
-| New (v0.2.0) | `env`, `mktemp`, `tee`, `realpath`, `sha256sum` |
-| Shell | `sh` (POSIX shell with full trap, set -e, set -x, arithmetic, here-docs) |
+## See also
 
-### Builtin feature highlights (v0.2.0)
+silex-sdk — the Docker build image that ships silex.
+toybox(1) — the upstream codebase.
 
-- **`grep`**: `-m N`, `-o`, `-A/-B/-C N` context lines (plus existing `-E/-F/-v/-l/-i/-n/-c/-r`)
-- **`sort`**: `-M` month sort (plus existing `-r/-u/-n/-t/-k/-s`)
-- **`xargs`**: `-a FILE`, `-L N`, `-s BYTES` (plus existing `-n/-I/-0/-r/-P`)
-- **`head`**: legacy `-N` shorthand (`head -1` = `head -n 1`)
-- **`test`**: `-nt`/`-ot`/`-ef` file comparison operators
+## Licence
 
-### Shell compliance
-
-POSIX sh with:
-- Full arithmetic: `$((expr))` with bitshift, bitwise, compound assignment (`+=`, `-=`, `<<=`, …)
-- `trap` — EXIT, INT, TERM, HUP, QUIT, PIPE, CHLD, USR1, USR2
-- `set -e` with all POSIX exemptions (conditions, `&&`/`||`, negation)
-- `set -x` tracing (`MATCHBOX_TRACE=1` env var alternative)
-- Here-documents with `<<`, `<<-`, quoted delimiter (no expansion)
-- All POSIX parameter expansions: `${var:-default}`, `${#var}`, `${var%pat}`, etc.
-- Function definitions, local variables, recursive calls (depth limit 1000)
-
-## Architecture
-
-- **Multicall binary**: symlink tool names to `matchbox`; dispatch by `argv[0]`
-- **POSIX shell**: full recursive-descent parser in `src/shell/`
-- **Module system**: unknown flags trigger `dlopen` of a `.so` module from `/usr/lib/matchbox/modules/`
-- **io_uring batching**: independent filesystem operations submitted as a single batch (auto-detected; falls back gracefully; override with `MATCHBOX_FORCE_FALLBACKS=1`)
-- **Filesystem cache**: avoids redundant `stat()` calls within a build script
-- **Thompson NFA/DFA regex**: fast pattern matching for `grep` and `sed`; BMH literal fast path
-
-## Environment variables
-
-| Variable | Effect |
-|----------|--------|
-| `MATCHBOX_TRACE=1` | Print each command to stderr before execution (`set -x` style) |
-| `MATCHBOX_TRACE=2` | As above, plus `[builtin]` tag for builtin commands |
-| `MATCHBOX_FORCE_FALLBACKS=1` | Disable io_uring and inotify; use portable fallback paths |
-
-## Testing
-
-```sh
-make test             # unit + C tests
-make compat-test      # 54 TAP compat tests vs system tools
-make integration-test # end-to-end shell scripts
-make security-test    # rm safety and privilege checks
-make check            # full quality audit (size, version, all suites)
-```
-
-## License
-
-BSD 2-Clause — see `LICENSE`.
+BSD 2-clause.

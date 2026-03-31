@@ -1,9 +1,9 @@
 #!/bin/sh
-# tests/unit/shell/test_pipes.sh — pipe functionality tests for matchbox shell
+# tests/unit/shell/test_pipes.sh — pipe functionality tests for silex shell
 # chmod +x tests/unit/shell/test_pipes.sh
-# Usage: ./test_pipes.sh [path/to/matchbox]
+# Usage: ./test_pipes.sh [path/to/silex]
 
-MATCHBOX="${1:-build/bin/matchbox}"
+SILEX="${1:-build/bin/silex}"
 PASS=0
 FAIL=0
 
@@ -37,7 +37,7 @@ check_exit() {
     fi
 }
 
-MB="$MATCHBOX"
+MB="$SILEX"
 
 # --- Simple pipe: echo hello | cat ---
 got=$("$MB" -c 'echo hello | cat')

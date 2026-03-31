@@ -6,22 +6,22 @@ ulimit -d 2097152   # 2 GB data segment
 # tests/bench/bench_builtin_cp.sh — cp builtin benchmark
 # chmod +x tests/bench/bench_builtin_cp.sh
 #
-# Usage: ./bench_builtin_cp.sh [MATCHBOX_BINARY] [ITERATIONS]
-#   MATCHBOX_BINARY  path to matchbox binary (default: build/bin/matchbox)
+# Usage: ./bench_builtin_cp.sh [SILEX_BINARY] [ITERATIONS]
+#   SILEX_BINARY  path to silex binary (default: build/bin/silex)
 #   ITERATIONS       iterations per size (default: 1000)
 #
 # Creates test files of 1KB, 10KB, 100KB, 1MB.
-# Benchmarks: matchbox cp vs /bin/cp
+# Benchmarks: silex cp vs /bin/cp
 # Output: TSV format
 #   command <tab> size_label <tab> mean_ms <tab> min_ms <tab> max_ms <tab> stddev_ms
 
 set -uo pipefail
 
-MATCHBOX="${1:-build/bin/matchbox}"
+SILEX="${1:-build/bin/silex}"
 N="${2:-1000}"
 
-if [ ! -x "$MATCHBOX" ]; then
-    echo "ERROR: matchbox binary not found: $MATCHBOX" >&2
+if [ ! -x "$SILEX" ]; then
+    echo "ERROR: silex binary not found: $SILEX" >&2
     exit 1
 fi
 
@@ -114,19 +114,19 @@ bench_cp() {
 printf '# cp benchmark: %d iterations per (command x size)\n' "$N"
 printf '# System: %s\n' "$(uname -srm)"
 printf '# Date:   %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-printf '# matchbox: %s\n' "$MATCHBOX"
+printf '# silex: %s\n' "$SILEX"
 printf '#\n'
 printf 'command\tsize\tmean_ms\tmin_ms\tmax_ms\tstddev_ms\n'
 
 # ---------------------------------------------------------------------------
-# matchbox cp benchmarks
+# silex cp benchmarks
 # ---------------------------------------------------------------------------
 
 for src_file in "$SRC_1K:1KB" "$SRC_10K:10KB" "$SRC_100K:100KB" "$SRC_1M:1MB"; do
     src="${src_file%%:*}"
     label="${src_file##*:}"
     dst="$TMPDIR_CP/mb_dst_${label}.bin"
-    bench_cp "matchbox-cp" "$MATCHBOX cp" "$src" "$dst" "$N" "$label"
+    bench_cp "silex-cp" "$SILEX cp" "$src" "$dst" "$N" "$label"
 done
 
 # ---------------------------------------------------------------------------
@@ -150,7 +150,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Summary: ratio matchbox/system for each size
+# Summary: ratio silex/system for each size
 # ---------------------------------------------------------------------------
 
 printf '#\n'

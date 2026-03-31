@@ -8,8 +8,8 @@ ulimit -d 2097152   # 2 GB data segment
 # Measures the effect of the path-keyed fscache on repeated stat() calls.
 # Compares: TTL=0 (cache disabled) vs TTL=5 (cache enabled, default).
 #
-# Usage: ./bench_cache.sh [MATCHBOX_BINARY] [ITERATIONS]
-#   MATCHBOX_BINARY  path to matchbox binary (default: build/bin/matchbox)
+# Usage: ./bench_cache.sh [SILEX_BINARY] [ITERATIONS]
+#   SILEX_BINARY  path to silex binary (default: build/bin/silex)
 #   ITERATIONS       number of iterations (default: 500)
 #
 # Output: TSV format
@@ -17,11 +17,11 @@ ulimit -d 2097152   # 2 GB data segment
 
 set -uo pipefail
 
-MATCHBOX="${1:-build/bin/matchbox}"
+SILEX="${1:-build/bin/silex}"
 N="${2:-500}"
 
-if [ ! -x "$MATCHBOX" ]; then
-    echo "ERROR: matchbox binary not found or not executable: $MATCHBOX" >&2
+if [ ! -x "$SILEX" ]; then
+    echo "ERROR: silex binary not found or not executable: $SILEX" >&2
     exit 1
 fi
 
@@ -82,14 +82,14 @@ bench_command() {
 }
 
 # The workload: ls -la on a directory tree (triggers many stat() calls)
-WORKLOAD_CMD="\"$MATCHBOX\" sh -c 'find \"$TMPDIR_CACHE\" -name \"*.txt\" | while read f; do \"$MATCHBOX\" sh -c \"ls -la \\\"$TMPDIR_CACHE\\\"\" > /dev/null; done'"
+WORKLOAD_CMD="\"$SILEX\" sh -c 'find \"$TMPDIR_CACHE\" -name \"*.txt\" | while read f; do \"$SILEX\" sh -c \"ls -la \\\"$TMPDIR_CACHE\\\"\" > /dev/null; done'"
 
 # Simplified workload: ls on the flat directory (known number of stats)
-FLAT_WORKLOAD="\"$MATCHBOX\" sh -c 'for f in \"$TMPDIR_CACHE\"/*.txt; do \"$MATCHBOX\" sh -c \"test -f \\\"\$f\\\"\"; done'"
+FLAT_WORKLOAD="\"$SILEX\" sh -c 'for f in \"$TMPDIR_CACHE\"/*.txt; do \"$SILEX\" sh -c \"test -f \\\"\$f\\\"\"; done'"
 
 # Use a grep workload to exercise repeated file stat + read
-GREP_WORKLOAD_CACHED="\"$MATCHBOX\" grep -r 'line 1' \"$TMPDIR_CACHE\""
-GREP_WORKLOAD_NOCACHE="MATCHBOX_FSCACHE_TTL=0 \"$MATCHBOX\" grep -r 'line 1' \"$TMPDIR_CACHE\""
+GREP_WORKLOAD_CACHED="\"$SILEX\" grep -r 'line 1' \"$TMPDIR_CACHE\""
+GREP_WORKLOAD_NOCACHE="SILEX_FSCACHE_TTL=0 \"$SILEX\" grep -r 'line 1' \"$TMPDIR_CACHE\""
 
 # ---------------------------------------------------------------------------
 # Header
@@ -98,7 +98,7 @@ GREP_WORKLOAD_NOCACHE="MATCHBOX_FSCACHE_TTL=0 \"$MATCHBOX\" grep -r 'line 1' \"$
 printf '# fscache benchmark: %d iterations each\n' "$N"
 printf '# System: %s\n' "$(uname -srm)"
 printf '# Date:   %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-printf '# matchbox: %s\n' "$MATCHBOX"
+printf '# silex: %s\n' "$SILEX"
 printf '# testdir: %d files in %s\n' "$(find "$TMPDIR_CACHE" -type f | wc -l)" "$TMPDIR_CACHE"
 printf '#\n'
 printf 'scenario\tmean_ms\tmin_ms\tmax_ms\tstddev_ms\n'
@@ -109,20 +109,20 @@ printf 'scenario\tmean_ms\tmin_ms\tmax_ms\tstddev_ms\n'
 
 # grep -r with cache enabled (default TTL=5s)
 bench_command "grep-r-cache-on(TTL=5)" \
-    "\"$MATCHBOX\" grep -r 'line 1' \"$TMPDIR_CACHE\"" "$N"
+    "\"$SILEX\" grep -r 'line 1' \"$TMPDIR_CACHE\"" "$N"
 
 # grep -r with cache disabled (TTL=0)
 bench_command "grep-r-cache-off(TTL=0)" \
-    "MATCHBOX_FSCACHE_TTL=0 \"$MATCHBOX\" grep -r 'line 1' \"$TMPDIR_CACHE\"" "$N"
+    "SILEX_FSCACHE_TTL=0 \"$SILEX\" grep -r 'line 1' \"$TMPDIR_CACHE\"" "$N"
 
 # cp workload: repeated copy of the same source (exercises stat on src)
 SRC="$TMPDIR_CACHE/file_0001.txt"
 DST="$TMPDIR_CACHE/dst.txt"
 bench_command "cp-cache-on(TTL=5)" \
-    "\"$MATCHBOX\" cp \"$SRC\" \"$DST\"" "$N"
+    "\"$SILEX\" cp \"$SRC\" \"$DST\"" "$N"
 
 bench_command "cp-cache-off(TTL=0)" \
-    "MATCHBOX_FSCACHE_TTL=0 \"$MATCHBOX\" cp \"$SRC\" \"$DST\"" "$N"
+    "SILEX_FSCACHE_TTL=0 \"$SILEX\" cp \"$SRC\" \"$DST\"" "$N"
 
 printf '#\n'
 printf '# Done.\n'

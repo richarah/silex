@@ -1,5 +1,5 @@
-#ifndef MATCHBOX_EXEC_H
-#define MATCHBOX_EXEC_H
+#ifndef SILEX_EXEC_H
+#define SILEX_EXEC_H
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif

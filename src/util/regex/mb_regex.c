@@ -27,15 +27,15 @@ mb_regex *mb_regex_compile(const char *pat, int flags, const char **errstr)
     re->class = mb_classify(pat, flags);
 
     switch (re->class) {
-    case MB_CLASS_FIXED:
-    case MB_CLASS_PREFIX:
-    case MB_CLASS_ANCHORED: {
+    case SX_CLASS_FIXED:
+    case SX_CLASS_PREFIX:
+    case SX_CLASS_ANCHORED: {
         /* Extract fixed string */
         char buf[512];
         int flen = mb_extract_fixed(pat, re->class, buf, sizeof(buf));
         if (flen < 0) {
             /* Too long for buffer: fall back to SIMPLE */
-            re->class = MB_CLASS_SIMPLE;
+            re->class = SX_CLASS_SIMPLE;
             goto do_simple;
         }
         re->fixed_len = (size_t)flen;
@@ -43,8 +43,8 @@ mb_regex *mb_regex_compile(const char *pat, int flags, const char **errstr)
 
         /* Build BMH skip table only for FIXED class (full-text search).
          * PREFIX and ANCHORED use memcmp/strcmp and don't need BMH. */
-        if (re->class == MB_CLASS_FIXED) {
-            if (flags & MB_REG_ICASE)
+        if (re->class == SX_CLASS_FIXED) {
+            if (flags & SX_REG_ICASE)
                 mb_bmh_build_icase(re->fixed_str, re->fixed_len, re->bmh_skip);
             else
                 mb_bmh_build(re->fixed_str, re->fixed_len, re->bmh_skip);
@@ -52,28 +52,28 @@ mb_regex *mb_regex_compile(const char *pat, int flags, const char **errstr)
         return re;
     }
 
-    case MB_CLASS_CHARCLASS:
-    case MB_CLASS_SIMPLE:
+    case SX_CLASS_CHARCLASS:
+    case SX_CLASS_SIMPLE:
     do_simple: {
         mb_prog_init(&re->prog);
         const char *err = NULL;
         if (mb_parse(pat, flags, &re->prog, &err) < 0) {
             mb_prog_free(&re->prog);
             /* Fall back to POSIX */
-            re->class = MB_CLASS_BACKREF;
+            re->class = SX_CLASS_BACKREF;
             goto do_posix;
         }
         return re;
     }
 
-    case MB_CLASS_BACKREF:
+    case SX_CLASS_BACKREF:
     do_posix: {
         /* POSIX regcomp fallback */
         int rflags = 0;
-        if (flags & MB_REG_ERE)     rflags |= REG_EXTENDED;
-        if (flags & MB_REG_ICASE)   rflags |= REG_ICASE;
-        if (flags & MB_REG_NEWLINE) rflags |= REG_NEWLINE;
-        if (flags & MB_REG_NOSUB)   rflags |= REG_NOSUB;
+        if (flags & SX_REG_ERE)     rflags |= REG_EXTENDED;
+        if (flags & SX_REG_ICASE)   rflags |= REG_ICASE;
+        if (flags & SX_REG_NEWLINE) rflags |= REG_NEWLINE;
+        if (flags & SX_REG_NOSUB)   rflags |= REG_NOSUB;
 
         int rc = regcomp(&re->posix_re, pat, rflags);
         if (rc != 0) {
@@ -104,9 +104,9 @@ int mb_regex_search(const mb_regex *re, const char *s, size_t n, mb_match *m)
     if (!re || !s) return 0;
 
     switch (re->class) {
-    case MB_CLASS_FIXED: {
+    case SX_CLASS_FIXED: {
         const char *found;
-        if (re->flags & MB_REG_ICASE)
+        if (re->flags & SX_REG_ICASE)
             found = mb_bmh_search_icase(s, n, re->fixed_str, re->fixed_len,
                                          re->bmh_skip);
         else
@@ -117,11 +117,11 @@ int mb_regex_search(const mb_regex *re, const char *s, size_t n, mb_match *m)
         return 1;
     }
 
-    case MB_CLASS_PREFIX: {
+    case SX_CLASS_PREFIX: {
         /* Pattern: ^literal — only matches at start of string */
         if (re->fixed_len > n) return 0;
         int match;
-        if (re->flags & MB_REG_ICASE) {
+        if (re->flags & SX_REG_ICASE) {
             match = (strncasecmp(s, re->fixed_str, re->fixed_len) == 0);
         } else {
             match = (memcmp(s, re->fixed_str, re->fixed_len) == 0);
@@ -131,11 +131,11 @@ int mb_regex_search(const mb_regex *re, const char *s, size_t n, mb_match *m)
         return 1;
     }
 
-    case MB_CLASS_ANCHORED: {
+    case SX_CLASS_ANCHORED: {
         /* Pattern: ^literal$ — must match entire string */
         if (re->fixed_len != n) return 0;
         int match;
-        if (re->flags & MB_REG_ICASE) {
+        if (re->flags & SX_REG_ICASE) {
             match = (strncasecmp(s, re->fixed_str, n) == 0);
         } else {
             match = (memcmp(s, re->fixed_str, n) == 0);
@@ -145,8 +145,8 @@ int mb_regex_search(const mb_regex *re, const char *s, size_t n, mb_match *m)
         return 1;
     }
 
-    case MB_CLASS_CHARCLASS:
-    case MB_CLASS_SIMPLE: {
+    case SX_CLASS_CHARCLASS:
+    case SX_CLASS_SIMPLE: {
         int anchor_bol = 0;
         /* Check if pattern starts with BOL assertion */
         if (re->prog.len > 0) {
@@ -160,7 +160,7 @@ int mb_regex_search(const mb_regex *re, const char *s, size_t n, mb_match *m)
         return mb_thompson_search(&re->prog, re->flags, s, n, m, anchor_bol);
     }
 
-    case MB_CLASS_BACKREF: {
+    case SX_CLASS_BACKREF: {
         if (!re->posix_ok) return 0;
         regmatch_t pm;
         int rc = regexec(&re->posix_re, s, 1, &pm, 0);
@@ -195,12 +195,12 @@ unsigned char mb_regex_first_char(const mb_regex *re)
 {
     if (!re) return 0;
     switch (re->class) {
-    case MB_CLASS_FIXED:
-    case MB_CLASS_PREFIX:
-    case MB_CLASS_ANCHORED:
+    case SX_CLASS_FIXED:
+    case SX_CLASS_PREFIX:
+    case SX_CLASS_ANCHORED:
         return re->fixed_len > 0 ? (unsigned char)re->fixed_str[0] : 0;
-    case MB_CLASS_SIMPLE:
-    case MB_CLASS_CHARCLASS:
+    case SX_CLASS_SIMPLE:
+    case SX_CLASS_CHARCLASS:
         if (re->prog.len > 0) {
             const mb_instr *in = &re->prog.instrs[0];
             if (in->op == I_CHAR)
@@ -223,7 +223,7 @@ unsigned char mb_regex_first_char(const mb_regex *re)
 void mb_regex_free(mb_regex *re)
 {
     if (!re) return;
-    if (re->class == MB_CLASS_SIMPLE || re->class == MB_CLASS_CHARCLASS)
+    if (re->class == SX_CLASS_SIMPLE || re->class == SX_CLASS_CHARCLASS)
         mb_prog_free(&re->prog);
     if (re->posix_ok)
         regfree(&re->posix_re);

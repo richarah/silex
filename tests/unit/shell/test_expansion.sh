@@ -1,9 +1,9 @@
 #!/bin/sh
-# tests/unit/shell/test_expansion.sh — parameter expansion tests for matchbox
+# tests/unit/shell/test_expansion.sh — parameter expansion tests for silex
 # chmod +x tests/unit/shell/test_expansion.sh
-# Usage: ./test_expansion.sh [path/to/matchbox]
+# Usage: ./test_expansion.sh [path/to/silex]
 
-MATCHBOX="${1:-build/bin/matchbox}"
+SILEX="${1:-build/bin/silex}"
 PASS=0
 FAIL=0
 
@@ -37,7 +37,7 @@ check_exit() {
     fi
 }
 
-MB="$MATCHBOX"
+MB="$SILEX"
 
 # --- ${var:-default}: use default if unset or empty ---
 got=$("$MB" -c 'unset V; echo ${V:-default}')

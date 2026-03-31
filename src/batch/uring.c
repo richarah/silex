@@ -296,7 +296,7 @@ static int uring_exec_unlinks(batch_op_t *ops, int count)
             struct mb_io_uring_cqe *cqe = &cqes_arr[head & cq_mask];
             if (cqe->res < 0) {
                 batch_op_t *failed = (batch_op_t *)(uintptr_t)cqe->user_data;
-                fprintf(stderr, "matchbox: batch rm '%s': %s\n",
+                fprintf(stderr, "silex: batch rm '%s': %s\n",
                         failed ? failed->path : "?",
                         strerror(-(int)cqe->res));
             }

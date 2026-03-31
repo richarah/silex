@@ -1,7 +1,7 @@
 #!/bin/sh
 # tests/edge/test_limits.sh — PATH_MAX filenames, /dev/null, /dev/zero
 
-MATCHBOX="${1:-build/bin/matchbox}"
+SILEX="${1:-build/bin/silex}"
 PASS=0
 FAIL=0
 TMPDIR_EDGE=$(mktemp -d)
@@ -35,16 +35,16 @@ check_output() {
 }
 
 # /dev/null as input
-got=$("$MATCHBOX" cat /dev/null)
+got=$("$SILEX" cat /dev/null)
 check_output "cat /dev/null: empty output" "$got" ""
 
-got=$("$MATCHBOX" wc -l /dev/null | tr -s ' ' | sed 's/^ //')
+got=$("$SILEX" wc -l /dev/null | tr -s ' ' | sed 's/^ //')
 case "$got" in
     "0"*) check "wc -l /dev/null: 0 lines" "0" ;;
     *)    check "wc -l /dev/null: 0 lines" "1" ;;
 esac
 
-"$MATCHBOX" grep 'anything' /dev/null >/dev/null 2>&1
+"$SILEX" grep 'anything' /dev/null >/dev/null 2>&1
 RC=$?
 if [ "$RC" -eq 1 ]; then
     check "grep /dev/null: exit 1 (no match)" "0"
@@ -52,25 +52,25 @@ else
     check "grep /dev/null: exit 1 (no match)" "1"
 fi
 
-"$MATCHBOX" sort /dev/null > /dev/null 2>&1
+"$SILEX" sort /dev/null > /dev/null 2>&1
 check "sort /dev/null: no crash" "$?"
 
-"$MATCHBOX" sed 's/x/y/' /dev/null > /dev/null 2>&1
+"$SILEX" sed 's/x/y/' /dev/null > /dev/null 2>&1
 check "sed /dev/null: no crash" "$?"
 
 # /dev/zero as input — must NOT loop forever (bounded read via head)
 # head -c 10 /dev/zero: get 10 bytes from /dev/zero
-got=$(head -c 10 /dev/zero | "$MATCHBOX" wc -c)
+got=$(head -c 10 /dev/zero | "$SILEX" wc -c)
 case "$got" in
     *10*) check "wc -c: /dev/zero bounded read via head" "0" ;;
     *)    check "wc -c: /dev/zero bounded read via head" "1" ;;
 esac
 
 # /dev/null as output
-"$MATCHBOX" echo hello > /dev/null 2>&1
+"$SILEX" echo hello > /dev/null 2>&1
 check "echo to /dev/null: no crash" "$?"
 
-printf 'test\n' | "$MATCHBOX" sort > /dev/null 2>&1
+printf 'test\n' | "$SILEX" sort > /dev/null 2>&1
 check "sort stdout to /dev/null: no crash" "$?"
 
 # Near PATH_MAX filenames
@@ -84,7 +84,7 @@ done
 mkdir -p "$LONGDIR" 2>/dev/null && {
     LONGFILE="$LONGDIR/testfile.txt"
     printf 'deep content\n' > "$LONGFILE"
-    "$MATCHBOX" cat "$LONGFILE" > /dev/null 2>&1
+    "$SILEX" cat "$LONGFILE" > /dev/null 2>&1
     check "cat: deep path (long filename)" "$?"
 }
 

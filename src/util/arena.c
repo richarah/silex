@@ -1,4 +1,4 @@
-/* arena.c — arena allocator for matchbox shell */
+/* arena.c — arena allocator for silex shell */
 
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
@@ -29,7 +29,7 @@ HOT void *arena_alloc(arena_t *a, size_t size)
         size_t block_data_size = size > ARENA_BLOCK_SIZE ? size : ARENA_BLOCK_SIZE;
 
         if (a->total_bytes + block_data_size > ARENA_MAX_BYTES) {
-            fprintf(stderr, "matchbox: arena: exceeded maximum size (%u MB)\n",
+            fprintf(stderr, "silex: arena: exceeded maximum size (%u MB)\n",
                     (unsigned)(ARENA_MAX_BYTES / (1024u * 1024u)));
             abort();
         }

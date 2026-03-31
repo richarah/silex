@@ -1,7 +1,7 @@
 /* vcsignore.h — .gitignore-style VCS filter for grep --vcs / find --vcs */
 
-#ifndef MATCHBOX_VCSIGNORE_H
-#define MATCHBOX_VCSIGNORE_H
+#ifndef SILEX_VCSIGNORE_H
+#define SILEX_VCSIGNORE_H
 
 typedef struct vcsignore vcsignore_t;
 
@@ -31,4 +31,4 @@ void vcsignore_free(vcsignore_t *ign);
  */
 int vcsignore_skip_name(const char *name, int is_dir);
 
-#endif /* MATCHBOX_VCSIGNORE_H */
+#endif /* SILEX_VCSIGNORE_H */

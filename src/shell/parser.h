@@ -1,5 +1,5 @@
-#ifndef MATCHBOX_PARSER_H
-#define MATCHBOX_PARSER_H
+#ifndef SILEX_PARSER_H
+#define SILEX_PARSER_H
 
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
@@ -73,4 +73,4 @@ node_t *parser_parse(parser_t *p);            /* parse one complete command */
 node_t *parser_parse_list(parser_t *p);       /* parse until EOF */
 void    parser_error(parser_t *p, const char *msg);
 
-#endif /* MATCHBOX_PARSER_H */
+#endif /* SILEX_PARSER_H */

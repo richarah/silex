@@ -1,9 +1,9 @@
 #!/bin/sh
-# tests/security/test_path_traversal.sh — path security tests for matchbox
+# tests/security/test_path_traversal.sh — path security tests for silex
 # chmod +x tests/security/test_path_traversal.sh
-# Usage: ./test_path_traversal.sh [path/to/matchbox]
+# Usage: ./test_path_traversal.sh [path/to/silex]
 
-MATCHBOX="${1:-build/bin/matchbox}"
+SILEX="${1:-build/bin/silex}"
 PASS=0
 FAIL=0
 
@@ -68,12 +68,12 @@ trap 'rm -rf "$TMPDIR_PATH"' EXIT INT TERM
 # path_normalize: /../ handling
 # ===========================================================================
 
-# We test via the matchbox tools themselves — e.g., mkdir and cat must not
+# We test via the silex tools themselves — e.g., mkdir and cat must not
 # escape the working area due to /../ components in arguments.
 
 # mkdir with /../ traversal should stay within tmpdir or fail
 mkdir -p "$TMPDIR_PATH/safe/subdir"
-"$MATCHBOX" mkdir -p "$TMPDIR_PATH/safe/subdir/../../injected" > /dev/null 2>&1
+"$SILEX" mkdir -p "$TMPDIR_PATH/safe/subdir/../../injected" > /dev/null 2>&1
 check_exit_zero "mkdir /../ traversal: exits cleanly" "$?"
 # The resolved path should be $TMPDIR_PATH/safe/injected — still inside TMPDIR_PATH
 if [ -d "$TMPDIR_PATH/safe/injected" ] || [ -d "$TMPDIR_PATH/injected" ]; then
@@ -90,7 +90,7 @@ fi
 # Attempt path traversal above TMPDIR root — should not reach /tmp/.. = /
 DEEP="$TMPDIR_PATH/a/b/c/d/e"
 mkdir -p "$DEEP"
-"$MATCHBOX" mkdir -p "$DEEP/../../../../../../../../../etc/injected" > /dev/null 2>&1
+"$SILEX" mkdir -p "$DEEP/../../../../../../../../../etc/injected" > /dev/null 2>&1
 if [ -d "/etc/injected" ]; then
     echo "FAIL: path traversal: escaped to /etc/injected"
     FAIL=$((FAIL + 1))
@@ -107,12 +107,12 @@ DASHFILE="$TMPDIR_PATH/-dangerous-file"
 printf 'test content\n' > "$DASHFILE"
 
 # cat -- -dangerous-file should read the file, not interpret as flag
-got=$("$MATCHBOX" cat -- "$DASHFILE" 2>/dev/null)
+got=$("$SILEX" cat -- "$DASHFILE" 2>/dev/null)
 check "cat -- -filename: reads file, not flag" "$got" "test content"
 
 # cp -- -source -dest
 DASHDEST="$TMPDIR_PATH/-dest-file"
-"$MATCHBOX" cp -- "$DASHFILE" "$DASHDEST" > /dev/null 2>&1
+"$SILEX" cp -- "$DASHFILE" "$DASHDEST" > /dev/null 2>&1
 check_exit_zero "cp -- -src -dst: exit 0" "$?"
 if [ -f "$DASHDEST" ]; then
     echo "PASS: cp -- -src -dst: destination created"
@@ -124,7 +124,7 @@ fi
 
 # mkdir -- -dashdir
 DASHDIR="$TMPDIR_PATH/-dashdir"
-"$MATCHBOX" mkdir -- "$DASHDIR" > /dev/null 2>&1
+"$SILEX" mkdir -- "$DASHDIR" > /dev/null 2>&1
 check_exit_zero "mkdir -- -dashdir: exit 0" "$?"
 if [ -d "$DASHDIR" ]; then
     echo "PASS: mkdir -- -dashdir: directory created"
@@ -142,7 +142,7 @@ fi
 SEMICOLONFILE="$TMPDIR_PATH/file;echo INJECTED"
 printf 'safe content\n' > "$SEMICOLONFILE" 2>/dev/null || true
 if [ -f "$SEMICOLONFILE" ]; then
-    got=$("$MATCHBOX" cat -- "$SEMICOLONFILE" 2>/dev/null)
+    got=$("$SILEX" cat -- "$SEMICOLONFILE" 2>/dev/null)
     check "cat file with semicolon in name: no injection" "$got" "safe content"
 fi
 
@@ -150,7 +150,7 @@ fi
 BACKTICKFILE="$TMPDIR_PATH/file\`echo INJECTED\`"
 printf 'safe content\n' > "$BACKTICKFILE" 2>/dev/null || true
 if [ -f "$BACKTICKFILE" ]; then
-    got=$("$MATCHBOX" cat -- "$BACKTICKFILE" 2>/dev/null)
+    got=$("$SILEX" cat -- "$BACKTICKFILE" 2>/dev/null)
     check "cat file with backtick in name: no injection" "$got" "safe content"
 fi
 
@@ -158,7 +158,7 @@ fi
 DOLLARFILE="$TMPDIR_PATH/file\$HOME"
 printf 'safe content\n' > "$DOLLARFILE" 2>/dev/null || true
 if [ -f "$DOLLARFILE" ]; then
-    got=$("$MATCHBOX" cat -- "$DOLLARFILE" 2>/dev/null)
+    got=$("$SILEX" cat -- "$DOLLARFILE" 2>/dev/null)
     check "cat file with \$ in name: no variable expansion" "$got" "safe content"
 fi
 
@@ -166,7 +166,7 @@ fi
 NEWLINEFILE="$TMPDIR_PATH/$(printf 'file\nwith\nnewlines')"
 printf 'newline file content\n' > "$NEWLINEFILE" 2>/dev/null || true
 if [ -f "$NEWLINEFILE" ]; then
-    got=$("$MATCHBOX" cat -- "$NEWLINEFILE" 2>/dev/null)
+    got=$("$SILEX" cat -- "$NEWLINEFILE" 2>/dev/null)
     check "cat file with newline in name: content correct" "$got" "newline file content"
 fi
 
@@ -174,7 +174,7 @@ fi
 SPACEINJ="$TMPDIR_PATH/a b; echo INJECTED"
 printf 'space file\n' > "$SPACEINJ" 2>/dev/null || true
 if [ -f "$SPACEINJ" ]; then
-    got=$("$MATCHBOX" cat -- "$SPACEINJ" 2>/dev/null)
+    got=$("$SILEX" cat -- "$SPACEINJ" 2>/dev/null)
     check "cat file with space+semicolon: no injection" "$got" "space file"
 fi
 
@@ -182,10 +182,10 @@ fi
 # Verify path_normalize does not return path above anchor
 # ===========================================================================
 
-# Use matchbox --canon-path or similar if available, else test via mkdir behaviour
+# Use silex --canon-path or similar if available, else test via mkdir behaviour
 # Test: normalise /tmp/a/../../../etc -> must not be /etc
 TRAV_PATH="$TMPDIR_PATH/x/../../../etc"
-"$MATCHBOX" cat "$TRAV_PATH/passwd" > /dev/null 2>&1
+"$SILEX" cat "$TRAV_PATH/passwd" > /dev/null 2>&1
 RC=$?
 if [ $RC -ne 0 ]; then
     echo "PASS: path traversal to /etc/passwd: rejected or not found cleanly"
@@ -203,7 +203,7 @@ fi
 # by testing with a path that ends with a weird character
 WEIRDFILE="$TMPDIR_PATH/test_weird_"
 printf 'weird\n' > "${WEIRDFILE}name"
-got=$("$MATCHBOX" cat -- "${WEIRDFILE}name" 2>/dev/null)
+got=$("$SILEX" cat -- "${WEIRDFILE}name" 2>/dev/null)
 check "cat file with trailing underscore in name" "$got" "weird"
 
 echo ""

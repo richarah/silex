@@ -6,8 +6,8 @@ ulimit -d 2097152   # 2 GB data segment
 # tests/bench/bench_startup.sh — startup latency benchmark
 # chmod +x tests/bench/bench_startup.sh
 #
-# Usage: ./bench_startup.sh [MATCHBOX_BINARY] [ITERATIONS]
-#   MATCHBOX_BINARY  path to matchbox binary (default: build/bin/matchbox)
+# Usage: ./bench_startup.sh [SILEX_BINARY] [ITERATIONS]
+#   SILEX_BINARY  path to silex binary (default: build/bin/silex)
 #   ITERATIONS       number of iterations per command (default: 1000)
 #
 # Output: TSV format
@@ -15,11 +15,11 @@ ulimit -d 2097152   # 2 GB data segment
 
 set -uo pipefail
 
-MATCHBOX="${1:-build/bin/matchbox}"
+SILEX="${1:-build/bin/silex}"
 N="${2:-1000}"
 
-if [ ! -x "$MATCHBOX" ]; then
-    echo "ERROR: matchbox binary not found or not executable: $MATCHBOX" >&2
+if [ ! -x "$SILEX" ]; then
+    echo "ERROR: silex binary not found or not executable: $SILEX" >&2
     exit 1
 fi
 
@@ -96,7 +96,7 @@ bench_command() {
 printf '# Startup benchmark: %d iterations each\n' "$N"
 printf '# System: %s\n' "$(uname -srm)"
 printf '# Date:   %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-printf '# matchbox: %s\n' "$MATCHBOX"
+printf '# silex: %s\n' "$SILEX"
 printf '#\n'
 printf 'command\tmean_ms\tmin_ms\tmax_ms\tstddev_ms\n'
 
@@ -104,8 +104,8 @@ printf 'command\tmean_ms\tmin_ms\tmax_ms\tstddev_ms\n'
 # Benchmarks
 # ---------------------------------------------------------------------------
 
-# matchbox: shell startup via -c "true"
-bench_command "matchbox -c true" "$MATCHBOX -c 'true'" "$N"
+# silex: shell startup via -c "true"
+bench_command "silex -c true" "$SILEX -c 'true'" "$N"
 
 # dash (if available)
 if have_cmd dash; then
@@ -135,11 +135,11 @@ else
     printf 'busybox-sh\tSKIP\tSKIP\tSKIP\tSKIP\t# busybox not installed\n'
 fi
 
-# matchbox: echo hello (tests builtin dispatch overhead)
-bench_command "matchbox echo hello" "$MATCHBOX echo hello" "$N"
+# silex: echo hello (tests builtin dispatch overhead)
+bench_command "silex echo hello" "$SILEX echo hello" "$N"
 
-# matchbox: --list (tests argument parsing with output)
-bench_command "matchbox --list" "$MATCHBOX --list" "$N"
+# silex: --list (tests argument parsing with output)
+bench_command "silex --list" "$SILEX --list" "$N"
 
 # System /bin/echo for comparison
 bench_command "/bin/echo hello" "/bin/echo hello" "$N"

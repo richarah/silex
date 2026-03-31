@@ -79,7 +79,7 @@ COLD void fscache_init(void)
 {
     hm_init(&g_fscache.map, FSCACHE_INITIAL_CAP);
 
-    const char *env = getenv("MATCHBOX_FSCACHE_TTL");
+    const char *env = getenv("SILEX_FSCACHE_TTL");
     if (env) {
         long v = strtol(env, NULL, 10);
         g_fscache.ttl = (v > 0) ? (int)v : 0;

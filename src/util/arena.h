@@ -1,6 +1,6 @@
-/* arena.h — arena allocator for matchbox shell */
-#ifndef MATCHBOX_ARENA_H
-#define MATCHBOX_ARENA_H
+/* arena.h — arena allocator for silex shell */
+#ifndef SILEX_ARENA_H
+#define SILEX_ARENA_H
 
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
@@ -30,4 +30,4 @@ char *arena_strndup(arena_t *a, const char *s, size_t n);
 void  arena_reset(arena_t *a);   /* reuse memory, do not free */
 void  arena_free(arena_t *a);    /* free all blocks */
 
-#endif /* MATCHBOX_ARENA_H */
+#endif /* SILEX_ARENA_H */

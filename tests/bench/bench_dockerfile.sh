@@ -6,11 +6,11 @@ ulimit -d 2097152   # 2 GB data segment
 # tests/bench/bench_dockerfile.sh — Dockerfile RUN instruction simulation benchmark
 #
 # Simulates execution of typical Dockerfile RUN instruction patterns
-# using matchbox as the shell runtime, measuring throughput relative
+# using silex as the shell runtime, measuring throughput relative
 # to dash/bash.
 #
-# Usage: ./bench_dockerfile.sh [MATCHBOX_BINARY] [ITERATIONS]
-#   MATCHBOX_BINARY  path to matchbox binary (default: build/bin/matchbox)
+# Usage: ./bench_dockerfile.sh [SILEX_BINARY] [ITERATIONS]
+#   SILEX_BINARY  path to silex binary (default: build/bin/silex)
 #   ITERATIONS       number of iterations per scenario (default: 200)
 #
 # Output: TSV format
@@ -18,11 +18,11 @@ ulimit -d 2097152   # 2 GB data segment
 
 set -uo pipefail
 
-MATCHBOX="${1:-build/bin/matchbox}"
+SILEX="${1:-build/bin/silex}"
 N="${2:-200}"
 
-if [ ! -x "$MATCHBOX" ]; then
-    echo "ERROR: matchbox binary not found: $MATCHBOX" >&2
+if [ ! -x "$SILEX" ]; then
+    echo "ERROR: silex binary not found: $SILEX" >&2
     exit 1
 fi
 
@@ -89,7 +89,7 @@ bench_command() {
 printf '# dockerfile simulation benchmark: %d iterations each\n' "$N"
 printf '# System: %s\n' "$(uname -srm)"
 printf '# Date:   %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-printf '# matchbox: %s\n' "$MATCHBOX"
+printf '# silex: %s\n' "$SILEX"
 printf '#\n'
 printf 'command\tscenario\tmean_ms\tmin_ms\tmax_ms\tstddev_ms\n'
 
@@ -102,8 +102,8 @@ mkdir -p "'"$TMPDIR_DF"'/run_test/a/b/c"
 cp "'"$TMPDIR_DF"'/app/src/pkg_1.json" "'"$TMPDIR_DF"'/run_test/a/b/c/out.json"
 rm -rf "'"$TMPDIR_DF"'/run_test"
 '
-bench_command "matchbox-sh" "mkdir-cp-rm" \
-    "\"$MATCHBOX\" sh -c '$MKDIR_CP'" "$N"
+bench_command "silex-sh" "mkdir-cp-rm" \
+    "\"$SILEX\" sh -c '$MKDIR_CP'" "$N"
 if command -v dash > /dev/null 2>&1; then
     bench_command "dash" "mkdir-cp-rm" \
         "dash -c '$MKDIR_CP'" "$N"
@@ -116,9 +116,9 @@ fi
 # ---------------------------------------------------------------------------
 # Pattern 2: find + grep (package list filter)
 # ---------------------------------------------------------------------------
-FIND_GREP='find "'"$TMPDIR_DF"'/app/src" -name "*.json" | '"$MATCHBOX"' grep "pkg-[13579]"'
-bench_command "matchbox-sh" "find-grep-json" \
-    "\"$MATCHBOX\" sh -c '$FIND_GREP'" "$N"
+FIND_GREP='find "'"$TMPDIR_DF"'/app/src" -name "*.json" | '"$SILEX"' grep "pkg-[13579]"'
+bench_command "silex-sh" "find-grep-json" \
+    "\"$SILEX\" sh -c '$FIND_GREP'" "$N"
 if command -v dash > /dev/null 2>&1; then
     bench_command "dash" "find-grep-json" \
         "dash -c 'find \"$TMPDIR_DF/app/src\" -name \"*.json\" | grep \"pkg-[13579]\"'" "$N"
@@ -128,8 +128,8 @@ fi
 # Pattern 3: chmod -R (recursive permission set)
 # ---------------------------------------------------------------------------
 CHMOD_R='chmod -R 755 "'"$TMPDIR_DF"'/usr/local/bin"'
-bench_command "matchbox-sh" "chmod-r-bin" \
-    "\"$MATCHBOX\" sh -c '$CHMOD_R'" "$N"
+bench_command "silex-sh" "chmod-r-bin" \
+    "\"$SILEX\" sh -c '$CHMOD_R'" "$N"
 if command -v dash > /dev/null 2>&1; then
     bench_command "dash" "chmod-r-bin" \
         "dash -c '$CHMOD_R'" "$N"
@@ -150,8 +150,8 @@ find "'"$TMPDIR_DF"'/var/cache/apt/archives" -name "*.deb" -exec rm -f {} +
 rm -rf "'"$TMPDIR_DF"'/etc/apt/lists"/*
 mkdir -p "'"$TMPDIR_DF"'/etc/apt/lists"
 '
-bench_command "matchbox-sh" "apt-sim" \
-    "\"$MATCHBOX\" sh -c '$APT_SIM'" "$N"
+bench_command "silex-sh" "apt-sim" \
+    "\"$SILEX\" sh -c '$APT_SIM'" "$N"
 if command -v dash > /dev/null 2>&1; then
     bench_command "dash" "apt-sim" \
         "dash -c '$APT_SIM'" "$N"
@@ -166,11 +166,11 @@ fi
 # ---------------------------------------------------------------------------
 SED_MULTI='
 for f in "'"$TMPDIR_DF"'/app/src"/*.json; do
-    '"$MATCHBOX"' sed "s/version/ver/g" "$f" > /dev/null
+    '"$SILEX"' sed "s/version/ver/g" "$f" > /dev/null
 done
 '
-bench_command "matchbox-sh" "sed-multi-file" \
-    "\"$MATCHBOX\" sh -c '$SED_MULTI'" "$N"
+bench_command "silex-sh" "sed-multi-file" \
+    "\"$SILEX\" sh -c '$SED_MULTI'" "$N"
 if command -v dash > /dev/null 2>&1; then
     bench_command "dash" "sed-multi-file" \
         "dash -c 'for f in \"$TMPDIR_DF/app/src\"/*.json; do sed \"s/version/ver/g\" \"\$f\" > /dev/null; done'" "$N"

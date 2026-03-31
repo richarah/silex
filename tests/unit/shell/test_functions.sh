@@ -1,9 +1,9 @@
 #!/bin/sh
-# tests/unit/shell/test_functions.sh — shell function tests for matchbox
+# tests/unit/shell/test_functions.sh — shell function tests for silex
 # chmod +x tests/unit/shell/test_functions.sh
-# Usage: ./test_functions.sh [path/to/matchbox]
+# Usage: ./test_functions.sh [path/to/silex]
 
-MATCHBOX="${1:-build/bin/matchbox}"
+SILEX="${1:-build/bin/silex}"
 PASS=0
 FAIL=0
 
@@ -37,7 +37,7 @@ check_exit() {
     fi
 }
 
-MB="$MATCHBOX"
+MB="$SILEX"
 
 # --- Function definition with name() { } syntax ---
 got=$("$MB" -c '

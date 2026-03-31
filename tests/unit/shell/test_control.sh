@@ -1,9 +1,9 @@
 #!/bin/sh
-# tests/unit/shell/test_control.sh — control structure tests for matchbox shell
+# tests/unit/shell/test_control.sh — control structure tests for silex shell
 # chmod +x tests/unit/shell/test_control.sh
-# Usage: ./test_control.sh [path/to/matchbox]
+# Usage: ./test_control.sh [path/to/silex]
 
-MATCHBOX="${1:-build/bin/matchbox}"
+SILEX="${1:-build/bin/silex}"
 PASS=0
 FAIL=0
 
@@ -37,7 +37,7 @@ check_exit() {
     fi
 }
 
-MB="$MATCHBOX"
+MB="$SILEX"
 
 # ===========================================================================
 # if / then / elif / else / fi

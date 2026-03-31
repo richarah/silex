@@ -1,7 +1,7 @@
 /* strbuf.h — bounds-checked, heap-managed string buffer */
 
-#ifndef MATCHBOX_STRBUF_H
-#define MATCHBOX_STRBUF_H
+#ifndef SILEX_STRBUF_H
+#define SILEX_STRBUF_H
 
 #include <stddef.h>
 
@@ -43,4 +43,4 @@ static inline const char *sb_str(const strbuf_t *sb) { return sb->buf; }
 /* Return current length (not counting NUL). */
 static inline size_t sb_len(const strbuf_t *sb) { return sb->len; }
 
-#endif /* MATCHBOX_STRBUF_H */
+#endif /* SILEX_STRBUF_H */

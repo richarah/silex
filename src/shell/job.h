@@ -1,5 +1,5 @@
-#ifndef MATCHBOX_JOB_H
-#define MATCHBOX_JOB_H
+#ifndef SILEX_JOB_H
+#define SILEX_JOB_H
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif

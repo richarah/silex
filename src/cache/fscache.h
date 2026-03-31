@@ -1,5 +1,5 @@
-#ifndef MATCHBOX_FSCACHE_H
-#define MATCHBOX_FSCACHE_H
+#ifndef SILEX_FSCACHE_H
+#define SILEX_FSCACHE_H
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
@@ -55,4 +55,4 @@ void fscache_insert(const char *path, const struct stat *st);
  * Used by XC-02 dead command elimination. */
 int fscache_written_by_matchbox(const char *path);
 
-#endif /* MATCHBOX_FSCACHE_H */
+#endif /* SILEX_FSCACHE_H */

@@ -1,4 +1,4 @@
-# matchbox — Unikernel Compatibility Research
+# silex — Unikernel Compatibility Research
 
 **Status**: Research / Feasibility Analysis
 **Last updated**: 2026-03-30
@@ -8,18 +8,18 @@
 ## Overview
 
 A unikernel is a single-address-space OS image that packages an application and a
-minimal kernel into one bootable binary. matchbox's goals (small binary, static link,
+minimal kernel into one bootable binary. silex's goals (small binary, static link,
 no runtime dependencies) make it a natural candidate for unikernel deployment as the
 container build layer in a VM-based sandbox.
 
 This document analyses compatibility with three mature unikernel frameworks and
-enumerates the minimum kernel interface matchbox requires.
+enumerates the minimum kernel interface silex requires.
 
 ---
 
 ## Syscall Surface
 
-The following table lists every Linux syscall class matchbox uses, derived from
+The following table lists every Linux syscall class silex uses, derived from
 `strace -e trace=all` on the integration test suite. Syscalls marked **required**
 must be present in the unikernel; those marked **optional** are used only for
 performance or optional features and can be stubbed.
@@ -60,7 +60,7 @@ performance or optional features and can be stubbed.
 | `pread64` | none currently | NO | |
 | `posix_fadvise` | grep, sed, sort, tail | optional | Stub to no-op |
 | `io_uring_*` | batch subsystem | optional | Falls back to poll |
-| `/proc/self/exe` | matchbox --install | optional | Can stub to empty |
+| `/proc/self/exe` | silex --install | optional | Can stub to empty |
 
 **Hard requirements summary**: ~30 syscalls (POSIX file I/O, fork/exec, signals,
 directory traversal). No networking. No thread synchronisation primitives beyond
@@ -77,23 +77,23 @@ directory traversal). No networking. No thread synchronisation primitives beyond
 | Feature | Status |
 |---------|--------|
 | `fork` | Partial — `vfork` supported; full `fork` via copy-on-write needs `ukfork` (experimental in 0.17+) |
-| `execve` | **Not supported** natively; in-process dispatch (matchbox already does this for all 27 applets) eliminates need |
+| `execve` | **Not supported** natively; in-process dispatch (silex already does this for all 27 applets) eliminates need |
 | POSIX file I/O | Full (`lib/posix-fs` + `lib/vfscore`) |
 | Signals | Partial (`lib/posix-signal`); `SIGPIPE`, `SIGCHLD` supported |
 | `isatty` | Stubbed to 0 (non-interactive mode assumed) |
 | Static binary | YES — Unikraft builds a static ELF unikernel |
 
 **Verdict**: **Feasible with caveats.**
-matchbox's in-process applet dispatch (which already avoids `execve` for all 27
+silex's in-process applet dispatch (which already avoids `execve` for all 27
 builtins) covers the execve gap. The remaining issue is `fork` for external commands
 and pipeline stages. Unikraft 0.17+ `ukfork` must be enabled. Scripts that call
-only matchbox applets work today; scripts that invoke external binaries require fork.
+only silex applets work today; scripts that invoke external binaries require fork.
 
 **Build approach**:
 ```
-# Clone Unikraft + matchbox source
+# Clone Unikraft + silex source
 git clone https://github.com/unikraft/unikraft
-# Add matchbox as a lib (adapt Makefile to emit a .a)
+# Add silex as a lib (adapt Makefile to emit a .a)
 # Enable: lib/posix-process, lib/posix-fs, lib/posix-signal, lib/vfscore, lib/ukfork
 # Build: make menuconfig && make
 ```
@@ -113,7 +113,7 @@ git clone https://github.com/unikraft/unikraft
 | Static binary | YES — OSv can boot a static PIE binary directly |
 
 **Verdict**: **Not feasible without modification.**
-OSv's explicit non-support of `fork` is a fundamental incompatibility with matchbox's
+OSv's explicit non-support of `fork` is a fundamental incompatibility with silex's
 shell, which forks for pipelines, background jobs, and subshells. A fork-free mode
 (using `posix_spawn` or thread-based simulation) would require significant shell
 refactoring.
@@ -140,7 +140,7 @@ added.
 
 ## Minimum Kernel Interface
 
-For matchbox to run on a bare-metal / unikernel target with no `fork`, the shell
+For silex to run on a bare-metal / unikernel target with no `fork`, the shell
 must operate in **fork-free mode**. This requires:
 
 1. **Inline pipelines**: Run pipeline stages sequentially using `dup2` + in-process
@@ -173,7 +173,7 @@ That is **~25 syscalls** — achievable in any unikernel with basic POSIX suppor
 
 | Priority | Action |
 |----------|--------|
-| Short-term | Test matchbox binary boot under Unikraft with `ukfork` enabled |
+| Short-term | Test silex binary boot under Unikraft with `ukfork` enabled |
 | Medium-term | Add `--fork-free` mode to shell that disables fork-dependent features |
 | Long-term | Replace fork-based pipelines with in-process buffered execution |
 

@@ -404,7 +404,7 @@ static char *expand_braced(shell_ctx_t *sh, const char *body)
                 strbuf_t sb;
                 sb_init(&sb, 64);
                 expand_into(sh, word_part, &sb, 0);
-                fprintf(stderr, "matchbox: %s: %s\n", varname,
+                fprintf(stderr, "silex: %s: %s\n", varname,
                         sb_len(&sb) > 0 ? sb_str(&sb) : "parameter null or not set");
                 sb_free(&sb);
                 exit(1);
@@ -764,10 +764,10 @@ static long arith_primary(arith_ctx_t *ac)
             case 2:  result = cur_val - rhs; break;
             case 3:  result = cur_val * rhs; break;
             case 4:
-                if (!rhs) { fprintf(stderr, "matchbox: sh: arithmetic expression: division by zero\n"); exit(2); }
+                if (!rhs) { fprintf(stderr, "silex: sh: arithmetic expression: division by zero\n"); exit(2); }
                 result = cur_val / rhs; break;
             case 5:
-                if (!rhs) { fprintf(stderr, "matchbox: sh: arithmetic expression: division by zero\n"); exit(2); }
+                if (!rhs) { fprintf(stderr, "silex: sh: arithmetic expression: division by zero\n"); exit(2); }
                 result = cur_val % rhs; break;
             case 6:  result = cur_val << rhs; break;
             case 7:  result = cur_val >> rhs; break;
@@ -809,13 +809,13 @@ static long arith_mul(arith_ctx_t *ac)
         if (op == '*') left *= right;
         else if (op == '/') {
             if (!right) {
-                fprintf(stderr, "matchbox: sh: arithmetic expression: division by zero\n");
+                fprintf(stderr, "silex: sh: arithmetic expression: division by zero\n");
                 exit(2);
             }
             left /= right;
         } else {
             if (!right) {
-                fprintf(stderr, "matchbox: sh: arithmetic expression: division by zero\n");
+                fprintf(stderr, "silex: sh: arithmetic expression: division by zero\n");
                 exit(2);
             }
             left %= right;
@@ -1245,7 +1245,7 @@ static void expand_into(shell_ctx_t *sh, const char *word, strbuf_t *out,
                     char tmp[nlen + 1];
                     memcpy(tmp, start, nlen);
                     tmp[nlen] = '\0';
-                    fprintf(stderr, "matchbox: %s: unbound variable\n", tmp);
+                    fprintf(stderr, "silex: %s: unbound variable\n", tmp);
                     exit(1);
                 }
                 continue;

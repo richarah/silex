@@ -20,7 +20,7 @@ jobs:
       - name: Unit tests
         run: make test
       - name: Integration tests
-        run: bash tests/integration/run_integration.sh build/bin/matchbox
+        run: bash tests/integration/run_integration.sh build/bin/silex
 
   # Job 2: AddressSanitizer + UndefinedBehaviorSanitizer
   asan:
@@ -63,7 +63,7 @@ jobs:
       - name: scan-build
         run: |
           make clean
-          scan-build --status-bugs make CC=clang CFLAGS="-std=c11 -Wall -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -DMATCHBOX_VERSION=\\\"0.1.0\\\"" || true
+          scan-build --status-bugs make CC=clang CFLAGS="-std=c11 -Wall -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -DSILEX_VERSION=\\\"0.1.0\\\"" || true
       - name: cppcheck
         run: |
           cppcheck --enable=warning,style --error-exitcode=1 \
@@ -96,7 +96,7 @@ jobs:
         run: make release
       - name: Check binary size <= 1.5MB
         run: |
-          SIZE=$(wc -c < build/bin/matchbox)
+          SIZE=$(wc -c < build/bin/silex)
           echo "Stripped size: ${SIZE} bytes ($(( SIZE / 1024 ))K)"
           if [ "$SIZE" -gt 1572864 ]; then
             echo "FAIL: binary ${SIZE} bytes > 1.5MB limit"
@@ -120,7 +120,7 @@ jobs:
                LDFLAGS="-static" \
                LDLIBS="-ldl"
       - name: Run under QEMU
-        run: qemu-aarch64-static build/bin/matchbox --version
+        run: qemu-aarch64-static build/bin/silex --version
 
   # Job 8: Build and test on musl (Alpine)
   test-musl:

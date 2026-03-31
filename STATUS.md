@@ -1,8 +1,9 @@
-# matchbox — Status Audit
+# silex — Status Audit
 
-**Date:** 2026-03-31 (v0.2.0 + Verify & Optimise pass)
-**Binary:** `build/bin/matchbox` — ~1.6 MB musl static (release), ~327 KB glibc dynamic PIE
-**Version:** 0.2.0 (released 2026-03-30)
+**Date:** 2026-03-31 (v0.3.0, renamed from matchbox)
+**Binary:** `build/bin/silex` — ~1.6 MB musl static (release), ~327 KB glibc dynamic PIE
+**Version:** 0.3.0 (released 2026-03-31)
+**Previous name:** matchbox (v0.1.0–v0.2.0)
 
 ---
 
@@ -20,7 +21,7 @@
 | Main | 1 (`src/main.c`) |
 | **Total** | **64** |
 
-Headers: matching `.h` for every `.c` plus `matchbox_module.h` (public module API).
+Headers: matching `.h` for every `.c` plus `silex_module.h` (public module API).
 
 Test directories: `tests/{unit,integration,compat,security,stress,edge,bench,fuzz}`.
 
@@ -42,7 +43,7 @@ cd, pwd, exit, export, unset, set, shift, source/., :, true, false, exec, eval, 
 
 ## 3. Shell Conformance
 
-Tested with `tests/unit/shell/*.sh` against `build/bin/matchbox`.
+Tested with `tests/unit/shell/*.sh` against `build/bin/silex`.
 
 | Suite | Pass | Fail | Notes |
 |-------|------|------|-------|
@@ -71,9 +72,9 @@ Remaining gap:
 
 ## 4. Module System
 
-- API version: `MATCHBOX_MODULE_API_VERSION = 2`
-- New in v2: `libc` field (`"musl"` or `"glibc"`), `MATCHBOX_EXPORT` macro, `MATCHBOX_LIBC_NAME`
-- Module directories: `/usr/lib/matchbox/modules` (glibc), `/usr/lib/matchbox/modules-musl` (musl)
+- API version: `SILEX_MODULE_API_VERSION = 2`
+- New in v2: `libc` field (`"musl"` or `"glibc"`), `SILEX_EXPORT` macro, `SILEX_LIBC_NAME`
+- Module directories: `/usr/lib/silex/modules` (glibc), `/usr/lib/silex/modules-musl` (musl)
 - Registry: 64 buckets, max 1 024 entries, invalidates on directory mtime change
 - Security checks on load: no symlinks, no world-writable, owner must be uid 0 or self, libc tag match, api_version match
 
@@ -96,9 +97,9 @@ Remaining gap:
 | V-01 | `vcsignore` gitignore(5) parser (`src/util/vcsignore.c`) | DONE |
 | V-02 | `grep --vcs` / `-S` smart case | DONE |
 | V-03 | `find --vcs` / `-S` / `--changed-within` | DONE |
-| E-01 | `MATCHBOX_SMART=1` env var | DONE |
+| E-01 | `SILEX_SMART=1` env var | DONE |
 | B-1 | `fscache_invalidate_all()` after fork+exec of external commands | DONE |
-| B-2 | `written_by_matchbox` flag + `fscache_insert()` in fscache | DONE |
+| B-2 | `written_by_silex` flag + `fscache_insert()` in fscache | DONE |
 | B-3 | Dual arena: `scratch_arena` for expansion temps, reset after each top-level cmd | DONE |
 | B-4 | Sorted applet table + binary search dispatch (O(log n)) | DONE |
 | B-5 | SWAR scalar linescan: 8-byte/cycle newline scanner in `linescan_scalar.c` | DONE |
@@ -165,7 +166,7 @@ Key bugs found and fixed during conformance testing:
 
 Measured on host (glibc dynamic build, x86-64-v3, no musl).
 
-| Metric | matchbox | Reference | Ratio |
+| Metric | silex | Reference | Ratio |
 |--------|----------|-----------|-------|
 | Startup latency (`sh -c 'exit 0'`, 100 iters) | ~690 µs | ~670 µs (dash) | 1.03× |
 | `grep` 10 000-line file (100 iters) | 1.48 ms/iter | 0.98 ms/iter (GNU grep) | 1.51× slower |
@@ -194,8 +195,8 @@ PGO workload suite (`pgo/`): **NOT PRESENT** — directory does not exist; `make
 | Target | CFLAGS | LDFLAGS | Libc | Notes |
 |--------|--------|---------|------|-------|
 | `make` / `make all` | CFLAGS_RELEASE | LDFLAGS_GLIBC | glibc | Default; auto-detects musl-gcc |
-| `make release` | CFLAGS_RELEASE -DMATCHBOX_LIBC_MUSL | LDFLAGS_MUSL (-static-pie) | musl | Requires musl-gcc |
-| `make release-glibc` | CFLAGS_RELEASE -DMATCHBOX_LIBC_GLIBC | LDFLAGS_GLIBC (-pie) | glibc | Dynamic PIE |
+| `make release` | CFLAGS_RELEASE -DSILEX_LIBC_MUSL | LDFLAGS_MUSL (-static-pie) | musl | Requires musl-gcc |
+| `make release-glibc` | CFLAGS_RELEASE -DSILEX_LIBC_GLIBC | LDFLAGS_GLIBC (-pie) | glibc | Dynamic PIE |
 | `make release-docker` | — | — | musl | Builds via Alpine container |
 | `make debug` | CFLAGS_DEBUG (-O0 -g3 -fsanitize=address,undefined) | — | glibc | No LTO, no hardening |
 
@@ -215,7 +216,7 @@ No musl-gcc on this machine. `make` builds glibc dynamic PIE.
 | `-fno-unwind-tables` | PASS — removes 10-15 KB of unwind data |
 | `--gc-sections` | PASS — dead code elimination at link time |
 | `--build-id=sha1` | PASS — content-based build ID |
-| No setuid / setgid | PASS — matchbox does not call setuid/setgid |
+| No setuid / setgid | PASS — silex does not call setuid/setgid |
 | Module: no symlink load | PASS — lstat + S_ISLNK check |
 | Module: no world-writable | PASS — `lst.st_mode & S_IWOTH` check |
 | Module: owner check | PASS — uid 0 or self |
@@ -264,14 +265,14 @@ No musl-gcc on this machine. `make` builds glibc dynamic PIE.
 | `make pgo` target | NOT FUNCTIONAL | Depends on absent pgo/ submodule |
 | Shell: `&>` redirect | KNOWN GAP | bash extension, not targeted |
 | v0.2.0 Phases A-G | **COMPLETE** | All planned v0.2.0 features shipped |
-| v0.2.0 Phase H | **COMPLETE** | MATCHBOX_FORCE_FALLBACKS + aarch64 CI job |
+| v0.2.0 Phase H | **COMPLETE** | SILEX_FORCE_FALLBACKS + aarch64 CI job |
 | v0.2.0 Phase I | **COMPLETE** | All docs updated; COVERAGE.md generated |
 | v0.2.0 Phase J | **COMPLETE** | check.sh exits 0 (10/10 PASS) |
 | Post-v0.2.0 COV | **COMPLETE** | Compat tests expanded 54→167 (113 new); grep -H/-L, readlink -f, date -u %Z, realpath nonexistent all fixed |
 | Post-v0.2.0 FP | **COMPLETE** | sha256sum error format; header comments; MARCH→x86-64-v2; build reproducibility verified |
 | Post-v0.2.0 L-01 | **COMPLETE** | `docs/TAR_FEASIBILITY.md` written |
 | Post-v0.2.0 L-02 | **COMPLETE** | `cat \| applet` pipe elimination in exec_pipeline; `docs/PIPE_ELIMINATION.md` |
-| Modern Techniques | **COMPLETE** | `grep --vcs/-S`, `find --vcs/-S/--changed-within`, `MATCHBOX_SMART=1`, `vcsignore` parser; 26/26 tests |
+| Modern Techniques | **COMPLETE** | `grep --vcs/-S`, `find --vcs/-S/--changed-within`, `SILEX_SMART=1`, `vcsignore` parser; 26/26 tests |
 | Thread-based pipeline | v0.3.0 | Design in PIPE_ELIMINATION.md |
 | tar builtin | v0.3.0 | Design in TAR_FEASIBILITY.md |
 
@@ -336,7 +337,7 @@ make pgo     # instrument build + run workloads + rebuild with profile data
 ```
 -std=c11 -Wall -Wextra -Werror -pedantic
 -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE
--DMATCHBOX_VERSION="0.2.0" -DMATCHBOX_LIBC_GLIBC=1
+-DSILEX_VERSION="0.2.0" -DSILEX_LIBC_GLIBC=1
 -fstack-protector-strong
 -O2 -flto=auto -fPIE
 -march=x86-64-v3

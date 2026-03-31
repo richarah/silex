@@ -7,17 +7,17 @@ ulimit -d 2097152   # 2 GB data segment
 #
 # Measures wc -l performance on a large file (100MB equivalent via /dev/urandom
 # piped through tr to create ASCII text with newlines at a known density).
-# Compares matchbox wc -l vs system wc -l.
+# Compares silex wc -l vs system wc -l.
 #
-# Usage: ./bench_newline.sh [MATCHBOX_BINARY] [ITERATIONS]
+# Usage: ./bench_newline.sh [SILEX_BINARY] [ITERATIONS]
 
 set -uo pipefail
 
-MATCHBOX="${1:-build/bin/matchbox}"
+SILEX="${1:-build/bin/silex}"
 N="${2:-20}"
 
-if [ ! -x "$MATCHBOX" ]; then
-    echo "ERROR: matchbox binary not found: $MATCHBOX" >&2
+if [ ! -x "$SILEX" ]; then
+    echo "ERROR: silex binary not found: $SILEX" >&2
     exit 1
 fi
 
@@ -80,13 +80,13 @@ bench_command() {
 printf '# newline scan benchmark: %d iterations\n' "$N"
 printf '# System: %s\n' "$(uname -srm)"
 printf '# Date:   %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-printf '# matchbox: %s\n' "$MATCHBOX"
+printf '# silex: %s\n' "$SILEX"
 printf '#\n'
 printf 'command\tmean_ms\tmin_ms\tmax_ms\tstddev_ms\n'
 
-bench_command "matchbox-wc-l-1mb"  "\"$MATCHBOX\" wc -l \"$TMPDIR_NL/file_1mb.txt\""  "$N"
+bench_command "silex-wc-l-1mb"  "\"$SILEX\" wc -l \"$TMPDIR_NL/file_1mb.txt\""  "$N"
 bench_command "system-wc-l-1mb"    "wc -l \"$TMPDIR_NL/file_1mb.txt\""                 "$N"
-bench_command "matchbox-wc-l-10mb" "\"$MATCHBOX\" wc -l \"$TMPDIR_NL/file_10mb.txt\"" "$N"
+bench_command "silex-wc-l-10mb" "\"$SILEX\" wc -l \"$TMPDIR_NL/file_10mb.txt\"" "$N"
 bench_command "system-wc-l-10mb"   "wc -l \"$TMPDIR_NL/file_10mb.txt\""                "$N"
 
 printf '#\n# Done.\n'
