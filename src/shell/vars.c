@@ -233,3 +233,39 @@ void vars_import_env(vars_t *v)
         free(name);
     }
 }
+
+void vars_print_exports(vars_t *v)
+{
+    /* Collect all exported variables from all scopes (current scope shadows parent) */
+    /* Use a simple linear scan to collect unique exports */
+    for (int i = 0; i < VARS_HASH_SIZE; i++) {
+        for (var_scope_t *s = v->scope; s != NULL; s = s->parent) {
+            for (var_entry_t *e = s->buckets[i]; e != NULL; e = e->next) {
+                if (e->exported) {
+                    /* Check if this name was already printed from an inner scope */
+                    int shadowed = 0;
+                    for (var_scope_t *inner = v->scope; inner != s; inner = inner->parent) {
+                        unsigned int idx = fnv1a(e->name);
+                        for (var_entry_t *check = inner->buckets[idx]; check; check = check->next) {
+                            if (strcmp(check->name, e->name) == 0 && check->exported) {
+                                shadowed = 1;
+                                break;
+                            }
+                        }
+                        if (shadowed) break;
+                    }
+                    if (!shadowed) {
+                        if (e->value && e->value[0] != '\0') {
+                            /* Variable has a value: print export NAME=VALUE */
+                            /* TODO: shell quote the value properly */
+                            printf("export %s='%s'\n", e->name, e->value);
+                        } else {
+                            /* Variable is exported but unset (or empty): print export NAME */
+                            printf("export %s\n", e->name);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

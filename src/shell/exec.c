@@ -1139,6 +1139,12 @@ static int exec_builtin_set(shell_ctx_t *sh, int argc, char **argv)
 
 static int exec_builtin_export(shell_ctx_t *sh, int argc, char **argv)
 {
+    /* Handle export -p: print all exported variables */
+    if (argc == 2 && strcmp(argv[1], "-p") == 0) {
+        vars_print_exports(&sh->vars);
+        return 0;
+    }
+
     for (int i = 1; i < argc; i++) {
         const char *eq = strchr(argv[i], '=');
         if (eq) {
