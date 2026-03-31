@@ -206,6 +206,11 @@ int shell_run_file(shell_ctx_t *sh, const char *path)
 
         if (!sh->opt_n) {
             rc = exec_node(sh, node);
+            /* FLOW_RETURN (202) inside sourced script acts like exit from the script */
+            if (rc == 202) {  /* FLOW_RETURN */
+                /* return builtin already set sh->last_exit; just break out */
+                break;
+            }
             sh->last_exit = rc;
             arena_reset(&sh->scratch_arena);
             if (errexit_should_stop(sh, rc))

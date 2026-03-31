@@ -1,0 +1,4 @@
+echo always
+(exit 47)
+return
+echo never
