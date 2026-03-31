@@ -848,6 +848,7 @@ int exec_node(shell_ctx_t *sh, node_t *node)
     }
 
     case N_ASYNC: {
+        fflush(NULL);  /* Flush all stdio buffers before fork to avoid duplicate output */
         pid_t pid = fork();
         if (pid < 0) {
             perror("fork");
