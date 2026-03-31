@@ -23,7 +23,7 @@ typedef struct {
 
 /* Compilation flags */
 enum mb_regex_flags {
-    MB_REG_BRE     = 0,        /* POSIX BRE (default) */
+    SX_REG_BRE     = 0,        /* POSIX BRE (default) */
     SX_REG_ERE     = 1 << 0,   /* POSIX ERE (-E) */
     SX_REG_ICASE   = 1 << 1,   /* case-insensitive */
     SX_REG_NEWLINE = 1 << 2,   /* ^ and $ match embedded newlines */

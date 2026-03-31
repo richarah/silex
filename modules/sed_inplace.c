@@ -1,7 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 /*
- * sed_inplace.c — matchbox module: sed -i SUFFIX (in-place edit with backup)
+ * sed_inplace.c — silex module: sed -i SUFFIX (in-place edit with backup)
  *
  * The core sed builtin handles plain -i (in-place, no backup).  This module
  * extends that behaviour by supporting a backup suffix: sed -iSUFFIX or
@@ -18,7 +18,7 @@
  *     d. Write the transformed content to <file>.
  */
 
-#include "../matchbox_module.h"
+#include "../silex_module.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -372,8 +372,9 @@ static const char *sed_inplace_flags[] = {
     NULL
 };
 
-static matchbox_module_t sed_inplace_module = {
-    .api_version = MATCHBOX_MODULE_API_VERSION,
+static silex_module_t sed_inplace_module = {
+    .api_version = SILEX_MODULE_API_VERSION,
+    .libc        = SILEX_LIBC_NAME,
     .tool_name   = "sed",
     .module_name = "sed_inplace",
     .description = "sed -i SUFFIX: in-place editing with optional backup suffix",
@@ -381,7 +382,7 @@ static matchbox_module_t sed_inplace_module = {
     .handler     = sed_inplace_handler,
 };
 
-matchbox_module_t *matchbox_module_init(void)
+silex_module_t *silex_module_init(void)
 {
     return &sed_inplace_module;
 }

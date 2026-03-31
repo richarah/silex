@@ -10,7 +10,7 @@
 # exits 1 if the watchdog killed the process due to resource excess.
 #
 # Example (wrap a bench run):
-#   bash tests/bench/bench_startup.sh build/bin/matchbox &
+#   bash tests/bench/bench_startup.sh build/bin/silex &
 #   BENCH_PID=$!
 #   sh scripts/watchdog.sh $BENCH_PID 4096 600 &
 #   WD_PID=$!

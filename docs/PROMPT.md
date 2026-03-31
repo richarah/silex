@@ -61,7 +61,7 @@ The main binary MUST be statically linked against musl libc. The module loader (
 
 ---
 
-## Component 1: Minimal POSIX shell
+## Component 1: minimal POSIX shell
 
 A POSIX-compliant `/bin/sh` replacement for script execution only.
 
@@ -104,7 +104,7 @@ If the module is not present, print: `silex: syntax not supported in POSIX mode.
 
 ---
 
-## Component 2: Coreutils as shell builtins
+## Component 2: coreutils as shell builtins
 
 When the shell executes a command that matches a builtin applet AND the flags are within the builtin's supported set, execute it in-process. No fork, no exec.
 
@@ -174,7 +174,7 @@ Builtins MUST produce byte-identical output to GNU coreutils for the same input 
 
 ---
 
-## Component 3: Module system
+## Component 3: module system
 
 ### Module directory
 
@@ -235,7 +235,7 @@ After first scan of the module directory, cache the mapping of (tool_name, flag)
 
 ---
 
-## Component 4: Syscall batching with io_uring
+## Component 4: syscall batching with io_uring
 
 ### When to batch
 
@@ -270,7 +270,7 @@ If io_uring is not available (kernel < 5.1, or seccomp blocks it, common in some
 
 ---
 
-## Component 5: Filesystem state cache
+## Component 5: filesystem state cache
 
 ### Purpose
 
@@ -293,7 +293,7 @@ The cache MUST NEVER cause a different observable result than not having the cac
 
 ---
 
-## Component 6: Built-in string operations
+## Component 6: built-in string operations
 
 ### Purpose
 
@@ -508,7 +508,7 @@ Output as TSV for easy graphing.
 
 This is the order in which to build silex. Each phase has a verification gate. Do NOT proceed to the next phase until the current phase passes its gate.
 
-### Phase 1: Multicall skeleton + 3 builtins
+### Phase 1: multicall skeleton + 3 builtins
 
 1. Set up the repo structure
 2. Implement main.c with argv[0] dispatch
@@ -519,7 +519,7 @@ This is the order in which to build silex. Each phase has a verification gate. D
 
 **Gate:** `silex --install /tmp/test && /tmp/test/mkdir -p /tmp/test/a/b/c && /tmp/test/cp /etc/hostname /tmp/test/a/ && /tmp/test/echo "hello"` works. Unit tests pass. Output matches GNU.
 
-### Phase 2: Minimal shell
+### Phase 2: minimal shell
 
 1. Implement lexer, parser, exec for POSIX sh subset
 2. Support: pipes, redirects, variables, command substitution, if/for/while/case, functions
@@ -529,7 +529,7 @@ This is the order in which to build silex. Each phase has a verification gate. D
 
 **Gate:** a real-world shell script (e.g., Alpine's `/etc/init.d/networking`) runs correctly. `tests/compat/posix-sh-tests.sh` passes.
 
-### Phase 3: Remaining core builtins
+### Phase 3: remaining core builtins
 
 1. Implement all builtins listed above with their POSIX + common GNU flags
 2. Unit tests for each
@@ -537,7 +537,7 @@ This is the order in which to build silex. Each phase has a verification gate. D
 
 **Gate:** all unit tests pass. All compat tests show byte-identical output to GNU for supported flags.
 
-### Phase 4: Module system
+### Phase 4: module system
 
 1. Implement module loader with security checks
 2. Implement module registry/cache
@@ -547,7 +547,7 @@ This is the order in which to build silex. Each phase has a verification gate. D
 
 **Gate:** `silex cp --reflink=auto a b` loads cp_reflink.so and works. Module from a world-writable directory is rejected. Missing module falls through to GNU cp in PATH.
 
-### Phase 5: Syscall batching
+### Phase 5: syscall batching
 
 1. Implement io_uring wrapper
 2. Implement independence detection for command sequences
@@ -556,7 +556,7 @@ This is the order in which to build silex. Each phase has a verification gate. D
 
 **Gate:** `mkdir -p a b c d e f g h i j` is measurably faster with batching enabled than disabled. Fallback works on a kernel without io_uring.
 
-### Phase 6: Filesystem cache
+### Phase 6: filesystem cache
 
 1. Implement hash map
 2. Implement cache with invalidation rules
@@ -565,7 +565,7 @@ This is the order in which to build silex. Each phase has a verification gate. D
 
 **Gate:** a build script that does repeated stat checks is measurably faster with cache. A test that creates a file via an external process and immediately checks for it via silex does NOT get a stale cache hit.
 
-### Phase 7: Built-in string operations
+### Phase 7: built-in string operations
 
 1. Implement in-process sed for simple cases
 2. Implement in-process tr and cut
@@ -574,7 +574,7 @@ This is the order in which to build silex. Each phase has a verification gate. D
 
 **Gate:** `echo "hello world" | silex sed 's/hello/goodbye/'` runs in-process (verify via strace: no fork). `echo "hello" | silex sed '1{h;d};/pattern/{x;p}' ` forks to external sed (complex expression).
 
-### Phase 8: Integration and benchmarks
+### Phase 8: integration and benchmarks
 
 1. Build a real Docker image using silex as /bin/sh
 2. Run benchmarks against busybox, dash, bash, GNU

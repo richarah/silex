@@ -329,7 +329,7 @@ static void do_chmod(const char *path, const struct stat *st)
         return;
     }
 
-    /* B-7: update fscache entry with fresh stat (written_by_matchbox=1) */
+    /* B-7: update fscache entry with fresh stat (written_by_silex=1) */
     {
         struct stat fresh;
         if (stat(path, &fresh) == 0)

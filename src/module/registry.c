@@ -20,10 +20,10 @@
 #include <limits.h>
 
 /*
- * registry.c — module registry for matchbox.
+ * registry.c — module registry for silex.
  *
  * Modules are discovered by scanning directories listed in the
- * MATCHBOX_MODULE_PATH environment variable (colon-separated), falling back
+ * SILEX_MODULE_PATH environment variable (colon-separated), falling back
  * to /usr/lib/silex/modules/.
  *
  * Registry entries are hashed by "tool:flag" using FNV-1a and stored in
@@ -94,7 +94,7 @@ static void registry_clear(void)
 
 /*
  * Determine the first module directory to check.
- * If MATCHBOX_MODULE_PATH is set, use its first component.
+ * If SILEX_MODULE_PATH is set, use its first component.
  * Otherwise use the default.
  */
 static void first_module_dir(char out[PATH_MAX])
@@ -269,7 +269,7 @@ silex_module_t *registry_lookup(const char *tool, const char *flag)
     if (cached)
         return cached;
 
-    /* Scan all module directories in MATCHBOX_MODULE_PATH */
+    /* Scan all module directories in SILEX_MODULE_PATH */
     const char *env = getenv("SILEX_MODULE_PATH");
     if (env && *env) {
         /* Make a mutable copy to tokenise */

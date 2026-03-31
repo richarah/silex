@@ -1,17 +1,17 @@
 # Security Test Results
 
 **Date:** 2026-03-31
-**matchbox version:** 0.2.0
+**silex version:** 0.2.0
 
 ## SEC-01: Path Traversal (symlink in cp -r)
 
 ```
 mkdir -p /tmp/jail_mb; ln -s /etc/passwd /tmp/jail_mb/link
-matchbox cp -r /tmp/jail_mb /tmp/dest_mb
+silex cp -r /tmp/jail_mb /tmp/dest_mb
 file /tmp/dest_mb/link → symbolic link to /etc/passwd
 ```
 
-**Result:** matchbox `cp -r` preserves symlinks (matches GNU cp -r default behavior).
+**Result:** silex `cp -r` preserves symlinks (matches GNU cp -r default behavior).
 To dereference, use `cp -rL` (future work). This is POSIX-compliant and matches GNU cp.
 
 ## SEC-02: Resource Exhaustion
@@ -44,13 +44,13 @@ No crashes, no hangs. All inputs handled gracefully.
 
 | Command | Output | Exit Code |
 |---------|--------|-----------|
-| `matchbox cat /nonexistent` | `matchbox: cat: /nonexistent: No such file or directory` | 1 |
-| `matchbox cp /nonexistent /tmp/d` | `matchbox: cp: cannot stat '/nonexistent': No such file or directory` | 1 |
-| `matchbox mkdir /proc/impossible` | `matchbox: mkdir: /proc/impossible: No such file or directory` | 1 |
-| `matchbox sort --bogus-flag` | Usage message | 2 |
-| `matchbox grep` (no args) | Usage message | 2 |
+| `silex cat /nonexistent` | `silex: cat: /nonexistent: No such file or directory` | 1 |
+| `silex cp /nonexistent /tmp/d` | `silex: cp: cannot stat '/nonexistent': No such file or directory` | 1 |
+| `silex mkdir /proc/impossible` | `silex: mkdir: /proc/impossible: No such file or directory` | 1 |
+| `silex sort --bogus-flag` | Usage message | 2 |
+| `silex grep` (no args) | Usage message | 2 |
 
-All error messages use `matchbox: TOOL: message` format. Exit codes are correct.
+All error messages use `silex: TOOL: message` format. Exit codes are correct.
 
 ## STRESS-01: 100,000 Iteration Loop
 
@@ -69,9 +69,9 @@ All error messages use `matchbox: TOOL: message` format. Exit codes are correct.
 
 ## Summary
 
-All security tests PASS. matchbox is robust under:
+All security tests PASS. silex is robust under:
 - Path traversal (symlinks preserved per GNU cp convention)
 - Resource exhaustion (div-by-zero exits 2, recursion capped at 1000, Thompson NFA for regex)
 - Crash inputs (no crashes/hangs on malformed input)
-- Error paths (consistent `matchbox: TOOL: message` format)
+- Error paths (consistent `silex: TOOL: message` format)
 - Stress (stable RSS, rapid invocation, concurrent operation)

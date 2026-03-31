@@ -380,7 +380,7 @@ int exec_simple_cmd(shell_ctx_t *sh, char **words, char **assigns, redir_t *redi
     int argc = 0;
     while (expanded[argc]) argc++;
 
-    /* MATCHBOX_TRACE: print command before execution */
+    /* SILEX_TRACE: print command before execution */
     if (sh->trace_level >= 1) {
         fputs("+ ", stderr);
         for (int ti = 0; ti < argc; ti++) {
@@ -452,7 +452,7 @@ int exec_simple_cmd(shell_ctx_t *sh, char **words, char **assigns, redir_t *redi
         /*
          * B-8: XC-02 Dead command elimination.
          * Skip `mkdir -p PATH...` when all PATH arguments are already
-         * confirmed existing directories with written_by_matchbox=1
+         * confirmed existing directories with written_by_silex=1
          * in fscache (i.e. we created them in this run).
          * Only safe when there are no redirections.
          */
@@ -474,7 +474,7 @@ int exec_simple_cmd(shell_ctx_t *sh, char **words, char **assigns, redir_t *redi
                     if (!a) break;
                     if (a[0] == '-' || strcmp(a, "--") == 0) continue;
                     struct stat st;
-                    if (!fscache_written_by_matchbox(a) ||
+                    if (!fscache_written_by_silex(a) ||
                         fscache_stat(a, &st) != 0 || !S_ISDIR(st.st_mode))
                         all_done = 0;
                 }
@@ -1647,7 +1647,7 @@ static int exec_builtin_command(shell_ctx_t *sh, int argc, char **argv)
         }
         /* Check applet table */
         if (find_applet(name)) {
-            if (verbose) printf("%s is a matchbox builtin\n", name);
+            if (verbose) printf("%s is a silex builtin\n", name);
             else         printf("%s\n", name);
             return 0;
         }
@@ -1691,7 +1691,7 @@ static int exec_builtin_type(shell_ctx_t *sh, int argc, char **argv)
             continue;
         }
         if (find_applet(name)) {
-            printf("%s is a matchbox builtin\n", name);
+            printf("%s is a silex builtin\n", name);
             continue;
         }
         /* Check PATH */

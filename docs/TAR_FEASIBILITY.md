@@ -38,7 +38,7 @@ Container builds pipe tar through `gzip`, `zstd`, or `xz`. silex does not need a
 
 ## Implementation approaches
 
-### Option A: Self-contained POSIX ustar (~2,000 lines)
+### Option A: self-contained POSIX ustar (~2,000 lines)
 
 Implement the POSIX ustar header format (512-byte blocks) in C, with:
 - `tar c[z][f]` — create archive (optionally pipe through `gzip`)
@@ -62,7 +62,7 @@ Implement the POSIX ustar header format (512-byte blocks) in C, with:
 
 **Estimated LOC:** 1,800–2,200 lines (ustar read/write + PAX long-name extension)
 
-### Option B: Thin libarchive wrapper (~300 lines)
+### Option B: thin libarchive wrapper (~300 lines)
 
 Link against `libarchive` (`-larchive`) and wrap `archive_read_*` / `archive_write_*`.
 
@@ -79,7 +79,7 @@ Link against `libarchive` (`-larchive`) and wrap `archive_read_*` / `archive_wri
 
 **Verdict: Rejected** for v0.3.0. May revisit as an optional loadable module (so the main binary stays lean).
 
-### Option C: External `tar` subprocess via exec
+### Option C: external `tar` subprocess via exec
 
 When `tar` is invoked inside silex scripts, exec the system `tar`. This is the current behavior (fallthrough to system PATH).
 
@@ -137,7 +137,7 @@ PAX extended header (type='x') precedes the entry it describes and contains
 - `-v` verbose listing
 - `-z` compression dispatch (fork `gzip`/`gzip -d` subprocess via pipe)
 
-### Phase 4: Tests (~200 lines)
+### Phase 4: tests (~200 lines)
 - `tests/compat/run.sh` additions: create, extract, list, round-trip
 - Compare output against GNU tar for representative archives
 

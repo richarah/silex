@@ -1,6 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 /*
- * tests/fuzz/fuzz_grep_pattern.c — LibFuzzer target for matchbox grep.
+ * tests/fuzz/fuzz_grep_pattern.c — LibFuzzer target for silex grep.
  *
  * Build (requires clang with libFuzzer support):
  *   clang -std=c11 -fsanitize=fuzzer,address,undefined \
@@ -27,7 +27,7 @@
  *     - bytes before '\n' = the grep pattern
  *     - bytes after  '\n' = the input text to match against
  *
- *   Both the pattern and the text are tested against the matchbox grep
+ *   Both the pattern and the text are tested against the silex grep
  *   regex engine. This exercises:
  *     - Pattern compilation with arbitrary byte sequences.
  *     - Matching with arbitrary text input.
@@ -42,9 +42,9 @@
 #include "../../src/util/arena.h"
 
 /*
- * Include the POSIX regex interface. matchbox uses regcomp/regexec internally.
+ * Include the POSIX regex interface. silex uses regcomp/regexec internally.
  * We test the same entry point that grep.c uses to compile and match patterns.
- * If matchbox wraps regex in its own API, adjust the include below.
+ * If silex wraps regex in its own API, adjust the include below.
  */
 #include <regex.h>
 #include <stdint.h>

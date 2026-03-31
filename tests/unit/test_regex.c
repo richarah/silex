@@ -1,4 +1,4 @@
-/* test_regex.c — unit tests for the matchbox Thompson NFA/DFA regex engine
+/* test_regex.c — unit tests for the silex Thompson NFA/DFA regex engine
  *
  * Compares mb_regex results against libc regexec for correctness.
  * Any difference = bug.
@@ -66,7 +66,7 @@ static void bre(const char *pat, const char *text, int expect_match,
                 const char *label)
 {
     (void)expect_match;
-    check(pat, MB_REG_BRE, 0, text, label);
+    check(pat, SX_REG_BRE, 0, text, label);
 }
 
 /* Convenience: ERE test */
@@ -74,7 +74,7 @@ static void ere(const char *pat, const char *text, int expect_match,
                 const char *label)
 {
     (void)expect_match;
-    check(pat, MB_REG_ERE, REG_EXTENDED, text, label);
+    check(pat, SX_REG_ERE, REG_EXTENDED, text, label);
 }
 
 /* Convenience: case-insensitive BRE test */
@@ -82,7 +82,7 @@ static void bre_i(const char *pat, const char *text, int expect_match,
                   const char *label)
 {
     (void)expect_match;
-    check(pat, MB_REG_BRE | MB_REG_ICASE, REG_ICASE, text, label);
+    check(pat, SX_REG_BRE | SX_REG_ICASE, REG_ICASE, text, label);
 }
 
 /* ---- Test suites ---------------------------------------------------------- */
@@ -256,7 +256,7 @@ static void test_backref_fallback(void)
     /* These patterns have backreferences and should fall back to POSIX.
      * We only verify they don't crash. */
     const char *err = NULL;
-    mb_regex *re = mb_regex_compile("\\(a\\)\\1", MB_REG_BRE, &err);
+    mb_regex *re = mb_regex_compile("\\(a\\)\\1", SX_REG_BRE, &err);
     if (re) {
         /* Just run it and verify no crash */
         mb_regex_search(re, "aa", 2, NULL);

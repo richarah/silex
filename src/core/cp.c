@@ -345,7 +345,7 @@ static int cp_path(const char *src, const char *dst,
     int ret = copy_file_fd(src_fd, dst, &src_st, opts);
     close(src_fd);
     if (ret == 0) {
-        /* B-7: insert dest stat into fscache (written_by_matchbox=1) */
+        /* B-7: insert dest stat into fscache (written_by_silex=1) */
         struct stat fresh;
         if (stat(dst, &fresh) == 0)
             fscache_insert(dst, &fresh);
@@ -436,7 +436,7 @@ int applet_cp(int argc, char **argv)
                 /* Unknown flag: in Phase 1 we fall through to PATH (Phase 4 does module) */
                 fprintf(stderr, "silex: cp: unrecognized option '-%c'\n", *p);
                 fprintf(stderr, "silex: cp: unsupported flag -%c. "
-                        "Install matchbox-gnu-cp module or GNU coreutils.\n", *p);
+                        "Install silex-gnu-cp module or GNU coreutils.\n", *p);
                 return 1;
             }
             p++;

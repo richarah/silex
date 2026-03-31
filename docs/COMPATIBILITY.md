@@ -7,7 +7,7 @@ Notes = known differences.
 
 Legend: Y = supported, N = not supported, - = not applicable
 
-## Locale and Character Encoding
+## Locale and character encoding
 
 silex operates in the **C/POSIX locale** for all text processing operations
 (grep, sed, sort, tr, wc). This matches the expected behaviour in container build
@@ -23,7 +23,7 @@ Implications:
 If locale-aware text processing is required, invoke the system `sort`/`grep`/etc.
 via an external command or install a locale module (v0.3.0 roadmap).
 
-## POSIX Utility Conventions
+## POSIX utility conventions
 
 All silex builtins implement the following POSIX utility conventions:
 - **`--`**: ends option processing; remaining arguments are operands (all tools)
@@ -32,7 +32,7 @@ All silex builtins implement the following POSIX utility conventions:
 - **Combined flags**: single-character options may be combined (e.g. `-rf`, `-nv`)
   for all tools that take single-character flags
 
-## Shell (sh)
+## Shell
 
 | Feature | POSIX | GNU/bash | silex | Notes |
 |---------|-------|----------|----------|-------|
@@ -262,7 +262,7 @@ supported. Unusual GNU flags fall through to the external tool via PATH.
 
 See source files in src/core/ for full flag details.
 
-## Exit Status Reference
+## Exit status reference
 
 POSIX exit status codes for all 27 builtins. "Usage error" means invalid flags
 or missing required arguments; the tool prints a message to stderr and exits 2.

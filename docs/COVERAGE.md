@@ -16,7 +16,7 @@
 
 ---
 
-## Shell subsystem (`src/shell/`)
+## Shell subsystem
 
 | File | Lines | Covered |
 |------|-------|---------|
@@ -34,7 +34,7 @@ The shell subsystem has the highest coverage because all 203 shell conformance t
 
 ---
 
-## Regex engine (`src/util/regex/`)
+## Regex engine
 
 | File | Lines | Covered |
 |------|-------|---------|
@@ -50,7 +50,7 @@ The shell subsystem has the highest coverage because all 203 shell conformance t
 
 ---
 
-## Core builtins (`src/core/`)
+## Core builtins
 
 ### Actively exercised by test suites
 
@@ -98,7 +98,7 @@ The shell subsystem has the highest coverage because all 203 shell conformance t
 
 ---
 
-## Utilities (`src/util/`)
+## Utilities
 
 | File | Lines | Covered |
 |------|-------|---------|
@@ -114,7 +114,7 @@ The shell subsystem has the highest coverage because all 203 shell conformance t
 
 ---
 
-## Module system, batch I/O, cache, main (`src/module/`, `src/batch/`, `src/cache/`, `src/main.c`)
+## Module system, batch I/O, cache, main
 
 | File | Lines | Covered |
 |------|-------|---------|

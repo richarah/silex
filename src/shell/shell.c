@@ -82,7 +82,7 @@ int shell_init(shell_ctx_t *sh, int argc, char **argv)
     if (argc > 0 && argv && argv[0])
         sh->script_name = arena_strdup(&sh->parse_arena, argv[0]);
     else
-        sh->script_name = arena_strdup(&sh->parse_arena, "matchbox");
+        sh->script_name = arena_strdup(&sh->parse_arena, "silex");
 
     /* $1..$N */
     if (argc > 1 && argv) {
@@ -123,7 +123,7 @@ int shell_init(shell_ctx_t *sh, int argc, char **argv)
     for (int i = 0; i < NSIG; i++)
         sh->traps[i].action = SHELL_TRAP_DEFAULT;
 
-    /* MATCHBOX_TRACE: tracing/debugging mode */
+    /* SILEX_TRACE: tracing/debugging mode */
     const char *trace_env = getenv("SILEX_TRACE");
     if (trace_env) {
         sh->trace_level = atoi(trace_env);

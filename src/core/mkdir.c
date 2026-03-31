@@ -110,7 +110,7 @@ static int mkdir_p(const char *path, mode_t mode, int verbose)
                             }
                             /* EEXIST: created by another process; OK */
                         } else {
-                            /* B-7: insert fresh stat into fscache (written_by_matchbox=1)
+                            /* B-7: insert fresh stat into fscache (written_by_silex=1)
                              * so subsequent fscache_stat() calls return a cache hit. */
                             struct stat newst;
                             if (stat(tmp, &newst) == 0)

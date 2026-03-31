@@ -818,7 +818,7 @@ int applet_grep(int argc, char **argv)
     grep_opts_t g;
     memset(&g, 0, sizeof(g));
 
-    /* MATCHBOX_SMART=1: enable smart-case and VCS-aware mode by default */
+    /* SILEX_SMART=1: enable smart-case and VCS-aware mode by default */
     if (getenv("SILEX_SMART") && strcmp(getenv("SILEX_SMART"), "1") == 0)
         g.opt_smart = 1;
 
@@ -1042,7 +1042,7 @@ int applet_grep(int argc, char **argv)
         i++;
     }
 
-    /* MATCHBOX_SMART: when smart mode is active and recursive, enable --vcs */
+    /* SILEX_SMART: when smart mode is active and recursive, enable --vcs */
     if (g.opt_smart && g.opt_r && !g.opt_vcs)
         g.opt_vcs = 1;
 

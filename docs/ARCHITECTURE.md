@@ -1,4 +1,4 @@
-# silex Architecture
+# silex architecture
 
 ## Overview
 
@@ -7,7 +7,7 @@ coreutils as in-process builtins. Its primary goal is to speed up container
 image builds by eliminating the fork/exec overhead of shell + coreutils for
 every RUN step in a Dockerfile.
 
-## Component Diagram
+## Component diagram
 
 ```
 +------------------------------------------------------------------+
@@ -53,7 +53,7 @@ every RUN step in a Dockerfile.
   cp_reflink.so, grep_pcre.so, sed_inplace.so, ...
 ```
 
-## Data Flow
+## Data flow
 
 ```
 Input (script file, -c string, or stdin)
@@ -80,7 +80,7 @@ exec_node (src/shell/exec.c)
     +-- is external? --> fork() + execvp()
 ```
 
-## Memory Model
+## Memory model
 
 All per-command allocations use an arena allocator (`src/util/arena.h`).
 The arena is reset between top-level commands (shell main loop), not freed.
@@ -99,7 +99,7 @@ Heap allocations (`malloc`):
 - Sort input lines (freed after output)
 - Regex compiled patterns (freed at sed/grep exit)
 
-## Concurrency Model
+## Concurrency model
 
 silex is single-threaded within a shell session. Concurrency arises from:
 
@@ -117,7 +117,7 @@ silex is single-threaded within a shell session. Concurrency arises from:
 
 4. **xargs -P**: Multiple child processes for parallel arg processing.
 
-## Module System
+## Module system
 
 Modules are `.so` files loaded via `dlopen()`. Security checks on every load:
 - Not a symlink
@@ -132,7 +132,7 @@ invalidated when the module directory's mtime changes.
 Unsupported flags trigger module lookup before falling through to `execvp()`
 of the external tool from `$PATH`.
 
-## Code Conventions
+## Code conventions
 
 ### Naming
 
@@ -145,7 +145,7 @@ of the external tool from `$PATH`.
 | Macros | ALL_CAPS | `ARENA_BLOCK_SIZE`, `SHELL_MAX_CALL_DEPTH` |
 | File-level comment | `/* tool.c -- short description */` | first line of every .c file |
 
-### Return Values
+### Return values
 
 All public functions return `int` representing an exit code:
 - 0: success

@@ -1,19 +1,19 @@
 # Mutation and Error Path Test Results
 
 **Date:** 2026-03-31
-**matchbox version:** 0.2.0
+**silex version:** 0.2.0
 
 ## MUT-03: Error Path Coverage
 
-All error paths exercise the `matchbox: TOOL: message` format and return appropriate exit codes.
+All error paths exercise the `silex: TOOL: message` format and return appropriate exit codes.
 
 | Test | Expected Output | Actual Output | Exit | Pass |
 |------|----------------|---------------|------|------|
-| `matchbox cat /nonexistent` | `matchbox: cat: /nonexistent: No such file or directory` | Same | 1 | ✓ |
-| `matchbox cp /nonexistent /tmp/d` | `matchbox: cp: cannot stat '/nonexistent': No such file or directory` | Same | 1 | ✓ |
-| `matchbox mkdir /proc/impossible` | `matchbox: mkdir: /proc/impossible: No such file or directory` | Same | 1 | ✓ |
-| `matchbox sort --bogus-flag` | Usage message | Usage message | 1 | ✓ |
-| `matchbox grep` (no pattern) | Usage message | Usage message | 2 | ✓ |
+| `silex cat /nonexistent` | `silex: cat: /nonexistent: No such file or directory` | Same | 1 | ✓ |
+| `silex cp /nonexistent /tmp/d` | `silex: cp: cannot stat '/nonexistent': No such file or directory` | Same | 1 | ✓ |
+| `silex mkdir /proc/impossible` | `silex: mkdir: /proc/impossible: No such file or directory` | Same | 1 | ✓ |
+| `silex sort --bogus-flag` | Usage message | Usage message | 1 | ✓ |
+| `silex grep` (no pattern) | Usage message | Usage message | 2 | ✓ |
 
 ## MUT-01/MUT-02: Mutation Testing (Manual Verification)
 

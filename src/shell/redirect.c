@@ -157,7 +157,7 @@ int redirect_apply(struct shell_ctx *sh, redir_t *redirs, redirect_ctx_t *ctx)
         case TOK_DLESS:
         case TOK_DLESSDASH: {
             /* heredoc: write body to a temp file, dup2 read end */
-            char tmpname[] = "/tmp/matchbox_heredoc_XXXXXX";
+            char tmpname[] = "/tmp/silex_heredoc_XXXXXX";
             int tmpfd = mkstemp(tmpname);
             if (tmpfd < 0) {
                 perror("mkstemp");

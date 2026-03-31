@@ -1,14 +1,14 @@
 # Quoting Conformance Results
 
 **Date:** 2026-03-31
-**matchbox version:** 0.2.0
+**silex version:** 0.2.0
 **Reference shell:** dash (/usr/bin/dash)
 
 ## Summary
 
 **54 passed, 0 failed, 0 skipped**
 
-All Q-01 through Q-08 test cases pass. matchbox output matches dash exactly.
+All Q-01 through Q-08 test cases pass. silex output matches dash exactly.
 
 ## Test Groups
 
@@ -25,7 +25,7 @@ All Q-01 through Q-08 test cases pass. matchbox output matches dash exactly.
 
 ## Bugs Fixed During Testing
 
-1. **Q-05-4 / Q-08-2 (stdin EOF in pipeline last stage)**: When matchbox reads a
+1. **Q-05-4 / Q-08-2 (stdin EOF in pipeline last stage)**: When silex reads a
    script from stdin via `fgetc(stdin)`, the stdio `stdin` FILE* gets its EOF flag
    set after consuming the script. When a builtin runs in-process as the last stage
    of a pipeline (with stdin redirected via `dup2` to the pipe read end), the

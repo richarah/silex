@@ -1,6 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 /*
- * tests/fuzz/fuzz_shell_parser.c — LibFuzzer target for the matchbox shell parser.
+ * tests/fuzz/fuzz_shell_parser.c — LibFuzzer target for the silex shell parser.
  *
  * Build (requires clang with libFuzzer support):
  *   clang -std=c11 -fsanitize=fuzzer,address,undefined \

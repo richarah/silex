@@ -22,7 +22,7 @@ typedef struct {
     const char *path;          /* interned path (for collision detection; owned by intern table) */
     struct stat st;            /* full cached stat result                  */
     time_t      cached_at;     /* unix time of population                  */
-    unsigned    written_by_matchbox : 1; /* set after builtin write op (XC-01/XC-02) */
+    unsigned    written_by_silex : 1; /* set after builtin write op (XC-01/XC-02) */
 } fscache_entry_t;
 
 /* High-bit flag distinguishing lstat entries from stat entries */
@@ -51,8 +51,8 @@ void fscache_invalidate_all(void);
 /* Insert/update a stat result (called after successful builtin writes) */
 void fscache_insert(const char *path, const struct stat *st);
 
-/* Returns 1 if path is cached with written_by_matchbox=1 and not expired.
+/* Returns 1 if path is cached with written_by_silex=1 and not expired.
  * Used by XC-02 dead command elimination. */
-int fscache_written_by_matchbox(const char *path);
+int fscache_written_by_silex(const char *path);
 
 #endif /* SILEX_FSCACHE_H */

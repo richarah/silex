@@ -1,4 +1,4 @@
-# Builtin-to-Builtin Pipe Elimination
+# Builtin-to-builtin pipe elimination
 
 **Date:** 2026-03-30
 **Status:** Phase 1 implemented; Phase 2 deferred to v0.3.0
@@ -17,7 +17,7 @@ creates 2 fork() calls, 2 pipe() system calls, 2 sets of dup2() calls, and 2 wai
 
 ---
 
-## Phase 1: Trivial cat elimination (implemented, v0.2.0)
+## Phase 1: trivial cat elimination (implemented, v0.2.0)
 
 **Location:** `src/shell/exec.c`, `pipeline_elim_trivial_cat()`
 
@@ -52,7 +52,7 @@ grep "error"             # reads from original stdin
 
 ---
 
-## Phase 2: Thread-based pipeline (planned, v0.3.0)
+## Phase 2: thread-based pipeline (planned, v0.3.0)
 
 ### Problem with current approach
 

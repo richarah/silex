@@ -1,11 +1,11 @@
-# Optimisation Log
+# Optimisation log
 
 This file records every optimisation attempted: what was done, why, before/after
 measurements, and whether it was kept or reverted.
 
 ---
 
-## Summary Table (O-01 — O-21, V-01 — V-03, S-01 — S-02, E-01, B-01 — B-09, B-3/5/7/8 new)
+## Summary table
 
 | ID | Name | Category | Benchmark | Before | After | Speedup | Binary +/- | Status |
 |----|------|----------|-----------|--------|-------|---------|------------|--------|
@@ -47,13 +47,13 @@ measurements, and whether it was kept or reverted.
 
 ---
 
-## Performance Gap Analysis vs System Tools (2026-03-30)
+## Performance gap analysis vs system tools
 
 Post-O-12 analysis: for each builtin, strace -c was run against both silex and the
 system equivalent on the same input. Identified gaps were fixed. All fixes verified with
 88 unit + 36 integration + 41 security tests passing.
 
-### Additional Fixes Applied (post-O-12)
+### Additional fixes applied (post-O-12)
 
 #### grep / sort / sed: 128KB explicit stdio read buffer
 Input getline() loop was using glibc's default 4KB buffer. Passing NULL to setvbuf()
@@ -90,7 +90,7 @@ tail -c N: fseeko(fp, size-N, SEEK_SET) directly.
 - After:  22 reads; wc -l now 3x faster than GNU wc on 5.4MB input
 - Files: src/core/wc.c
 
-### Final Comparison Table (20-run average, 2026-03-30)
+### Final comparison table
 
 | Tool | Benchmark | silex | system | ratio | Status |
 |------|-----------|----------|--------|-------|--------|
@@ -108,7 +108,7 @@ tail -c N: fseeko(fp, size-N, SEEK_SET) directly.
 | sort | 550KB | 4ms | 6ms | 0.67 | FASTER |
 | sed | s/// 550KB | 5ms | 5ms | 1.00 | EQUAL |
 
-### Known Gaps (not fixable without breaking scope)
+### Known gaps (not fixable without breaking scope)
 
 **grep BRE/ERE regex speed** — CLOSED by O-13 (Thompson NFA/DFA, 2026-03-30)
 O-13 replaced POSIX regcomp/regexec with a Thompson NFA simulation + lazy DFA cache.
@@ -126,7 +126,7 @@ files, package lists <10MB), the gap is <10ms and acceptable.
 
 ---
 
-## Build System Tuning (2026-03-30)
+## Build system tuning
 
 ### Per-file optimisation overrides
 
@@ -164,7 +164,7 @@ Cold files compiled at -Os (4 total):
 | util/error.c | Error formatting only; rare path |
 | util/platform.c | OS detection; startup only |
 
-### Linker hardening flags (release and release-glibc)
+### Linker hardening flags
 
 | Flag | Effect |
 |------|--------|
@@ -175,7 +175,7 @@ Cold files compiled at -Os (4 total):
 | -z noexecstack | Marks PT_GNU_STACK as RW, not RWE |
 | --build-id=sha1 | Content-based build ID for reproducibility |
 
-### Binary size change (glibc dynamic, 2026-03-30)
+### Binary size change
 
 Before (static-pie, -O2 -flto, no gc-sections): 1786K
 After (dynamic PIE, -O2 -flto=auto, gc-sections, no unwind tables, fvisibility=hidden): 278K
@@ -195,7 +195,7 @@ All symbols default to hidden in release builds. This:
 
 ---
 
-## Baseline Measurements (2026-03-30, 100 iterations unless noted)
+## Baseline measurements
 
 ### bench_startup.sh (100 iter)
 | command | mean_ms | min_ms | max_ms | stddev_ms |
@@ -297,7 +297,7 @@ Reason kept/reverted: ...
 
 ---
 
-## OPT-001: Arena allocator for parse trees
+## OPT-001: arena allocator for parse trees
 
 Date: Phase 2 implementation
 Status: KEPT
@@ -310,7 +310,7 @@ Reason kept: Significant reduction in allocator pressure for interactive shell
 
 ---
 
-## OPT-002: Builtin short-circuit (no fork for common tools)
+## OPT-002: builtin short-circuit (no fork for common tools)
 
 Date: Phase 2 implementation
 Status: KEPT
@@ -340,7 +340,7 @@ Reason kept: Reduces kernel round-trips for bulk operations. Safe because
 
 ---
 
-## OPT-004: Filesystem state cache (path-keyed)
+## OPT-004: filesystem state cache (path-keyed)
 
 Date: Phase 6 implementation / fixed 2026-03-30
 Status: KEPT (TTL=5s default; disable with SILEX_FSCACHE_TTL=0)
@@ -364,7 +364,7 @@ Reason kept: Build scripts frequently check the same files multiple times.
 
 ---
 
-## OPT-005: In-process sed (no fork for simple substitutions)
+## OPT-005: in-process sed (no fork for simple substitutions)
 
 Date: Phase 7 implementation
 Status: KEPT
@@ -378,7 +378,7 @@ Note: sed is already a full builtin. Phase 7 adds sed_is_simple() for future
 
 ---
 
-## OPT-006: Power-of-two hash tables
+## OPT-006: power-of-two hash tables
 
 Date: Phase 2/6 implementation
 Status: KEPT
@@ -391,7 +391,7 @@ Reason kept: Standard practice. Both vars.c (VARS_HASH_SIZE=256) and
 
 ---
 
-## OPT-007: Lexer word-stop lookup table
+## OPT-007: lexer word-stop lookup table
 
 Date: 2026-03-30
 Status: KEPT
@@ -426,7 +426,7 @@ Reason kept: Zero-cost change (compiler may have already done this), correct,
 
 ---
 
-## PENDING: Computed goto for lexer dispatch
+## PENDING: computed goto for lexer dispatch
 
 Status: PENDING (only if profiling shows lexer as hot path)
 Plan: Replace switch in lexer_read with GCC computed goto (label array).
@@ -447,7 +447,7 @@ Plan: Addressed by O-02 (vectorised newline scan) + O-09 (writev) in this releas
 
 ---
 
-## O-10: Compiled glob patterns for find -name / -iname
+## O-10: compiled glob patterns for find -name / -iname
 
 Date: 2026-03-30
 Status: KEPT
@@ -525,7 +525,7 @@ correct fallback on old kernels.
 
 ---
 
-## O-12: Binary layout section attributes (HOT/WARM/COLD)
+## O-12: binary layout section attributes (HOT/WARM/COLD)
 
 Date: 2026-03-30
 Status: KEPT
@@ -592,7 +592,7 @@ Reason kept: 3x fewer stat syscalls in multi-call scenarios (e.g., Dockerfile
 
 ---
 
-## O-07: String intern table for variable name and path deduplication
+## O-07: string intern table for variable name and path deduplication
 
 Date: 2026-03-30
 Status: KEPT
@@ -731,7 +731,7 @@ Reason kept: Real benefit on large files (container builds copy many MB-to-GB pa
 
 ---
 
-## O-02: Vectorised newline scan (linescan_avx2/neon/scalar)
+## O-02: vectorised newline scan (linescan_avx2/neon/scalar)
 
 Date: 2026-03-30
 Status: KEPT
@@ -763,7 +763,7 @@ Reason kept: Measurable 39% improvement on small/medium files; correctly tested.
 
 ---
 
-## O-01: Character classification LUT
+## O-01: character classification LUT
 
 Date: 2026-03-30
 Status: KEPT
@@ -842,7 +842,7 @@ Reason kept: Closes known 4x performance gap. All 36 integration + 41 security
 
 ---
 
-## O-14: Explicit 128KB stdout buffer for grep/sort/sed
+## O-14: explicit 128KB stdout buffer for grep/sort/sed
 
 Date: 2026-03-30
 Status: KEPT
@@ -954,7 +954,7 @@ Reason kept: 620x fewer kernel calls. Correct: d_type from readdir is always set
 
 ---
 
-## O-19: Buffer size audit (input + output)
+## O-19: buffer size audit (input + output)
 
 Date: 2026-03-30
 Status: KEPT (all buffers audited and set explicitly)
@@ -982,11 +982,11 @@ Final state: all 7 sequential-read builtins use explicit ≥128KB input buffers.
 
 ---
 
-## Final Polish Phase (F-01 — F-10) — 2026-03-30
+## Final polish phase
 
 Summary of polish-phase performance work done after O-19.
 
-### F-03: PATH Lookup Cache
+### F-03: PATH lookup cache
 
 **Category**: Syscall reduction
 **Files**: `src/shell/exec.c`, `src/shell/shell.h`
@@ -1015,7 +1015,7 @@ was repeated on every iteration.
 - After:  ~5 stat() calls (cached after first)
 - Wall time improvement: ~15% on command-heavy scripts
 
-### F-05: `__builtin_expect` Branch Prediction Hints
+### F-05: `__builtin_expect` branch prediction hints
 
 **Category**: CPU / branch prediction
 **Files**: `src/util/section.h`, `src/util/arena.c`, `src/shell/exec.c`
@@ -1036,11 +1036,11 @@ workloads on modern out-of-order CPUs. Not measurable in isolation due to noise.
 
 ---
 
-## v0.2.0 Phase Additions — 2026-03-30
+## v0.2.0 phase additions
 
-### A-01: `waitpid` EINTR Retry
+### A-01: `waitpid` EINTR retry
 
-**Category**: Correctness / robustness
+**Category**: Correctness / signal handling
 **Files**: `src/shell/exec.c`
 
 **Problem**: The external-command waitpid at `exec.c:521` was not retrying on `EINTR`.
@@ -1057,7 +1057,7 @@ sequences caused early termination.
 
 ---
 
-### A-02: Full POSIX Arithmetic Operator Set
+### A-02: full POSIX arithmetic operator set
 
 **Category**: Correctness / POSIX compliance
 **Files**: `src/shell/expand.c`
@@ -1075,7 +1075,7 @@ Fixes `$((x << 2))`, `$((x += 1))`, `$((a & b))`, etc.
 
 ---
 
-### D-02: grep Extended Options
+### D-02: grep extended options
 
 **Category**: Compatibility
 **Files**: `src/core/grep.c`
@@ -1091,7 +1091,7 @@ Implementation:
 
 ---
 
-### D-03: sort `-M` Month Sort
+### D-03: sort `-M` month sort
 
 **Category**: Compatibility
 **Files**: `src/core/sort.c`
@@ -1101,7 +1101,7 @@ Unknown prefixes map to 0 (sort before January). Applied in `key_compare_strings
 
 ---
 
-### D-04: xargs Extended Options
+### D-04: xargs extended options
 
 **Category**: Compatibility
 **Files**: `src/core/xargs.c`
@@ -1110,7 +1110,7 @@ Unknown prefixes map to 0 (sort before January). Applied in `key_compare_strings
 
 ---
 
-### G-01: SILEX_TRACE Observability
+### G-01: SILEX_TRACE observability
 
 **Category**: Debuggability
 **Files**: `src/shell/shell.h`, `src/shell/shell.c`, `src/shell/exec.c`
@@ -1124,7 +1124,7 @@ Complements the shell's `set -x` option (which sets `opt_x` flag on the same pat
 
 ---
 
-### O-20: Thompson NFA O(n²) → O(n) + Pointer Swap
+### O-20: Thompson NFA O(n²) → O(n) + pointer swap
 
 **Category**: CPU / algorithmic
 **Files**: `src/util/regex/thompson.c`
@@ -1157,7 +1157,7 @@ runtime even after the O(n²) fix was applied.
 
 ---
 
-### O-21: grep memchr Prefilter (G-01)
+### O-21: grep memchr prefilter (G-01)
 
 **Category**: CPU / algorithmic
 **Files**: `src/util/regex/regex.h`, `src/util/regex/mb_regex.c`, `src/core/grep.c`
@@ -1202,7 +1202,7 @@ support io_uring (e.g. old kernels, heavily sandboxed containers, aarch64 QEMU).
 
 ---
 
-## Modern Techniques (2026-03-31)
+## Modern techniques
 
 Inspired by ripgrep / fd: developer-ergonomics features for interactive use.
 

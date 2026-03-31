@@ -22,9 +22,9 @@
  * ABI mismatches.  The libc tag in silex_module_t is verified at load
  * time in addition to this directory separation. */
 #ifdef SILEX_LIBC_MUSL
-#  define MATCHBOX_MODULE_DIR "/usr/lib/silex/modules-musl"
+#  define SILEX_MODULE_DIR "/usr/lib/silex/modules-musl"
 #else
-#  define MATCHBOX_MODULE_DIR "/usr/lib/silex/modules"
+#  define SILEX_MODULE_DIR "/usr/lib/silex/modules"
 #endif
 
 /* Expected libc tag for modules loaded by this build */
@@ -35,7 +35,7 @@
 #endif
 
 /*
- * loader.c — secure .so loading for matchbox modules.
+ * loader.c — secure .so loading for silex modules.
  *
  * Security checks performed before dlopen():
  *  1. lstat() path: must exist and not be a symlink

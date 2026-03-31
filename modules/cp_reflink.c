@@ -1,7 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 /*
- * cp_reflink.c — matchbox module: cp --reflink[=auto|always|never]
+ * cp_reflink.c — silex module: cp --reflink[=auto|always|never]
  *
  * On Linux, tries ioctl(FICLONE) for a copy-on-write reflink clone.
  * Falls back to copy_file_range() then a plain read/write loop.
@@ -11,7 +11,7 @@
  * --reflink=never:           skip reflink and use plain copy
  */
 
-#include "../matchbox_module.h"
+#include "../silex_module.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -236,8 +236,9 @@ static const char *cp_reflink_flags[] = {
     NULL
 };
 
-static matchbox_module_t cp_reflink_module = {
-    .api_version = MATCHBOX_MODULE_API_VERSION,
+static silex_module_t cp_reflink_module = {
+    .api_version = SILEX_MODULE_API_VERSION,
+    .libc        = SILEX_LIBC_NAME,
     .tool_name   = "cp",
     .module_name = "cp_reflink",
     .description = "cp --reflink: copy-on-write reflink via FICLONE / copy_file_range",
@@ -245,7 +246,7 @@ static matchbox_module_t cp_reflink_module = {
     .handler     = cp_reflink_handler,
 };
 
-matchbox_module_t *matchbox_module_init(void)
+silex_module_t *silex_module_init(void)
 {
     return &cp_reflink_module;
 }

@@ -1,6 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 /*
- * tests/fuzz/fuzz_sed_expr.c — LibFuzzer target for matchbox sed expression parsing.
+ * tests/fuzz/fuzz_sed_expr.c — LibFuzzer target for silex sed expression parsing.
  *
  * Build (requires clang with libFuzzer support):
  *   clang -std=c11 -fsanitize=fuzzer,address,undefined \
@@ -28,7 +28,7 @@
  *     - bytes before '\n' = the sed expression (-e script)
  *     - bytes after  '\n' = the input text to process
  *
- *   We call into the matchbox sed expression parser and executor with
+ *   We call into the silex sed expression parser and executor with
  *   arbitrary byte sequences to verify:
  *     - No crashes, hangs, or memory errors on invalid scripts.
  *     - Error recovery: bad scripts are rejected without crashing.
@@ -51,7 +51,7 @@
 
 /*
  * sed_script_t: minimal representation of a parsed sed command.
- * In the real matchbox sed implementation this struct is defined in sed.c or
+ * In the real silex sed implementation this struct is defined in sed.c or
  * an internal header. We define a stub here so the fuzzer compiles standalone
  * and can be adjusted when the real types are available.
  *

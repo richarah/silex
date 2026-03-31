@@ -8,7 +8,7 @@
  * fscache.c — per-process filesystem stat cache.
  *
  * Caches the result of stat()/lstat() keyed by FNV-1a(path).
- * TTL is read from MATCHBOX_FSCACHE_TTL (seconds); 0 disables the cache
+ * TTL is read from SILEX_FSCACHE_TTL (seconds); 0 disables the cache
  * (all calls pass through directly to the kernel).
  *
  * The cache is not thread-safe; it is designed for single-threaded use
@@ -50,7 +50,7 @@
  * never stat 100 000 distinct paths; this prevents unbounded memory growth. */
 #define FSCACHE_MAX_ENTRIES  100000
 
-/* Default TTL in seconds when MATCHBOX_FSCACHE_TTL is not set */
+/* Default TTL in seconds when SILEX_FSCACHE_TTL is not set */
 #define FSCACHE_DEFAULT_TTL 5
 
 /* Global cache instance */
@@ -278,7 +278,7 @@ void fscache_invalidate_all(void)
 
 /*
  * Insert a freshly-observed stat result (called after successful builtin ops).
- * Sets written_by_matchbox = 1 to allow XC-01/XC-02 optimisations.
+ * Sets written_by_silex = 1 to allow XC-01/XC-02 optimisations.
  */
 void fscache_insert(const char *path, const struct stat *st)
 {
@@ -299,10 +299,10 @@ void fscache_insert(const char *path, const struct stat *st)
     }
     entry->st                 = *st;
     entry->cached_at          = time(NULL);
-    entry->written_by_matchbox = 1;
+    entry->written_by_silex = 1;
 }
 
-int fscache_written_by_matchbox(const char *path)
+int fscache_written_by_silex(const char *path)
 {
     if (!path || g_fscache.ttl <= 0)
         return 0;
@@ -312,7 +312,7 @@ int fscache_written_by_matchbox(const char *path)
         return 0;
     if (time(NULL) - e->cached_at >= (time_t)g_fscache.ttl)
         return 0;
-    return e->written_by_matchbox ? 1 : 0;
+    return e->written_by_silex ? 1 : 0;
 }
 
 WARM void fscache_invalidate(const char *path)

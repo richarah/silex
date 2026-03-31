@@ -1,7 +1,7 @@
 # Optimisation Verification Results
 
 **Date:** 2026-03-31
-**matchbox version:** 0.2.0
+**silex version:** 0.2.0
 
 ## OPT-01: io_uring Batching
 
@@ -13,7 +13,7 @@ active on this system.
 ## OPT-02: fscache (stat reduction)
 
 ```
-strace -e trace=newfstatat -c matchbox sh -c 'test -d /tmp; test -d /tmp; test -d /tmp'
+strace -e trace=newfstatat -c silex sh -c 'test -d /tmp; test -d /tmp; test -d /tmp'
 → 3 newfstatat calls
 ```
 
@@ -38,7 +38,7 @@ cache avoids repeated `stat()` calls across directories in PATH. The cache holds
 ## OPT-05: Pipe Elimination (trivial `cat`)
 
 ```
-strace -e trace=clone,fork -c matchbox sh -c 'cat /etc/passwd | wc -l'
+strace -e trace=clone,fork -c silex sh -c 'cat /etc/passwd | wc -l'
 → 1 clone call
 ```
 
@@ -83,7 +83,7 @@ with `0x0A0A0A0A0A0A0A0AULL` then applies the "has zero byte" test.
 ## B-7: Filesystem State Propagation (XC-01)
 
 After successful builtin write operations, `fscache_insert()` is called to populate the
-cache with `written_by_matchbox=1`:
+cache with `written_by_silex=1`:
 - `mkdir.c`: after `mkdir()` succeeds (already present, O-08)
 - `cp.c`: after `copy_file_fd()` succeeds
 - `chmod.c`: after `chmod()/fchmodat()` succeeds
@@ -92,7 +92,7 @@ cache with `written_by_matchbox=1`:
 ## B-8: Dead Command Elimination (XC-02)
 
 Before dispatching `mkdir -p PATH...`, exec.c checks if ALL path arguments are:
-1. Present in fscache with `written_by_matchbox=1`
+1. Present in fscache with `written_by_silex=1`
 2. Confirmed as directories
 
 If so, the mkdir call is skipped (exit 0 immediately) — saving applet dispatch overhead

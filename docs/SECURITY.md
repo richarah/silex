@@ -1,6 +1,6 @@
-# silex Security
+# silex security
 
-## Threat Model
+## Threat model
 
 silex is designed to run inside container build environments (Docker, OCI).
 The primary threat is an attacker who controls:
@@ -12,7 +12,7 @@ silex does NOT aim to sandbox arbitrary user code. It is a build tool, not
 a security boundary. However, it avoids a number of dangerous patterns common
 in ad hoc shell scripts.
 
-## Input Handling
+## Input handling
 
 All user-provided strings are stored in `strbuf_t` (src/util/strbuf.h), a
 bounds-checked heap-managed buffer that prevents buffer overflows. Direct
@@ -22,7 +22,7 @@ All filesystem paths are normalized or canonicalized before operations:
 - `path_normalize()`: lexical resolution of `.` and `..` (no syscall)
 - `path_canon()`: full `realpath(3)` canonicalization (resolves symlinks)
 
-## rm Safety
+## rm safety
 
 `rm -rf /` is always rejected. Detection:
 1. Strip trailing slashes from the path.
@@ -32,7 +32,7 @@ All filesystem paths are normalized or canonicalized before operations:
 `rm --no-preserve-root` is rejected unconditionally. There is no way to
 override the `/` protection.
 
-## Module Loading Security
+## Module loading security
 
 Every `dlopen()` call in `src/module/loader.c` performs these checks before
 opening the .so:
@@ -49,7 +49,7 @@ opening the .so:
 
 No caching of security check results. Checks run on every `dlopen()`.
 
-## Code Safety Invariants
+## Code safety invariants
 
 These are enforced by convention and verified by code review:
 
@@ -66,7 +66,7 @@ grep -rn "alloca\|system(\|popen(" src/
 grep -rn "gets\|sprintf\|strcpy\|strcat" src/
 ```
 
-## Build Security
+## Build security
 
 The Makefile uses:
 - `-Wall -Wextra -Werror -pedantic`: all warnings are errors
@@ -80,7 +80,7 @@ LDFLAGS_EXTRA = -pie
 ```
 These are not enabled by default because they conflict with `-static` linking.
 
-## Resource Exhaustion Caps
+## Resource exhaustion caps
 
 silex enforces hard limits to prevent resource exhaustion from malicious or
 pathological inputs:
@@ -98,7 +98,7 @@ code 1. No crash or stack overflow occurs.
 The PATH lookup cache is bounded by the number of distinct command names in the
 script (at most 256 buckets, chained). Cache entries are freed in `shell_free()`.
 
-## Signal Handling
+## Signal handling
 
 The shell ignores `SIGPIPE` (set to `SIG_IGN` in `shell_init`). Each child
 process restores `SIGPIPE` to `SIG_DFL` before `execv`. This matches the
@@ -122,7 +122,7 @@ deliberate design choice for POSIX compliance but imposes constraints:
 - `SIGPIPE` in child processes is always reset to `SIG_DFL`, regardless of
   any parent trap for SIGPIPE.
 
-## Reporting Vulnerabilities
+## Reporting vulnerabilities
 
 File a GitHub issue with the label `security`. For sensitive reports, email
 the maintainer directly (see git log for contact). Please include:
@@ -131,7 +131,7 @@ the maintainer directly (see git log for contact). Please include:
 - Expected vs actual behavior
 - Impact assessment
 
-## Static vs Dynamic Build Security
+## Static vs dynamic build security
 
 The musl static build (`make release`) and the glibc dynamic build (`make release-glibc`)
 have different security profiles:
@@ -155,7 +155,7 @@ include glibc (Debian, Ubuntu, RHEL, Alpine with glibc compatibility layer).
 Module libc tagging (`silex_module_t.libc`) prevents loading a musl-compiled .so
 into a glibc build and vice versa, avoiding subtle ABI mismatches.
 
-## Privilege Handling
+## Privilege handling
 
 silex does not call `setuid()`, `setgid()`, `seteuid()`, or `setegid()`. It does
 not drop or acquire privileges at runtime.
@@ -177,7 +177,7 @@ Recommendation: run silex as the same user as the container build process (typic
 root inside a container, or a dedicated build user). Do not run silex as a more
 privileged user than the build requires.
 
-## Environment Variable Handling
+## Environment variable handling
 
 silex reads the following environment variables:
 
@@ -210,7 +210,7 @@ silex is not a security boundary. It runs inside an already-sandboxed container
 build environment where the container runtime (Docker, containerd, etc.) provides
 the primary isolation.
 
-## Build Reproducibility
+## Build reproducibility
 
 The `release` and `release-glibc` targets produce reproducible output for identical
 source trees and compilers when `SOURCE_DATE_EPOCH` is set:
@@ -236,7 +236,7 @@ B2=$(make release SOURCE_DATE_EPOCH=1700000000 2>/dev/null && sha256sum build/bi
 [ "$B1" = "$B2" ] && echo "Reproducible" || echo "NOT reproducible"
 ```
 
-## Audit Checklist
+## Audit checklist
 
 Manual review items (run before each release):
 

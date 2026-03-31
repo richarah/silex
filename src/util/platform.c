@@ -62,7 +62,7 @@ int g_inotify_available  = 0;
  * Minimal io_uring_params: the kernel fills this in on io_uring_setup().
  * We zero-initialise it and only care whether the syscall succeeds.
  */
-struct matchbox_io_uring_params {
+struct silex_io_uring_params {
     unsigned int sq_entries;
     unsigned int cq_entries;
     unsigned int flags;
@@ -77,7 +77,7 @@ struct matchbox_io_uring_params {
 
 void platform_detect(void)
 {
-    /* MATCHBOX_FORCE_FALLBACKS=1: disable all optional kernel features.
+    /* SILEX_FORCE_FALLBACKS=1: disable all optional kernel features.
      * Used for testing the portable fallback paths. */
     if (getenv("SILEX_FORCE_FALLBACKS") != NULL) {
         g_uring_available   = 0;
@@ -90,7 +90,7 @@ void platform_detect(void)
     /* ------------------------------------------------------------------ */
 #if SYS_io_uring_setup != (-1L)
     {
-        struct matchbox_io_uring_params params;
+        struct silex_io_uring_params params;
         memset(&params, 0, sizeof(params));
 
         long fd = syscall((long)SYS_io_uring_setup, (long)1, &params);

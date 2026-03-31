@@ -17,7 +17,7 @@ enumerates the minimum kernel interface silex requires.
 
 ---
 
-## Syscall Surface
+## Syscall surface
 
 The following table lists every Linux syscall class silex uses, derived from
 `strace -e trace=all` on the integration test suite. Syscalls marked **required**
@@ -68,7 +68,7 @@ directory traversal). No networking. No thread synchronisation primitives beyond
 
 ---
 
-## Framework Analysis
+## Framework analysis
 
 ### 1. Unikraft (https://unikraft.org)
 
@@ -138,7 +138,7 @@ added.
 
 ---
 
-## Minimum Kernel Interface
+## Minimum kernel interface
 
 For silex to run on a bare-metal / unikernel target with no `fork`, the shell
 must operate in **fork-free mode**. This requires:

@@ -1,7 +1,7 @@
 # GNU Comparison Results
 
 **Date:** 2026-03-31
-**matchbox version:** 0.2.0
+**silex version:** 0.2.0
 **Reference:** System GNU tools
 
 ## Summary

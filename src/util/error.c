@@ -11,7 +11,7 @@
 COLD void err_msg(const char *name, const char *fmt, ...)
 {
     va_list ap;
-    fprintf(stderr, "matchbox");
+    fprintf(stderr, "silex");
     if (name && *name)
         fprintf(stderr, ": %s", name);
     fprintf(stderr, ": ");
@@ -25,7 +25,7 @@ COLD void err_sys(const char *name, const char *fmt, ...)
 {
     int saved = errno;
     va_list ap;
-    fprintf(stderr, "matchbox");
+    fprintf(stderr, "silex");
     if (name && *name)
         fprintf(stderr, ": %s", name);
     fprintf(stderr, ": ");

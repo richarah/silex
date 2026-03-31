@@ -7,7 +7,7 @@
 
 ---
 
-## 1. File Inventory
+## File inventory
 
 | Subsystem | Source files (.c) |
 |-----------|-------------------|
@@ -27,21 +27,21 @@ Test directories: `tests/{unit,integration,compat,security,stress,edge,bench,fuz
 
 ---
 
-## 2. Builtin Completeness
+## Builtin completeness
 
-### External tool builtins (32)
+### External tool builtins
 
 basename, cat, chmod, cp, cut, date, dirname, echo, env, find, grep, head, install, ln, mkdir, mktemp, mv, printf, readlink, realpath, rm, sed, sha256sum, sort, stat, tail, tee, touch, tr, wc, xargs, sh
 
 All 32 are implemented and present (5 new in v0.2.0: env, mktemp, realpath, sha256sum, tee).
 
-### Shell builtins (in shell/exec.c)
+### Shell builtins
 
 cd, pwd, exit, export, unset, set, shift, source/., :, true, false, exec, eval, read, wait, kill, jobs, bg, fg, umask, command, type, getopts, break, continue, return, local, readonly, trap
 
 ---
 
-## 3. Shell Conformance
+## Shell conformance
 
 Tested with `tests/unit/shell/*.sh` against `build/bin/silex`.
 
@@ -70,7 +70,7 @@ Remaining gap:
 
 ---
 
-## 4. Module System
+## Module system
 
 - API version: `SILEX_MODULE_API_VERSION = 2`
 - New in v2: `libc` field (`"musl"` or `"glibc"`), `SILEX_EXPORT` macro, `SILEX_LIBC_NAME`
@@ -80,7 +80,7 @@ Remaining gap:
 
 ---
 
-## 5. Optimisations Implemented
+## Optimisations implemented
 
 | ID | Description | Status |
 |----|-------------|--------|
@@ -111,7 +111,7 @@ Regex classifier dispatch order: BMH (literal) → prefix-anchor → full Thomps
 
 ---
 
-## 5b. Memory Safety Structural Audit
+## Memory safety structural audit
 
 Audit performed 2026-03-30. All FAIL/MISSING items were fixed.
 
@@ -137,7 +137,7 @@ Audit performed 2026-03-30. All FAIL/MISSING items were fixed.
 
 ---
 
-## 5c. Conformance Test Suite (2026-03-31)
+## Conformance test suite
 
 All results recorded in `tests/conformance/`.
 
@@ -162,7 +162,7 @@ Key bugs found and fixed during conformance testing:
 
 ---
 
-## 6. Performance Targets
+## Performance targets
 
 Measured on host (glibc dynamic build, x86-64-v3, no musl).
 
@@ -177,7 +177,7 @@ Startup is within 3% of dash. grep is ~50% slower than GNU grep (expected: GNU g
 
 ---
 
-## 7. Benchmark Comparison
+## Benchmark comparison
 
 See Section 6. Full benchmark scripts in `tests/bench/` with resource caps:
 
@@ -190,7 +190,7 @@ PGO workload suite (`pgo/`): **NOT PRESENT** — directory does not exist; `make
 
 ---
 
-## 8. Build Configurations
+## Build configurations
 
 | Target | CFLAGS | LDFLAGS | Libc | Notes |
 |--------|--------|---------|------|-------|
@@ -204,7 +204,7 @@ No musl-gcc on this machine. `make` builds glibc dynamic PIE.
 
 ---
 
-## 9. Security Status
+## Security status
 
 | Check | Status |
 |-------|--------|
@@ -224,7 +224,7 @@ No musl-gcc on this machine. `make` builds glibc dynamic PIE.
 
 ---
 
-## 10. Test Suite Status
+## Test suite status
 
 | Suite | Command | Pass | Fail | Total |
 |-------|---------|------|------|-------|
@@ -257,7 +257,7 @@ No musl-gcc on this machine. `make` builds glibc dynamic PIE.
 
 ---
 
-## 11. Deferred / Outstanding Work
+## Deferred and outstanding work
 
 | Item | Status | Notes |
 |------|--------|-------|
@@ -278,7 +278,7 @@ No musl-gcc on this machine. `make` builds glibc dynamic PIE.
 
 ---
 
-## 12. Documentation
+## Documentation
 
 | File | Status | Contents |
 |------|--------|---------|
@@ -295,7 +295,7 @@ No musl-gcc on this machine. `make` builds glibc dynamic PIE.
 
 ---
 
-## 13. CI Status
+## CI status
 
 11 jobs defined in `.github/workflows/ci.yml`:
 
@@ -315,7 +315,7 @@ No musl-gcc on this machine. `make` builds glibc dynamic PIE.
 
 ---
 
-## 14. PGO Workload Suite
+## PGO workload suite
 
 **Status: NOT PRESENT.**
 
@@ -331,7 +331,7 @@ make pgo     # instrument build + run workloads + rebuild with profile data
 
 ---
 
-## 15. Compiler Flags
+## Compiler flags
 
 **CFLAGS_RELEASE (current default):**
 ```
