@@ -1487,6 +1487,52 @@ static int exec_builtin_printf_sh(shell_ctx_t *sh, int argc, char **argv)
                         consumed_arg = 1;
                     }
                     break;
+                case 'b': {
+                    /* %b - interpret backslash escapes */
+                    if (argi < argc) {
+                        const char *s = argv[argi++];
+                        consumed_arg = 1;
+                        while (*s) {
+                            if (*s == '\\' && s[1]) {
+                                s++;
+                                switch (*s) {
+                                case 'n':  putchar('\n'); break;
+                                case 't':  putchar('\t'); break;
+                                case 'r':  putchar('\r'); break;
+                                case 'b':  putchar('\b'); break;
+                                case 'f':  putchar('\f'); break;
+                                case 'v':  putchar('\v'); break;
+                                case '\\': putchar('\\'); break;
+                                case '0': case '1': case '2': case '3':
+                                case '4': case '5': case '6': case '7': {
+                                    unsigned char oc = *s - '0';
+                                    if (s[1] >= '0' && s[1] <= '7') {
+                                        oc = (unsigned char)(oc * 8 + (s[1] - '0'));
+                                        s++;
+                                        if (s[1] >= '0' && s[1] <= '7') {
+                                            oc = (unsigned char)(oc * 8 + (s[1] - '0'));
+                                            s++;
+                                        }
+                                    }
+                                    putchar((int)oc);
+                                    break;
+                                }
+                                case 'c':
+                                    /* %b \c - terminate output */
+                                    return 0;
+                                default:
+                                    putchar('\\');
+                                    putchar(*s);
+                                    break;
+                                }
+                                s++;
+                            } else {
+                                putchar(*s++);
+                            }
+                        }
+                    }
+                    break;
+                }
                 case 'd': {
                     long v = argi < argc ? atol(argv[argi++]) : 0;
                     if (argi > 2) consumed_arg = 1;
