@@ -1669,6 +1669,18 @@ static int exec_builtin_command(shell_ctx_t *sh, int argc, char **argv)
     const char *name = argv[i];
 
     if (describe || verbose) {
+        /* Check shell keywords first */
+        const char *keywords[] = {
+            "!", "{", "}", "case", "do", "done", "elif", "else", "esac",
+            "fi", "for", "if", "in", "then", "until", "while", NULL
+        };
+        for (const char **kw = keywords; *kw; kw++) {
+            if (strcmp(name, *kw) == 0) {
+                if (verbose) printf("%s is a shell keyword\n", name);
+                else         printf("%s\n", name);
+                return 0;
+            }
+        }
         /* Check shell builtin */
         if (find_shell_builtin(name)) {
             if (verbose) printf("%s is a shell builtin\n", name);
@@ -1716,6 +1728,20 @@ static int exec_builtin_type(shell_ctx_t *sh, int argc, char **argv)
     int ret = 0;
     for (int i = 1; i < argc; i++) {
         const char *name = argv[i];
+        /* Check shell keywords first */
+        const char *keywords[] = {
+            "!", "{", "}", "case", "do", "done", "elif", "else", "esac",
+            "fi", "for", "if", "in", "then", "until", "while", NULL
+        };
+        int is_keyword = 0;
+        for (const char **kw = keywords; *kw; kw++) {
+            if (strcmp(name, *kw) == 0) {
+                printf("%s is a shell keyword\n", name);
+                is_keyword = 1;
+                break;
+            }
+        }
+        if (is_keyword) continue;
         if (find_shell_builtin(name)) {
             printf("%s is a shell builtin\n", name);
             continue;

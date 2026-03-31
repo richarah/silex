@@ -61,8 +61,8 @@ echo "(This may take 5-10 minutes - 627 tests)"
 echo ""
 
 # Run check.pl with silex as the test shell
-# -p: program to test, -s: test set file
-TEST_OUTPUT=$(perl check.pl -p "$SILEX" -s check.t 2>&1 || true)
+# -p: program to test, -s: test set file, -t: per-test timeout (2s)
+TEST_OUTPUT=$(timeout 300 perl check.pl -p "$SILEX" -s check.t -t 2 2>&1 || true)
 
 # Show last 100 lines of output
 echo "$TEST_OUTPUT" | tail -100

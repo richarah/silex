@@ -89,7 +89,8 @@ fi
 
 # Try Python 3 if Python 2 failed or doesn't exist
 if [ "$SUCCESS" -eq 0 ]; then
-    if python3 test/sh_spec.py --shell="$SILEX" spec/*.test.sh >"/tmp/oils-output-$$" 2>&1; then
+    # Python 3 needs PYTHONPATH to find local 'test' module (avoid conflict with system test module)
+    if PYTHONPATH="$OIL_DIR" python3 test/sh_spec.py --shell="$SILEX" spec/*.test.sh >"/tmp/oils-output-$$" 2>&1; then
         # Success! Parse output for pass/fail counts
         PASS=$(grep -oE '[0-9]+ passed' "/tmp/oils-output-$$" | awk '{print $1}' || echo 0)
         FAIL=$(grep -oE '[0-9]+ failed' "/tmp/oils-output-$$" | awk '{print $1}' || echo 0)
