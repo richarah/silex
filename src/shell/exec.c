@@ -1022,7 +1022,11 @@ int exec_node(shell_ctx_t *sh, node_t *node)
         rc = 0;
         sh->loop_depth++;
         for (int i = 0; wlist && wlist[i]; i++) {
-            vars_set(&sh->vars, node->u.for_node.var, wlist[i]);
+            /* Check for readonly variable - exit loop immediately */
+            if (vars_set(&sh->vars, node->u.for_node.var, wlist[i]) != 0) {
+                rc = 1;
+                break;
+            }
             rc = exec_node(sh, node->u.for_node.body);
             if (rc == FLOW_BREAK) {
                 if (sh->break_level > 0) { sh->break_level--; break; }
