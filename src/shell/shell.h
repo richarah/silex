@@ -43,6 +43,7 @@ typedef struct shell_ctx {
     int         call_depth;  /* function call nesting depth (recursion guard) */
     int         trace_level; /* SILEX_TRACE=1: +cmd, =2: +[builtin/fork/module] tag */
     int         break_level; /* for break N / continue N; 0 = normal */
+    int         loop_depth;  /* current loop nesting depth; 0 = not in loop */
     /* PATH resolution cache: command name → resolved absolute path.
      * Invalidated (path_cache_hash reset) when PATH changes. */
     void       *path_cache[256];  /* path_cache_entry_t*, open-addressing by FNV-1a */

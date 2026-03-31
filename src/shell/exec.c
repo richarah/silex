@@ -424,11 +424,15 @@ int exec_simple_cmd(shell_ctx_t *sh, char **words, char **assigns, redir_t *redi
         if (redirs) redirect_apply(sh, redirs, &rctx);
 
         /* Set positional parameters for function */
-        char **old_pos = sh->positional;
-        int old_n      = sh->positional_n;
+        char **old_pos   = sh->positional;
+        int old_n        = sh->positional_n;
+        int old_break    = sh->break_level;
+        int old_loop     = sh->loop_depth;
 
         sh->positional_n = argc - 1;
         sh->positional   = expanded + 1;
+        sh->break_level  = 0;  /* Isolate break/continue from caller */
+        sh->loop_depth   = 0;  /* Functions don't inherit loop context */
 
         vars_push_scope(&sh->vars);
         sh->call_depth++;
@@ -438,11 +442,14 @@ int exec_simple_cmd(shell_ctx_t *sh, char **words, char **assigns, redir_t *redi
 
         sh->positional   = old_pos;
         sh->positional_n = old_n;
+        sh->break_level  = old_break;
+        sh->loop_depth   = old_loop;
 
         if (redirs) redirect_restore(&rctx);
 
-        /* Absorb FLOW_RETURN */
+        /* Absorb flow control: functions isolate break/continue/return from caller */
         if (cmd_rc == FLOW_RETURN) cmd_rc = sh->last_exit;
+        if (cmd_rc == FLOW_BREAK || cmd_rc == FLOW_CONTINUE) cmd_rc = 0;
         goto cmd_done;
     }
 
@@ -915,6 +922,7 @@ int exec_node(shell_ctx_t *sh, node_t *node)
 
     case N_WHILE: {
         rc = 0;
+        sh->loop_depth++;
         for (;;) {
             int save_cond = sh->in_cond;
             sh->in_cond = 1;
@@ -932,11 +940,13 @@ int exec_node(shell_ctx_t *sh, node_t *node)
             }
             if (sh->opt_e && rc != 0) break;
         }
+        sh->loop_depth--;
         break;
     }
 
     case N_UNTIL: {
         rc = 0;
+        sh->loop_depth++;
         for (;;) {
             int save_cond = sh->in_cond;
             sh->in_cond = 1;
@@ -954,6 +964,7 @@ int exec_node(shell_ctx_t *sh, node_t *node)
             }
             if (sh->opt_e && rc != 0) break;
         }
+        sh->loop_depth--;
         break;
     }
 
@@ -970,6 +981,7 @@ int exec_node(shell_ctx_t *sh, node_t *node)
             wlist[sh->positional_n] = NULL;
         }
         rc = 0;
+        sh->loop_depth++;
         for (int i = 0; wlist && wlist[i]; i++) {
             vars_set(&sh->vars, node->u.for_node.var, wlist[i]);
             rc = exec_node(sh, node->u.for_node.body);
@@ -983,6 +995,7 @@ int exec_node(shell_ctx_t *sh, node_t *node)
             }
             if (sh->opt_e && rc != 0) break;
         }
+        sh->loop_depth--;
         break;
     }
 
@@ -1592,6 +1605,8 @@ static int exec_builtin_break(shell_ctx_t *sh, int argc, char **argv)
 {
     int n = (argc >= 2) ? atoi(argv[1]) : 1;
     if (n < 1) n = 1;
+    /* POSIX: break outside of a loop should be silently ignored */
+    if (sh->loop_depth == 0) return 0;
     sh->break_level = n - 1;  /* loops decrement; propagate if > 0 */
     return FLOW_BREAK;
 }
@@ -1600,6 +1615,8 @@ static int exec_builtin_continue(shell_ctx_t *sh, int argc, char **argv)
 {
     int n = (argc >= 2) ? atoi(argv[1]) : 1;
     if (n < 1) n = 1;
+    /* POSIX: continue outside of a loop should be silently ignored */
+    if (sh->loop_depth == 0) return 0;
     sh->break_level = n - 1;
     return FLOW_CONTINUE;
 }
