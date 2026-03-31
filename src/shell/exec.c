@@ -337,7 +337,8 @@ int exec_simple_cmd(shell_ctx_t *sh, char **words, char **assigns, redir_t *redi
             if (!eq) { anames[i] = NULL; avals[i] = NULL; continue; }
             size_t nlen = (size_t)(eq - assigns[i]);
             anames[i] = strndup(assigns[i], nlen);
-            avals[i]  = expand_word(sh, eq + 1);
+            /* Use expand_word_assign for assignment values - enables ~: expansion */
+            avals[i]  = expand_word_assign(sh, eq + 1);
         }
         cmdsub_exit = sh->last_exit;  /* 0 or last cmd-sub exit */
         sh->last_exit = prev_exit;    /* restore for with-command path */

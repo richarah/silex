@@ -18,6 +18,9 @@ struct shell_ctx; /* forward declaration */
 /* Expand a single word (no field splitting yet) */
 char *expand_word(struct shell_ctx *sh, const char *word);
 
+/* Expand a single word in assignment context (allows ~:path tilde expansion) */
+char *expand_word_assign(struct shell_ctx *sh, const char *word);
+
 /* Expand a word and perform field splitting + globbing */
 expand_result_t expand_word_full(struct shell_ctx *sh, const char *word);
 

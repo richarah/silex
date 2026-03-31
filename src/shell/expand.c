@@ -120,15 +120,27 @@ static const char *sh_getvar(shell_ctx_t *sh, const char *name)
  * Returns newly-malloc'd string or NULL if no tilde
  * ------------------------------------------------------------------------- */
 
-static char *expand_tilde(shell_ctx_t *sh, const char *word)
+static char *expand_tilde(shell_ctx_t *sh, const char *word, int in_assignment)
 {
     if (word[0] != '~')
         return NULL;
 
     const char *rest = word + 1;
+    /* Tilde expands if followed by:
+     *  - / (always)
+     *  - : (only in assignment context for PATH-like values)
+     *  - end of string (always) */
     const char *slash = strchr(rest, '/');
+    const char *colon = in_assignment ? strchr(rest, ':') : NULL;
+    const char *delim = NULL;
+
+    /* Find first delimiter (/ or :) */
+    if (slash && colon) delim = (slash < colon) ? slash : colon;
+    else if (slash) delim = slash;
+    else if (colon) delim = colon;
+
     char username[256];
-    size_t ulen = slash ? (size_t)(slash - rest) : strlen(rest);
+    size_t ulen = delim ? (size_t)(delim - rest) : strlen(rest);
 
     const char *home = NULL;
 
@@ -154,7 +166,7 @@ static char *expand_tilde(shell_ctx_t *sh, const char *word)
     strbuf_t sb;
     sb_init(&sb, 128);
     sb_append(&sb, home);
-    if (slash) sb_append(&sb, slash);
+    if (delim) sb_append(&sb, delim);  /* Append from delimiter onwards (/ or :) */
     char *result = strdup(sb_str(&sb));
     sb_free(&sb);
     return result;
@@ -1315,8 +1327,8 @@ char *expand_word(shell_ctx_t *sh, const char *word)
 {
     if (!word) return arena_strdup(&sh->scratch_arena, "");
 
-    /* Tilde expansion first */
-    char *tilded = expand_tilde(sh, word);
+    /* Tilde expansion first - not in assignment context */
+    char *tilded = expand_tilde(sh, word, 0);
     const char *src = tilded ? tilded : word;
 
     strbuf_t sb;
@@ -1326,6 +1338,56 @@ char *expand_word(shell_ctx_t *sh, const char *word)
 
     char *result = arena_strdup(&sh->scratch_arena, sb_str(&sb));
     sb_free(&sb);
+    return result;
+}
+
+char *expand_word_assign(shell_ctx_t *sh, const char *word)
+{
+    if (!word) return arena_strdup(&sh->scratch_arena, "");
+
+    /* In assignment context, tilde expands at beginning and after each : */
+    strbuf_t result_sb;
+    sb_init(&result_sb, 128);
+
+    const char *p = word;
+    const char *seg_start = p;
+
+    while (*p) {
+        /* Check for : delimiter or end of string */
+        if (*p == ':' || p[1] == '\0') {
+            int is_end = (p[1] == '\0' && *p != ':');
+            size_t seg_len = is_end ? (size_t)(p - seg_start + 1) : (size_t)(p - seg_start);
+
+            /* Extract segment */
+            char *segment = strndup(seg_start, seg_len);
+            if (segment) {
+                /* Try tilde expansion on this segment */
+                char *tilded = expand_tilde(sh, segment, 1);
+                const char *src = tilded ? tilded : segment;
+
+                /* Expand the segment */
+                strbuf_t seg_sb;
+                sb_init(&seg_sb, 64);
+                expand_into(sh, src, &seg_sb, 0);
+                sb_append(&result_sb, sb_str(&seg_sb));
+                sb_free(&seg_sb);
+                free(tilded);
+                free(segment);
+            }
+
+            /* Add : delimiter if we're at one */
+            if (*p == ':') {
+                sb_appendc(&result_sb, ':');
+                seg_start = p + 1;
+            }
+
+            if (is_end) break;
+        }
+        p++;
+    }
+
+    char *result = arena_strdup(&sh->scratch_arena, sb_str(&result_sb));
+    sb_free(&result_sb);
     return result;
 }
 
