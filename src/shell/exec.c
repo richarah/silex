@@ -435,6 +435,11 @@ int exec_simple_cmd(shell_ctx_t *sh, char **words, char **assigns, redir_t *redi
         sh->loop_depth   = 0;  /* Functions don't inherit loop context */
 
         vars_push_scope(&sh->vars);
+        /* Import environment-prefix variables into function scope */
+        for (int i = 0; i < nassigns; i++) {
+            if (anames[i])
+                vars_set_local(&sh->vars, anames[i], avals[i] ? avals[i] : "");
+        }
         sh->call_depth++;
         cmd_rc = exec_node(sh, fnbody);
         sh->call_depth--;
@@ -875,6 +880,10 @@ int exec_node(shell_ctx_t *sh, node_t *node)
             break;
         }
         if (pid == 0) {
+            /* Subshell: clear inherited traps (keep only traps set in this subshell) */
+            for (int i = 0; i < NSIG; i++)
+                sh->traps[i].set_in_this_shell = 0;
+
             /* Apply any redirections on the subshell node */
             redirect_ctx_t rctx;
             rctx.saved = NULL;
@@ -887,7 +896,13 @@ int exec_node(shell_ctx_t *sh, node_t *node)
             /* Normalize other flow control to 0 (break/continue outside loop) */
             if (r >= FLOW_BREAK) r = 0;
             sh->last_exit = r;
-            /* POSIX: EXIT traps do NOT run in subshells, only in the main shell */
+            /* POSIX: Fire EXIT trap only if it was set in this subshell */
+            const char *exit_act = sh->traps[0].action;
+            if (sh->traps[0].set_in_this_shell &&
+                exit_act != SHELL_TRAP_DEFAULT && exit_act[0] != '\0') {
+                sh->traps[0].action = SHELL_TRAP_DEFAULT;
+                shell_run_string(sh, exit_act);
+            }
             fflush(NULL);
             _exit(r);
         }
@@ -1302,6 +1317,12 @@ static int exec_builtin_trap(shell_ctx_t *sh, int argc, char **argv)
     if (argc < 2) return 0;
 
     const char *action = argv[1];
+    /* POSIX: expand variables in trap action at trap-set time */
+    char *expanded_action = NULL;
+    if (strcmp(action, "-") != 0 && strcmp(action, "") != 0) {
+        expanded_action = expand_word(sh, action);
+    }
+
     for (int i = 2; i < argc; i++) {
         int sig = atoi(argv[i]);
         if (sig == 0 && argv[i][0] != '0') {
@@ -1322,10 +1343,13 @@ static int exec_builtin_trap(shell_ctx_t *sh, int argc, char **argv)
 
         if (strcmp(action, "-") == 0) {
             sh->traps[sig].action = SHELL_TRAP_DEFAULT;
+            sh->traps[sig].set_in_this_shell = 0;
         } else if (strcmp(action, "") == 0) {
             sh->traps[sig].action = SHELL_TRAP_IGNORE;
+            sh->traps[sig].set_in_this_shell = 1;
         } else {
-            sh->traps[sig].action = arena_strdup(&sh->parse_arena, action);
+            sh->traps[sig].action = arena_strdup(&sh->parse_arena, expanded_action);
+            sh->traps[sig].set_in_this_shell = 1;
         }
 
         /* Install the signal handler */

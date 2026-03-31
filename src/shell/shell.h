@@ -36,6 +36,7 @@ typedef struct shell_ctx {
     int         positional_n;
     struct {
         char *action;
+        int   set_in_this_shell; /* 1 if set in this shell level (not inherited) */
     } traps[NSIG];
     /* Function definitions: name -> node_t* */
     void       *funcs[256];  /* var_entry_t* array for func lookup */
