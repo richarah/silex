@@ -798,6 +798,8 @@ int exec_node(shell_ctx_t *sh, node_t *node)
         sh->in_cond = 1;
         rc = exec_node(sh, node->u.binary.left);
         sh->in_cond = save_cond;
+        /* Propagate flow control immediately */
+        if (rc >= FLOW_BREAK) break;
         sh->and_or_exempt = 0;
         if (rc == 0) {
             rc = exec_node(sh, node->u.binary.right);
@@ -813,6 +815,8 @@ int exec_node(shell_ctx_t *sh, node_t *node)
         sh->in_cond = 1;
         rc = exec_node(sh, node->u.binary.left);
         sh->in_cond = save_cond;
+        /* Propagate flow control immediately */
+        if (rc >= FLOW_BREAK) break;
         sh->and_or_exempt = 0;
         if (rc != 0) {
             rc = exec_node(sh, node->u.binary.right);
@@ -826,6 +830,8 @@ int exec_node(shell_ctx_t *sh, node_t *node)
         sh->in_cond = 1;
         rc = exec_node(sh, node->u.binary.left);
         sh->in_cond = save_cond;
+        /* Propagate flow control immediately (don't invert it!) */
+        if (rc >= FLOW_BREAK) break;
         rc = (rc == 0) ? 1 : 0;
         break;
     }
@@ -913,6 +919,11 @@ int exec_node(shell_ctx_t *sh, node_t *node)
         sh->in_cond = 1;
         int cond = exec_node(sh, node->u.if_node.cond);
         sh->in_cond = save_cond;
+        /* If condition returns flow control (return/break/continue), propagate immediately */
+        if (cond >= FLOW_BREAK) {
+            rc = cond;
+            break;
+        }
         if (cond == 0) {
             rc = exec_node(sh, node->u.if_node.then_b);
         } else if (node->u.if_node.elif_chain) {
@@ -933,6 +944,12 @@ int exec_node(shell_ctx_t *sh, node_t *node)
             sh->in_cond = 1;
             int cond = exec_node(sh, node->u.loop.cond);
             sh->in_cond = save_cond;
+            /* If condition returns flow control (return/break/continue), propagate immediately */
+            if (cond >= FLOW_BREAK) {
+                rc = cond;
+                sh->loop_depth--;
+                return rc;
+            }
             if (cond != 0) break;
             rc = exec_node(sh, node->u.loop.body);
             if (rc == FLOW_BREAK) {
@@ -957,6 +974,12 @@ int exec_node(shell_ctx_t *sh, node_t *node)
             sh->in_cond = 1;
             int cond = exec_node(sh, node->u.loop.cond);
             sh->in_cond = save_cond;
+            /* If condition returns flow control (return/break/continue), propagate immediately */
+            if (cond >= FLOW_BREAK) {
+                rc = cond;
+                sh->loop_depth--;
+                return rc;
+            }
             if (cond == 0) break;
             rc = exec_node(sh, node->u.loop.body);
             if (rc == FLOW_BREAK) {
