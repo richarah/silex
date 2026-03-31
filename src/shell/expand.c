@@ -547,8 +547,18 @@ static char *cmd_subst(shell_ctx_t *sh, const char *cmd)
         sub.script_name  = sh->script_name;
         sub.last_exit    = sh->last_exit;  /* inherit $? */
         memcpy(sub.funcs, sh->funcs, sizeof(sh->funcs)); /* inherit functions */
+        /* Clear set_in_this_shell for inherited traps */
+        for (int i = 0; i < NSIG; i++)
+            sub.traps[i].set_in_this_shell = 0;
         shell_run_string(&sub, cmd);
         int ex = sub.last_exit;
+        /* Fire EXIT trap if set in this command substitution */
+        const char *exit_act = sub.traps[0].action;
+        if (sub.traps[0].set_in_this_shell &&
+            exit_act != SHELL_TRAP_DEFAULT && exit_act[0] != '\0') {
+            sub.traps[0].action = SHELL_TRAP_DEFAULT;
+            shell_run_string(&sub, exit_act);
+        }
         shell_free(&sub);
         fflush(NULL);
         _exit(ex);
