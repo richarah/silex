@@ -1,123 +1,74 @@
 #!/bin/sh
-# run-smoosh.sh — Run Smoosh tests against silex
-# Suite 2: 157 tests derived from formal mechanized semantics
+# run-smoosh.sh — Run the Smoosh conformance suite against silex.
 #
-# Smoosh is a POSIX shell formalized in Coq (mechanized formal semantics).
-# These tests are derived from the formal model and represent the "gold standard"
-# for POSIX shell behavior - if Smoosh says it's correct, it IS correct.
+# Smoosh is a POSIX shell formalized in Coq. Its tests are derived from the
+# formal model, so they are the closest thing to a ground truth for POSIX
+# shell semantics.
 #
-# Expected pass rate: High (these are unambiguous POSIX tests)
+# This delegates to Smoosh's OWN runner (tests/shell_tests.sh) rather than
+# reimplementing it. That matters:
+#
+#   * Upstream runs every test in a fresh mktemp dir. A reimplementation that
+#     runs them in-place scatters each test's scratch files (a1, cmd.sh, dir/,
+#     link_*) through the source tree -- which is how they ended up committed.
+#   * Upstream defaults the expected exit code to 0 when there is no .ec file.
+#     Skipping that check instead of defaulting it silently passes every test
+#     that exits non-zero when it should have exited 0.
+#   * Upstream exits non-zero when any test fails.
+#
+# Do not reimplement it again.
 
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPOS_DIR="$SCRIPT_DIR/repos"
-SMOOSH_DIR="$REPOS_DIR/smoosh"
+SMOOSH_DIR="$SCRIPT_DIR/repos/smoosh"
+
+# Canonicalise before anything cds: a relative path is meaningless afterwards.
 SILEX="${SILEX:-$SCRIPT_DIR/../../build/bin/silex}"
+case "$SILEX" in
+    /*) ;;
+    *)  SILEX="$(cd "$(dirname "$SILEX")" 2>/dev/null && pwd)/$(basename "$SILEX")" ;;
+esac
 
-echo "=== Smoosh Formal Semantics Tests ==="
-echo "Suite: Smoosh (mechanized POSIX shell semantics)"
-echo "Tests: 157 tests from formal Coq model"
-echo "Binary: $SILEX"
-echo ""
-
-# Verify Smoosh repo exists
 if [ ! -d "$SMOOSH_DIR" ]; then
     echo "ERROR: Smoosh repo not found at $SMOOSH_DIR"
     echo "Run: tests/external/fetch-all.sh"
     exit 1
 fi
 
-# Verify silex binary exists
 if [ ! -x "$SILEX" ]; then
     echo "ERROR: silex binary not found or not executable: $SILEX"
     exit 1
 fi
 
-cd "$SMOOSH_DIR"
+echo "=== Smoosh Formal Semantics Tests ==="
+echo "Binary: $SILEX"
+echo ""
 
-# Check if Smoosh test directory exists
-if [ ! -d "tests/shell" ]; then
-    echo "ERROR: Smoosh tests/shell directory not found"
-    echo "The Smoosh repo structure may have changed."
+# The suite's C helpers (fds, argv, getenv, readdir) are used by some tests.
+if ! make -C "$SMOOSH_DIR/tests" utils >/dev/null 2>&1; then
+    echo "ERROR: could not build Smoosh test utilities (make -C tests utils)"
     exit 1
 fi
 
-# Technique: Run .test files directly as shell scripts, compare stdout/stderr
-# Each test has: .test (script), .out (expected stdout), .err (expected stderr)
+# Keep the run's logs out of the source tree.
+LOG_DIR="$(mktemp -d)"
+trap 'rm -rf "$LOG_DIR"' EXIT INT TERM
 
-echo "Running Smoosh tests with silex..."
-echo "(This may take 2-5 minutes)"
-echo ""
+cd "$SMOOSH_DIR/tests"
 
-PASS=0
-FAIL=0
-TOTAL=0
-
-cd tests/shell
-
-# Export TEST_SHELL and TEST_UTIL for tests that use them
-export TEST_SHELL="$SILEX"
-export TEST_UTIL="$SMOOSH_DIR/tests/util"
-
-# Run each .test file with timeout to prevent hangs
-for test_file in *.test; do
-    [ ! -f "$test_file" ] && continue
-
-    TOTAL=$((TOTAL + 1))
-    base="${test_file%.test}"
-
-    # Progress indicator (every 20 tests)
-    if [ $((TOTAL % 20)) -eq 0 ]; then
-        echo "  Progress: $TOTAL tests..."
-    fi
-
-    # Run test with 5-second timeout
-    # Use timeout command if available, otherwise run without it
-    if command -v timeout >/dev/null 2>&1; then
-        timeout 5 "$SILEX" "$test_file" >"/tmp/smoosh-out-$$" 2>"/tmp/smoosh-err-$$" || true
-    else
-        "$SILEX" "$test_file" >"/tmp/smoosh-out-$$" 2>"/tmp/smoosh-err-$$" || true
-    fi
-
-    # Compare output
-    out_ok=1
-    err_ok=1
-
-    if [ -f "$base.out" ]; then
-        if ! diff -q "$base.out" "/tmp/smoosh-out-$$" >/dev/null 2>&1; then
-            out_ok=0
-        fi
-    fi
-
-    if [ -f "$base.err" ]; then
-        if ! diff -q "$base.err" "/tmp/smoosh-err-$$" >/dev/null 2>&1; then
-            err_ok=0
-        fi
-    fi
-
-    if [ $out_ok -eq 1 ] && [ $err_ok -eq 1 ]; then
-        PASS=$((PASS + 1))
-    else
-        FAIL=$((FAIL + 1))
-    fi
-
-    rm -f "/tmp/smoosh-out-$$" "/tmp/smoosh-err-$$"
-done
+TEST_SHELL="$SILEX" \
+TEST_UTIL="$SMOOSH_DIR/tests/util" \
+TEST_LOGDIR="$LOG_DIR" \
+TEST_ENV="" \
+    sh ./shell_tests.sh
+status=$?
 
 echo ""
-echo "=== Smoosh Test Results ==="
-echo ""
+if [ "$status" -eq 0 ]; then
+    echo "Result: PASS (all tests passed)"
+else
+    echo "Result: FAIL"
+fi
 
-echo "  TOTAL: $TOTAL"
-echo "  PASS:  $PASS"
-echo "  FAIL:  $FAIL"
-echo ""
-
-echo "Smoosh: pass=$PASS fail=$FAIL total=$TOTAL"
-
-echo ""
-echo "Result: Tests completed"
-echo ""
-
-exit 0
+exit "$status"
