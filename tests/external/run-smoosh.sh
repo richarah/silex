@@ -56,6 +56,10 @@ TOTAL=0
 
 cd tests/shell
 
+# Export TEST_SHELL and TEST_UTIL for tests that use them
+export TEST_SHELL="$SILEX"
+export TEST_UTIL="$SMOOSH_DIR/tests/util"
+
 # Run each .test file with timeout to prevent hangs
 for test_file in *.test; do
     [ ! -f "$test_file" ] && continue

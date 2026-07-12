@@ -117,7 +117,14 @@ int shell_init(shell_ctx_t *sh, int argc, char **argv)
     if (user) vars_set(&sh->vars, "USER", user);
 
     const char *pwd = getenv("PWD");
-    if (pwd) vars_set(&sh->vars, "PWD", pwd);
+    if (pwd) {
+        vars_set(&sh->vars, "PWD", pwd);
+    } else {
+        /* If PWD not set in environment, initialize to current directory */
+        char cwd[4096];
+        if (getcwd(cwd, sizeof(cwd)))
+            vars_set(&sh->vars, "PWD", cwd);
+    }
 
     /* POSIX: PPID shall be set to the decimal value of the parent process ID */
     char ppid_buf[32];
@@ -162,8 +169,11 @@ int shell_run_string(shell_ctx_t *sh, const char *script)
     int rc = 0;
     for (;;) {
         node_t *node = parser_parse(&par);
-        if (!node) break;
-        if (par.error) break;
+        if (par.error) {
+            sh->last_exit = 2;  /* Parse error returns exit code 2 */
+            break;
+        }
+        if (!node) break;  /* EOF */
 
         if (!sh->opt_n) {
             rc = exec_node(sh, node);
@@ -185,6 +195,7 @@ int shell_run_string(shell_ctx_t *sh, const char *script)
 
 int shell_run_file(shell_ctx_t *sh, const char *path)
 {
+    sh->interactive = 0;  /* Running from file: non-interactive */
     FILE *fp = fopen(path, "r");
     if (!fp) {
         perror(path);
@@ -201,8 +212,11 @@ int shell_run_file(shell_ctx_t *sh, const char *path)
     int rc = 0;
     for (;;) {
         node_t *node = parser_parse(&par);
-        if (!node) break;
-        if (par.error) break;
+        if (par.error) {
+            sh->last_exit = 2;  /* Parse error returns exit code 2 */
+            break;
+        }
+        if (!node) break;  /* EOF */
 
         if (!sh->opt_n) {
             rc = exec_node(sh, node);
@@ -210,6 +224,13 @@ int shell_run_file(shell_ctx_t *sh, const char *path)
             if (rc == 202) {  /* FLOW_RETURN */
                 /* return builtin already set sh->last_exit; just break out */
                 break;
+            }
+            /* FLOW_BREAK (200) and FLOW_CONTINUE (201) must propagate to caller's loop */
+            if (rc == 200 || rc == 201) {  /* FLOW_BREAK or FLOW_CONTINUE */
+                /* Don't update sh->last_exit; propagate flow control code */
+                lexer_free(&lex);
+                fclose(fp);
+                return rc;
             }
             sh->last_exit = rc;
             arena_reset(&sh->scratch_arena);
@@ -230,6 +251,7 @@ int shell_run_file(shell_ctx_t *sh, const char *path)
 int shell_run_stdin(shell_ctx_t *sh)
 {
     int interactive = isatty(STDIN_FILENO);
+    sh->interactive = interactive;
 
     lexer_t  lex;
     parser_t par;
@@ -249,7 +271,11 @@ int shell_run_stdin(shell_ctx_t *sh)
         node_t *node = parser_parse(&par);
         if (!node) break;
         if (par.error) {
-            par.error = 0;
+            if (!interactive) {
+                sh->last_exit = 2;  /* Parse error in non-interactive mode */
+                break;
+            }
+            par.error = 0;  /* In interactive mode, reset and continue */
             continue;
         }
 

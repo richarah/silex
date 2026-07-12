@@ -158,8 +158,7 @@ int applet_sh(int argc, char **argv)
     if (exit_action != SHELL_TRAP_DEFAULT && exit_action[0] != '\0') {
         sh.traps[0].action = SHELL_TRAP_DEFAULT;
         shell_run_string(&sh, exit_action);
-        /* Exit code follows the trap action's last status, per POSIX */
-        ret = sh.last_exit;
+        /* POSIX: EXIT trap does not affect exit status unless it calls exit */
     }
 
     shell_free(&sh);

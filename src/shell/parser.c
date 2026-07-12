@@ -1084,16 +1084,34 @@ node_t *parser_parse(parser_t *p)
         else
             break;
     }
-    if (peek(p).type == TOK_EOF)
+    token_t t = peek(p);
+    if (t.type == TOK_EOF)
         return NULL;
-    return parse_list(p);
+
+    node_t *result = parse_list(p);
+
+    /* If parse_list returned NULL but we're not at EOF, it's a parse error */
+    if (!result && !p->error && peek(p).type != TOK_EOF) {
+        parser_error(p, "unexpected token");
+    }
+
+    return result;
 }
 
 /* Parse a complete program (list until EOF) */
 node_t *parser_parse_list(parser_t *p)
 {
     skip_newlines(p);
-    if (peek(p).type == TOK_EOF)
+    token_t t = peek(p);
+    if (t.type == TOK_EOF)
         return NULL;
-    return parse_list(p);
+
+    node_t *result = parse_list(p);
+
+    /* If parse_list returned NULL but we're not at EOF, it's a parse error */
+    if (!result && !p->error && peek(p).type != TOK_EOF) {
+        parser_error(p, "unexpected token");
+    }
+
+    return result;
 }

@@ -146,5 +146,9 @@ int applet_echo(int argc, char **argv)
     if (!opt_n && !stopped)
         putchar('\n');
 
+    /* Check for write errors (e.g., writing to /dev/full) */
+    if (fflush(stdout) != 0 || ferror(stdout))
+        return 1;
+
     return 0;
 }

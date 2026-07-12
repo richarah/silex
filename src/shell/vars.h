@@ -33,10 +33,13 @@ void         vars_push_scope(vars_t *v);
 void         vars_pop_scope(vars_t *v);
 const char  *vars_get(vars_t *v, const char *name);
 int          vars_set(vars_t *v, const char *name, const char *value);
+int          vars_set_context(vars_t *v, const char *name, const char *value, const char *ctx);
 int          vars_set_local(vars_t *v, const char *name, const char *value);
 int          vars_export(vars_t *v, const char *name);
+int          vars_export_context(vars_t *v, const char *name, const char *ctx);
 int          vars_readonly(vars_t *v, const char *name);
 int          vars_unset(vars_t *v, const char *name);
+int          vars_unset_context(vars_t *v, const char *name, const char *ctx);
 void         vars_export_env(vars_t *v);    /* call setenv for all exported vars */
 void         vars_import_env(vars_t *v);    /* import all environ vars as exported */
 void         vars_print_exports(vars_t *v); /* print `export` declarations for all exported vars */

@@ -73,7 +73,7 @@ else
 fi
 
 # >&-: close stdout
-"$MB" -c 'echo closed >&-' >/dev/null 2>&1
+"$MB" -c 'true >&-' >/dev/null 2>&1
 check_exit ">&- closes stdout fd" "$?" "0"
 
 # -----------------------------------------------------------------------

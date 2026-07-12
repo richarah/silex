@@ -22,8 +22,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/times.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 /* -------------------------------------------------------------------------
@@ -49,6 +51,7 @@ static int exec_builtin_test(shell_ctx_t *sh, int argc, char **argv);
 static int exec_builtin_local(shell_ctx_t *sh, int argc, char **argv);
 static int exec_builtin_return(shell_ctx_t *sh, int argc, char **argv);
 static int exec_builtin_wait(shell_ctx_t *sh, int argc, char **argv);
+static int exec_builtin_times(shell_ctx_t *sh, int argc, char **argv);
 static int exec_builtin_source(shell_ctx_t *sh, int argc, char **argv);
 static int exec_builtin_break(shell_ctx_t *sh, int argc, char **argv);
 static int exec_builtin_continue(shell_ctx_t *sh, int argc, char **argv);
@@ -56,6 +59,9 @@ static int exec_builtin_umask(shell_ctx_t *sh, int argc, char **argv);
 static int exec_builtin_command(shell_ctx_t *sh, int argc, char **argv);
 static int exec_builtin_type(shell_ctx_t *sh, int argc, char **argv);
 static int exec_builtin_getopts(shell_ctx_t *sh, int argc, char **argv);
+static int exec_builtin_alias(shell_ctx_t *sh, int argc, char **argv);
+static int exec_builtin_unalias(shell_ctx_t *sh, int argc, char **argv);
+static int exec_builtin_hash(shell_ctx_t *sh, int argc, char **argv);
 
 /* -------------------------------------------------------------------------
  * Special exit codes for break/continue/return flow control
@@ -108,6 +114,7 @@ static const shell_builtin_t shell_builtins[] = {
     { "local",    exec_builtin_local     },
     { "return",   exec_builtin_return    },
     { "wait",     exec_builtin_wait      },
+    { "times",    exec_builtin_times     },
     { ".",        exec_builtin_source    },
     { "source",   exec_builtin_source    },
     { "break",    exec_builtin_break     },
@@ -116,6 +123,9 @@ static const shell_builtin_t shell_builtins[] = {
     { "command",  exec_builtin_command   },
     { "type",     exec_builtin_type      },
     { "getopts",  exec_builtin_getopts   },
+    { "alias",    exec_builtin_alias     },
+    { "unalias",  exec_builtin_unalias   },
+    { "hash",     exec_builtin_hash      },
     { NULL, NULL }
 };
 
@@ -126,6 +136,30 @@ static shell_builtin_fn find_shell_builtin(const char *name)
             return b->fn;
     }
     return NULL;
+}
+
+/* Check if a command name is a POSIX special builtin.
+ * Special builtins: break, :, continue, ., eval, exec, exit, export,
+ * readonly, return, set, shift, times, trap, unset.
+ * Special builtins must cause the shell to exit on certain errors
+ * (e.g., redirect failures, readonly violations) in non-interactive mode. */
+static int is_special_builtin(const char *name)
+{
+    return (strcmp(name, ":") == 0 ||
+            strcmp(name, ".") == 0 ||
+            strcmp(name, "break") == 0 ||
+            strcmp(name, "continue") == 0 ||
+            strcmp(name, "eval") == 0 ||
+            strcmp(name, "exec") == 0 ||
+            strcmp(name, "exit") == 0 ||
+            strcmp(name, "export") == 0 ||
+            strcmp(name, "readonly") == 0 ||
+            strcmp(name, "return") == 0 ||
+            strcmp(name, "set") == 0 ||
+            strcmp(name, "shift") == 0 ||
+            strcmp(name, "times") == 0 ||
+            strcmp(name, "trap") == 0 ||
+            strcmp(name, "unset") == 0);
 }
 
 /* -------------------------------------------------------------------------
@@ -190,6 +224,69 @@ static void func_unregister(shell_ctx_t *sh, const char *name)
             return;
         }
         pp = &(*pp)->next;
+    }
+}
+
+/* -------------------------------------------------------------------------
+ * Alias registry helpers
+ * Store alias definitions as (name, value) pairs.
+ * sh->aliases[256] is used as a simple open-addressing hash.
+ * ------------------------------------------------------------------------- */
+
+typedef struct alias_entry {
+    char        *name;
+    char        *value;
+    struct alias_entry *next;
+} alias_entry_t;
+
+static void alias_register(shell_ctx_t *sh, const char *name, const char *value)
+{
+    unsigned int idx = func_hash(name);  /* Reuse func_hash for aliases */
+    alias_entry_t *e = sh->aliases[idx];
+    while (e) {
+        if (strcmp(e->name, name) == 0) {
+            /* Update existing alias */
+            e->value = arena_strdup(&sh->parse_arena, value);
+            return;
+        }
+        e = e->next;
+    }
+    /* Allocate new entry in arena */
+    alias_entry_t *ne = arena_alloc(&sh->parse_arena, sizeof(alias_entry_t));
+    ne->name  = arena_strdup(&sh->parse_arena, name);
+    ne->value = arena_strdup(&sh->parse_arena, value);
+    ne->next  = sh->aliases[idx];
+    sh->aliases[idx] = ne;
+}
+
+static const char *alias_lookup(shell_ctx_t *sh, const char *name)
+{
+    unsigned int idx = func_hash(name);
+    alias_entry_t *e = sh->aliases[idx];
+    while (e) {
+        if (strcmp(e->name, name) == 0) return e->value;
+        e = e->next;
+    }
+    return NULL;
+}
+
+static void alias_unregister(shell_ctx_t *sh, const char *name)
+{
+    unsigned int idx = func_hash(name);
+    alias_entry_t **pp = (alias_entry_t **)&sh->aliases[idx];
+    while (*pp) {
+        if (strcmp((*pp)->name, name) == 0) {
+            *pp = (*pp)->next;   /* unlink (arena-allocated; not freed) */
+            return;
+        }
+        pp = &(*pp)->next;
+    }
+}
+
+static void alias_clear_all(shell_ctx_t *sh)
+{
+    for (int i = 0; i < 256; i++) {
+        sh->aliases[i] = NULL;
     }
 }
 
@@ -376,11 +473,8 @@ int exec_simple_cmd(shell_ctx_t *sh, char **words, char **assigns, redir_t *redi
         return assign_err ? 1 : cmdsub_exit;
     }
 
-    /* With command: set env temporarily (will be cleaned up after command) */
-    for (int i = 0; i < nassigns; i++) {
-        if (anames[i])
-            setenv(anames[i], avals[i] ? avals[i] : "", 1);
-    }
+    /* With command: env-prefix assignments will be applied in child process
+     * or function scope, not in parent shell */
 
     /* 2. Expand all words */
     char **expanded = expand_words(sh, words);
@@ -390,6 +484,52 @@ int exec_simple_cmd(shell_ctx_t *sh, char **words, char **assigns, redir_t *redi
 
     {
     const char *cmd = expanded[0];
+
+    /* Alias expansion: check if first word is an alias */
+    const char *alias_value = alias_lookup(sh, cmd);
+    if (alias_value) {
+        /* If alias expands to empty string, treat as no-op */
+        if (alias_value[0] == '\0') {
+            cmd_rc = 0;
+            goto cmd_done;
+        }
+        /* Simple word splitting on spaces (simplified - doesn't handle quotes properly)
+         * Full POSIX alias expansion would require re-lexing/parsing */
+        char *alias_copy = arena_strdup(&sh->scratch_arena, alias_value);
+        int alias_argc = 0;
+        char *alias_words[256];  /* Max 256 words in alias expansion */
+
+        /* Split on whitespace */
+        char *p = alias_copy;
+        while (*p) {
+            /* Skip whitespace */
+            while (*p == ' ' || *p == '\t' || *p == '\n') p++;
+            if (!*p) break;
+            /* Found start of word */
+            alias_words[alias_argc++] = p;
+            /* Find end of word */
+            while (*p && *p != ' ' && *p != '\t' && *p != '\n') p++;
+            if (*p) *p++ = '\0';
+        }
+
+        if (alias_argc > 0) {
+            /* Count original args (excluding first word which is being replaced) */
+            int orig_argc = 0;
+            while (expanded[orig_argc]) orig_argc++;
+
+            /* Build new expanded array: alias_words + original args[1..] */
+            int new_argc = alias_argc + (orig_argc - 1);
+            char **new_expanded = arena_alloc(&sh->scratch_arena, (size_t)(new_argc + 1) * sizeof(char *));
+            for (int i = 0; i < alias_argc; i++)
+                new_expanded[i] = alias_words[i];
+            for (int i = 1; i < orig_argc; i++)
+                new_expanded[alias_argc + i - 1] = expanded[i];
+            new_expanded[new_argc] = NULL;
+
+            expanded = new_expanded;
+            cmd = expanded[0];
+        }
+    }
 
     /* Count argc */
     int argc = 0;
@@ -414,7 +554,18 @@ int exec_simple_cmd(shell_ctx_t *sh, char **words, char **assigns, redir_t *redi
         rctx.saved = NULL;
         rctx.error = 0;
         if (redirs) redirect_apply(sh, redirs, &rctx);
-        cmd_rc = sfn(sh, argc, expanded);
+        /* If redirect failed, don't execute the command */
+        if (rctx.error) {
+            cmd_rc = 1;
+            /* POSIX: Special builtins must cause non-interactive shell to exit on redirect error
+             * EXCEPT when invoked via 'command' prefix */
+            if (!sh->interactive && !sh->in_command_builtin && is_special_builtin(cmd)) {
+                /* Exit immediately with error status */
+                exit(1);
+            }
+        } else {
+            cmd_rc = sfn(sh, argc, expanded);
+        }
         /* 'exec' with no command: redirections are permanent (not restored) */
         if (strcmp(cmd, "exec") == 0 && argc == 1)
             redirect_commit(&rctx);
@@ -518,6 +669,11 @@ int exec_simple_cmd(shell_ctx_t *sh, char **words, char **assigns, redir_t *redi
                 redirect_ctx_t rctx2 = {NULL, 0};
                 if (redirs) redirect_apply(sh, redirs, &rctx2);
                 vars_export_env(&sh->vars);
+                /* Apply env-prefix assignments AFTER exporting shell vars */
+                for (int i = 0; i < nassigns; i++) {
+                    if (anames[i])
+                        setenv(anames[i], avals[i] ? avals[i] : "", 1);
+                }
                 int aret = ap->fn(argc, expanded);
                 fflush(NULL);
                 _exit(aret);
@@ -584,6 +740,12 @@ int exec_simple_cmd(shell_ctx_t *sh, char **words, char **assigns, redir_t *redi
         /* Export all exported vars */
         vars_export_env(&sh->vars);
 
+        /* Apply env-prefix assignments AFTER exporting shell vars */
+        for (int i = 0; i < nassigns; i++) {
+            if (anames[i])
+                setenv(anames[i], avals[i] ? avals[i] : "", 1);
+        }
+
         execv(exec_path, expanded);
         perror(exec_path);
         _exit(127);
@@ -606,12 +768,10 @@ int exec_simple_cmd(shell_ctx_t *sh, char **words, char **assigns, redir_t *redi
     } /* end command dispatch block */
 
 cmd_done:
-    /* Clean up env-prefix assigns: unsetenv + free */
+    /* Free env-prefix assign storage (env was only modified in child processes) */
     for (int i = 0; i < nassigns; i++) {
-        if (anames[i]) {
-            unsetenv(anames[i]);
+        if (anames[i])
             free(anames[i]);
-        }
     }
     free(anames);
     free(avals);
@@ -876,6 +1036,10 @@ int exec_node(shell_ctx_t *sh, node_t *node)
             break;
         }
         if (pid == 0) {
+            /* Update PPID in child process */
+            char ppid_buf[32];
+            snprintf(ppid_buf, sizeof(ppid_buf), "%d", (int)getppid());
+            vars_set(&sh->vars, "PPID", ppid_buf);
             int r = exec_node(sh, node->u.binary.left);
             fflush(NULL);
             _exit(r);
@@ -895,6 +1059,11 @@ int exec_node(shell_ctx_t *sh, node_t *node)
             break;
         }
         if (pid == 0) {
+            /* Update PPID in child process */
+            char ppid_buf[32];
+            snprintf(ppid_buf, sizeof(ppid_buf), "%d", (int)getppid());
+            vars_set(&sh->vars, "PPID", ppid_buf);
+
             /* Subshell: clear inherited traps (keep only traps set in this subshell) */
             for (int i = 0; i < NSIG; i++)
                 sh->traps[i].set_in_this_shell = 0;
@@ -916,7 +1085,10 @@ int exec_node(shell_ctx_t *sh, node_t *node)
             if (sh->traps[0].set_in_this_shell &&
                 exit_act != SHELL_TRAP_DEFAULT && exit_act[0] != '\0') {
                 sh->traps[0].action = SHELL_TRAP_DEFAULT;
+                int exit_code = sh->last_exit;  /* Save exit code before trap */
                 shell_run_string(sh, exit_act);
+                /* Trap can modify $?, but subshell exits with original code */
+                r = exit_code;
             }
             fflush(NULL);
             _exit(r);
@@ -1135,6 +1307,7 @@ static int exec_builtin_exit(shell_ctx_t *sh, int argc, char **argv)
     if (exit_action != SHELL_TRAP_DEFAULT && exit_action[0] != '\0') {
         sh->traps[0].action = SHELL_TRAP_DEFAULT;
         shell_run_string(sh, exit_action);
+        /* Trap can modify $?, but we exit with original code */
     }
     exit(code);
     return code; /* unreachable */
@@ -1155,8 +1328,17 @@ static int exec_builtin_set(shell_ctx_t *sh, int argc, char **argv)
                 case 'f': sh->opt_f = 1; break;
                 case 'n': sh->opt_n = 1; break;
                 case 'o':
-                    if (i + 1 < argc && strcmp(argv[i+1], "pipefail") == 0) {
-                        sh->opt_pipefail = 1; i++;
+                    if (i + 1 < argc) {
+                        const char *opt = argv[i+1];
+                        if (strcmp(opt, "pipefail") == 0) {
+                            sh->opt_pipefail = 1; i++;
+                        } else {
+                            fprintf(stderr, "silex: set: %s: invalid option name\n", opt);
+                            return 1;
+                        }
+                    } else {
+                        fprintf(stderr, "silex: set: -o: option name required\n");
+                        return 1;
                     }
                     break;
                 default: break;
@@ -1171,8 +1353,17 @@ static int exec_builtin_set(shell_ctx_t *sh, int argc, char **argv)
                 case 'f': sh->opt_f = 0; break;
                 case 'n': sh->opt_n = 0; break;
                 case 'o':
-                    if (i + 1 < argc && strcmp(argv[i+1], "pipefail") == 0) {
-                        sh->opt_pipefail = 0; i++;
+                    if (i + 1 < argc) {
+                        const char *opt = argv[i+1];
+                        if (strcmp(opt, "pipefail") == 0) {
+                            sh->opt_pipefail = 0; i++;
+                        } else {
+                            fprintf(stderr, "silex: set: %s: invalid option name\n", opt);
+                            return 1;
+                        }
+                    } else {
+                        fprintf(stderr, "silex: set: +o: option name required\n");
+                        return 1;
                     }
                     break;
                 default: break;
@@ -1203,14 +1394,24 @@ static int exec_builtin_export(shell_ctx_t *sh, int argc, char **argv)
         return 0;
     }
 
+    int rc = 0;
     for (int i = 1; i < argc; i++) {
         const char *eq = strchr(argv[i], '=');
         if (eq) {
             size_t nlen = (size_t)(eq - argv[i]);
             char *name  = strndup(argv[i], nlen);
             if (name) {
-                vars_set(&sh->vars, name, eq + 1);
-                vars_export(&sh->vars, name);
+                if (vars_set_context(&sh->vars, name, eq + 1, "export") != 0) {
+                    rc = 1;
+                    /* POSIX: export is a special builtin; exit non-interactive shell on error
+                     * EXCEPT when invoked via 'command' prefix */
+                    if (!sh->interactive && !sh->in_command_builtin) {
+                        free(name);
+                        exit(1);
+                    }
+                } else {
+                    vars_export(&sh->vars, name);
+                }
                 free(name);
             }
         } else {
@@ -1220,7 +1421,7 @@ static int exec_builtin_export(shell_ctx_t *sh, int argc, char **argv)
             vars_export(&sh->vars, argv[i]);
         }
     }
-    return 0;
+    return rc;
 }
 
 static int exec_builtin_unset(shell_ctx_t *sh, int argc, char **argv)
@@ -1240,31 +1441,48 @@ static int exec_builtin_unset(shell_ctx_t *sh, int argc, char **argv)
     }
     int rc = 0;
     for (; i < argc; i++) {
-        if (func_mode)
+        if (func_mode) {
             func_unregister(sh, argv[i]);
-        else if (vars_unset(&sh->vars, argv[i]) != 0)
-            rc = 1;
+        } else {
+            if (vars_unset_context(&sh->vars, argv[i], "unset") != 0) {
+                rc = 1;
+                /* POSIX: unset is a special builtin; exit non-interactive shell on error */
+                if (!sh->interactive) {
+                    exit(1);
+                }
+            }
+        }
     }
     return rc;
 }
 
 static int exec_builtin_readonly(shell_ctx_t *sh, int argc, char **argv)
 {
+    int rc = 0;
     for (int i = 1; i < argc; i++) {
         const char *eq = strchr(argv[i], '=');
         if (eq) {
             size_t nlen = (size_t)(eq - argv[i]);
             char *name  = strndup(argv[i], nlen);
             if (name) {
-                vars_set(&sh->vars, name, eq + 1);
-                vars_readonly(&sh->vars, name);
+                if (vars_set_context(&sh->vars, name, eq + 1, "readonly") != 0) {
+                    rc = 1;
+                    /* POSIX: readonly is a special builtin; exit non-interactive shell on error
+                     * EXCEPT when invoked via 'command' prefix */
+                    if (!sh->interactive && !sh->in_command_builtin) {
+                        free(name);
+                        exit(1);
+                    }
+                } else {
+                    vars_readonly(&sh->vars, name);
+                }
                 free(name);
             }
         } else {
             vars_readonly(&sh->vars, argv[i]);
         }
     }
-    return 0;
+    return rc;
 }
 
 static int exec_builtin_cd(shell_ctx_t *sh, int argc, char **argv)
@@ -1333,14 +1551,38 @@ static int exec_builtin_exec_cmd(shell_ctx_t *sh, int argc, char **argv)
 
 static int exec_builtin_trap(shell_ctx_t *sh, int argc, char **argv)
 {
-    if (argc < 2) return 0;
+    /* trap with no arguments: print all traps */
+    if (argc < 2) {
+        for (int sig = 0; sig < NSIG; sig++) {
+            const char *act = sh->traps[sig].action;
+            if (act == SHELL_TRAP_DEFAULT) continue;
+
+            const char *signame = NULL;
+            if (sig == 0) signame = "EXIT";
+            else if (sig == SIGINT) signame = "INT";
+            else if (sig == SIGTERM) signame = "TERM";
+            else if (sig == SIGHUP) signame = "HUP";
+            else if (sig == SIGQUIT) signame = "QUIT";
+            else if (sig == SIGPIPE) signame = "PIPE";
+            else if (sig == SIGCHLD) signame = "CHLD";
+            else if (sig == SIGUSR1) signame = "USR1";
+            else if (sig == SIGUSR2) signame = "USR2";
+            else continue;
+
+            if (act[0] == '\0') {
+                /* SHELL_TRAP_IGNORE: empty string means ignore */
+                printf("trap -- '' %s\n", signame);
+            } else {
+                /* Print the action with proper quoting */
+                printf("trap -- '%s' %s\n", act, signame);
+            }
+        }
+        return 0;
+    }
 
     const char *action = argv[1];
-    /* POSIX: expand variables in trap action at trap-set time */
-    char *expanded_action = NULL;
-    if (strcmp(action, "-") != 0 && strcmp(action, "") != 0) {
-        expanded_action = expand_word(sh, action);
-    }
+    /* POSIX: trap action is stored as-is and expanded when trap fires */
+    const char *trap_action = action;
 
     for (int i = 2; i < argc; i++) {
         int sig = atoi(argv[i]);
@@ -1362,12 +1604,12 @@ static int exec_builtin_trap(shell_ctx_t *sh, int argc, char **argv)
 
         if (strcmp(action, "-") == 0) {
             sh->traps[sig].action = SHELL_TRAP_DEFAULT;
-            sh->traps[sig].set_in_this_shell = 0;
+            sh->traps[sig].set_in_this_shell = 1;
         } else if (strcmp(action, "") == 0) {
             sh->traps[sig].action = SHELL_TRAP_IGNORE;
             sh->traps[sig].set_in_this_shell = 1;
         } else {
-            sh->traps[sig].action = arena_strdup(&sh->parse_arena, expanded_action);
+            sh->traps[sig].action = arena_strdup(&sh->parse_arena, trap_action);
             sh->traps[sig].set_in_this_shell = 1;
         }
 
@@ -1582,6 +1824,10 @@ static int exec_builtin_printf_sh(shell_ctx_t *sh, int argc, char **argv)
         if (!consumed_arg) break;
     } while (argi < argc);
 
+    /* Check for write errors */
+    if (fflush(stdout) != 0 || ferror(stdout))
+        return 1;
+
     return 0;
 }
 
@@ -1617,6 +1863,7 @@ static int exec_builtin_test(shell_ctx_t *sh, int argc, char **argv)
         if (strcmp(op, "-e") == 0) { struct stat st; return (stat(a, &st) == 0) ? 0 : 1; }
         if (strcmp(op, "-f") == 0) { struct stat st; return (stat(a, &st) == 0 && S_ISREG(st.st_mode)) ? 0 : 1; }
         if (strcmp(op, "-d") == 0) { struct stat st; return (stat(a, &st) == 0 && S_ISDIR(st.st_mode)) ? 0 : 1; }
+        if (strcmp(op, "-L") == 0) { struct stat st; return (lstat(a, &st) == 0 && S_ISLNK(st.st_mode)) ? 0 : 1; }
         if (strcmp(op, "-r") == 0) return (access(a, R_OK) == 0) ? 0 : 1;
         if (strcmp(op, "-w") == 0) return (access(a, W_OK) == 0) ? 0 : 1;
         if (strcmp(op, "-x") == 0) return (access(a, X_OK) == 0) ? 0 : 1;
@@ -1642,12 +1889,18 @@ static int exec_builtin_test(shell_ctx_t *sh, int argc, char **argv)
         if (strcmp(op, "-o") == 0)  return (a[0] || b[0]) ? 0 : 1;
         if (strcmp(op, "-nt") == 0) {
             struct stat sa, sb2;
-            if (stat(a, &sa) != 0 || stat(b, &sb2) != 0) return 1;
+            int a_exists = (stat(a, &sa) == 0);
+            int b_exists = (stat(b, &sb2) == 0);
+            if (!a_exists) return 1;
+            if (!b_exists) return 0;
             return (sa.st_mtime > sb2.st_mtime) ? 0 : 1;
         }
         if (strcmp(op, "-ot") == 0) {
             struct stat sa, sb2;
-            if (stat(a, &sa) != 0 || stat(b, &sb2) != 0) return 1;
+            int a_exists = (stat(a, &sa) == 0);
+            int b_exists = (stat(b, &sb2) == 0);
+            if (!b_exists) return 1;
+            if (!a_exists) return 0;
             return (sa.st_mtime < sb2.st_mtime) ? 0 : 1;
         }
         if (strcmp(op, "-ef") == 0) {
@@ -1711,13 +1964,143 @@ static int exec_builtin_wait(shell_ctx_t *sh, int argc, char **argv)
     return rc;
 }
 
+static int exec_builtin_times(shell_ctx_t *sh, int argc, char **argv)
+{
+    (void)sh;
+    (void)argc;
+    (void)argv;
+
+    struct tms buf;
+    if (times(&buf) == (clock_t)-1) {
+        fprintf(stderr, "silex: times: error getting process times\n");
+        return 1;
+    }
+
+    long clk_tck = sysconf(_SC_CLK_TCK);
+    if (clk_tck <= 0) clk_tck = 100;  /* Fallback */
+
+    /* Format: shell user time, shell system time */
+    long shell_user_min = buf.tms_utime / clk_tck / 60;
+    long shell_user_sec = (buf.tms_utime / clk_tck) % 60;
+    long shell_user_ms = (buf.tms_utime % clk_tck) * 1000 / clk_tck;
+
+    long shell_sys_min = buf.tms_stime / clk_tck / 60;
+    long shell_sys_sec = (buf.tms_stime / clk_tck) % 60;
+    long shell_sys_ms = (buf.tms_stime % clk_tck) * 1000 / clk_tck;
+
+    /* Output to stdout and check for errors */
+    if (printf("%ldm%ld.%03lds %ldm%ld.%03lds\n",
+               shell_user_min, shell_user_sec, shell_user_ms,
+               shell_sys_min, shell_sys_sec, shell_sys_ms) < 0) {
+        fprintf(stderr, "silex: times: I/O error\n");
+        return 2;
+    }
+
+    /* Format: children user time, children system time */
+    long child_user_min = buf.tms_cutime / clk_tck / 60;
+    long child_user_sec = (buf.tms_cutime / clk_tck) % 60;
+    long child_user_ms = (buf.tms_cutime % clk_tck) * 1000 / clk_tck;
+
+    long child_sys_min = buf.tms_cstime / clk_tck / 60;
+    long child_sys_sec = (buf.tms_cstime / clk_tck) % 60;
+    long child_sys_ms = (buf.tms_cstime % clk_tck) * 1000 / clk_tck;
+
+    if (printf("%ldm%ld.%03lds %ldm%ld.%03lds\n",
+               child_user_min, child_user_sec, child_user_ms,
+               child_sys_min, child_sys_sec, child_sys_ms) < 0) {
+        fprintf(stderr, "silex: times: I/O error\n");
+        return 2;
+    }
+
+    return 0;
+}
+
 static int exec_builtin_source(shell_ctx_t *sh, int argc, char **argv)
 {
     if (argc < 2) {
         fprintf(stderr, "silex: .: filename argument required\n");
         return 1;
     }
-    return shell_run_file(sh, argv[1]);
+
+    const char *filename = argv[1];
+    char resolved_path[PATH_MAX];
+    const char *actual_path = filename;
+
+    /* If filename contains '/', use it as-is; otherwise search PATH */
+    if (!strchr(filename, '/')) {
+        /* Search PATH for the file */
+        const char *pathval = vars_get(&sh->vars, "PATH");
+        if (pathval && *pathval) {
+            char *pathcopy = strdup(pathval);
+            if (pathcopy) {
+                char *saveptr = NULL;
+                char *dir = strtok_r(pathcopy, ":", &saveptr);
+                int found = 0;
+                while (dir) {
+                    int n = snprintf(resolved_path, sizeof(resolved_path), "%s/%s", dir, filename);
+                    if (n > 0 && (size_t)n < sizeof(resolved_path)) {
+                        struct stat st;
+                        /* Check if file exists, is regular, and is readable */
+                        if (stat(resolved_path, &st) == 0 && S_ISREG(st.st_mode) &&
+                            access(resolved_path, R_OK) == 0) {
+                            actual_path = resolved_path;
+                            found = 1;
+                            break;
+                        }
+                    }
+                    dir = strtok_r(NULL, ":", &saveptr);
+                }
+                free(pathcopy);
+                if (!found) {
+                    /* File not found in PATH */
+                    const char *cmd = strcmp(argv[0], ".") == 0 ? "." : "source";
+                    fprintf(stderr, "%s: %s: not found\n", cmd, filename);
+                    sh->last_exit = 1;
+                    /* POSIX: source/. is a special builtin; exit non-interactive shell on error */
+                    if (!sh->interactive) {
+                        exit(1);
+                    }
+                    return 1;
+                }
+            }
+        } else {
+            /* No PATH set */
+            const char *cmd = strcmp(argv[0], ".") == 0 ? "." : "source";
+            fprintf(stderr, "%s: %s: not found\n", cmd, filename);
+            sh->last_exit = 1;
+            /* POSIX: source/. is a special builtin; exit non-interactive shell on error */
+            if (!sh->interactive) {
+                exit(1);
+            }
+            return 1;
+        }
+    }
+
+    /* Check if file exists and is readable */
+    FILE *fp = fopen(actual_path, "r");
+    if (!fp) {
+        /* Print error with proper command name */
+        const char *cmd = strcmp(argv[0], ".") == 0 ? "." : "source";
+        fprintf(stderr, "%s: %s: ", cmd, actual_path);
+
+        /* Customize error message based on errno */
+        if (errno == ENOENT) {
+            fprintf(stderr, "not found\n");
+        } else if (errno == EACCES) {
+            fprintf(stderr, "Permission denied\n");
+        } else {
+            perror("");
+        }
+        sh->last_exit = 1;
+        /* POSIX: source/. is a special builtin; exit non-interactive shell on error */
+        if (!sh->interactive) {
+            exit(1);
+        }
+        return 1;
+    }
+    fclose(fp);
+
+    return shell_run_file(sh, actual_path);
 }
 
 static int exec_builtin_break(shell_ctx_t *sh, int argc, char **argv)
@@ -1759,6 +2142,9 @@ static int exec_builtin_umask(shell_ctx_t *sh, int argc, char **argv)
         } else {
             printf("%04o\n", (unsigned)m);
         }
+        /* Check for write errors */
+        if (fflush(stdout) != 0 || ferror(stdout))
+            return 1;
         return 0;
     }
     /* Set umask */
@@ -1833,12 +2219,16 @@ static int exec_builtin_command(shell_ctx_t *sh, int argc, char **argv)
                 free(path_copy);
             }
         }
-        if (verbose) fprintf(stderr, "silex: command: %s: not found\n", name);
+        /* Not found: return 1 without printing error (exit code indicates failure) */
         return 1;
     }
 
-    /* Execute name bypassing shell functions (builtins still apply) */
-    return exec_simple_cmd(sh, argv + i, NULL, NULL);
+    /* Execute name bypassing shell functions (builtins still apply, but without special builtin semantics) */
+    int old_in_command = sh->in_command_builtin;
+    sh->in_command_builtin = 1;
+    int rc = exec_simple_cmd(sh, argv + i, NULL, NULL);
+    sh->in_command_builtin = old_in_command;
+    return rc;
 }
 
 static int exec_builtin_type(shell_ctx_t *sh, int argc, char **argv)
@@ -2015,5 +2405,146 @@ static int exec_builtin_getopts(shell_ctx_t *sh, int argc, char **argv)
     vars_set(&sh->vars, "__OPTPOS", buf);
 
     return 0;
+}
+
+/* -------------------------------------------------------------------------
+ * alias [name[=value] ...]
+ * Without arguments: list all aliases
+ * With name=value: set alias
+ * With name only: print that alias
+ * ------------------------------------------------------------------------- */
+
+static int exec_builtin_alias(shell_ctx_t *sh, int argc, char **argv)
+{
+    (void)sh;
+
+    if (argc == 1) {
+        /* List all aliases */
+        for (int i = 0; i < 256; i++) {
+            alias_entry_t *e = sh->aliases[i];
+            while (e) {
+                printf("alias %s='%s'\n", e->name, e->value);
+                e = e->next;
+            }
+        }
+        return 0;
+    }
+
+    /* Process each argument */
+    for (int i = 1; i < argc; i++) {
+        const char *arg = argv[i];
+        const char *eq = strchr(arg, '=');
+
+        if (eq) {
+            /* Set alias: name=value */
+            size_t nlen = (size_t)(eq - arg);
+            char *name = strndup(arg, nlen);
+            const char *value = eq + 1;
+            alias_register(sh, name, value);
+            free(name);
+        } else {
+            /* Print specific alias */
+            const char *value = alias_lookup(sh, arg);
+            if (value) {
+                printf("alias %s='%s'\n", arg, value);
+            } else {
+                fprintf(stderr, "alias: %s: not found\n", arg);
+                return 1;
+            }
+        }
+    }
+
+    return 0;
+}
+
+/* -------------------------------------------------------------------------
+ * unalias [-a] name [name ...]
+ * Remove alias definitions
+ * -a: remove all aliases
+ * ------------------------------------------------------------------------- */
+
+static int exec_builtin_unalias(shell_ctx_t *sh, int argc, char **argv)
+{
+    (void)sh;
+
+    if (argc < 2) {
+        fprintf(stderr, "unalias: usage: unalias [-a] name [name ...]\n");
+        return 2;
+    }
+
+    int i = 1;
+    if (strcmp(argv[i], "-a") == 0) {
+        /* Remove all aliases */
+        alias_clear_all(sh);
+        return 0;
+    }
+
+    /* Remove specified aliases */
+    int rc = 0;
+    for (; i < argc; i++) {
+        const char *name = argv[i];
+        if (alias_lookup(sh, name)) {
+            alias_unregister(sh, name);
+        } else {
+            fprintf(stderr, "unalias: %s: not found\n", name);
+            rc = 1;
+        }
+    }
+
+    return rc;
+}
+
+static int exec_builtin_hash(shell_ctx_t *sh, int argc, char **argv)
+{
+    /* hash [-r] [name ...] */
+    int i = 1;
+    int was_r_flag = 0;
+
+    /* Check for -r flag (clear cache) */
+    if (i < argc && strcmp(argv[i], "-r") == 0) {
+        path_cache_clear(sh);
+        was_r_flag = 1;
+        i++;
+    }
+
+    /* If no arguments (or only -r flag), print/clear and exit */
+    if (i >= argc) {
+        /* If no -r flag was given, print the hash table */
+        if (!was_r_flag) {
+            /* Display cached entries */
+            for (int j = 0; j < 256; j++) {
+                path_cache_entry_t *e = sh->path_cache[j];
+                while (e) {
+                    if (e->found && e->path) {
+                        printf("%s\n", e->path);
+                    }
+                    e = e->next;
+                }
+            }
+        }
+        return 0;
+    }
+
+    /* Cache specified commands */
+    int rc = 0;
+    for (; i < argc; i++) {
+        const char *name = argv[i];
+
+        /* Skip builtins and commands with / */
+        if (strchr(name, '/') || find_shell_builtin(name) || find_applet(name)) {
+            continue;
+        }
+
+        /* Resolve the command in PATH */
+        char resolved[PATH_MAX];
+        if (path_resolve(sh, name, resolved, sizeof(resolved))) {
+            path_cache_put(sh, name, resolved);
+        } else {
+            fprintf(stderr, "hash: %s: not found\n", name);
+            rc = 1;
+        }
+    }
+
+    return rc;
 }
 

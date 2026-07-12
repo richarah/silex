@@ -83,7 +83,7 @@ static var_entry_t *vars_find(vars_t *v, const char *name)
     return NULL;
 }
 
-int vars_set(vars_t *v, const char *name, const char *value)
+int vars_set_context(vars_t *v, const char *name, const char *value, const char *ctx)
 {
     unsigned int idx = fnv1a(name);
 
@@ -92,7 +92,10 @@ int vars_set(vars_t *v, const char *name, const char *value)
         var_entry_t *e = scope_find(s, name, idx);
         if (e) {
             if (e->readonly) {
-                fprintf(stderr, "silex: %s: readonly variable\n", name);
+                if (ctx)
+                    fprintf(stderr, "%s: %s: is read only\n", ctx, name);
+                else
+                    fprintf(stderr, "silex: %s: readonly variable\n", name);
                 return 1;
             }
             e->value = arena_strdup(v->arena, value);
@@ -109,6 +112,11 @@ int vars_set(vars_t *v, const char *name, const char *value)
     e->next           = v->scope->buckets[idx];
     v->scope->buckets[idx] = e;
     return 0;
+}
+
+int vars_set(vars_t *v, const char *name, const char *value)
+{
+    return vars_set_context(v, name, value, NULL);
 }
 
 int vars_set_local(vars_t *v, const char *name, const char *value)
@@ -137,14 +145,23 @@ int vars_set_local(vars_t *v, const char *name, const char *value)
     return 0;
 }
 
-int vars_export(vars_t *v, const char *name)
+int vars_export_context(vars_t *v, const char *name, const char *ctx)
 {
     var_entry_t *e = vars_find(v, name);
     if (!e)
         return 1;
+    if (e->readonly && ctx) {
+        fprintf(stderr, "%s: %s: is read only\n", ctx, name);
+        return 1;
+    }
     e->exported = 1;
     setenv(name, e->value, 1);
     return 0;
+}
+
+int vars_export(vars_t *v, const char *name)
+{
+    return vars_export_context(v, name, NULL);
 }
 
 int vars_readonly(vars_t *v, const char *name)
@@ -156,7 +173,7 @@ int vars_readonly(vars_t *v, const char *name)
     return 0;
 }
 
-int vars_unset(vars_t *v, const char *name)
+int vars_unset_context(vars_t *v, const char *name, const char *ctx)
 {
     unsigned int idx = fnv1a(name);
 
@@ -166,7 +183,10 @@ int vars_unset(vars_t *v, const char *name)
             var_entry_t *e = *pp;
             if (strcmp(e->name, name) == 0) {
                 if (e->readonly) {
-                    fprintf(stderr, "silex: %s: readonly variable\n", name);
+                    if (ctx)
+                        fprintf(stderr, "%s: %s: is read only\n", ctx, name);
+                    else
+                        fprintf(stderr, "silex: %s: readonly variable\n", name);
                     return 1;
                 }
                 *pp = e->next;
@@ -176,6 +196,11 @@ int vars_unset(vars_t *v, const char *name)
         }
     }
     return 0;
+}
+
+int vars_unset(vars_t *v, const char *name)
+{
+    return vars_unset_context(v, name, NULL);
 }
 
 void vars_export_env(vars_t *v)

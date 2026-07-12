@@ -40,11 +40,15 @@ typedef struct shell_ctx {
     } traps[NSIG];
     /* Function definitions: name -> node_t* */
     void       *funcs[256];  /* var_entry_t* array for func lookup */
+    /* Alias definitions: name -> value string */
+    void       *aliases[256]; /* alias_entry_t* array for alias lookup */
     pid_t       last_bg_pid; /* $! */
     int         call_depth;  /* function call nesting depth (recursion guard) */
     int         trace_level; /* SILEX_TRACE=1: +cmd, =2: +[builtin/fork/module] tag */
     int         break_level; /* for break N / continue N; 0 = normal */
     int         loop_depth;  /* current loop nesting depth; 0 = not in loop */
+    int         interactive; /* 1 if shell is interactive (stdin is tty), 0 otherwise */
+    int         in_command_builtin; /* 1 if executing via 'command' prefix (disables special builtin semantics) */
     /* PATH resolution cache: command name → resolved absolute path.
      * Invalidated (path_cache_hash reset) when PATH changes. */
     void       *path_cache[256];  /* path_cache_entry_t*, open-addressing by FNV-1a */

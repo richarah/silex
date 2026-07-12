@@ -111,7 +111,9 @@ int redirect_apply(struct shell_ctx *sh, redir_t *redirs, redirect_ctx_t *ctx)
                 }
                 int src = atoi(target);
                 if (dup2(src, fd) < 0) {
-                    perror("redirect <&");
+                    /* Silently fail for EBADF (fd not open) - POSIX behavior */
+                    if (errno != EBADF)
+                        perror("redirect <&");
                     ctx->error = 1;
                     return -1;
                 }
@@ -138,7 +140,9 @@ int redirect_apply(struct shell_ctx *sh, redir_t *redirs, redirect_ctx_t *ctx)
                 }
                 int src = atoi(target);
                 if (dup2(src, fd) < 0) {
-                    perror("redirect >&");
+                    /* Silently fail for EBADF (fd not open) - POSIX behavior */
+                    if (errno != EBADF)
+                        perror("redirect >&");
                     ctx->error = 1;
                     return -1;
                 }
@@ -245,6 +249,9 @@ void redirect_restore(redirect_ctx_t *ctx)
         if (s->saved_fd >= 0) {
             dup2(s->saved_fd, s->orig_fd);
             close(s->saved_fd);
+        } else {
+            /* fd was not open originally; close it to restore that state */
+            close(s->orig_fd);
         }
     }
     ctx->saved = NULL;

@@ -74,11 +74,18 @@ static const char *sh_getvar(shell_ctx_t *sh, const char *name)
             return sh->script_name ? sh->script_name : "";
         case '@':
         case '*': {
-            /* Join all positionals with space */
+            /* Join all positionals: $* uses first char of IFS, $@ uses space */
             strbuf_t sb;
             sb_init(&sb, 64);
+            char sep;
+            if (name[0] == '*') {
+                const char *ifs = sh_getvar(sh, "IFS");
+                sep = (ifs && ifs[0]) ? ifs[0] : ' ';
+            } else {
+                sep = ' ';
+            }
             for (int i = 0; i < sh->positional_n; i++) {
-                if (i > 0) sb_appendc(&sb, ' ');
+                if (i > 0) sb_appendc(&sb, sep);
                 sb_append(&sb, sh->positional[i]);
             }
             char *r = arena_strdup(&sh->scratch_arena, sb_str(&sb));
@@ -284,10 +291,20 @@ static int has_unquoted_glob(const char *word)
  */
 static char *expand_braced(shell_ctx_t *sh, const char *body)
 {
+    /* Empty expansion ${} is an error */
+    if (body[0] == '\0') {
+        fprintf(stderr, "silex: bad substitution\n");
+        exit(2);
+    }
+
     /* ${#VAR} — length */
     if (body[0] == '#' && body[1] != '\0' && body[1] != '}') {
         const char *varname = body + 1;
         const char *val = sh_getvar(sh, varname);
+        if (!val && sh->opt_u) {
+            fprintf(stderr, "silex: %s: unbound variable\n", varname);
+            exit(1);
+        }
         char buf[32];
         snprintf(buf, sizeof(buf), "%zu", val ? strlen(val) : (size_t)0);
         return arena_strdup(&sh->scratch_arena, buf);
@@ -416,7 +433,7 @@ static char *expand_braced(shell_ctx_t *sh, const char *body)
                 strbuf_t sb;
                 sb_init(&sb, 64);
                 expand_into(sh, word_part, &sb, 0);
-                fprintf(stderr, "silex: %s: %s\n", varname,
+                fprintf(stderr, "%s: %s\n", varname,
                         sb_len(&sb) > 0 ? sb_str(&sb) : "parameter null or not set");
                 sb_free(&sb);
                 exit(1);
@@ -728,6 +745,10 @@ static long arith_primary(arith_ctx_t *ac)
         }
         namebuf[ni] = '\0';
         const char *v = sh_getvar(ac->sh, namebuf);
+        if (!v && ac->sh->opt_u) {
+            fprintf(stderr, "silex: %s: unbound variable\n", namebuf);
+            exit(1);
+        }
         return v ? atol(v) : 0L;
     }
 
@@ -808,6 +829,11 @@ static long arith_primary(arith_ctx_t *ac)
             return result;
         }
 
+        /* No assignment operator: just read the value */
+        if (!v && ac->sh->opt_u) {
+            fprintf(stderr, "silex: %s: unbound variable\n", namebuf);
+            exit(1);
+        }
         return cur_val;
     }
 
@@ -1247,9 +1273,20 @@ static void expand_into(shell_ctx_t *sh, const char *word, strbuf_t *out,
                         sb_append(out, sh->positional[pi]);
                     }
                 } else {
-                    char spec[2] = { *p, '\0' };
-                    const char *v = sh_getvar(sh, spec);
-                    if (v) sb_append(out, v);
+                    /* Unquoted $* or $@: when IFS is empty, still split on \x01 */
+                    const char *ifs = sh_getvar(sh, "IFS");
+                    if (ifs && ifs[0] == '\0') {
+                        /* Empty IFS: use \x01 to separate positionals */
+                        for (int pi = 0; pi < sh->positional_n; pi++) {
+                            if (pi > 0) sb_appendc(out, '\x01');
+                            sb_append(out, sh->positional[pi]);
+                        }
+                    } else {
+                        /* Non-empty or unset IFS: join with space (default behavior) */
+                        char spec[2] = { *p, '\0' };
+                        const char *v = sh_getvar(sh, spec);
+                        if (v) sb_append(out, v);
+                    }
                 }
                 p++;
                 continue;
@@ -1289,6 +1326,10 @@ static void expand_into(shell_ctx_t *sh, const char *word, strbuf_t *out,
                 char spec[2] = { *p, '\0' };
                 const char *v = sh_getvar(sh, spec);
                 if (v) sb_append(out, v);
+                else if (sh->opt_u) {
+                    fprintf(stderr, "silex: $%c: unbound variable\n", *p);
+                    exit(1);
+                }
                 p++;
                 continue;
             }
@@ -1521,10 +1562,16 @@ expand_result_t expand_word_full(shell_ctx_t *sh, const char *word)
 
 glob_phase:
     if (nfields == 0) {
-        /* No fields — single empty word */
-        fields = realloc(fields, sizeof(char *));
-        if (fields) fields[0] = expanded;
-        nfields = 1;
+        /* POSIX: if an unquoted expansion produces an empty result,
+         * it yields zero fields, not one empty field. Only produce an empty
+         * field if the original word was literally empty or quoted empty. */
+        if (!do_ifs_split || expanded[0] != '\0') {
+            /* Literal word or non-empty result: create single field */
+            fields = realloc(fields, sizeof(char *));
+            if (fields) fields[0] = expanded;
+            nfields = 1;
+        }
+        /* else: empty expansion result from unquoted param expansion yields 0 fields */
     }
 
     /* Pathname expansion (globbing) unless set -f */

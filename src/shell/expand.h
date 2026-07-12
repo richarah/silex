@@ -27,6 +27,10 @@ expand_result_t expand_word_full(struct shell_ctx *sh, const char *word);
 /* Expand an array of words (for command arguments) */
 char **expand_words(struct shell_ctx *sh, char **words);
 
+/* Expand a word for use as a pattern (case statement, etc.) - escapes pattern
+ * metacharacters that come from quoted contexts */
+char *expand_word_pattern(struct shell_ctx *sh, const char *word);
+
 /* Expand arithmetic expression -- returns long */
 long expand_arith(struct shell_ctx *sh, const char *expr);
 
