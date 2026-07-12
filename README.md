@@ -2,6 +2,16 @@
 
 A considered Docker base image.
 
+> **Two components live in this repo.**
+>
+> **`sdk/`** — the Docker base image. The thing you `FROM`. This README is about it.
+>
+> **`core/`** — the silex binary: a POSIX `sh` plus 32 coreutils implemented as
+> builtins in a single process. Usable on its own; see [core/README.md](core/README.md).
+>
+> They are independent today: the image ships dash and busybox, **not** the core
+> binary. See [Known issues](#known-issues).
+
 ```diff
 - FROM ubuntu:24.04
 + FROM silex:slim
@@ -221,15 +231,23 @@ than gcc on very large TUs. `CC=gcc`.
 **GCC hardcoded in CMakeLists.** `apk add gcc` or
 remove the override.
 
-**`/bin/sh` is dash.** `[[ ]]`, arrays, process
+**`/bin/sh` is dash, not silex.** `[[ ]]`, arrays, process
 substitution are bash. Use POSIX sh or `#!/bin/bash`.
+
+The silex shell in `core/` is not yet the image's `/bin/sh`.
+It passes 125/186 of the Smoosh POSIX conformance suite
+(`make core-external-test`), and a build shell that gets
+exit codes wrong is worse than a slow one. It becomes
+`/bin/sh` when it reaches ≥95% there and a clean 5/5 on the
+Autoconf suite — not before.
 
 **`python3` on PATH. `python` is not.** Per PEP 394.
 
 **No GPU in slim.** CPU only.
 
-**Coreutils are busybox.** `sort --parallel` works via
-GNU sort wrapper. Other GNU-only flags don't.
+**Coreutils are busybox, not silex.** `sort --parallel` works
+via GNU sort wrapper. Other GNU-only flags don't. Same gate as
+above applies to the silex builtins in `core/`.
 
 **git not in slim.** `silex:dev` or `apk add git`.
 
@@ -289,18 +307,27 @@ docker run --ulimit nofile=65535:65535 silex:slim ...
 ```sh
 git clone https://github.com/richarah/silex.git
 cd silex
-make verify-sources    # SHA256, once
-make bootstrap         # from debian:bookworm-slim, ~90-120 min
-make build             # from previous silex:slim, ~15-20 min
-make test              # compat tests
+make sdk-bootstrap     # image, from debian:bookworm-slim, ~90-120 min
+make sdk-build         # image, from previous silex:slim, ~15-20 min
+make sdk-test          # image compat tests
 ```
 
-`make bootstrap` compiles everything from source.
-Tarballs verified against `sources.json`.
+`make sdk-bootstrap` compiles every bundled tool from
+source. Each tarball is fetched from its upstream and
+checked against a pinned SHA256 in the Dockerfile; a
+mismatch fails the build.
 
-`make build` reuses the previous release's clang and
+`make sdk-build` reuses the previous release's clang and
 mold, skipping the 60-minute LLVM step. Silex builds
 Silex.
+
+To build the core binary instead:
+
+```sh
+make core-release      # musl static, ~1MB
+make core-test         # unit tests
+make core-external-test  # POSIX conformance suites
+```
 
 ## FAQ
 
@@ -346,7 +373,8 @@ in `benchmarks/`.
 It's a Dockerfile.
 
 **silex?**
-Latin for flint.
+Latin for flint. The image is `sdk/`; the shell and
+coreutils binary is `core/`.
 
 ## Licence
 

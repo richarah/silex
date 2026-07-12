@@ -1,10 +1,24 @@
-name: CI
+name: Core CI
 
 on:
   push:
     branches: [ main, master ]
+    paths:
+      - 'core/**'
+      - '.github/workflows/core-ci.yml'
   pull_request:
     branches: [ main, master ]
+    paths:
+      - 'core/**'
+      - '.github/workflows/core-ci.yml'
+
+# Every run: step in this workflow assumes the repo root is core/.
+# NOTE: this does NOT apply to `uses:` steps -- actions/cache, upload-artifact
+# and friends resolve their path: inputs against the workspace root, so those
+# are spelled out with the core/ prefix by hand below.
+defaults:
+  run:
+    working-directory: core
 
 jobs:
   # Job 1: Build and test with GCC
@@ -193,8 +207,8 @@ jobs:
       - name: Cache external test repositories
         uses: actions/cache@v4
         with:
-          path: tests/external/repos
-          key: external-repos-${{ hashFiles('tests/external/fetch-all.sh') }}
+          path: core/tests/external/repos
+          key: external-repos-${{ hashFiles('core/tests/external/fetch-all.sh') }}
 
       - name: Run external tests (Docker)
         run: make external-test-docker
@@ -204,7 +218,7 @@ jobs:
         if: always()
         with:
           name: external-test-results
-          path: tests/external/results/
+          path: core/tests/external/results/
 
       - name: Check critical requirements
         run: |

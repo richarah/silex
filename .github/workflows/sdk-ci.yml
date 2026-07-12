@@ -1,10 +1,16 @@
-name: CI
+name: SDK CI
 
 on:
   push:
     branches: [master]
+    paths:
+      - 'sdk/**'
+      - '.github/workflows/sdk-ci.yml'
   pull_request:
     branches: [master]
+    paths:
+      - 'sdk/**'
+      - '.github/workflows/sdk-ci.yml'
   workflow_dispatch:
     inputs:
       runner:
@@ -15,6 +21,16 @@ on:
         options:
           - self-hosted
           - ubuntu-latest
+
+# A cold image build is 90-120 minutes. Without the paths: filter above, every
+# one-line change to core/ would trigger one.
+concurrency:
+  group: sdk-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: sdk
 
 jobs:
   build-and-test:

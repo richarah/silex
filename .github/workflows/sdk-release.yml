@@ -1,13 +1,22 @@
-name: Release
+name: SDK Release
 
+# paths: filters do NOT apply to tag triggers, so the tag namespace is the only
+# thing stopping a core release (core-v*) from firing a 90-minute image build.
 on:
   push:
     tags:
-      - 'v*'
+      - 'sdk-v*'
 
 env:
   REGISTRY: ghcr.io
+  # Resolves to richarah/silex, so the image publishes to ghcr.io/richarah/silex
+  # -- which is what setup-silex/action.yml has always tried to pull. Leave it
+  # dynamic; do not hardcode.
   IMAGE_NAME: ${{ github.repository }}
+
+defaults:
+  run:
+    working-directory: sdk
 
 jobs:
   release:

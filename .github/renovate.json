@@ -10,12 +10,21 @@
   "customManagers": [
     {
       "customType": "regex",
-      "fileMatch": ["dockerfiles/Dockerfile\\.slim"],
+      "fileMatch": ["^sdk/dockerfiles/Dockerfile(\\.bootstrap)?$"],
       "matchStrings": [
-        "MOLD_VERSION=(?<currentValue>[\\d.]+)",
-        "SCCACHE_VERSION=(?<currentValue>[\\d.]+)"
+        "ARG MOLD_VERSION=(?<currentValue>[\\d.]+)"
       ],
       "depNameTemplate": "rui314/mold",
+      "datasourceTemplate": "github-releases",
+      "versioningTemplate": "semver"
+    },
+    {
+      "customType": "regex",
+      "fileMatch": ["^sdk/dockerfiles/Dockerfile(\\.bootstrap)?$"],
+      "matchStrings": [
+        "ARG SCCACHE_VERSION=(?<currentValue>[\\d.]+)"
+      ],
+      "depNameTemplate": "mozilla/sccache",
       "datasourceTemplate": "github-releases",
       "versioningTemplate": "semver"
     }

@@ -8,8 +8,10 @@ updates:
     open-pull-requests-limit: 5
 
   # Docker base images
+  # NOTE: this only bumps FROM lines. It cannot see the ARG *_VERSION /
+  # *_SHA256 pins in sdk/dockerfiles/, so tarball updates are still manual.
   - package-ecosystem: "docker"
-    directory: "/dockerfiles"
+    directory: "/sdk/dockerfiles"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5

@@ -283,7 +283,7 @@ release-glibc: $(TARGET)
 	@echo "Release (glibc dynamic): $$(wc -c < $(TARGET)) bytes"
 
 release-docker:
-	docker run --rm -v $(PWD):/src -w /src alpine:latest sh -c \
+	docker run --rm -v $(CURDIR):/src -w /src alpine:latest sh -c \
 	    "apk add --no-cache gcc musl-dev make linux-headers && make release"
 
 # --- Debug build (ASan/UBSan) -------------------------------------------------
@@ -427,8 +427,8 @@ external-test-docker:
 	docker build -t silex-test -f tests/external/Dockerfile .
 	@echo "=== Running external tests in Docker ==="
 	docker run --rm \
-	    -v $(PWD)/tests/external/repos:/silex/tests/external/repos \
-	    -v $(PWD)/tests/external/results:/silex/tests/external/results \
+	    -v $(CURDIR)/tests/external/repos:/silex/tests/external/repos \
+	    -v $(CURDIR)/tests/external/results:/silex/tests/external/results \
 	    silex-test bash tests/external/docker-run.sh
 
 # Fetch repos via Docker (cached via volume mount)
@@ -436,7 +436,7 @@ external-fetch-docker:
 	@echo "=== Fetching external repos via Docker ==="
 	docker build -t silex-test -f tests/external/Dockerfile .
 	docker run --rm \
-	    -v $(PWD)/tests/external/repos:/silex/tests/external/repos \
+	    -v $(CURDIR)/tests/external/repos:/silex/tests/external/repos \
 	    silex-test make external-fetch
 
 check: $(TARGET)
@@ -539,7 +539,7 @@ size-check: release
 	fi
 
 # --- PGO (requires pgo/ submodule) -----------------------------------------
-PGO_DIR      = $(PWD)/pgo
+PGO_DIR      = $(CURDIR)/pgo
 PGO_RAW_DIR  = $(PGO_DIR)/profiles/raw
 PGO_MERGED   = $(PGO_DIR)/profiles/merged.profdata
 PGO_BINARY   = $(BINDIR)/silex-instrumented
@@ -570,11 +570,15 @@ pgo: pgo-instrument pgo-collect pgo-build
 .PHONY: pgo pgo-instrument pgo-collect pgo-merge pgo-build pgo-report pgo-validate
 
 # --- Git hooks ----------------------------------------------------------------
+# core/ is not the repo root, so .git and .githooks live above it. Ask git where
+# they are rather than assuming.
 install-hooks:
-	mkdir -p .git/hooks
-	cp .githooks/commit-msg .git/hooks/commit-msg
-	chmod +x .git/hooks/commit-msg
-	@echo "Git hooks installed."
+	@hooks="$$(git rev-parse --git-path hooks)"; \
+	root="$$(git rev-parse --show-toplevel)"; \
+	mkdir -p "$$hooks"; \
+	cp "$$root/.githooks/commit-msg" "$$hooks/commit-msg"; \
+	chmod +x "$$hooks/commit-msg"; \
+	echo "Git hooks installed to $$hooks"
 
 # --- Clean --------------------------------------------------------------------
 clean:
