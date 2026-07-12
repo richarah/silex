@@ -69,7 +69,17 @@ ARG TARGETARCH
 # Builds everything that requires a C/C++ compiler.
 # Order: mold (linker) → stage-1 clang → all other tools.
 # ============================================================================
-FROM debian:bookworm-slim AS build-c
+# Base image, pinned by digest.
+#
+# This was `FROM debian:bookworm-slim` -- a MUTABLE tag. The README criticises
+# Wolfi for being rolling, and then floated the whole image on a tag that
+# Debian repoints whenever they cut a point release. A digest is the only
+# thing that makes `docker build` twice give you the same base twice.
+#
+# Bump: docker buildx imagetools inspect debian:bookworm-slim | grep Digest
+ARG DEBIAN_BASE=debian:bookworm-slim@sha256:60eac759739651111db372c07be67863818726f754804b8707c90979bda511df
+
+FROM ${DEBIAN_BASE} AS build-c
 
 ARG LLVM_VERSION LLVM_SHA256
 ARG MOLD_VERSION MOLD_SHA256
@@ -498,7 +508,7 @@ RUN set -ex \
 # Uses Debian lld since mold is not built yet in this stage.
 # RUSTFLAGS: target-cpu for native performance. No lto (incompatible with embed-bitcode=no in sccache 0.8.2).
 # ============================================================================
-FROM debian:bookworm-slim AS build-rust
+FROM ${DEBIAN_BASE} AS build-rust
 
 ARG RUST_VERSION RUST_SHA256_X86_64 RUST_SHA256_AARCH64
 ARG SCCACHE_VERSION SCCACHE_SHA256
@@ -596,7 +606,7 @@ RUN set -ex \
 # Assemble all built artifacts. Configure apk for Wolfi repos.
 # Remove Debian package manager (replaced by apk via apt-shim).
 # ============================================================================
-FROM debian:bookworm-slim AS final
+FROM ${DEBIAN_BASE} AS final
 
 ARG LLVM_VERSION
 ARG TARGETARCH

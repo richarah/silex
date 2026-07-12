@@ -56,6 +56,16 @@ ARG TARGETARCH
 # Rebuilds all C/C++ tools from source using the existing toolchain.
 # LLVM and mold are NOT rebuilt; they are carried forward via COPY below.
 # ============================================================================
+# Base image, pinned by digest.
+#
+# This was `FROM debian:bookworm-slim` -- a MUTABLE tag. The README criticises
+# Wolfi for being rolling, and then floated the whole image on a tag that
+# Debian repoints whenever they cut a point release. A digest is the only
+# thing that makes `docker build` twice give you the same base twice.
+#
+# Bump: docker buildx imagetools inspect debian:bookworm-slim | grep Digest
+ARG DEBIAN_BASE=debian:bookworm-slim@sha256:60eac759739651111db372c07be67863818726f754804b8707c90979bda511df
+
 FROM silex:slim AS build-c
 
 ARG NINJA_VERSION NINJA_SHA256
@@ -496,7 +506,7 @@ RUN set -ex \
 # Base: debian:bookworm-slim (glibc, libssl3, zlib1g, ca-certificates).
 # LLVM and mold are copied from the PREVIOUS silex:slim, not rebuilt.
 # ============================================================================
-FROM debian:bookworm-slim AS final
+FROM ${DEBIAN_BASE} AS final
 
 ARG TARGETARCH
 # Extract LLVM major version from the image we carry forward.
