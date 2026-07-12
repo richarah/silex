@@ -716,6 +716,17 @@ ENV RUSTC_WRAPPER="sccache"
 ENV SCCACHE_IDLE_TIMEOUT="0"
 ENV SCCACHE_CACHE_SIZE="10G"
 
+# sccache for C/C++, not just Rust.
+#
+# These were set ONLY in scripts/entrypoint.sh. Docker `RUN` uses SHELL, never
+# ENTRYPOINT -- so during `docker build`, the flagship "18x warm sccache
+# rebuild" was unreachable: RUSTC_WRAPPER was set (so Rust was cached) but
+# CMAKE_{C,CXX}_COMPILER_LAUNCHER was not, so every C and C++ compile bypassed
+# sccache entirely. Setting them here means a plain `RUN cmake --build` is
+# cached, which is the flow the README advertises.
+ENV CMAKE_C_COMPILER_LAUNCHER="sccache"
+ENV CMAKE_CXX_COMPILER_LAUNCHER="sccache"
+
 ENV SILEX_MALLOC="mimalloc"
 
 ENV LC_ALL="C"
@@ -736,5 +747,30 @@ LABEL org.opencontainers.image.version="2.0.0"
 LABEL org.opencontainers.image.licenses="MIT"
 LABEL org.opencontainers.image.source="https://github.com/richarah/silex"
 
+# Route `RUN` through the entrypoint.
+#
+# Docker `RUN` uses SHELL (default: ["/bin/sh", "-c"]) and NEVER ENTRYPOINT.
+# Everything the entrypoint configures was therefore inert during `docker build`
+# -- which is the only thing this image exists to make faster:
+#
+#   LD_PRELOAD=libmimalloc      mimalloc was never loaded  ("9% under threaded builds")
+#   MAKEFLAGS=-j$(nproc)        `RUN make` ran SERIALLY
+#   LDFLAGS=-fuse-ld=mold       mold applied only by accident, via the /usr/bin/ld symlink
+#   CMAKE_*_COMPILER_LAUNCHER   sccache bypassed for all C/C++
+#
+# The static values above are set as ENV so they survive a user overriding
+# SHELL. This SHELL directive additionally restores the *dynamic* ones -- the
+# nproc-derived -j, the mimalloc preload, and the SILEX_* override knobs
+# (SILEX_MALLOC=system, SILEX_CACHE=off, ...) -- for every RUN in a downstream
+# Dockerfile, since SHELL is inherited by child images.
+SHELL ["/usr/local/bin/silex-entrypoint", "/bin/sh", "-c"]
+
+# One config line per RUN would drown the build log; `silex doctor` reports it
+# on demand. Set SILEX_QUIET=off to restore it.
+ENV SILEX_QUIET="on"
+
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/silex-entrypoint"]
-CMD ["/bin/bash"]
+
+# bash is NOT installed in slim (README: "bash is one `apk add` away"), so
+# `docker run silex:slim` used to fail outright with "no such file".
+CMD ["/bin/sh"]
