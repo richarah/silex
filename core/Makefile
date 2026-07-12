@@ -202,11 +202,6 @@ MODULE_SRCS = \
     $(SRCDIR)/module/loader.c \
     $(SRCDIR)/module/registry.c
 
-BATCH_SRCS = \
-    $(SRCDIR)/batch/uring.c \
-    $(SRCDIR)/batch/detect.c \
-    $(SRCDIR)/batch/fallback.c
-
 CACHE_SRCS = \
     $(SRCDIR)/cache/hashmap.c \
     $(SRCDIR)/cache/fscache.c
@@ -214,7 +209,7 @@ CACHE_SRCS = \
 MAIN_SRCS = $(SRCDIR)/main.c
 
 ALL_SRCS = $(UTIL_SRCS) $(CORE_SRCS) $(SHELL_SRCS) $(MODULE_SRCS) \
-           $(BATCH_SRCS) $(CACHE_SRCS) $(MAIN_SRCS)
+           $(CACHE_SRCS) $(MAIN_SRCS)
 
 # Object files: mirror source tree under $(OBJDIR)
 OBJS = $(patsubst $(SRCDIR)/%.c,$(OBJDIR)/%.o,$(ALL_SRCS))
@@ -662,9 +657,6 @@ $(OBJDIR)/shell/shell.o:    $(SRCDIR)/shell/shell.c    $(SHELL_HDRS) $(UTIL_HDRS
 $(OBJDIR)/module/loader.o:   $(SRCDIR)/module/loader.c   $(SRCDIR)/module/loader.h
 $(OBJDIR)/module/registry.o: $(SRCDIR)/module/registry.c $(SRCDIR)/module/registry.h
 
-$(OBJDIR)/batch/uring.o:    $(SRCDIR)/batch/uring.c    $(SRCDIR)/batch/uring.h
-$(OBJDIR)/batch/detect.o:   $(SRCDIR)/batch/detect.c   $(SRCDIR)/batch/detect.h
-$(OBJDIR)/batch/fallback.o: $(SRCDIR)/batch/fallback.c $(SRCDIR)/batch/fallback.h
 
 $(OBJDIR)/cache/hashmap.o:  $(SRCDIR)/cache/hashmap.c  $(SRCDIR)/cache/hashmap.h
 $(OBJDIR)/cache/fscache.o:  $(SRCDIR)/cache/fscache.c  $(SRCDIR)/cache/fscache.h

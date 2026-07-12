@@ -50,8 +50,33 @@
  * never stat 100 000 distinct paths; this prevents unbounded memory growth. */
 #define FSCACHE_MAX_ENTRIES  100000
 
-/* Default TTL in seconds when SILEX_FSCACHE_TTL is not set */
-#define FSCACHE_DEFAULT_TTL 5
+/* Default TTL in seconds when SILEX_FSCACHE_TTL is not set.
+ *
+ * OFF BY DEFAULT, deliberately. This is a wall-clock TTL over filesystem state,
+ * which makes correctness a function of how fast the machine is: a cached
+ * positive stat() is served for up to TTL seconds no matter what happened to
+ * the filesystem in between.
+ *
+ * Invalidation is a whitelist, and the failure mode of a missing entry on that
+ * whitelist is a silently stale answer rather than an error. Today the whitelist
+ * has exactly one entry: fscache_invalidate() is called only from mkdir. Not
+ * from rm, mv, ln, install, sed -i, tee, or shell redirections (`> file`) --
+ * all of which are builtins, so they do not even fork, and fscache_invalidate_all()
+ * fires only after forking an EXTERNAL command. Background jobs and command
+ * substitutions can diverge from it entirely.
+ *
+ * The upside does not justify that: a cold stat() on a warm dentry cache is
+ * ~300-600ns, and OPTIMISATIONS.md prices the whole subsystem at roughly 10us
+ * across an entire Dockerfile.
+ *
+ * (It was already inert in practice -- fscache_init() has no callers, so ttl was
+ * a static zero and fscache_stat() always fell through to stat(). Making the
+ * default 0 means it stays safe if anyone ever wires init up.)
+ *
+ * Set SILEX_FSCACHE_TTL to opt in. A sound version would anchor cached results
+ * to openat() descriptors rather than paths, and invalidate on every write.
+ */
+#define FSCACHE_DEFAULT_TTL 0
 
 /* Global cache instance */
 fscache_t g_fscache;

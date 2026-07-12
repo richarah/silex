@@ -273,8 +273,37 @@ static int has_unquoted_glob(const char *word)
         if (*p == '\\' && !in_sq) { p++; if (!*p) break; continue; }
         if (*p == '\'' && !in_dq) { in_sq = !in_sq; continue; }
         if (*p == '"'  && !in_sq) { in_dq = !in_dq; continue; }
-        if (!in_sq && !in_dq &&
-            (*p == '*' || *p == '?' || *p == '[')) return 1;
+        if (in_sq || in_dq) continue;
+
+        if (*p == '*' || *p == '?')
+            return 1;
+
+        if (*p == '[') {
+            /* A '[' only opens a bracket expression if something closes it in
+             * the SAME word. A bare '[' is the test command, and treating it as
+             * a glob metacharacter meant every `if [ ... ]` and `while [ ... ]`
+             * ran a full glob() over the working directory -- an opendir plus
+             * two getdents64 per conditional. GLOB_NOCHECK handed back the
+             * literal '[', so the answer was right and the cost was enormous:
+             *
+             *   while [ $i -lt 2000 ]      169 ms
+             *   while test $i -lt 2000       9 ms   <- the very same builtin
+             *
+             * and it scaled with the size of the directory: 500 iterations cost
+             * 13 ms in a directory of 10 files and 179 ms in one of 2000.
+             * Configure scripts are mostly conditionals, run against a source
+             * tree -- the worst case on both counts.
+             */
+            int sq = 0, dq = 0;
+            for (const char *q = p + 1; *q; q++) {
+                if (*q == '\\' && !sq) { q++; if (!*q) break; continue; }
+                if (*q == '\'' && !dq) { sq = !sq; continue; }
+                if (*q == '"'  && !sq) { dq = !dq; continue; }
+                if (!sq && !dq && *q == ']')
+                    return 1;               /* a complete bracket expression */
+            }
+            /* No closing ']', so not a glob. Keep looking for a * or ?. */
+        }
     }
     return 0;
 }
@@ -1702,7 +1731,13 @@ glob_phase:
          * globbing chars that came from quoted contexts like "*". */
         if (do_glob) {
             glob_t g;
-            int r = glob(f, GLOB_NOSORT | GLOB_NOCHECK, NULL, &g);
+            /* NOT GLOB_NOSORT. POSIX requires pathname expansion results to be
+             * sorted, and builds depend on it: a command like `gcc *.c` was
+             * being handed files in raw directory order, which varies by
+             * filesystem and by the order the files happened to be created.
+             * That makes link order -- and therefore the output binary --
+             * depend on how the source tree was checked out. */
+            int r = glob(f, GLOB_NOCHECK, NULL, &g);
             if (r == 0) {
                 for (size_t gi = 0; gi < g.gl_pathc; gi++) {
                     if (nfinal >= fcap) {

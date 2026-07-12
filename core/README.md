@@ -25,13 +25,37 @@ Existing scripts work unchanged.
 ## What's inside
 
 A POSIX sh. Thirty-two coreutils as builtins. A module
-loader. A regex engine. An arena allocator. An
-io_uring submission path for batching independent
-filesystem operations. A filesystem state cache.
+loader. A regex engine. An arena allocator.
+
+There is also a filesystem state cache, but it is **off by
+default** and you should leave it that way. It is a
+wall-clock TTL over `stat()` results, so a cached answer is
+served for up to N seconds regardless of what happened to the
+filesystem — and its invalidation is a whitelist with exactly
+one entry (`mkdir`). `rm`, `mv`, `ln`, `sed -i` and shell
+redirections do not invalidate it. Enabling it trades a
+correctness hazard for roughly 10µs across a whole Dockerfile.
+`SILEX_FSCACHE_TTL` opts in.
 
 The builtins handle POSIX flags and the GNU flags
 that appear in container workloads. Everything else
 delegates.
+
+There used to be an "io_uring submission path for batching
+independent filesystem operations" listed here. It had zero
+callers — `rm` called plain `unlink()` — so it was never on
+any code path. It has been removed. It also carried a
+data-loss bug (the submission ring was capped at 256 entries
+while the fill loop was unbounded, so beyond 256 files
+entries were overwritten: some files skipped, others unlinked
+twice) and enabled `IORING_SETUP_SQPOLL` whenever running as
+root — which, in a container build, is always — spawning a
+kernel thread per ring, set up and torn down on every call.
+
+Measured, the upside was not there either: io_uring saves
+syscall *entry* overhead, not the VFS work, so batching 1000
+unlinks saves on the order of 1ms. See git history if you
+want it back.
 
 ## Performance
 
