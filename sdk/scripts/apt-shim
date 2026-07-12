@@ -59,6 +59,20 @@ case "$_CMD" in
             echo "silex apt-shim: no packages specified" >&2
             exit 1
         fi
+        # SECURITY: --allow-untrusted disables the signature check that
+        # /etc/apk/keys/ exists to perform. The image ships a signing key
+        # (keys/*.rsa.pub) and then declines to use it, so packages from
+        # richarah.github.io/silex-packages are installed with no integrity
+        # guarantee beyond TLS to GitHub Pages. A repo compromise, a Pages
+        # misconfiguration, or an MITM that can terminate TLS installs arbitrary
+        # root-owned binaries into every user's build. That is strictly weaker
+        # than the stock Debian apt this shim replaces.
+        #
+        # This cannot simply be deleted: it is not currently possible to confirm
+        # the published packages are signed (Pages is not enabled on the
+        # silex-packages repo, so the APKINDEX is unreachable). Sign the index,
+        # confirm apk verifies it against the shipped key, then remove every
+        # --allow-untrusted here and in dockerfiles/.
         echo "silex apt-shim: apk add --no-cache --allow-untrusted ${_pkgs}" >&2
         # shellcheck disable=SC2086
         if [ -f "$NOSYNC_SO" ]; then

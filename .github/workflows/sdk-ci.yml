@@ -90,12 +90,18 @@ jobs:
       - name: Run compat tests
         run: make test
 
+      # sources.json is the manifest, but the ARG pins in the Dockerfiles are
+      # what actually gate the build. They had already drifted (apk-tools 2.14.4
+      # vs 3.0.5). Cheap to check, so check it on every push.
+      - name: Verify source pins have not drifted
+        run: make verify-drift
+
       - name: Lint examples
         run: |
           for df in examples/*/Dockerfile; do
             echo "=== $df ==="
             docker run --rm -v "$PWD:/workspace" -w /workspace silex:slim \
-              silex lint "$df" || true
+              silex lint "$df"
           done
 
       # Push silex:slim after a successful master build so the next CI run

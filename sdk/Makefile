@@ -18,7 +18,7 @@ FULL_TAG    = $(REGISTRY)/$(IMAGE):$(TAG)
 DOCKER     ?= docker
 DOCKER_FLAGS ?= --progress=plain
 
-.PHONY: all verify-sources bootstrap build release cache test clean
+.PHONY: all verify-sources verify-drift bootstrap build release cache test clean
 
 all: build
 
@@ -26,8 +26,16 @@ all: build
 # verify-sources: download all source tarballs and print SHA256.
 # Review output, then update sources.json and Dockerfile.bootstrap ARG values.
 # ---------------------------------------------------------------------------
+# Verifies. Downloads each tarball, compares its SHA256 against sources.json,
+# and fails on mismatch. It used to only PRINT hashes for you to paste in, so it
+# could not fail -- and it kept its own drifted copy of the versions.
 verify-sources:
 	@sh scripts/verify-sources.sh
+
+# Fast: checks only that the Dockerfile ARG pins still agree with sources.json.
+# No network. This is the one CI runs on every push.
+verify-drift:
+	@sh scripts/verify-sources.sh --drift-only
 
 # ---------------------------------------------------------------------------
 # bootstrap: cold-start build from debian:bookworm-slim.
