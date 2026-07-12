@@ -143,7 +143,16 @@ done:
     }
 
     close(src_fd);
-    close(dst_fd);
+
+    /* Deferred write errors (EIO/ENOSPC/EDQUOT on overlayfs, NFS, FUSE) are
+     * reported at close(), not at write(). Swallowing this return means
+     * install(1) reports success while leaving a truncated binary behind. */
+    if (close(dst_fd) != 0) {
+        if (ret == 0) {
+            err_sys("install", "error closing '%s'", dst_path);
+            ret = 1;
+        }
+    }
     return ret;
 }
 

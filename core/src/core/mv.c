@@ -75,7 +75,18 @@ done:
             /* non-fatal: permissions are best-effort */
         }
     }
-    close(dst_fd);
+
+    /* This return MUST be checked. On overlayfs/NFS/FUSE, write() only dirties
+     * the page cache and EIO/ENOSPC/EDQUOT surface at close(). The caller
+     * (mv_cross_fs) unlinks the source once this returns 0 -- so swallowing a
+     * close error here means writing a corrupt destination and then deleting
+     * the only good copy. */
+    if (close(dst_fd) != 0) {
+        if (ret == 0) {
+            err_sys("mv", "error closing '%s'", dst_path);
+            ret = 1;
+        }
+    }
     return ret;
 }
 

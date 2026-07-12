@@ -160,9 +160,46 @@ static void print_help(void)
         printf("  %-12s %s\n", a->name, a->usage);
 }
 
-int main(int argc, char **argv)
+/* Flush stdout and report a deferred write error.
+ *
+ * stdio buffers, so a failing write() is not seen at the printf/fwrite that
+ * caused it -- it surfaces at the flush, which otherwise happens implicitly
+ * during exit() with its return value discarded. Without this, `silex cat big
+ * > /dev/full` (or any full disk, quota, or broken pipe) exits 0 having written
+ * nothing. In a container build that means a RUN step that silently produced no
+ * output and was recorded as successful.
+ *
+ * GNU coreutils installs close_stdout() via atexit for exactly this. Registered
+ * once here, it covers every applet rather than each one remembering.
+ */
+static int stdout_write_error = 0;
+
+static void check_stdout(void)
+{
+    /* Runs from both main() and atexit(); do the work once. */
+    static int done = 0;
+    if (done)
+        return;
+    done = 1;
+
+    if (ferror(stdout) || fflush(stdout) != 0) {
+        /* Don't use err_sys(): stdout is already broken, and stderr may be too.
+         * EPIPE is normal (`silex yes | head`) and must stay silent. */
+        if (errno != EPIPE)
+            fprintf(stderr, "silex: write error on stdout: %s\n", strerror(errno));
+        stdout_write_error = 1;
+    }
+}
+
+static int silex_main(int argc, char **argv)
 {
     if (argc < 1 || !argv[0])
+        return 1;
+
+    /* Covers applets that exit() rather than returning: the flush still runs
+     * and the error is still reported. It cannot influence the status in that
+     * case -- main()'s wrapper below does that for the normal return path. */
+    if (atexit(check_stdout) != 0)
         return 1;
 
     /* Determine the invocation name (basename of argv[0]) */
@@ -226,4 +263,18 @@ int main(int argc, char **argv)
         return 1;
     }
     return a->fn(argc, argv);
+}
+
+int main(int argc, char **argv)
+{
+    int status = silex_main(argc, argv);
+
+    /* Surface a deferred stdout write error in the exit status. An applet that
+     * "succeeded" while its output went nowhere has not succeeded. Only
+     * escalate a 0 -- an applet's own failure code is more informative. */
+    check_stdout();
+    if (status == 0 && stdout_write_error)
+        status = 1;
+
+    return status;
 }

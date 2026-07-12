@@ -100,8 +100,16 @@ static int copy_file_fd(int src_fd, const char *dst_path,
                     ret = 1;
                     goto done;
                 }
-                if (n == 0)
+                if (n == 0) {
+                    /* Short copy: copy_file_range hit EOF before st_size bytes.
+                     * This used to `break` with cfr_ok still set, so the
+                     * truncated destination was reported as a success. Fall
+                     * back to the read/write loop, which reads to the real EOF
+                     * and handles a source that shrank under us. */
+                    if (off_in < file_size)
+                        cfr_ok = 0;
                     break;
+                }
             }
             if (cfr_ok)
                 goto done;
@@ -157,7 +165,17 @@ done:
         }
     }
 
-    close(dst_fd);
+    /* close() is where a deferred write error surfaces. On overlayfs, NFS and
+     * FUSE -- which is exactly what a container build runs on -- write() only
+     * dirties the page cache; EIO/ENOSPC/EDQUOT are reported here. Ignoring
+     * this return means reporting success while leaving a truncated or corrupt
+     * destination behind. GNU coreutils checks it for the same reason. */
+    if (close(dst_fd) != 0) {
+        if (ret == 0) {
+            err_sys("cp", "error closing '%s'", dst_path);
+            ret = 1;
+        }
+    }
     return ret;
 }
 
