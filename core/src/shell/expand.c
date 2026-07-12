@@ -1382,31 +1382,119 @@ char *expand_word(shell_ctx_t *sh, const char *word)
     return result;
 }
 
+/* Advance past the construct starting at *p, if p is at one.
+ *
+ * Used to find the colons in an assignment RHS that are genuinely PATH-style
+ * delimiters, as opposed to colons that merely happen to sit inside a
+ * quotation or an expansion. Returns a pointer past the construct, or p itself
+ * if there is no construct here.
+ *
+ * Handles: \x  '...'  "..."  ${...}  $(...)  `...`  -- with nesting, so
+ * ${a:-${b:-c}} and $(f $(g)) are skipped whole.
+ */
+static const char *skip_construct(const char *p)
+{
+    if (*p == '\\' && p[1])
+        return p + 2;
+
+    if (*p == '\'') {
+        const char *q = p + 1;
+        while (*q && *q != '\'')
+            q++;
+        return *q ? q + 1 : q;              /* unterminated: stop at NUL */
+    }
+
+    if (*p == '"') {
+        const char *q = p + 1;
+        while (*q && *q != '"') {
+            if (*q == '\\' && q[1])
+                q += 2;
+            else if (*q == '$' && (q[1] == '{' || q[1] == '('))
+                q = skip_construct(q);      /* colons inside are not delimiters */
+            else if (*q == '`')
+                q = skip_construct(q);
+            else
+                q++;
+        }
+        return *q ? q + 1 : q;
+    }
+
+    if (*p == '`') {
+        const char *q = p + 1;
+        while (*q && *q != '`') {
+            if (*q == '\\' && q[1]) q += 2;
+            else                    q++;
+        }
+        return *q ? q + 1 : q;
+    }
+
+    if (*p == '$' && p[1] == '{') {
+        const char *q = p + 2;
+        int depth = 1;
+        while (*q && depth > 0) {
+            if (*q == '\\' && q[1])                       { q += 2; continue; }
+            if (*q == '\'' || *q == '"' || *q == '`')      { q = skip_construct(q); continue; }
+            if (*q == '$' && (q[1] == '{' || q[1] == '(')) { q = skip_construct(q); continue; }
+            if (*q == '{') depth++;
+            if (*q == '}') depth--;
+            q++;
+        }
+        return q;
+    }
+
+    if (*p == '$' && p[1] == '(') {
+        const char *q = p + 2;
+        int depth = 1;
+        while (*q && depth > 0) {
+            if (*q == '\\' && q[1])                       { q += 2; continue; }
+            if (*q == '\'' || *q == '"' || *q == '`')      { q = skip_construct(q); continue; }
+            if (*q == '$' && (q[1] == '{' || q[1] == '(')) { q = skip_construct(q); continue; }
+            if (*q == '(') depth++;
+            if (*q == ')') depth--;
+            q++;
+        }
+        return q;
+    }
+
+    return p;
+}
+
 char *expand_word_assign(shell_ctx_t *sh, const char *word)
 {
     if (!word) return arena_strdup(&sh->scratch_arena, "");
 
-    /* In assignment context, tilde expands at beginning and after each : */
+    /* In assignment context a tilde expands at the start of the word and after
+     * each colon, so that PATH=~/bin:~/sbin works. That means splitting the
+     * word on colons -- but only on colons that are actually delimiters.
+     *
+     * This used to split on every ':' in the string, with no regard for quoting
+     * or nesting. So V=${u:-x} was cut into "${u" and "-x}", and the first
+     * fragment is an unterminated expansion: "bad substitution". Every colon
+     * form of parameter expansion (:- :+ := :?) was unusable in an assignment,
+     * while the identical expansion worked as a command argument, in a for
+     * list, and in a case word. PREFIX=${PREFIX:-$(pwd)} is a ubiquitous idiom;
+     * this is what stopped modernish from bootstrapping.
+     */
     strbuf_t result_sb;
     sb_init(&result_sb, 128);
 
     const char *p = word;
     const char *seg_start = p;
 
-    while (*p) {
-        /* Check for : delimiter or end of string */
-        if (*p == ':' || p[1] == '\0') {
-            int is_end = (p[1] == '\0' && *p != ':');
-            size_t seg_len = is_end ? (size_t)(p - seg_start + 1) : (size_t)(p - seg_start);
+    for (;;) {
+        const char *skipped = skip_construct(p);
+        if (skipped != p) {
+            p = skipped;                    /* colons inside are not delimiters */
+            continue;
+        }
 
-            /* Extract segment */
+        if (*p == ':' || *p == '\0') {
+            size_t seg_len = (size_t)(p - seg_start);
             char *segment = strndup(seg_start, seg_len);
             if (segment) {
-                /* Try tilde expansion on this segment */
                 char *tilded = expand_tilde(sh, segment, 1);
                 const char *src = tilded ? tilded : segment;
 
-                /* Expand the segment */
                 strbuf_t seg_sb;
                 sb_init(&seg_sb, 64);
                 expand_into(sh, src, &seg_sb, 0);
@@ -1416,14 +1504,13 @@ char *expand_word_assign(shell_ctx_t *sh, const char *word)
                 free(segment);
             }
 
-            /* Add : delimiter if we're at one */
-            if (*p == ':') {
-                sb_appendc(&result_sb, ':');
-                seg_start = p + 1;
-            }
+            if (*p == '\0')
+                break;
 
-            if (is_end) break;
+            sb_appendc(&result_sb, ':');
+            seg_start = p + 1;
         }
+
         p++;
     }
 
@@ -1566,10 +1653,22 @@ glob_phase:
          * it yields zero fields, not one empty field. Only produce an empty
          * field if the original word was literally empty or quoted empty. */
         if (!do_ifs_split || expanded[0] != '\0') {
-            /* Literal word or non-empty result: create single field */
-            fields = realloc(fields, sizeof(char *));
-            if (fields) fields[0] = expanded;
-            nfields = 1;
+            /* Literal word or non-empty result: create single field.
+             *
+             * nfields used to be set to 1 unconditionally, even when realloc
+             * returned NULL -- and the loop below then dereferenced fields[0].
+             * The old buffer was leaked on that path too. On OOM, leave the
+             * field count at 0 rather than promising a field that isn't there. */
+            char **grown = realloc(fields, sizeof(char *));
+            if (!grown) {
+                free(fields);
+                fields  = NULL;
+                nfields = 0;
+            } else {
+                fields    = grown;
+                fields[0] = expanded;
+                nfields   = 1;
+            }
         }
         /* else: empty expansion result from unquoted param expansion yields 0 fields */
     }

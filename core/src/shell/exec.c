@@ -1487,26 +1487,61 @@ static int exec_builtin_readonly(shell_ctx_t *sh, int argc, char **argv)
 
 static int exec_builtin_cd(shell_ctx_t *sh, int argc, char **argv)
 {
+    /* POSIX: cd [-L|-P] [directory | -]
+     *
+     * `--` (end of options) was not handled at all, so `cd -- "$dir"` tried to
+     * chdir("--") and failed with "--: No such file or directory". That is the
+     * idiom for a directory that might begin with a dash, and modernish's
+     * bootstrap uses it -- so modernish could not start.
+     *
+     * -L/-P are accepted; silex resolves physically either way (see below).
+     */
+    int i = 1;
+    for (; i < argc; i++) {
+        if (strcmp(argv[i], "--") == 0) { i++; break; }
+        if (strcmp(argv[i], "-L") == 0 || strcmp(argv[i], "-P") == 0) continue;
+        break;                                  /* not an option */
+    }
+
     const char *dir;
-    if (argc < 2) {
+    int print_dir = 0;
+
+    if (i >= argc) {
         dir = vars_get(&sh->vars, "HOME");
-        if (!dir) {
+        if (!dir || !*dir) {
             fprintf(stderr, "silex: cd: HOME not set\n");
             return 1;
         }
+    } else if (strcmp(argv[i], "-") == 0) {
+        /* cd - : switch to OLDPWD and echo it, per POSIX. */
+        dir = vars_get(&sh->vars, "OLDPWD");
+        if (!dir || !*dir) {
+            fprintf(stderr, "silex: cd: OLDPWD not set\n");
+            return 1;
+        }
+        print_dir = 1;
     } else {
-        dir = argv[1];
+        dir = argv[i];
     }
 
+    /* Remember where we were before moving, so `cd -` works next time. */
+    char oldpwd[PATH_MAX];
+    const char *prev = getcwd(oldpwd, sizeof(oldpwd)) ? oldpwd : NULL;
+
     if (chdir(dir) != 0) {
-        perror(dir);
+        fprintf(stderr, "silex: cd: %s: %s\n", dir, strerror(errno));
         return 1;
     }
 
-    /* Update $PWD */
-    char pwd[4096];
-    if (getcwd(pwd, sizeof(pwd)))
+    if (prev)
+        vars_set(&sh->vars, "OLDPWD", prev);
+
+    char pwd[PATH_MAX];
+    if (getcwd(pwd, sizeof(pwd))) {
         vars_set(&sh->vars, "PWD", pwd);
+        if (print_dir)
+            printf("%s\n", pwd);
+    }
 
     return 0;
 }
