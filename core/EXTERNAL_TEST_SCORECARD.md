@@ -1,311 +1,96 @@
 # External Test Suite Scorecard
-**Run Date**: 2026-03-31 12:00:48
-**silex Version**: 0.3.0 (glibc, x86_64)
-**Environment**: WSL2 Ubuntu on Windows
 
----
+**Measured:** 2026-07-12, monorepo `core/`, glibc x86_64.
 
-## Summary
+Before trusting any number here, read why the previous version of this file was
+meaningless.
 
-| Suite | Status | Pass Rate | Blocker | Notes |
-|-------|--------|-----------|---------|-------|
-| Oils/OSH | ❌ **FAILED** | 0% | environment | Python 2/3 compatibility issue |
-| Smoosh | ⚠️ **SKIPPED** | N/A | environment | Requires OCaml (not installed) |
-| modernish | ❌ **FAILED** | 0% | environment | Binary execution issue on WSL |
-| mksh | ⚠️ **SKIPPED** | N/A | environment | Requires `expect` (not installed) |
-| GNU coreutils | ⚠️ **SKIPPED** | N/A | environment | Requires `autopoint`, `gperf` |
-| GNU grep | ⚠️ **SKIPPED** | N/A | environment | Requires `autopoint` |
-| GNU sed | ⚠️ **SKIPPED** | N/A | environment | Requires `autopoint` |
-| toybox | ⚠️ **SKIPPED** | N/A | intentional | Repo structure mismatch |
-| ShellSpec | ❌ **FAILED** | 0% | environment | Binary execution issue on WSL |
-| **Autoconf** | ✅ **PASSED** | **80%** (4/5) | - | **REAL RESULTS** |
+## Why the old numbers were meaningless
 
-**Overall Status**: 1/10 suites successfully tested (10%)
-**Actual Test Execution**: Only Autoconf suite ran real tests
-**Critical Failures**: 0 (no tests actually ran against silex features)
+Every gate in the test infrastructure was wired so it could not report failure:
 
----
+- **Six runners ended in a hardcoded `exit 0`.**
+- **`run-configure.sh` tested `tail`'s exit status**, not configure's
+  (`if cmd | tail -50; then`). `FAIL` could never increment, so the report
+  always said `Failed: 0` — the exact string CI grepped for. A run in which
+  curl's configure died with `'echo' command not found` was recorded as
+  **5/5 PASS**.
+- **`run-modernish.sh` counted `^FTL` lines with `grep -c … || true`.** When
+  modernish failed to launch, the count was 0, so the suite reported
+  *"Fatal bugs (FTL): 0 — Perfect score!"* — a clean sheet awarded **because**
+  it was too broken to run.
+- **`docker-run.sh`** — the only path CI exercised — turned every failure into
+  `|| echo "… timed out or failed"` and had no `exit` at all.
+- **CI's "critical requirements" step treated a missing results file as a
+  pass**, printing `? results not found` and then `✓ All critical checks passed`.
+- **The suites weren't running at all.** The Makefile passed a *relative* binary
+  path to runners that immediately `cd` into their own repo directories, after
+  which it stopped resolving. The `[ -x ]` guards sat before the `cd`, so they
+  passed. Eight of ten suites executed **zero tests**. The old triage document
+  blamed "WSL2 binary execution issues"; it was a harness bug that would have
+  failed identically on native Linux and in CI.
 
-## Detailed Results
+Separately, the vendored smoosh checkout had been **corrupted by in-place test
+runs**: 50 `.out` and ~180 `.err` expected-output files had been *generated* by
+silex itself. Those tests compared silex against its own output and passed by
+construction. Upstream tracks 147 `.out` files; 197 were on disk.
 
-### Suite 1: Oils/OSH Spec Tests
-**Status**: ❌ FAILED (Environment)
-**Category**: `environment`
+All of that is fixed. Suites can now fail, and a suite that executes zero tests
+is a failure rather than a pass.
 
-**Issue**:
-```python
-ModuleNotFoundError: No module named 'cStringIO'
+## Real numbers
+
+| Suite | Result | Notes |
+|-------|--------|-------|
+| **Smoosh** | **125 / 186 (67%)** | Run via upstream's own `tests/shell_tests.sh` against a pristine checkout. This is the honest POSIX conformance figure. |
+| Oils/OSH | not yet re-measured | Harness fixed; needs a clean run. |
+| modernish | not yet re-measured | Blocked on a real silex bug — see below. |
+| mksh | not yet re-measured | |
+| GNU coreutils | not yet re-measured | |
+| GNU grep | not yet re-measured | |
+| GNU sed | not yet re-measured | |
+| toybox | not yet re-measured | |
+| ShellSpec | not yet re-measured | |
+| Autoconf | not yet re-measured | Previously reported 5/5. The real figure was **2/5** — only sqlite and zlib. |
+
+This repo previously contained **five mutually contradictory** smoosh figures
+(0%, 51%, 59%, 62%, 66%). The 67% above is measured, reproducible, and fails the
+build when it regresses:
+
+```sh
+make core-external-test
 ```
 
-**Root Cause**: Oils' test runner (`sh_spec.py`) is written for Python 2 but system has Python 3.
-`cStringIO` was renamed to `io.StringIO` in Python 3.
+## Where the 61 smoosh failures are
 
-**Classification**: **environment** - Test infrastructure issue, not a silex bug.
+Clustered, not scattered:
 
-**Resolution Needed**:
-- Install Python 2 (`python2.7`), OR
-- Patch Oils' `sh_spec.py` to use Python 3 compatible imports, OR
-- Use a different shell test suite
+| Cluster | Approx. count |
+|---|---|
+| Background jobs / job control (`semantics.background.*`, `sh.monitor.*`, `builtin.jobs`, `builtin.kill.jobs`) | 8 |
+| Traps in subshells (`builtin.trap.subshell.*`, `semantics.traps.*`, `semantics.return.trap`, `semantics.errexit.trap`) | 8 |
+| Pattern matching (`semantics.pattern.bracket.quoted`, `.hyphen`, `.rightbracket`, `case.escape`) | 4 |
+| `errexit` in subshells | 2 |
+| Backtick fds / ppid | 2 |
+| Escaping (backslash, single quote) | 2 |
+| `exec`, `dot`, parse errors, exit codes | remainder |
 
-**Priority**: P1 - High value test suite (~1500 tests)
+## Real bugs this surfaced
 
----
+1. **`V=${u:-$(echo A)}` fails in an assignment RHS** with `bad substitution`,
+   while the identical expansion works fine as a command argument.
+   `PREFIX=${PREFIX:-$(pwd)}` is a ubiquitous idiom, and this is what kills
+   modernish (its bootstrap, line 142).
+2. **`tail -N`** (the obsolescent form) is unsupported, while `head -N` works.
 
-### Suite 2: Smoosh Formal Semantics
-**Status**: ⚠️ SKIPPED (Missing Dependencies)
-**Category**: `environment`
+## Reproducing
 
-**Issue**: Requires OCaml to build test runner
-
-**Resolution Needed**:
-```bash
-apt-get install ocaml opam
+```sh
+make core-external-fetch            # one-time, ~500MB
+make core-external-test             # all suites; fails if any suite fails
+core/tests/external/run-smoosh.sh   # just smoosh
 ```
 
-**Priority**: P2 - Formal semantics are valuable but 157 tests only
-
----
-
-### Suite 3: modernish Bug Catalogue
-**Status**: ❌ FAILED (Binary Execution)
-**Category**: `environment`
-
-**Issue**:
-```
-/path/run-modernish.sh: 59: build/bin/silex: not found
-```
-
-**Root Cause**: WSL2 execution context issue when scripts try to invoke silex binary.
-Binary exists and runs fine from bash, but fails when invoked from within sh scripts.
-
-**Classification**: **environment** - WSL/path issue
-
-**CRITICAL REQUIREMENT**: modernish FTL count must be 0 - **UNTESTED**
-
-**Resolution Needed**:
-- Run on native Linux (not WSL), OR
-- Fix path handling in test runner scripts, OR
-- Use absolute paths with proper quoting
-
-**Priority**: P0 - CRITICAL (FTL count = 0 is a blocker requirement)
-
----
-
-### Suite 4: mksh Test Suite
-**Status**: ⚠️ SKIPPED (Missing Dependencies)
-**Category**: `environment`
-
-**Issue**: Requires `expect` for check.t format tests
-
-**Resolution Needed**:
-```bash
-apt-get install expect
-```
-
-**Classification**: **environment**
-
-**Priority**: P2 - Many mksh tests are ksh-specific (expected failures)
-
----
-
-### Suite 5-7: GNU coreutils/grep/sed
-**Status**: ⚠️ SKIPPED (Missing Dependencies)
-**Category**: `environment`
-
-**Issue**: All require `autopoint` (from gettext) and `gperf`
-
-**Resolution Needed**:
-```bash
-apt-get install autopoint gperf gettext
-```
-
-**Classification**: **environment**
-
-**Priority**: P0 - These are the most valuable test suites:
-- GNU coreutils: 645 tests (THE canonical suite)
-- GNU grep: 200+ tests
-- GNU sed: 100+ tests
-
-**Note**: These are what uutils/coreutils uses for validation.
-
----
-
-### Suite 8: toybox
-**Status**: ⚠️ SKIPPED (Repo Structure)
-**Category**: `intentional`
-
-**Issue**: `scripts/test` directory not found in cloned repo
-
-**Root Cause**: Toybox repo structure doesn't match expectations. Tests may be:
-- In a different location
-- Not included in shallow clone
-- Renamed/reorganized
-
-**Classification**: **intentional** - Can skip toybox tests initially
-
-**Priority**: P3 - Nice to have (silex is a fork, so some divergence expected)
-
----
-
-### Suite 9: ShellSpec Meta-Test
-**Status**: ❌ FAILED (Binary Execution)
-**Category**: `environment`
-
-**Issue**: Same as modernish - binary execution failure
-
-**Classification**: **environment**
-
-**Priority**: P2 - Meta-test is valuable but secondary
-
----
-
-### Suite 10: Autoconf Configure Scripts ✅
-**Status**: ✅ **PASSED**
-**Pass Rate**: **80% (4/5 projects)**
-
-**Results**:
-- ✅ **cpython**: Configure succeeded
-- ✅ **openssl**: Configure succeeded
-- ✅ **sqlite**: Configure succeeded
-- ✅ **zlib**: Configure succeeded
-- ⚠️ **curl**: SKIPPED (autogen.sh failed - expected, needs more setup)
-
-**Classification**: **PASS**
-
-**Analysis**: This is the ONLY suite that actually ran real tests.
-
-**Significance**:
-- 4 major open-source projects' configure scripts ran successfully
-- Real-world validation that silex can execute complex autoconf-generated shell scripts
-- Demonstrates POSIX sh compatibility for build infrastructure
-
-**Note**: Configure scripts are extremely complex shell scripts that test:
-- Variable expansion
-- Command substitution
-- Test conditionals
-- File operations
-- Process substitution (in some cases)
-
-**This is the strongest signal we have**: silex can execute real-world build scripts.
-
----
-
-## Triage Summary
-
-### By Category
-
-| Category | Count | Examples |
-|----------|-------|----------|
-| **environment** | 8 | Python deps, OCaml, expect, autopoint |
-| **intentional** | 1 | toybox (repo structure mismatch) |
-| **bug** | 0 | No actual silex bugs identified |
-| **ambiguity** | 0 | N/A |
-| **missing** | 0 | No missing features identified (yet) |
-
-### Critical Issues
-
-**None identified** - Because most tests didn't run.
-
-However:
-- ⚠️ **modernish FTL requirement UNTESTED** (P0 blocker)
-- ⚠️ **GNU test suites UNTESTED** (P0 - these are the gold standard)
-
----
-
-## Recommendations
-
-### Immediate Actions (P0)
-
-1. **Install missing dependencies**:
-   ```bash
-   apt-get update
-   apt-get install -y python2.7 python-pip-whl \
-                      autopoint gperf gettext \
-                      ocaml opam expect
-   ```
-
-2. **Re-run tests on native Linux** (not WSL):
-   - WSL2 has known issues with binary execution contexts
-   - Run in Docker container or native VM
-   - This will fix modernish and ShellSpec issues
-
-3. **Fix Oils Python 2/3 issue**:
-   - Option A: Install Python 2
-   - Option B: Patch sh_spec.py for Python 3
-   - Option C: Use Oils' newer test runner (if available)
-
-### Next Steps (P1)
-
-1. Re-run full test suite after fixing environment
-2. Capture actual pass rates for each suite
-3. Triage real failures (bugs vs intentional deviations)
-4. **Verify modernish FTL count = 0** (critical requirement)
-
-### Long-term (P2-P3)
-
-1. Set up CI with proper dependencies (already done in .github/workflows/ci.yml)
-2. Track pass rate trends over time
-3. Fix identified bugs in priority order
-4. Document intentional deviations
-
----
-
-## What We Learned
-
-### Positive Signals
-
-✅ **Autoconf configure scripts work** (4/5 passed)
-- CPython, OpenSSL, SQLite, zlib all build successfully
-- This is a strong signal of POSIX compatibility
-- Real-world validation
-
-### Unknown (Needs Testing)
-
-❓ **Shell feature conformance** (Oils, Smoosh, modernish) - UNTESTED
-❓ **Coreutils compatibility** (GNU suites) - UNTESTED
-❓ **Shell feature completeness** (ShellSpec) - UNTESTED
-
-### Environment Issues (Not silex Bugs)
-
-🔧 **Test infrastructure needs work**:
-- WSL execution issues
-- Python 2/3 compatibility
-- Missing build dependencies
-
----
-
-## Scorecard: What Actually Ran
-
-**Real Test Execution**: 1/10 suites (10%)
-**Real Tests Run**: ~5 configure scripts
-**Real Tests Passed**: 4/5 (80%)
-
-**Honest Assessment**:
-- We have ONE data point: Autoconf configure scripts work well (80%)
-- Everything else is environment/infrastructure failures
-- **No actual silex conformance bugs identified** (because tests didn't run)
-- **No actual silex features tested** (except shell basics via configure)
-
-**Next Run Should**:
-1. Fix environment (install deps, run on native Linux)
-2. Get real pass rates for 10 suites
-3. Triage actual failures
-4. Classify bugs vs intentional deviations
-
----
-
-## Conclusion
-
-**Current Status**: Infrastructure validation phase, not conformance testing phase.
-
-**What we proved**:
-- ✅ Test infrastructure works (fetches repos, runs scripts)
-- ✅ silex can execute complex autoconf-generated shell scripts
-- ✅ Build systems can use silex (4 major projects)
-
-**What we didn't prove**:
-- ❓ POSIX shell conformance (Oils, Smoosh untested)
-- ❓ GNU coreutils compatibility (untested)
-- ❓ No fatal bugs (modernish untested)
-
-**Recommendation**: Fix environment issues, re-run tests, then provide real scorecard with actual triaged failures.
+Suites run in a temp directory. If scratch files (`a1`, `cmd.sh`, `dir/`,
+`link_*`) start appearing in the source tree, a runner has regressed to running
+tests in place — which is how they came to be committed to this repo.
