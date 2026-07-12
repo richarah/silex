@@ -66,4 +66,16 @@ void shell_free(shell_ctx_t *sh);
 /* Signal handler installed by trap built-in */
 void shell_signal_handler(int sig);
 
+/* Strict integer parse for user-supplied numbers (exit codes, signal numbers,
+ * file descriptors, shift/break/continue counts).
+ *
+ * atoi() returns 0 for anything it cannot parse and has no way to report an
+ * error, so `exit abc` exited 0 -- a build step that failed reporting success.
+ * It also cannot detect overflow.
+ *
+ * Returns 0 and stores the value on success; returns -1 on a trailing garbage,
+ * empty string, or out-of-range input. Rejects values outside [min, max].
+ */
+int sh_parse_int(const char *s, int min, int max, int *out);
+
 #endif

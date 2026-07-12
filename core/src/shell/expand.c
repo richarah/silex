@@ -325,7 +325,14 @@ static char *expand_braced(shell_ctx_t *sh, const char *body)
     }
 
     size_t namelen = (size_t)(p - body);
-    char varname[namelen + 1];
+    /* Was a VLA sized by the name length in ${...}, i.e. by the input. Names
+     * are short in practice, so use a fixed buffer and reject anything absurd
+     * rather than putting an attacker-controlled size on the stack. */
+    char varname[256];
+    if (namelen >= sizeof(varname)) {
+        fprintf(stderr, "silex: variable name too long\n");
+        return NULL;
+    }
     memcpy(varname, body, namelen);
     varname[namelen] = '\0';
 
@@ -501,13 +508,24 @@ static char *expand_braced(shell_ctx_t *sh, const char *body)
         strbuf_t sb;
         sb_init(&sb, 128);
         size_t slen = strlen(s);
+
+        /* This used to declare `char tmp[mlen + 1]` inside the inner loop -- a
+         * variable-length array sized by the remaining length of the subject.
+         * A large variable therefore put an unbounded allocation on the stack,
+         * once per iteration, with no way to detect failure. Allocate the
+         * scratch buffer once on the heap instead. */
+        char *tmp = malloc(slen + 1);
+        if (!tmp) {
+            sb_free(&sb);
+            return arena_strdup(&sh->scratch_arena, s);
+        }
+
         size_t i = 0;
         int replaced = 0;
         while (i <= slen) {
             /* Try matching at position i */
             int matched = 0;
             for (size_t mlen = slen - i; ; mlen--) {
-                char tmp[mlen + 1];
                 memcpy(tmp, s + i, mlen);
                 tmp[mlen] = '\0';
                 if (fnmatch(pat_buf, tmp, 0) == 0) {
@@ -530,6 +548,7 @@ static char *expand_braced(shell_ctx_t *sh, const char *body)
                 break;
             }
         }
+        free(tmp);
         char *r = arena_strdup(&sh->scratch_arena, sb_str(&sb));
         sb_free(&sb);
         return r;
@@ -1311,11 +1330,10 @@ static void expand_into(shell_ctx_t *sh, const char *word, strbuf_t *out,
                 const char *v = sh_getvar(sh, name);
                 if (v) sb_append(out, v);
                 else if (sh->opt_u) {
-                    /* set -u: error on unset var */
-                    char tmp[nlen + 1];
-                    memcpy(tmp, start, nlen);
-                    tmp[nlen] = '\0';
-                    fprintf(stderr, "silex: %s: unbound variable\n", tmp);
+                    /* set -u: error on unset var. `name` is already the
+                     * interned, NUL-terminated name -- the VLA copy that used
+                     * to be here was redundant AND sized by input. */
+                    fprintf(stderr, "silex: %s: unbound variable\n", name);
                     exit(1);
                 }
                 continue;

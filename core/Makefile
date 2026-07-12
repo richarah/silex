@@ -47,12 +47,20 @@ endif
 
 # --- Flags --------------------------------------------------------------------
 CFLAGS_COMMON  = -std=c11 -Wall -Wextra -Werror -pedantic \
+                 -Wshadow -Wvla -Wpointer-arith \
                  -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE \
                  -DSILEX_VERSION=\"$(VERSION)\" \
                  -fstack-protector-strong \
+                 -fstack-clash-protection \
                  $(LIBC_DEFINE)
 
-CFLAGS_RELEASE = $(CFLAGS_COMMON) \
+# _FORTIFY_SOURCE needs optimisation to do anything, so it cannot go in
+# CFLAGS_COMMON (the debug build is -O0). It is the highest-value flag available
+# given ~166 fixed-size stack buffers and ~81 memcpy calls: it turns a range of
+# buffer overflows into a clean abort instead of memory corruption.
+CFLAGS_FORTIFY = -D_FORTIFY_SOURCE=2
+
+CFLAGS_RELEASE = $(CFLAGS_COMMON) $(CFLAGS_FORTIFY) \
                  -O2 $(LTO_FLAG) -fPIE \
                  $(MARCH_FLAG) \
                  -ffunction-sections \

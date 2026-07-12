@@ -321,3 +321,27 @@ void shell_free(shell_ctx_t *sh)
     if (g_trap_shell == sh)
         g_trap_shell = NULL;
 }
+
+/* -------------------------------------------------------------------------
+ * sh_parse_int: strict integer parse for user-supplied numbers.
+ * See shell.h for why atoi() is not good enough.
+ * ------------------------------------------------------------------------- */
+int sh_parse_int(const char *s, int min, int max, int *out)
+{
+    if (!s || !*s)
+        return -1;
+
+    /* Leading whitespace is accepted (strtol does), trailing garbage is not. */
+    errno = 0;
+    char *end = NULL;
+    long v = strtol(s, &end, 10);
+
+    if (end == s)          return -1;   /* no digits at all */
+    while (*end == ' ' || *end == '\t') end++;
+    if (*end != '\0')      return -1;   /* trailing garbage: "12abc" */
+    if (errno == ERANGE)   return -1;   /* out of long range */
+    if (v < (long)min || v > (long)max) return -1;
+
+    *out = (int)v;
+    return 0;
+}

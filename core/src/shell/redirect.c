@@ -8,6 +8,7 @@
 #include "shell.h"
 #include "expand.h"
 
+#include <limits.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdlib.h>
@@ -109,7 +110,14 @@ int redirect_apply(struct shell_ctx *sh, redir_t *redirs, redirect_ctx_t *ctx)
                         return -1;
                     }
                 }
-                int src = atoi(target);
+                /* A file descriptor must be a real fd, not whatever atoi()
+                 * made of the string: `cmd <&abc` used to dup2(0, fd). */
+                int src;
+                if (sh_parse_int(target, 0, 1023, &src) != 0) {
+                    fprintf(stderr, "silex: %s: bad file descriptor\n", target);
+                    ctx->error = 1;
+                    return -1;
+                }
                 if (dup2(src, fd) < 0) {
                     /* Silently fail for EBADF (fd not open) - POSIX behavior */
                     if (errno != EBADF)
@@ -138,7 +146,14 @@ int redirect_apply(struct shell_ctx *sh, redir_t *redirs, redirect_ctx_t *ctx)
                         return -1;
                     }
                 }
-                int src = atoi(target);
+                /* A file descriptor must be a real fd, not whatever atoi()
+                 * made of the string: `cmd <&abc` used to dup2(0, fd). */
+                int src;
+                if (sh_parse_int(target, 0, 1023, &src) != 0) {
+                    fprintf(stderr, "silex: %s: bad file descriptor\n", target);
+                    ctx->error = 1;
+                    return -1;
+                }
                 if (dup2(src, fd) < 0) {
                     /* Silently fail for EBADF (fd not open) - POSIX behavior */
                     if (errno != EBADF)

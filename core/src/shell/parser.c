@@ -791,11 +791,11 @@ static node_t *parse_command(parser_t *p)
             redir_t  *rhead = NULL;
             redir_t **rtail = &rhead;
             for (;;) {
-                token_t t = peek(p);
+                token_t rt = peek(p);  /* not the outer t: -Wshadow */
                 int fd = -1;
-                if (is_redir_op(t.type)) {
+                if (is_redir_op(rt.type)) {
                     /* direct redirect op: use default fd */
-                } else if (t.type == TOK_WORD) {
+                } else if (rt.type == TOK_WORD) {
                     /* might be io-number: consume and check next */
                     token_t w = consume(p);
                     fd = try_io_number(w.text, peek(p).type);

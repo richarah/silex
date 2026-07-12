@@ -1300,8 +1300,15 @@ static int exec_builtin_false(shell_ctx_t *sh, int argc, char **argv)
 static int exec_builtin_exit(shell_ctx_t *sh, int argc, char **argv)
 {
     int code = sh->last_exit;
-    if (argc >= 2)
-        code = atoi(argv[1]);
+    if (argc >= 2) {
+        /* atoi() returned 0 for garbage, so `exit abc` exited 0 -- a failing
+         * build step reporting success. POSIX: exit status is mod 256. */
+        if (sh_parse_int(argv[1], INT_MIN, INT_MAX, &code) != 0) {
+            fprintf(stderr, "silex: exit: %s: numeric argument required\n", argv[1]);
+            code = 2;
+        }
+        code &= 0xff;
+    }
     /* Fire EXIT trap (traps[0]) before exiting; clear first to prevent re-entry */
     const char *exit_action = sh->traps[0].action;
     if (exit_action != SHELL_TRAP_DEFAULT && exit_action[0] != '\0') {
@@ -1549,7 +1556,10 @@ static int exec_builtin_cd(shell_ctx_t *sh, int argc, char **argv)
 static int exec_builtin_shift(shell_ctx_t *sh, int argc, char **argv)
 {
     int n = 1;
-    if (argc >= 2) n = atoi(argv[1]);
+    if (argc >= 2 && sh_parse_int(argv[1], 0, INT_MAX, &n) != 0) {
+        fprintf(stderr, "silex: shift: %s: numeric argument required\n", argv[1]);
+        return 1;
+    }
     if (n < 0 || n > sh->positional_n) {
         fprintf(stderr, "silex: shift: %d: too many\n", n);
         return 1;
@@ -1620,8 +1630,12 @@ static int exec_builtin_trap(shell_ctx_t *sh, int argc, char **argv)
     const char *trap_action = action;
 
     for (int i = 2; i < argc; i++) {
-        int sig = atoi(argv[i]);
-        if (sig == 0 && argv[i][0] != '0') {
+        /* A signal number must be a valid signal, not whatever atoi() made of
+         * the string. Fall through to the name lookup when it is not numeric. */
+        int sig = 0;
+        if (sh_parse_int(argv[i], 0, 64, &sig) != 0)
+            sig = -1;
+        if (sig < 0) {
             /* Try signal name */
             if (strcmp(argv[i], "EXIT") == 0) sig = 0;
             else if (strcmp(argv[i], "INT") == 0)  sig = SIGINT;
@@ -1977,7 +1991,13 @@ static int exec_builtin_local(shell_ctx_t *sh, int argc, char **argv)
 static int exec_builtin_return(shell_ctx_t *sh, int argc, char **argv)
 {
     int code = sh->last_exit;
-    if (argc >= 2) code = atoi(argv[1]);
+    if (argc >= 2) {
+        if (sh_parse_int(argv[1], INT_MIN, INT_MAX, &code) != 0) {
+            fprintf(stderr, "silex: return: %s: numeric argument required\n", argv[1]);
+            code = 2;
+        }
+        code &= 0xff;
+    }
     sh->last_exit = code;
     return FLOW_RETURN;
 }
@@ -2140,7 +2160,11 @@ static int exec_builtin_source(shell_ctx_t *sh, int argc, char **argv)
 
 static int exec_builtin_break(shell_ctx_t *sh, int argc, char **argv)
 {
-    int n = (argc >= 2) ? atoi(argv[1]) : 1;
+    int n = 1;
+    if (argc >= 2 && sh_parse_int(argv[1], 1, INT_MAX, &n) != 0) {
+        fprintf(stderr, "silex: break: %s: numeric argument required\n", argv[1]);
+        return 1;
+    }
     if (n < 1) n = 1;
     /* POSIX: break outside of a loop should be silently ignored */
     if (sh->loop_depth == 0) return 0;
@@ -2150,7 +2174,11 @@ static int exec_builtin_break(shell_ctx_t *sh, int argc, char **argv)
 
 static int exec_builtin_continue(shell_ctx_t *sh, int argc, char **argv)
 {
-    int n = (argc >= 2) ? atoi(argv[1]) : 1;
+    int n = 1;
+    if (argc >= 2 && sh_parse_int(argv[1], 1, INT_MAX, &n) != 0) {
+        fprintf(stderr, "silex: continue: %s: numeric argument required\n", argv[1]);
+        return 1;
+    }
     if (n < 1) n = 1;
     /* POSIX: continue outside of a loop should be silently ignored */
     if (sh->loop_depth == 0) return 0;
@@ -2336,7 +2364,10 @@ static int exec_builtin_getopts(shell_ctx_t *sh, int argc, char **argv)
 
     /* Get OPTIND (1-based; default 1) */
     const char *optind_str = vars_get(&sh->vars, "OPTIND");
-    int optind = optind_str ? atoi(optind_str) : 1;
+    /* OPTIND is user-settable (OPTIND=abc), so it is untrusted. */
+    int optind = 1;
+    if (optind_str && sh_parse_int(optind_str, 1, INT_MAX, &optind) != 0)
+        optind = 1;
     if (optind < 1) optind = 1;
 
     /* Build args array: argv[3..] if given, else sh->positional */
@@ -2352,7 +2383,9 @@ static int exec_builtin_getopts(shell_ctx_t *sh, int argc, char **argv)
 
     /* OPTPOS: sub-index within current arg (stored as "__OPTPOS" internal var) */
     const char *pos_str = vars_get(&sh->vars, "__OPTPOS");
-    int optpos = pos_str ? atoi(pos_str) : 1;
+    int optpos = 1;
+    if (pos_str && sh_parse_int(pos_str, 1, INT_MAX, &optpos) != 0)
+        optpos = 1;
     if (optpos < 1) optpos = 1;
 
     /* Check bounds */
