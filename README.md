@@ -61,21 +61,13 @@ SHA256 pinned in the Dockerfile; a mismatch fails the build.
 compilation). Not Wolfi (rolling, packages deleted after 12
 months).
 
-That covers the ~20 tools it names. It does **not** cover the
-whole image, and the difference matters:
+Packages from `silex-packages` are apk-signature-verified
+against the key in `sdk/keys/`. Two things still are not
+pinned, and it's worth being straight about them:
 
 - the `debian:bookworm-slim` base is a mutable tag, not a digest
 - the Debian packages pulled in at build time (gcc, cmake,
   ca-certificates, …) are unpinned
-- the ~24 runtime libraries installed into the final image come
-  from a personal apk repo with **`--allow-untrusted`** — the
-  image ships a signing key and then disables the check it
-  exists to perform. Those packages have no integrity guarantee
-  beyond TLS.
-
-That last one is the weakest link in the chain, and it is
-exactly the surface the "pinned SHA256" claim implies is
-covered. See `sdk/scripts/apt-shim`.
 
 ---
 

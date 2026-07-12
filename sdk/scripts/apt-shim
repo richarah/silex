@@ -59,31 +59,34 @@ case "$_CMD" in
             echo "silex apt-shim: no packages specified" >&2
             exit 1
         fi
-        # SECURITY: --allow-untrusted disables the signature check that
-        # /etc/apk/keys/ exists to perform. The image ships a signing key
-        # (keys/*.rsa.pub) and then declines to use it, so packages from
-        # richarah.github.io/silex-packages are installed with no integrity
-        # guarantee beyond TLS to GitHub Pages. A repo compromise, a Pages
-        # misconfiguration, or an MITM that can terminate TLS installs arbitrary
-        # root-owned binaries into every user's build. That is strictly weaker
-        # than the stock Debian apt this shim replaces.
+        # Packages are signature-verified against /etc/apk/keys/silex-packages.rsa.pub.
         #
-        # This cannot simply be deleted: it is not currently possible to confirm
-        # the published packages are signed (Pages is not enabled on the
-        # silex-packages repo, so the APKINDEX is unreachable). Sign the index,
-        # confirm apk verifies it against the shipped key, then remove every
-        # --allow-untrusted here and in dockerfiles/.
-        echo "silex apt-shim: apk add --no-cache --allow-untrusted ${_pkgs}" >&2
+        # Every apk call here used to pass --allow-untrusted, which disabled that
+        # check entirely. The reason turned out to be two filename bugs, not a
+        # missing signature:
+        #
+        #   1. The index IS signed, as .SIGN.RSA.silex-packages.rsa.pub -- but the
+        #      image installed the key as -69c32c6d.rsa.pub. apk looks the key up
+        #      BY THE NAME IN THE SIGNATURE, so it never found it and reported
+        #      "UNTRUSTED signature". Same key, wrong filename.
+        #   2. Packages were published as <name>-<ver>.<arch>.apk, while apk derives
+        #      the filename from the index as <name>-<ver>.apk (the arch comes from
+        #      the directory). Every package 404'd.
+        #
+        # Both are fixed, so verification works and --allow-untrusted is gone.
+        # Do not reintroduce it: it would silently accept arbitrary root-owned
+        # binaries from anyone who could MITM or compromise the repo.
+        echo "silex apt-shim: apk add --no-cache ${_pkgs}" >&2
         # shellcheck disable=SC2086
         if [ -f "$NOSYNC_SO" ]; then
-            env LD_PRELOAD="${LD_PRELOAD:+$LD_PRELOAD:}$NOSYNC_SO" apk add --no-cache --allow-untrusted ${_pkgs}
+            env LD_PRELOAD="${LD_PRELOAD:+$LD_PRELOAD:}$NOSYNC_SO" apk add --no-cache ${_pkgs}
         else
-            apk add --no-cache --allow-untrusted ${_pkgs}
+            apk add --no-cache ${_pkgs}
         fi
         ;;
     update)
         # Match Debian apt-get update behaviour: warn on unavailable repos but exit 0.
-        apk update --allow-untrusted || true
+        apk update || true
         ;;
     upgrade)
         apk upgrade

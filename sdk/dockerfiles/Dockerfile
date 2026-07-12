@@ -76,7 +76,7 @@ RUN mkdir -p /src /build /out/bin /out/lib /out/share
 
 # curl is not pre-installed in silex:slim; install via apk.
 # LD_LIBRARY_PATH ensures Wolfi's /usr/lib/libcurl.so.4 is found first.
-RUN apk update --allow-untrusted && apk add --allow-untrusted curl
+RUN apk update && apk add curl
 ENV LD_LIBRARY_PATH="/usr/lib"
 
 # ============================================================================
@@ -380,7 +380,7 @@ RUN set -ex \
 # Static libs come from Wolfi's -dev + -static packages.
 # ============================================================================
 RUN set -ex \
-    && apk add --allow-untrusted --no-cache openssl-dev openssl-libs-static \
+    && apk add --no-cache openssl-dev openssl-libs-static \
                           zlib-dev zlib-static \
                           zstd-dev zstd-static \
                           make \
@@ -422,7 +422,7 @@ ARG TARGETARCH
 
 # curl is not pre-installed in silex:slim; install via apk.
 # Fetch repo index, then install curl for downloading Rust toolchain.
-RUN apk update --allow-untrusted && apk add --allow-untrusted curl
+RUN apk update && apk add curl
 ENV LD_LIBRARY_PATH="/usr/lib"
 
 RUN mkdir -p /src /out/bin
@@ -611,7 +611,7 @@ RUN mkdir -p /etc/apk/keys /etc/apk/protected_paths.d /etc/apk/commit_hooks.d \
 # through test failures. List includes all common development library
 # dependencies (SSL, compression, databases, UI, interpreters, etc.).
 # ============================================================================
-RUN apk add --allow-untrusted --no-cache \
+RUN apk add --no-cache \
     libssl3 \
     libcurl4 \
     libreadline8 \
