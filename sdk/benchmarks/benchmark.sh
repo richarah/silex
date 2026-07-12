@@ -13,18 +13,29 @@ set -e
 RUNS=4   # 4 runs per image per project; drop highest, average remaining 3
 
 # Run command in container, print elapsed ms to stdout.
-# Returns 0 always; failed runs produce a measurement of time-to-fail
-# (typically <1s, visually distinct from successful multi-second runs).
+#
+# This used to end in `|| true` and time the failure, on the theory that a
+# failed run is "visually distinct" because it is fast. It is not distinct to
+# the arithmetic downstream: a silex run that dies immediately (say, because a
+# package is missing from silex-packages) is recorded as ~1s and averaged in as
+# a 3x win over a working ubuntu run. Every number in the README table was
+# unfalsifiable for this reason. A benchmark that cannot fail cannot measure.
 _time_run() {
     _img="$1"
     _cmd="$2"
     _t0=$(date +%s%3N)
-    docker run --rm "$_img" sh -c "$_cmd" >/dev/null 2>&1 || true
+    if ! docker run --rm "$_img" sh -c "$_cmd" >/dev/null 2>&1; then
+        echo "BENCHMARK FAILED: '$_img' could not run the workload." >&2
+        echo "  cmd: $_cmd" >&2
+        echo "  A failed run is not a fast run. Refusing to report a time." >&2
+        return 1
+    fi
     _t1=$(date +%s%3N)
     printf '%d' $((_t1 - _t0))
 }
 
 # bench LABEL IMAGE CMD — prints avg ms (drop-highest of RUNS runs).
+# Returns non-zero if any run failed; the caller must not report a time.
 bench() {
     _label="$1"
     _image="$2"
@@ -32,7 +43,10 @@ bench() {
     _results=""
     _i=0
     while [ "$_i" -lt "$RUNS" ]; do
-        _dt=$(_time_run "$_image" "$_cmd")
+        if ! _dt=$(_time_run "$_image" "$_cmd"); then
+            echo "  $_label: aborting -- a run failed, so there is no time to report." >&2
+            return 1
+        fi
         _results="$_results $_dt"
         printf '  %s r%d: %dms\n' "$_label" "$((_i+1))" "$_dt" >&2
         _i=$((_i + 1))

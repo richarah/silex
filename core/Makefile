@@ -358,7 +358,9 @@ test: $(TARGET) $(TEST_CHARCLASS) $(TEST_LINESCAN) $(TEST_REGEX)
 	@echo "--- test_regex (C) ---"
 	@$(TEST_REGEX) && echo "PASS: test_regex"
 
-check: test
+# check = build + unit tests + the check.sh conformance script.
+# This used to be two separate `check:` rules (one with no recipe), which GNU
+# make silently merged. Adding a recipe to the other would have dropped one.
 
 test-asan: CFLAGS = $(CFLAGS_DEBUG)
 test-asan: LDFLAGS =
@@ -413,7 +415,7 @@ external-test: $(TARGET)
 	    echo "Run: make external-fetch"; \
 	    exit 1; \
 	fi
-	@bash tests/external/run-all.sh $(TARGET)
+	@bash tests/external/run-all.sh $(abspath $(TARGET))
 
 # Fetch external test repositories (one-time setup, ~500MB, ~5-10 min)
 external-fetch:
@@ -439,30 +441,38 @@ external-fetch-docker:
 	    -v $(CURDIR)/tests/external/repos:/silex/tests/external/repos \
 	    silex-test make external-fetch
 
-check: $(TARGET)
+check: $(TARGET) test
 	@sh check.sh
 
-# --- Module build -------------------------------------------------------------
-MODULES_DIR = modules
-MODULES_OUT = build/modules
-MODULE_SRCS = $(wildcard $(MODULES_DIR)/*.c)
-MODULE_SOS  = $(patsubst $(MODULES_DIR)/%.c,$(MODULES_OUT)/%.so,$(MODULE_SRCS))
+# --- Loadable plugin build ----------------------------------------------------
+# These are the .so plugins in modules/, NOT the module subsystem in src/module/.
+#
+# This used to also be called MODULE_SRCS, which silently clobbered the
+# MODULE_SRCS defined at the top of this file (src/module/loader.c and
+# registry.c). Both are recursively expanded, so the last definition won -- and
+# `analyze` and `cppcheck` are defined after this point, so they never saw the
+# dlopen loader at all. The link survived only because $(TARGET)'s prerequisites
+# are expanded at parse time, before this line. Do not name it MODULE_SRCS.
+PLUGINS_DIR = modules
+PLUGINS_OUT = build/modules
+PLUGIN_SRCS = $(wildcard $(PLUGINS_DIR)/*.c)
+PLUGIN_SOS  = $(patsubst $(PLUGINS_DIR)/%.c,$(PLUGINS_OUT)/%.so,$(PLUGIN_SRCS))
 
-modules: $(MODULE_SOS)
+modules: $(PLUGIN_SOS)
 
-$(MODULES_OUT)/%.so: $(MODULES_DIR)/%.c silex_module.h | $(MODULES_OUT)
+$(PLUGINS_OUT)/%.so: $(PLUGINS_DIR)/%.c silex_module.h | $(PLUGINS_OUT)
 	$(CC) -shared -fPIC -O2 -std=c11 -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE \
 	      -I$(SRCDIR) -o $@ $<
 
-$(MODULES_OUT):
-	mkdir -p $(MODULES_OUT)
+$(PLUGINS_OUT):
+	mkdir -p $(PLUGINS_OUT)
 
 install-modules: modules
 	install -d $(DESTDIR)/usr/lib/silex/modules
-	install -m 644 $(MODULES_OUT)/*.so $(DESTDIR)/usr/lib/silex/modules/
+	install -m 644 $(PLUGINS_OUT)/*.so $(DESTDIR)/usr/lib/silex/modules/
 
 clean-modules:
-	rm -rf $(MODULES_OUT)
+	rm -rf $(PLUGINS_OUT)
 
 # --- Fuzz targets -------------------------------------------------------------
 FUZZ_CC    = clang

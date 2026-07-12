@@ -97,15 +97,24 @@ test_configure() {
     # Set CONFIG_SHELL to use silex
     export CONFIG_SHELL="$SILEX"
 
-    # Run configure (with minimal options to speed up)
-    if "$SILEX" ./configure --prefix="$TEST_PREFIX" \
+    # Capture configure's status BEFORE piping. `if cmd | tail; then` tests the
+    # exit status of tail, which is 0 whenever it can write -- so FAIL could
+    # never be incremented and this suite always reported "Failed: 0". CI greps
+    # for exactly that string, which is how a run where curl died with
+    # "'echo' command not found" was still recorded as 5/5 PASS.
+    _cfg_log=$(mktemp)
+    "$SILEX" ./configure --prefix="$TEST_PREFIX" \
         --disable-shared --disable-dependency-tracking \
-        --quiet 2>&1 | tail -50; then
+        --quiet >"$_cfg_log" 2>&1
+    EXIT_CODE=$?
+    tail -50 "$_cfg_log"
+    rm -f "$_cfg_log"
+
+    if [ "$EXIT_CODE" -eq 0 ]; then
         echo ""
         echo "✓ PASS: $project configure succeeded"
         PASS=$((PASS + 1))
     else
-        EXIT_CODE=$?
         echo ""
         echo "✗ FAIL: $project configure failed (exit code: $EXIT_CODE)"
         FAIL=$((FAIL + 1))

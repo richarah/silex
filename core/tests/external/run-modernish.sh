@@ -54,16 +54,29 @@ echo ""
 # --test: run test suite
 # The test suite will detect bugs in the shell
 
-# modernish needs to be run with the shell to test
+# Capture status BEFORE the pipe. `cmd | tee f; EXIT_CODE=$?` captures tee's
+# status, not the shell's.
 RESULT_FILE="/tmp/silex-modernish-results.txt"
-"$SILEX" bin/modernish --test 2>&1 | tee "$RESULT_FILE"
+"$SILEX" bin/modernish --test >"$RESULT_FILE" 2>&1
 EXIT_CODE=$?
+cat "$RESULT_FILE"
 
 echo ""
 echo "=== modernish Test Results ==="
 echo ""
 
-# Parse results for FTL (fatal), BUG, and QRK classifications
+# If modernish never launched, the result file holds an error message rather
+# than a report. `grep -c "^FTL" || true` yields 0 in that case, which used to
+# be reported as "Fatal bugs (FTL): 0 -- Perfect score!" -- i.e. the suite
+# scored a clean sheet precisely BECAUSE it was too broken to run. A total
+# launch failure must not be indistinguishable from a perfect score.
+if ! grep -qE '^(FTL|BUG|QRK|ok|not ok|--- )' "$RESULT_FILE" 2>/dev/null; then
+    echo "ERROR: modernish produced no recognisable test output."
+    echo "It did not run. Exit code was $EXIT_CODE. First 20 lines:"
+    head -20 "$RESULT_FILE" | sed 's/^/  /'
+    exit 1
+fi
+
 FTL_COUNT=$(grep -c "^FTL" "$RESULT_FILE" || true)
 BUG_COUNT=$(grep -c "^BUG" "$RESULT_FILE" || true)
 QRK_COUNT=$(grep -c "^QRK" "$RESULT_FILE" || true)

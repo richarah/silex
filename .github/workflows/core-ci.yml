@@ -74,15 +74,14 @@ jobs:
           sudo apt-get install -y clang clang-tools cppcheck make
       - name: Build (needed for headers)
         run: make
+      # --status-bugs and --error-exitcode exist to make these fail. Both used to
+      # end in `|| true`, which threw that away -- this job could not fail.
       - name: scan-build
         run: |
           make clean
-          scan-build --status-bugs make CC=clang CFLAGS="-std=c11 -Wall -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -DSILEX_VERSION=\\\"0.1.0\\\"" || true
+          scan-build --status-bugs make CC=clang
       - name: cppcheck
-        run: |
-          cppcheck --enable=warning,style --error-exitcode=1 \
-            --suppress=missingIncludeSystem \
-            -I src src/ || true
+        run: make cppcheck
 
   # Job 5: Shellcheck on test scripts
   shellcheck:
@@ -220,37 +219,54 @@ jobs:
           name: external-test-results
           path: core/tests/external/results/
 
+      # A missing results file means the suite did not run. That is a failure,
+      # not a pass. This step used to print "? results not found" and fall
+      # through to "✓ All critical checks passed", so a suite that crashed
+      # before producing output was indistinguishable from a suite that passed.
       - name: Check critical requirements
         run: |
+          set -eu
           echo "Checking critical requirements..."
 
-          # Check 1: modernish FTL count must be 0
-          latest=$(ls -t tests/external/results/modernish-*.txt 2>/dev/null | head -1)
-          if [ -f "$latest" ]; then
-            ftl=$(grep -i 'Fatal bugs (FTL):' "$latest" 2>/dev/null | grep -oE '[0-9]+' | head -1 || echo "unknown")
-            if [ "$ftl" = "0" ]; then
-              echo "✓ modernish FTL count = 0 (PASS)"
-            else
-              echo "✗ BLOCKER: modernish FTL count = $ftl (must be 0)"
+          require_results() {
+            _pattern="$1"
+            _name="$2"
+            _latest=$(ls -t $_pattern 2>/dev/null | head -1 || true)
+            if [ -z "$_latest" ] || [ ! -f "$_latest" ]; then
+              echo "✗ BLOCKER: no $_name results found ($_pattern)."
+              echo "  The suite did not run. That is a failure, not a pass."
               exit 1
             fi
-          else
-            echo "? modernish results not found"
-          fi
+            printf '%s' "$_latest"
+          }
 
-          # Check 2: All configure scripts must pass
-          latest=$(ls -t tests/external/results/configure-*.txt 2>/dev/null | head -1)
-          if [ -f "$latest" ]; then
-            conf_fail=$(grep -i 'Failed:' "$latest" 2>/dev/null | grep -oE '[0-9]+' | head -1 || echo "unknown")
-            if [ "$conf_fail" = "0" ]; then
-              echo "✓ All configure scripts passed (PASS)"
-            else
-              echo "✗ BLOCKER: Configure failures = $conf_fail (must be 0)"
-              exit 1
-            fi
-          else
-            echo "? Configure results not found"
+          # Check 1: modernish fatal-bug count must be 0
+          latest=$(require_results 'tests/external/results/modernish-*.txt' modernish)
+          ftl=$(grep -i 'Fatal bugs (FTL):' "$latest" | grep -oE '[0-9]+' | head -1 || true)
+          if [ -z "$ftl" ]; then
+            echo "✗ BLOCKER: could not read an FTL count from $latest."
+            echo "  modernish almost certainly failed to launch. A missing count is"
+            echo "  not a zero count."
+            exit 1
           fi
+          if [ "$ftl" -ne 0 ]; then
+            echo "✗ BLOCKER: modernish FTL count = $ftl (must be 0)"
+            exit 1
+          fi
+          echo "✓ modernish FTL count = 0"
+
+          # Check 2: every Autoconf configure script must pass
+          latest=$(require_results 'tests/external/results/configure-*.txt' configure)
+          conf_fail=$(grep -i 'Failed:' "$latest" | grep -oE '[0-9]+' | head -1 || true)
+          if [ -z "$conf_fail" ]; then
+            echo "✗ BLOCKER: could not read a failure count from $latest."
+            exit 1
+          fi
+          if [ "$conf_fail" -ne 0 ]; then
+            echo "✗ BLOCKER: configure failures = $conf_fail (must be 0)"
+            exit 1
+          fi
+          echo "✓ All configure scripts passed"
 
           echo ""
           echo "✓ All critical checks passed"

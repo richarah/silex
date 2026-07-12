@@ -70,13 +70,14 @@ run_suite() {
         return
     fi
 
-    # Run suite and capture output
+    # Run suite and capture output.
+    # `if sh "$script" | tee f; then` tests tee's status, not the suite's -- so
+    # exit_code was always 0, PASS always incremented, FAIL never did, and
+    # run-all.sh could not fail. Capture the status, then show the output.
     local start_time=$(date +%s)
-    if sh "$script" 2>&1 | tee "$result_file"; then
-        local exit_code=0
-    else
-        local exit_code=$?
-    fi
+    sh "$script" >"$result_file" 2>&1
+    local exit_code=$?
+    cat "$result_file"
     local end_time=$(date +%s)
     local duration=$((end_time - start_time))
 

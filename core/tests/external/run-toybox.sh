@@ -104,4 +104,11 @@ echo ""
 echo "Result: Tests completed"
 echo ""
 
-exit 0
+# A suite that executed zero tests has not passed -- it has not run. Eight of
+# the ten suites were doing exactly that, and the hardcoded `exit 0` that used
+# to sit here reported every one of them as green.
+if [ "${TOTAL:-0}" -eq 0 ]; then
+    echo "ERROR: no tests were executed. The suite did not run."
+    exit 1
+fi
+[ "${FAIL:-1}" -eq 0 ]

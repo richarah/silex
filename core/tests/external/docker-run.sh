@@ -40,30 +40,46 @@ echo "════════════════════════�
 echo "  Running Test Suites (Parallel Execution)"
 echo "════════════════════════════════════════════════════════════════"
 
+# Every suite invocation used to end in `|| echo "... timed out or failed"`,
+# which turned each failure into a log line and left this script exiting 0. It
+# is the only path CI exercises, so nothing downstream could ever go red.
+#
+# Now each suite's exit status is recorded, and the script fails if any suite
+# failed -- including a suite that produced no output at all.
+STATUS_DIR="$(mktemp -d)"
+trap 'rm -rf "$STATUS_DIR"' EXIT INT TERM
+
+# The suites we expect to have run. A suite with no status file at the end was
+# killed before it could record one -- that counts as a failure, not a pass.
+EXPECTED_SUITES="oils smoosh modernish mksh shellspec gnu-coreutils gnu-grep gnu-sed toybox configure"
+
+# run <name> <timeout> <script> <result-file>
+#
+# The `if` is load-bearing: `set -e` is on, so a bare failing `timeout` would
+# abort before the status was recorded -- and in a backgrounded call it would
+# kill the subshell silently, leaving no status file at all. Inside an `if`
+# condition, set -e is suspended.
+run_suite() {
+    _name="$1"; _to="$2"; _script="$3"; _out="$4"
+    if timeout "$_to" "$_script" > "$_out" 2>&1; then
+        _st=0
+    else
+        _st=$?
+    fi
+    echo "$_st" > "$STATUS_DIR/$_name"
+}
+
 # === PARALLEL BATCH 1: Shell suites ===
 echo ""
 echo "▶ Batch 1: Shell suites (5 parallel jobs)..."
 echo "  - Oils/OSH, Smoosh, modernish, mksh, ShellSpec"
 
-(timeout 600 tests/external/run-oils-spec.sh > "$RESULTS/oils-$TIMESTAMP.txt" 2>&1 || echo "Oils timed out or failed") &
-PID_OILS=$!
-
-(timeout 600 tests/external/run-smoosh.sh > "$RESULTS/smoosh-$TIMESTAMP.txt" 2>&1 || echo "Smoosh timed out or failed") &
-PID_SMOOSH=$!
-
-(timeout 600 tests/external/run-modernish.sh > "$RESULTS/modernish-$TIMESTAMP.txt" 2>&1 || echo "modernish timed out or failed") &
-PID_MODERN=$!
-
-(timeout 600 tests/external/run-mksh-tests.sh > "$RESULTS/mksh-$TIMESTAMP.txt" 2>&1 || echo "mksh timed out or failed") &
-PID_MKSH=$!
-
-(timeout 600 tests/external/run-shellspec.sh > "$RESULTS/shellspec-$TIMESTAMP.txt" 2>&1 || echo "ShellSpec timed out or failed") &
-PID_SS=$!
-
-# Wait for all shell suites
-for pid in $PID_OILS $PID_SMOOSH $PID_MODERN $PID_MKSH $PID_SS; do
-    wait $pid 2>/dev/null || true
-done
+run_suite oils      600 tests/external/run-oils-spec.sh  "$RESULTS/oils-$TIMESTAMP.txt" &
+run_suite smoosh    600 tests/external/run-smoosh.sh     "$RESULTS/smoosh-$TIMESTAMP.txt" &
+run_suite modernish 600 tests/external/run-modernish.sh  "$RESULTS/modernish-$TIMESTAMP.txt" &
+run_suite mksh      600 tests/external/run-mksh-tests.sh "$RESULTS/mksh-$TIMESTAMP.txt" &
+run_suite shellspec 600 tests/external/run-shellspec.sh  "$RESULTS/shellspec-$TIMESTAMP.txt" &
+wait
 echo "✓ Shell suites complete"
 
 # === PARALLEL BATCH 2: Coreutils suites ===
@@ -71,21 +87,11 @@ echo ""
 echo "▶ Batch 2: Coreutils suites (4 parallel jobs)..."
 echo "  - GNU coreutils, GNU grep, GNU sed, toybox"
 
-(timeout 1800 tests/external/run-gnu-coreutils.sh > "$RESULTS/gnu-coreutils-$TIMESTAMP.txt" 2>&1 || echo "GNU coreutils timed out or failed") &
-PID_GNU=$!
-
-(timeout 600 tests/external/run-gnu-grep.sh > "$RESULTS/gnu-grep-$TIMESTAMP.txt" 2>&1 || echo "GNU grep timed out or failed") &
-PID_GREP=$!
-
-(timeout 600 tests/external/run-gnu-sed.sh > "$RESULTS/gnu-sed-$TIMESTAMP.txt" 2>&1 || echo "GNU sed timed out or failed") &
-PID_SED=$!
-
-(timeout 600 tests/external/run-toybox.sh > "$RESULTS/toybox-$TIMESTAMP.txt" 2>&1 || echo "toybox timed out or failed") &
-PID_TOY=$!
-
-for pid in $PID_GNU $PID_GREP $PID_SED $PID_TOY; do
-    wait $pid 2>/dev/null || true
-done
+run_suite gnu-coreutils 1800 tests/external/run-gnu-coreutils.sh "$RESULTS/gnu-coreutils-$TIMESTAMP.txt" &
+run_suite gnu-grep       600 tests/external/run-gnu-grep.sh      "$RESULTS/gnu-grep-$TIMESTAMP.txt" &
+run_suite gnu-sed        600 tests/external/run-gnu-sed.sh       "$RESULTS/gnu-sed-$TIMESTAMP.txt" &
+run_suite toybox         600 tests/external/run-toybox.sh        "$RESULTS/toybox-$TIMESTAMP.txt" &
+wait
 echo "✓ Coreutils suites complete"
 
 # === SEQUENTIAL: Configure scripts ===
@@ -93,7 +99,7 @@ echo ""
 echo "▶ Batch 3: Configure scripts (sequential)..."
 echo "  - curl, CPython, OpenSSL, SQLite, zlib"
 
-timeout 1200 tests/external/run-configure.sh > "$RESULTS/configure-$TIMESTAMP.txt" 2>&1 || echo "Configure timed out or failed"
+run_suite configure 1200 tests/external/run-configure.sh "$RESULTS/configure-$TIMESTAMP.txt"
 echo "✓ Configure tests complete"
 
 # === GENERATE SCORECARD ===
@@ -180,3 +186,40 @@ echo "════════════════════════�
 echo "  Results saved to: $RESULTS/*-$TIMESTAMP.txt"
 echo "════════════════════════════════════════════════════════════════"
 echo ""
+
+# === EXIT STATUS ===
+# This script used to have no exit at all, so it always returned 0. CI runs
+# `make external-test-docker` and nothing else, which is why a run where eight
+# of ten suites executed zero tests still reported green.
+echo ""
+echo "════════════════════════════════════════════════════════════════"
+echo "  SUITE EXIT STATUS"
+echo "════════════════════════════════════════════════════════════════"
+
+failed=0
+for name in $EXPECTED_SUITES; do
+    f="$STATUS_DIR/$name"
+    if [ ! -e "$f" ]; then
+        # No status recorded: the suite was killed before it could finish.
+        printf '  %-16s DID NOT RUN\n' "$name"
+        failed=$((failed + 1))
+        continue
+    fi
+    st=$(cat "$f")
+    if [ "$st" -eq 0 ]; then
+        printf '  %-16s ok\n' "$name"
+    elif [ "$st" -eq 124 ]; then
+        printf '  %-16s TIMED OUT\n' "$name"
+        failed=$((failed + 1))
+    else
+        printf '  %-16s FAILED (exit %s)\n' "$name" "$st"
+        failed=$((failed + 1))
+    fi
+done
+
+echo ""
+if [ "$failed" -gt 0 ]; then
+    echo "✗ $failed of 10 suite(s) failed. Results in $RESULTS/"
+    exit 1
+fi
+echo "✓ All 10 suites passed."
