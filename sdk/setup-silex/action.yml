@@ -1,0 +1,33 @@
+# setup-silex/action.yml
+# GitHub Action: pull silex:slim and make it available as a local image
+# Usage:
+#   - uses: richarah/silex/setup-silex@v1
+#   Then use: docker build --build-arg BASE=silex:slim ...
+
+name: Setup silex
+description: Pull silex:slim for use in Docker builds
+
+inputs:
+  variant:
+    description: Image variant (slim, dev, runtime, cross)
+    default: slim
+  version:
+    description: Image version tag
+    default: latest
+  registry:
+    description: Registry to pull from
+    default: ghcr.io/richarah
+
+runs:
+  using: composite
+  steps:
+    - name: Pull silex image
+      shell: bash
+      run: |
+        IMAGE="${{ inputs.registry }}/silex:${{ inputs.variant }}"
+        if [ "${{ inputs.version }}" != "latest" ]; then
+          IMAGE="${IMAGE}-${{ inputs.version }}"
+        fi
+        docker pull "$IMAGE"
+        docker tag "$IMAGE" "silex:${{ inputs.variant }}"
+        echo "silex:${{ inputs.variant }} is ready"

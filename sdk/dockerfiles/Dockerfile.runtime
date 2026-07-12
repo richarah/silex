@@ -1,0 +1,25 @@
+# Silex Runtime: Minimal runtime companion image
+# No compiler. Just glibc, tini, ca-certificates, C++ runtime libs.
+# Use as the final stage in multi-stage builds.
+# Base matches silex:slim (debian:bookworm-slim) so glibc ABI is identical.
+#
+# Target size: <30MB
+#
+# Example:
+#   FROM ghcr.io/richarah/silex:slim AS builder
+#   RUN cmake -B build && cmake --build build
+#
+#   FROM ghcr.io/richarah/silex:runtime
+#   COPY --from=builder /workspace/build/my-app /usr/local/bin/
+#   CMD ["my-app"]
+
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    tini \
+    libstdc++6 \
+    libgcc-s1 \
+    && rm -rf /var/lib/apt/lists/*
+
+ENTRYPOINT ["/usr/bin/tini", "--"]

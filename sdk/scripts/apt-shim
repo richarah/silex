@@ -1,0 +1,103 @@
+#!/bin/sh
+# Silex apt-get shim: maps apt-get/apt/aptitude commands to apk.
+# Installed as /usr/local/bin/apt-get; symlinked as apt and aptitude.
+# See also: scripts/shims/apt-cache, apt-mark, dpkg
+# Disable with SILEX_APT_SHIM=off
+#
+# silex-packages provides Debian packages under their native Debian names,
+# so no package name translation is required.
+
+set -e
+
+NOSYNC_SO=/usr/local/silex/lib/silex-nosync.so
+
+if [ "$SILEX_APT_SHIM" = "off" ]; then
+    echo "silex: SILEX_APT_SHIM=off — apt-get shim disabled" >&2
+    exit 1
+fi
+
+# Strip common apt flags that apk does not understand.
+_strip_apt_flags() {
+    for _a in "$@"; do
+        case "$_a" in
+            -y|--yes|--assume-yes) ;;
+            --no-install-recommends) ;;
+            --install-recommends) ;;
+            -q|--quiet|-qq) ;;
+            --allow-unauthenticated) ;;
+            --allow-downgrades) ;;
+            --no-upgrade) ;;
+            --fix-broken) ;;
+            -f) ;;
+            *) printf '%s\n' "$_a" ;;
+        esac
+    done
+}
+
+# Strip version specifiers from package names (pkg=1.2 -> pkg).
+_strip_versions() {
+    for _pkg in "$@"; do
+        case "$_pkg" in -*|'') continue ;; esac
+        printf '%s\n' "$_pkg" | sed 's/[=<>!].*//'
+    done
+}
+
+# Parse leading flags before the subcommand (apt-get -y install ...)
+_CMD=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -y|--yes|--assume-yes|--no-install-recommends|--install-recommends|-q|--quiet|-qq) shift ;;
+        -*) shift ;;
+        *) _CMD="$1"; shift; break ;;
+    esac
+done
+
+case "$_CMD" in
+    install|install-recommends)
+        _pkgs=$(_strip_versions $(_strip_apt_flags "$@") | tr '\n' ' ')
+        if [ -z "$(printf '%s' "$_pkgs" | tr -d ' ')" ]; then
+            echo "silex apt-shim: no packages specified" >&2
+            exit 1
+        fi
+        echo "silex apt-shim: apk add --no-cache --allow-untrusted ${_pkgs}" >&2
+        # shellcheck disable=SC2086
+        if [ -f "$NOSYNC_SO" ]; then
+            env LD_PRELOAD="${LD_PRELOAD:+$LD_PRELOAD:}$NOSYNC_SO" apk add --no-cache --allow-untrusted ${_pkgs}
+        else
+            apk add --no-cache --allow-untrusted ${_pkgs}
+        fi
+        ;;
+    update)
+        # Match Debian apt-get update behaviour: warn on unavailable repos but exit 0.
+        apk update --allow-untrusted || true
+        ;;
+    upgrade)
+        apk upgrade
+        ;;
+    remove|purge)
+        _pkgs=$(_strip_apt_flags "$@" | tr '\n' ' ')
+        echo "silex apt-shim: apk del ${_pkgs}" >&2
+        # shellcheck disable=SC2086
+        exec apk del ${_pkgs}
+        ;;
+    autoremove|clean|autoclean|check)
+        # no-op
+        ;;
+    dist-upgrade|full-upgrade)
+        apk upgrade
+        ;;
+    download)
+        echo "silex apt-shim: 'apt-get download' not supported in shim" >&2
+        exit 1
+        ;;
+    "")
+        echo "silex apt-shim: no subcommand given" >&2
+        echo "Supported: install, update, upgrade, remove, purge, autoremove, clean" >&2
+        exit 1
+        ;;
+    *)
+        echo "silex apt-shim: unsupported command '$_CMD'" >&2
+        echo "Supported: install, update, upgrade, remove, purge, autoremove, clean" >&2
+        exit 1
+        ;;
+esac

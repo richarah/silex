@@ -1,0 +1,55 @@
+#!/bin/sh
+# Silex dpkg shim: translates common dpkg queries to apk equivalents.
+# dpkg -i (.deb install) is not supported — there is no .deb runtime.
+# Installed as /usr/local/bin/dpkg via shims/ symlink.
+
+set -e
+
+case "$1" in
+    -l|--list)
+        shift
+        if [ $# -gt 0 ]; then
+            exec apk info -e "$@"
+        else
+            exec apk list --installed
+        fi
+        ;;
+    -s|--status)
+        shift
+        exec apk info -e "$@"
+        ;;
+    -L|--listfiles)
+        shift
+        exec apk info -L "$@"
+        ;;
+    -S|--search)
+        shift
+        exec apk info --who-owns "$@"
+        ;;
+    --get-selections)
+        exec apk list --installed
+        ;;
+    --print-architecture|-p)
+        exec dpkg-architecture -qDEB_HOST_ARCH
+        ;;
+    --configure)
+        # --configure -a is a common post-apt cleanup step; no-op here.
+        exit 0
+        ;;
+    -i|--install)
+        printf 'silex dpkg: .deb install not supported; use apk add\n' >&2
+        exit 1
+        ;;
+    -r|--remove|-P|--purge)
+        shift
+        exec apk del "$@"
+        ;;
+    "")
+        printf 'silex dpkg: no arguments given\n' >&2
+        exit 1
+        ;;
+    *)
+        printf 'silex dpkg: unsupported: %s\n' "$1" >&2
+        exit 1
+        ;;
+esac

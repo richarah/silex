@@ -1,0 +1,17 @@
+#!/bin/sh
+# Shim: provide Debian-compatible lsb_release output
+# Returns Wolfi info, useful for scripts that detect distro
+case "${1:-}" in
+    -i|--id)           echo "Distributor ID:	Wolfi" ;;
+    -d|--description)  echo "Description:	Wolfi" ;;
+    -r|--release)      echo "Release:	rolling" ;;
+    -c|--codename)     echo "Codename:	n/a" ;;
+    -a|--all)
+        echo "Distributor ID:	Wolfi"
+        echo "Description:	Wolfi"
+        echo "Release:	rolling"
+        echo "Codename:	n/a"
+        ;;
+    *)
+        echo "Wolfi rolling" ;;
+esac
