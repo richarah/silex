@@ -7,6 +7,25 @@ SILEX="${1:-build/bin/silex}"
 PASS=0
 FAIL=0
 
+# The recursion-depth tests below are meaningless under AddressSanitizer.
+#
+# They assert that silex hits its own SHELL_MAX_CALL_DEPTH cap and reports a
+# depth error. ASan inflates every stack frame (redzones, shadow bookkeeping) by
+# a large factor, so the process runs out of real stack and is killed by the
+# kernel long before the shell's own counter reaches the cap. The shell never
+# gets to print its message, and it does not survive to run another command --
+# so both "no depth error in stderr" and "shell continues after depth error"
+# fail. That is ASan's stack, not a silex bug.
+#
+# Detected by asking the binary, not by an env var, so it is correct whether the
+# sanitiser came from `make debug` or from CFLAGS on the command line.
+SANITIZED=0
+if command -v nm >/dev/null 2>&1 && nm -D "$SILEX" 2>/dev/null | grep -q '__asan_'; then
+    SANITIZED=1
+elif command -v strings >/dev/null 2>&1 && strings "$SILEX" 2>/dev/null | grep -q 'AddressSanitizer'; then
+    SANITIZED=1
+fi
+
 check() {
     local desc="$1" got="$2" expected="$3"
     if [ "$got" = "$expected" ]; then
@@ -48,7 +67,12 @@ a
 ' >/dev/null 2>&1
 check_exit "recursion: mutual recursion exits non-zero" "$?" "1"
 
-# Error message must mention call depth
+# Error message must mention call depth.
+# Skipped under ASan: the process dies on a real stack overflow before the
+# shell's own depth counter trips, so there is no message to check.
+if [ "$SANITIZED" -eq 1 ]; then
+    echo "SKIP: recursion depth message (ASan inflates stack frames)"
+else
 got=$(timeout 5 "$SILEX" -c '
 f() { f; }
 f
@@ -73,6 +97,7 @@ f
 echo "continued"
 ' 2>/dev/null)
 check "recursion: shell continues after depth error" "$got" "continued"
+fi   # end: skipped under ASan
 
 # Recursion counter resets between separate invocations (no state leak)
 timeout 5 "$SILEX" -c 'f() { f; }; f' >/dev/null 2>&1; rc1=$?

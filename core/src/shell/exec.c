@@ -353,7 +353,10 @@ static void path_cache_put(shell_ctx_t *sh, const char *name,
                            const char *resolved)
 {
     unsigned int idx = fnv1a_str(name) & 255u;
+    /* Not a leak: every failure path below frees e (see the strdup check). cppcheck
+     * cannot follow the unlikely() macro into the error branch. */
     path_cache_entry_t *e = malloc(sizeof(*e));
+    /* cppcheck-suppress memleak */
     if (unlikely(!e)) return;
     e->name  = strdup(name);
     e->path  = resolved ? strdup(resolved) : NULL;
@@ -441,6 +444,11 @@ int exec_simple_cmd(shell_ctx_t *sh, char **words, char **assigns, redir_t *redi
     if (nassigns > 0) {
         anames = malloc((size_t)nassigns * sizeof(char *));
         avals  = malloc((size_t)nassigns * sizeof(char *));
+        if (!anames || !avals) {
+            free(anames); free(avals);
+            fprintf(stderr, "silex: out of memory\n");
+            return 1;
+        }
         /* POSIX 2.9.1: with no command name, the command completes with the
          * status of the LAST command substitution performed. expand.c records
          * each one in last_cmdsub_exit; zero it first so "no substitution at
@@ -892,7 +900,15 @@ int exec_pipeline(shell_ctx_t *sh, node_t *node)
                  * et al., giving the builtin stale data.  fflush(stdin) on
                  * glibc discards the read buffer, preventing this stale-read
                  * bug in builtins that use stdio (e.g. tr with getchar()). */
+                /* fflush() on an INPUT stream is undefined behaviour in ISO C.
+                 * glibc defines it as discarding the read buffer, which is
+                 * exactly what we want here -- but musl and the BSDs do not, so
+                 * only do it where it is defined. Everywhere else, clearerr()
+                 * alone is the portable part. */
+#ifdef __GLIBC__
+                /* cppcheck-suppress fflushOnInputStream */
                 fflush(stdin);
+#endif
                 clearerr(stdin);
                 dup2(pipes[i - 1][0], STDIN_FILENO);
                 close(pipes[i - 1][0]);

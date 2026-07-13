@@ -968,10 +968,20 @@ static long arith_shift(arith_ctx_t *ac)
         if (p[0] == '<' && p[1] == '<' && p[2] != '=') {
             ac->pos += 2;
             long right = arith_add(ac);
-            left = (right >= 0 && right < 64) ? (left << right) : 0;
+            /* Left-shifting a SIGNED value into or past the sign bit is
+             * undefined behaviour. Do the shift on the unsigned representation
+             * and convert back -- that is well-defined and gives the two's
+             * complement result every shell expects. */
+            left = (right >= 0 && right < 64)
+                 ? (long)((unsigned long)left << right)
+                 : 0;
         } else if (p[0] == '>' && p[1] == '>' && p[2] != '=') {
             ac->pos += 2;
             long right = arith_add(ac);
+            /* Right shift of a negative value is implementation-defined, not
+             * undefined; every compiler we target makes it arithmetic, which is
+             * the behaviour POSIX shells have. Keep it signed on purpose. */
+            /* cppcheck-suppress shiftTooManyBitsSigned */
             left = (right >= 0 && right < 64) ? (left >> right) : 0;
         } else {
             break;
@@ -1631,14 +1641,26 @@ expand_result_t expand_word_full(shell_ctx_t *sh, const char *word)
             while (*cp2) {
                 if (*cp2 == '\x01') {
                     *cp2 = '\0';
-                    if (n2 >= cap2) { cap2 *= 2; f2 = realloc(f2, (size_t)cap2 * sizeof(char *)); }
+                    if (n2 >= cap2) {
+                        /* `f2 = realloc(f2, ...)` leaks the old block when
+                         * realloc fails and returns NULL. Grow via a temporary. */
+                        char **g2 = realloc(f2, (size_t)(cap2 * 2) * sizeof(char *));
+                        if (!g2) { free(f2); f2 = NULL; break; }
+                        cap2 *= 2;
+                        f2 = g2;
+                    }
                     if (f2) f2[n2++] = arena_strdup(&sh->scratch_arena, tok2);
                     tok2 = cp2 + 1;
                 }
                 cp2++;
             }
             if (f2) {
-                if (n2 >= cap2) { cap2 *= 2; f2 = realloc(f2, (size_t)cap2 * sizeof(char *)); }
+                if (n2 >= cap2) {
+                    /* Same realloc-into-self leak as above. */
+                    char **g2 = realloc(f2, (size_t)(cap2 * 2) * sizeof(char *));
+                    if (!g2) { free(f2); f2 = NULL; }
+                    else { cap2 *= 2; f2 = g2; }
+                }
                 if (f2) f2[n2++] = arena_strdup(&sh->scratch_arena, tok2);
                 char **arr = arena_alloc(&sh->scratch_arena, (size_t)(n2 + 1) * sizeof(char *));
                 for (int i = 0; i < n2; i++) arr[i] = f2[i];

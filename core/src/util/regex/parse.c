@@ -397,7 +397,9 @@ static frag build_nfa(token *post, int n_post, mb_prog *prog,
     frag *stack = calloc(MAX_FSTACK, sizeof(frag));
     if (!stack) {
         if (errstr) *errstr = "out of memory";
-        frag bad; bad.valid = 0; hl_init(&bad.out); return bad;
+        /* zero-init: the whole struct is returned by value, and callers
+         * read members other than .valid */
+        frag bad = {0}; bad.valid = 0; hl_init(&bad.out); return bad;
     }
     int  stk = 0;
 
@@ -550,12 +552,16 @@ too_complex:
     if (errstr) *errstr = "pattern too complex";
     for (int _i = 0; _i < stk; _i++) hl_free(&stack[_i].out);
     free(stack);
-    { frag bad; bad.valid = 0; hl_init(&bad.out); return bad; }
+    { /* zero-init: the whole struct is returned by value, and callers
+         * read members other than .valid */
+        frag bad = {0}; bad.valid = 0; hl_init(&bad.out); return bad; }
 bad_pattern:
     if (errstr) *errstr = "invalid pattern";
     for (int _i = 0; _i < stk; _i++) hl_free(&stack[_i].out);
     free(stack);
-    { frag bad; bad.valid = 0; hl_init(&bad.out); return bad; }
+    { /* zero-init: the whole struct is returned by value, and callers
+         * read members other than .valid */
+        frag bad = {0}; bad.valid = 0; hl_init(&bad.out); return bad; }
 
 #undef PUSH
 #undef POP
