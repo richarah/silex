@@ -338,6 +338,7 @@ install: $(TARGET)
 TEST_CHARCLASS = build/bin/test_charclass
 TEST_LINESCAN  = build/bin/test_linescan
 TEST_REGEX     = build/bin/test_regex
+TEST_ARENA     = build/bin/test_arena
 
 REGEX_TEST_SRCS = \
     $(SRCDIR)/util/regex/classify.c \
@@ -357,12 +358,17 @@ $(TEST_LINESCAN): tests/unit/test_linescan.c $(SRCDIR)/util/linescan_scalar.c \
 	$(CC) $(CFLAGS_COMMON) -I$(SRCDIR) -o $@ \
 	    tests/unit/test_linescan.c $(SRCDIR)/util/linescan_scalar.c
 
+$(TEST_ARENA): tests/unit/test_arena.c $(SRCDIR)/util/arena.c \
+                  $(SRCDIR)/util/arena.h | $(BINDIR)
+	$(CC) $(CFLAGS_COMMON) -I$(SRCDIR) -o $@ \
+	    tests/unit/test_arena.c $(SRCDIR)/util/arena.c
+
 $(TEST_REGEX): tests/unit/test_regex.c $(REGEX_TEST_SRCS) | $(BINDIR)
 	@mkdir -p $(OBJDIR)/util/regex
 	$(CC) $(CFLAGS_COMMON) -I$(SRCDIR) -o $@ \
 	    tests/unit/test_regex.c $(REGEX_TEST_SRCS)
 
-test: $(TARGET) $(TEST_CHARCLASS) $(TEST_LINESCAN) $(TEST_REGEX)
+test: $(TARGET) $(TEST_CHARCLASS) $(TEST_LINESCAN) $(TEST_REGEX) $(TEST_ARENA)
 	@echo "=== Running unit tests ==="
 	@bash tests/unit/run_tests.sh $(TARGET)
 	@echo "--- test_charclass (C) ---"
@@ -371,6 +377,8 @@ test: $(TARGET) $(TEST_CHARCLASS) $(TEST_LINESCAN) $(TEST_REGEX)
 	@$(TEST_LINESCAN) && echo "PASS: test_linescan"
 	@echo "--- test_regex (C) ---"
 	@$(TEST_REGEX) && echo "PASS: test_regex"
+	@echo "--- test_arena (C) ---"
+	@$(TEST_ARENA) && echo "PASS: test_arena"
 
 # check = build + unit tests + the check.sh conformance script.
 # This used to be two separate `check:` rules (one with no recipe), which GNU

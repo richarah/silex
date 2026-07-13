@@ -40,6 +40,18 @@ typedef struct reg_entry {
     char               *flag;
     char               *so_path;
     silex_module_t  *mod;
+    /* 1 = we have already scanned for this (tool, flag) and there is no module.
+     * Without this, a miss was never remembered: registry_lookup() re-ran
+     * scan_dir() -- an opendir plus a full dlopen() of EVERY .so in the
+     * directory -- on every single lookup, then returned NULL and forked the
+     * external tool anyway. So `grep --some-gnu-flag` inside a loop paid that
+     * cost on every iteration, which made an unrecognised flag MORE expensive
+     * than a plain fork+exec: the exact opposite of the design goal.
+     *
+     * Negative entries are cleared by registry_clear(), which the mtime check
+     * in registry_check_invalidate() already triggers when the module directory
+     * changes -- so dropping a new module in is still picked up. */
+    int                 negative;
     struct reg_entry   *next;
 } reg_entry_t;
 
@@ -133,14 +145,52 @@ void registry_check_invalidate(void)
     }
 }
 
-silex_module_t *registry_find(const char *tool, const char *flag)
+/* Return the entry itself, so callers can tell "known miss" (entry with
+ * negative set) apart from "never looked up" (no entry at all). registry_find()
+ * cannot: it returns e->mod, which is NULL in both cases. */
+static reg_entry_t *registry_find_entry(const char *tool, const char *flag)
 {
     size_t idx = bucket_index(tool, flag);
     for (reg_entry_t *e = buckets[idx]; e; e = e->next) {
         if (strcmp(e->tool, tool) == 0 && strcmp(e->flag, flag) == 0)
-            return e->mod;
+            return e;
     }
     return NULL;
+}
+
+/* Record that (tool, flag) has been scanned for and does not exist. */
+static void registry_register_negative(const char *tool, const char *flag)
+{
+    if (registry_count >= REGISTRY_MAX_ENTRIES)
+        return;                     /* table full: stay correct, just slower */
+
+    reg_entry_t *e = calloc(1, sizeof(*e));
+    if (!e)
+        return;
+
+    e->tool = strdup(tool);
+    e->flag = strdup(flag);
+    if (!e->tool || !e->flag) {
+        free(e->tool);
+        free(e->flag);
+        free(e);
+        return;
+    }
+
+    e->so_path  = NULL;
+    e->mod      = NULL;
+    e->negative = 1;
+
+    size_t idx = bucket_index(tool, flag);
+    e->next      = buckets[idx];
+    buckets[idx] = e;
+    registry_count++;
+}
+
+silex_module_t *registry_find(const char *tool, const char *flag)
+{
+    reg_entry_t *e = registry_find_entry(tool, flag);
+    return e ? e->mod : NULL;
 }
 
 void registry_register(const char *tool, const char *flag,
@@ -264,10 +314,12 @@ silex_module_t *registry_lookup(const char *tool, const char *flag)
     /* Invalidate stale cache first */
     registry_check_invalidate();
 
-    /* Check in-memory registry first */
-    silex_module_t *cached = registry_find(tool, flag);
+    /* Check the in-memory registry first -- including negative entries, so a
+     * repeated miss costs a hash lookup rather than a directory scan and a
+     * dlopen of every module. */
+    reg_entry_t *cached = registry_find_entry(tool, flag);
     if (cached)
-        return cached;
+        return cached->negative ? NULL : cached->mod;
 
     /* Scan all module directories in SILEX_MODULE_PATH */
     const char *env = getenv("SILEX_MODULE_PATH");
@@ -294,5 +346,8 @@ silex_module_t *registry_lookup(const char *tool, const char *flag)
             return mod;
     }
 
+    /* Nothing provides this flag. Remember that, so the next lookup does not
+     * repeat the scan. */
+    registry_register_negative(tool, flag);
     return NULL;
 }

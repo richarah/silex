@@ -9,6 +9,7 @@
 
 #include <stddef.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -20,15 +21,53 @@ COLD void arena_init(arena_t *a)
 
 HOT void *arena_alloc(arena_t *a, size_t size)
 {
-    /* Round up to sizeof(void*) alignment */
+    /* Round up to sizeof(void*) alignment.
+     * The addition can wrap for a size near SIZE_MAX, which would round down to
+     * 0 and hand back a zero-length allocation the caller then writes through. */
     size_t align = sizeof(void *);
+    if (unlikely(size > SIZE_MAX - (align - 1))) {
+        fprintf(stderr, "silex: arena: allocation too large\n");
+        abort();
+    }
     size = (size + align - 1) & ~(align - 1);
+    if (unlikely(size == 0))
+        size = align;
 
-    /* Allocate a new block if needed (slow path — uncommon) */
-    if (unlikely(a->head == NULL || (a->head->cap - a->head->used) < size)) {
+    /* Fast path: the current block has room. */
+    if (likely(a->head != NULL && (a->head->cap - a->head->used) >= size)) {
+        void *ptr = (void *)(a->head->base + a->head->used);
+        a->head->used += size;
+        return ptr;
+    }
+
+    /* Slow path.
+     *
+     * Before growing, look for capacity we already own. arena_reset() zeroes
+     * `used` on EVERY block, but this function only ever consulted a->head --
+     * so every block below head was empty, reachable, and never used again.
+     *
+     * The effect was that any reset cycle needing more than one block's worth
+     * pushed a brand new block, permanently, and total_bytes climbed with every
+     * cycle until it hit ARENA_MAX_BYTES and abort()ed. Measured: 262 KB after
+     * one cycle, 39 MB after two hundred -- a 150x growth, and a crash at the
+     * 64 MB cap. A long ./configure does exactly this workload.
+     *
+     * The scan is O(blocks), but only on the slow path, and the list is short
+     * because it now stops growing.
+     */
+    for (arena_block_t *b = a->head ? a->head->next : NULL; b != NULL; b = b->next) {
+        if ((b->cap - b->used) >= size) {
+            void *ptr = (void *)(b->base + b->used);
+            b->used += size;
+            return ptr;
+        }
+    }
+
+    /* Genuinely out of capacity: grow. */
+    {
         size_t block_data_size = size > ARENA_BLOCK_SIZE ? size : ARENA_BLOCK_SIZE;
 
-        if (a->total_bytes + block_data_size > ARENA_MAX_BYTES) {
+        if (a->total_bytes > ARENA_MAX_BYTES - block_data_size) {
             fprintf(stderr, "silex: arena: exceeded maximum size (%u MB)\n",
                     (unsigned)(ARENA_MAX_BYTES / (1024u * 1024u)));
             abort();
@@ -49,11 +88,11 @@ HOT void *arena_alloc(arena_t *a, size_t size)
         blk->next         = a->head;
         a->head           = blk;
         a->total_bytes   += block_data_size;
-    }
 
-    void *ptr = (void *)(a->head->base + a->head->used);
-    a->head->used += size;
-    return ptr;
+        void *ptr = (void *)(a->head->base + a->head->used);
+        a->head->used += size;
+        return ptr;
+    }
 }
 
 char *arena_strdup(arena_t *a, const char *s)

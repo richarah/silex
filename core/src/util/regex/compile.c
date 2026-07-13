@@ -62,10 +62,13 @@ int mb_prog_emit_class(mb_prog *p, mb_charclass *cc, instr_type_t op)
     instr.op     = op;
     instr.arg.cc = copy;
 
-    /* If emit fails, the program never takes ownership of `copy` and nothing
-     * else will free it. */
+    /* mb_prog_emit returns the INSTRUCTION INDEX on success (see
+     * regex_internal.h: "returns instr index or -1"), so success is >= 0, not
+     * == 0. Testing `rc != 0` freed a charclass the program had just taken
+     * ownership of for every instruction at a non-zero index -- a double free.
+     * Only a negative return means emit failed and nothing owns `copy`. */
     int rc = mb_prog_emit(p, instr);
-    if (rc != 0)
+    if (rc < 0)
         free(copy);
     return rc;
 }
