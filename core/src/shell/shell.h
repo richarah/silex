@@ -55,6 +55,16 @@ typedef struct shell_ctx {
      * field. Without this, `exec cmd "$0" "$@"` (the autosetup/jimsh idiom, and
      * sqlite's ./configure) passes a phantom empty argument. */
     int         at_expanded_empty;
+    /* Exit status of the most recent command substitution performed during word
+     * expansion. POSIX 2.9.1: a command with no command name but containing a
+     * command substitution completes with the status of the LAST command
+     * substitution performed -- so `v=$(false); echo $?` must print 1.
+     *
+     * Kept separate from last_exit deliberately: $? must NOT be disturbed by a
+     * command substitution in an ordinary word (`echo $(false); echo $?` is
+     * echo's status, i.e. 0). Only the assignment-only path in exec_simple_cmd
+     * consumes this. */
+    int         last_cmdsub_exit;
     /* PATH resolution cache: command name → resolved absolute path.
      * Invalidated (path_cache_hash reset) when PATH changes. */
     void       *path_cache[256];  /* path_cache_entry_t*, open-addressing by FNV-1a */

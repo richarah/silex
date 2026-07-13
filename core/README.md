@@ -2,40 +2,40 @@
 
 Shell and coreutils for container builds.
 
-`./configure` and `make` spawn a fresh `/bin/sh` for every
-test and every recipe line — thousands of them. What
-dominates is not how fast the shell *runs*, but how fast it
-*starts*.
+A shell script spends most of its time launching other
+programs. Every `sed`, `grep`, `cat` or `test` is a fork, an
+exec, and — because those binaries are dynamically linked — a
+full run of `ld.so` resolving six shared libraries. That last
+part is the expensive one:
 
-silex is a small, statically linked, multi-call binary. It
-starts in 371 µs; dash takes 577 µs. Commands run as
-builtins in-process, so there is no second exec to pay for
-either. Flags the builtins don't handle are loaded from
-modules at runtime or forwarded to the external tool in PATH.
+    500x sed:   dash  666 us each   (forks /usr/bin/sed)
+                silex  24 us each   (builtin, in-process)
 
-As `/bin/sh`, on the same image and workload:
+silex runs thirty-two coreutils as builtins in one process.
+No fork, no exec, no load. Flags the builtins don't handle
+are loaded from modules at runtime or forwarded to the
+external tool in PATH.
 
-    ./configure (zlib)         240 ms  vs dash  284 ms
-    ./configure + make -j4     835 ms  vs dash 1496 ms
+As `/bin/sh`, same image, same workload, artifacts verified:
 
-Be clear about where that comes from. Roughly two thirds of
-the advantage over dash is *static linking*, which any shell
-could have — busybox sh starts in 446 µs. The remaining third
-is silex being leaner than busybox.
+    ./configure (zlib)         204 ms  vs dash  260 ms   (22% faster)
+    ./configure + make -j4    1362 ms  vs dash 1423 ms   ( 4% faster)
 
-And silex is **3.7x slower than dash at interpreting shell**.
-It wins on builds because builds are startup-bound, not
-interpretation-bound. If that ever stops being true, silex
-loses.
+Those two numbers say the same thing from two angles.
+`configure` is dominated by shell work, so silex wins big.
+`configure + make` is dominated by `gcc`, so it doesn't. **The
+more of your build is compilation, the less the shell matters.**
 
-The previous version of this README claimed that "in a
-container build invoking 500 commands per minute, half the
-wall time is process creation". At the ~500 µs per fork this
-project's own docs quote, that is 0.25 s per minute — 0.4%,
-not half. The fork thesis was wrong by two orders of
-magnitude, and the io_uring and fs-cache subsystems built to
-serve it turned out to be dead code with zero callers. See
-[docs/WHERE_THE_TIME_GOES.md](docs/WHERE_THE_TIME_GOES.md).
+4% on a real build is worth having. It is not 2-3x, and this
+project used to claim numbers it could not support. See
+[docs/WHERE_THE_TIME_GOES.md](docs/WHERE_THE_TIME_GOES.md) for
+the measurements, and for the benchmark that reported 44%
+because the build under test was silently failing.
+
+silex is also **3.7x slower than dash at interpreting shell**.
+It wins on builds because builds spend their shell time
+dispatching commands, not interpreting control flow. That is
+the ceiling.
 
 ## Usage
 

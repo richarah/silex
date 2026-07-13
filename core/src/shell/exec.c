@@ -441,8 +441,15 @@ int exec_simple_cmd(shell_ctx_t *sh, char **words, char **assigns, redir_t *redi
     if (nassigns > 0) {
         anames = malloc((size_t)nassigns * sizeof(char *));
         avals  = malloc((size_t)nassigns * sizeof(char *));
-        int prev_exit = sh->last_exit;
-        sh->last_exit = 0;  /* default: 0 unless cmd-sub sets it */
+        /* POSIX 2.9.1: with no command name, the command completes with the
+         * status of the LAST command substitution performed. expand.c records
+         * each one in last_cmdsub_exit; zero it first so "no substitution at
+         * all" yields 0.
+         *
+         * This used to read sh->last_exit, which expand.c never set for a
+         * command substitution -- so cmdsub_exit was always 0 and
+         * `v=$(cmd); ret=$?` always saw success. */
+        sh->last_cmdsub_exit = 0;
         for (int i = 0; i < nassigns; i++) {
             const char *eq = strchr(assigns[i], '=');
             if (!eq) { anames[i] = NULL; avals[i] = NULL; continue; }
@@ -451,8 +458,7 @@ int exec_simple_cmd(shell_ctx_t *sh, char **words, char **assigns, redir_t *redi
             /* Use expand_word_assign for assignment values - enables ~: expansion */
             avals[i]  = expand_word_assign(sh, eq + 1);
         }
-        cmdsub_exit = sh->last_exit;  /* 0 or last cmd-sub exit */
-        sh->last_exit = prev_exit;    /* restore for with-command path */
+        cmdsub_exit = sh->last_cmdsub_exit;
     }
 
     /* If no command words, apply to shell scope */

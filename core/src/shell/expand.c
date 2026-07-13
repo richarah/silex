@@ -654,10 +654,26 @@ static char *cmd_subst(shell_ctx_t *sh, const char *cmd)
 
     int status;
     waitpid(pid, &status, 0);
-    /* Note: We intentionally do NOT update sh->last_exit here.
-     * POSIX says command substitution in word expansion context (e.g., in
-     * case word) should not affect $? until after the word is fully expanded.
-     * The exit status of the substitution is discarded in this context. */
+
+    /* Record the substitution's status, but do NOT touch sh->last_exit.
+     *
+     * $? must not be disturbed by a command substitution inside an ordinary
+     * word: `echo $(false); echo $?` prints 0, because that is echo's status.
+     *
+     * But POSIX 2.9.1 says a command with NO command name that contains a
+     * command substitution completes with the status of the last substitution
+     * performed -- so `v=$(false); echo $?` must print 1. exec_simple_cmd's
+     * assignment-only path reads this.
+     *
+     * Nothing recorded the status at all before, so cmdsub_exit in exec.c was
+     * always 0 and `v=$(cmd); ret=$?` always saw success. That is the single
+     * most common idiom in a configure script, and it made them silently take
+     * the success branch of every probe: zlib's ./configure concluded it was
+     * building for IBM s390x on x86_64, emitted -DHAVE_S390X_VX -mzarch, and
+     * exited 0 with a Makefile that could not build. */
+    sh->last_cmdsub_exit = WIFEXITED(status) ? WEXITSTATUS(status)
+                         : WIFSIGNALED(status) ? 128 + WTERMSIG(status)
+                         : 1;
 
     /* Strip trailing newlines (POSIX) */
     while (sb.len > 0 && sb.buf[sb.len - 1] == '\n') {
