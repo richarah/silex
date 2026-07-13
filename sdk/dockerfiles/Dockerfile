@@ -721,14 +721,15 @@ RUN find /usr/share/locale -mindepth 1 -maxdepth 1 \
         ! -name 'zone.tab' ! -name 'iso3166.tab' \
         -exec rm -rf {} + 2>/dev/null || true
 
-# Hardlink dedup.
-RUN find /usr /opt -xdev -type f -size +4k 2>/dev/null \
-    | sort \
-    | xargs sha256sum 2>/dev/null \
-    | sort -k1,1 \
-    | awk 'prev==$1{printf "%s\0%s\0",pf,$NF}{prev=$1;pf=$NF}' \
-    | xargs -0 -r -n2 ln -f \
-    || true
+# Hardlink dedup was here. Removed.
+#
+# It was documented as saving "~20-40MB in the LLVM layer" by hardlinking
+# identical files. Measured, it saved 0 and cost a 4.1kB layer: the LLVM
+# files come in via COPY --from, so they live in the COPY layer, and
+# hardlinking them in a LATER layer cannot shrink an EARLIER one. (The
+# audit feared the opposite -- a full copy-up of libLLVM.so -- but modern
+# BuildKit treats ln -f as metadata, so neither the harm nor the benefit
+# was real. It was just dead complexity.)
 
 # ============================================================================
 # Environment.

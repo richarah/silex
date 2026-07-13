@@ -44,20 +44,35 @@ jobs:
         id: version
         run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
 
-      # Bootstrap build from source. Reproducible, no dependency on previous image.
-      # arm64 via QEMU is too slow for a full LLVM build; native arm64 runner required.
-      - name: Build silex:slim (bootstrap, amd64)
-        run: make bootstrap TARGETARCH=amd64 DOCKER_FLAGS="--progress=plain --load"
-
-      - name: Tag and push silex:slim
+      # Bootstrap build from source, and push WITH ZSTD compression in one step.
+      #
+      # The README advertises "~360MB compressed (zstd)" against ~900MB
+      # uncompressed. But the release used to `--load` the image (gzip layers)
+      # and then `docker push` -- which ships the stored GZIP layers. The zstd
+      # number was aspirational; every published image was gzip.
+      #
+      # zstd (level 19) compresses container layers meaningfully smaller than
+      # gzip and decompresses several times faster, so both the pull size and the
+      # cold-start-unpack cost drop -- and pull time is part of "cold build
+      # faster". Building straight to the registry with compression=zstd makes
+      # the advertised number real.
+      #
+      # COMPATIBILITY: zstd-compressed images require a containerd-aware client
+      # (Docker 23+, or containerd/BuildKit). GHCR stores and serves them. Older
+      # Docker cannot pull them; if that matters for your consumers, drop
+      # compression back to gzip here.
+      #
+      # arm64 via QEMU is too slow for a full LLVM build; native arm64 needed.
+      #
+      # One build, two outputs: a docker-format load into the local daemon (so the
+      # size-report step below can inspect localhost/silex:slim) AND a zstd image
+      # pushed to the registry. buildx does both from a single build -- no rebuild.
+      - name: Build and push silex:slim (bootstrap, amd64, zstd)
         run: |
           IMG="${{ env.REGISTRY }}/$(echo "${{ env.IMAGE_NAME }}" | tr '[:upper:]' '[:lower:]')"
-          docker tag localhost/silex:slim "${IMG}:slim"
-          docker tag localhost/silex:slim "${IMG}:slim-${{ steps.version.outputs.VERSION }}"
-          docker tag localhost/silex:slim "${IMG}:slim-latest"
-          docker push "${IMG}:slim"
-          docker push "${IMG}:slim-${{ steps.version.outputs.VERSION }}"
-          docker push "${IMG}:slim-latest"
+          make bootstrap TARGETARCH=amd64 DOCKER_FLAGS="--progress=plain \
+            --output type=docker,name=localhost/silex:slim \
+            --output type=image,\"name=${IMG}:slim,${IMG}:slim-${{ steps.version.outputs.VERSION }},${IMG}:slim-latest\",compression=zstd,compression-level=19,force-compression=true,push=true"
 
       - name: Get image size
         id: image_size
