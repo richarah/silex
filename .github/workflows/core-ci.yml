@@ -161,7 +161,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
-        run: apk add --no-cache gcc musl-dev make linux-headers bash
+        # coreutils: the compat suite compares silex against the SYSTEM tool, and
+        # on Alpine that is busybox, which pads `wc` output differently from GNU.
+        # silex matches GNU (correctly), so it "failed" against the wrong
+        # reference. The suite exists to check GNU compatibility -- so install GNU.
+        run: apk add --no-cache gcc musl-dev make linux-headers bash coreutils
       - name: Build release
         run: make release
       - name: Unit tests
@@ -193,7 +197,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
-        run: apk add --no-cache gcc musl-dev make linux-headers bash
+        # coreutils: the compat suite compares silex against the SYSTEM tool, and
+        # on Alpine that is busybox, which pads `wc` output differently from GNU.
+        # silex matches GNU (correctly), so it "failed" against the wrong
+        # reference. The suite exists to check GNU compatibility -- so install GNU.
+        run: apk add --no-cache gcc musl-dev make linux-headers bash coreutils
       - name: Build debug
         run: make debug
       - name: Unit tests under ASan

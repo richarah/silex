@@ -61,5 +61,11 @@ int mb_prog_emit_class(mb_prog *p, mb_charclass *cc, instr_type_t op)
     memset(&instr, 0, sizeof(instr));
     instr.op     = op;
     instr.arg.cc = copy;
-    return mb_prog_emit(p, instr);
+
+    /* If emit fails, the program never takes ownership of `copy` and nothing
+     * else will free it. */
+    int rc = mb_prog_emit(p, instr);
+    if (rc != 0)
+        free(copy);
+    return rc;
 }

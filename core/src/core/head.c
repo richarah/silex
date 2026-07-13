@@ -118,7 +118,10 @@ static int head_lines_but_last(FILE *fp, long long n)
         total++;
     }
 
+    /* NULL it: the fail path below frees raw again, and `goto fail` on the very
+     * next line would otherwise double-free. free(NULL) is a no-op. */
     free(raw);
+    raw = NULL;
     if (ferror(fp)) goto fail;
 
     /* Free remaining ring entries (last n lines — do not print) */
