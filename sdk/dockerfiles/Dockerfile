@@ -519,11 +519,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && rm -rf /usr/share/doc /usr/share/man /usr/share/info
 
-# Remove apt and dpkg. The apt-get shim replaces them.
-RUN dpkg --force-remove-reinstreq --purge apt apt-utils 2>/dev/null || true \
-    && rm -rf /var/lib/apt /var/cache/apt /usr/lib/apt \
-    && rm -f /usr/bin/apt /usr/bin/apt-get /usr/bin/apt-cache \
-    && rm -rf /var/lib/dpkg/info/apt* /var/lib/dpkg/info/apt-utils*
+# Keep apt, but hide it behind the shim.
+#
+# apt is NOT purged any more. It used to be -- `dpkg --purge apt` plus rm -rf of
+# /var/lib/apt and the binaries -- which meant that if a package was not in
+# silex-packages, `apt-get install foo` had nowhere to go and HARD-FAILED. The
+# repo covers ~86% of common Dockerfile installs; the other ~14% simply broke,
+# with no escape hatch. "Same packages, same names" was true only for what the
+# repo happened to contain.
+#
+# Now the real apt is preserved as apt-get.real, the shim goes on PATH as
+# apt-get, and the shim tries apk first and falls back to apt-get.real on a miss
+# (see scripts/apt-shim). Coverage becomes 100% by construction: a miss costs a
+# few seconds of real apt, not a broken build. The apk fast path is unchanged.
+#
+# We keep the index lists pruned (apt refreshes them on demand in the fallback),
+# and we do NOT ship apt's docs/man.
+RUN cp -a /usr/bin/apt-get /usr/bin/apt-get.real \
+    && rm -f /usr/bin/apt /usr/bin/apt-cache \
+    && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb
 
 # ============================================================================
 # Align FHS with Wolfi expectations before running apk.

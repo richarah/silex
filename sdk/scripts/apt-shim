@@ -76,12 +76,52 @@ case "$_CMD" in
         # Both are fixed, so verification works and --allow-untrusted is gone.
         # Do not reintroduce it: it would silently accept arbitrary root-owned
         # binaries from anyone who could MITM or compromise the repo.
+        # Try apk first (fast: signed static index, no dpkg, no fsync). If any
+        # requested package is not in silex-packages, fall back to REAL apt.
+        #
+        # This is what makes "same packages, same names" actually true. The repo
+        # covers ~86% of what Dockerfiles commonly install; without a fallback,
+        # the other ~14% HARD-FAILED with apt purged. Now a miss costs a few
+        # seconds of real apt-get, not a broken build -- and the repo can be
+        # pruned to whatever size fits its host without losing coverage.
+        #
+        # `apt-get.real` is the genuine apt, preserved by the Dockerfile instead
+        # of purged. SILEX_APT_FALLBACK=off disables the fallback (hard-fail on a
+        # miss, the old behaviour) for anyone who wants apk-only guarantees.
         echo "silex apt-shim: apk add --no-cache ${_pkgs}" >&2
+        # `set -e` is on (line 10), so the apk call MUST be guarded -- otherwise a
+        # miss aborts the shim here, before the fallback below ever runs. The `if`
+        # suspends set -e for the command, and we capture its status explicitly.
+        _apk_rc=0
         # shellcheck disable=SC2086
         if [ -f "$NOSYNC_SO" ]; then
-            env LD_PRELOAD="${LD_PRELOAD:+$LD_PRELOAD:}$NOSYNC_SO" apk add --no-cache ${_pkgs}
+            env LD_PRELOAD="${LD_PRELOAD:+$LD_PRELOAD:}$NOSYNC_SO" apk add --no-cache ${_pkgs} || _apk_rc=$?
         else
-            apk add --no-cache ${_pkgs}
+            apk add --no-cache ${_pkgs} || _apk_rc=$?
+        fi
+        if [ "$_apk_rc" -ne 0 ]; then
+            if [ "${SILEX_APT_FALLBACK:-on}" = off ]; then
+                echo "silex apt-shim: apk failed and SILEX_APT_FALLBACK=off; not falling back" >&2
+                exit "$_apk_rc"
+            fi
+            _real_apt="$(command -v apt-get.real || true)"
+            if [ -z "$_real_apt" ]; then
+                echo "silex apt-shim: apk could not install ${_pkgs}, and real apt is not" >&2
+                echo "                available to fall back to (apt-get.real missing)." >&2
+                exit "$_apk_rc"
+            fi
+            echo "silex apt-shim: some packages not in silex-packages; falling back to apt for: ${_pkgs}" >&2
+            # Real apt needs an index. Refresh it only if we have no lists yet, to
+            # keep the common (apk-hit) path from ever paying for it.
+            [ -n "$(ls -A /var/lib/apt/lists 2>/dev/null | grep -v lock)" ] || "$_real_apt" update -qq || true
+            # nosync applies here too: dpkg's fsync is the bulk of apt's cost.
+            # shellcheck disable=SC2086
+            if [ -f "$NOSYNC_SO" ]; then
+                exec env LD_PRELOAD="${LD_PRELOAD:+$LD_PRELOAD:}$NOSYNC_SO" \
+                    "$_real_apt" install -y --no-install-recommends ${_pkgs}
+            else
+                exec "$_real_apt" install -y --no-install-recommends ${_pkgs}
+            fi
         fi
         ;;
     update)
