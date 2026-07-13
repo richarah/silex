@@ -88,6 +88,12 @@ CFLAGS_DEBUG   = $(CFLAGS_COMMON) \
 
 CFLAGS ?= $(CFLAGS_RELEASE)
 
+# Append-only hooks, so a caller (e.g. the PGO targets) can add flags without
+# clobbering the feature-test macros the sources need. Overriding CFLAGS wholesale
+# is how path.c loses its realpath() declaration.
+CFLAGS  += $(EXTRA_CFLAGS)
+LDFLAGS += $(EXTRA_LDFLAGS)
+
 # --- Reproducible builds: pass SOURCE_DATE_EPOCH as build date ----------------
 ifdef SOURCE_DATE_EPOCH
     CFLAGS_COMMON += -Wdate-time \
@@ -628,36 +634,61 @@ size-check: release
 	    echo "OK: binary size $$SIZE bytes"; \
 	fi
 
-# --- PGO (requires pgo/ submodule) -----------------------------------------
-PGO_DIR      = $(CURDIR)/pgo
-PGO_RAW_DIR  = $(PGO_DIR)/profiles/raw
-PGO_MERGED   = $(PGO_DIR)/profiles/merged.profdata
-PGO_BINARY   = $(BINDIR)/silex-instrumented
+# --- PGO (profile-guided optimisation) ----------------------------------------
+#
+# Self-contained. The previous version of these targets ran `cd pgo && make
+# workloads` against a pgo/ directory that does not exist in the repo, so `make
+# pgo` failed immediately -- and sdk/Makefile advertised "PGO + BOLT" on top of
+# it. There was never a BOLT step at all, and the SDK's SILEX_PGO build-arg was a
+# dead ARG the Dockerfile ignored.
+#
+# What this does now, and does not:
+#   * it PROFILES the shell against real ./configure runs (the workload the
+#     binary is actually for -- see docs/WHERE_THE_TIME_GOES.md), not against a
+#     `wc` microbenchmark.
+#   * the resulting binary is verified for CORRECTNESS (make test passes with it).
+#   * the SPEEDUP is NOT claimed. PGO reorders code around a startup/dispatch
+#     hot path; on the hardware available here the delta was within measurement
+#     noise, and this project does not ship numbers it has not measured. Measure
+#     it on your target before relying on it.
+PGO_DIR       = build/pgo
+PGO_RAW       = $(PGO_DIR)/raw
+PGO_WORKLOADS = tests/external/repos/projects
 
-pgo-instrument: clean
-	$(MAKE) CC=$(CC) CFLAGS="$(CFLAGS_RELEASE) -fprofile-generate=$(PGO_RAW_DIR)" \
-	        LDFLAGS="$(LDFLAGS)" TARGET=$(PGO_BINARY) all
+pgo:
+	@echo "=== PGO: 1/3 instrumented build ==="
+	@$(MAKE) --no-print-directory clean
+	@$(MAKE) --no-print-directory \
+	    EXTRA_CFLAGS="-fprofile-generate=$(CURDIR)/$(PGO_RAW)" \
+	    EXTRA_LDFLAGS="-fprofile-generate=$(CURDIR)/$(PGO_RAW)" release-glibc
+	@echo "=== PGO: 2/3 profiling on real configure scripts ==="
+	@if [ ! -d "$(PGO_WORKLOADS)/zlib" ]; then \
+	    echo "PGO: no workloads under $(PGO_WORKLOADS); run 'make external-fetch' first" >&2; \
+	    exit 1; \
+	fi
+	@for p in zlib sqlite; do \
+	    [ -f "$(PGO_WORKLOADS)/$$p/configure" ] || continue; \
+	    w=$$(mktemp -d); cp -r "$(PGO_WORKLOADS)/$$p" "$$w/"; \
+	    ( cd "$$w/$$p" && make distclean >/dev/null 2>&1; \
+	      $(CURDIR)/$(TARGET) ./configure >/dev/null 2>&1 || true ); \
+	    rm -rf "$$w"; \
+	done
+	@$(CURDIR)/$(TARGET) -c 'i=0; while [ $$i -lt 5000 ]; do [ $$i -lt 9 ] || x=$$((i*2)); i=$$((i+1)); done' >/dev/null 2>&1 || true
+	@n=$$(ls $(PGO_RAW)/*.gcda 2>/dev/null | wc -l); \
+	 echo "    profiles: $$n files"; \
+	 if [ "$$n" -eq 0 ]; then \
+	    echo "PGO: no profile data was produced -- refusing to ship a binary that" >&2; \
+	    echo "     would be 'PGO-optimised' with no profile. Check the workloads run." >&2; \
+	    exit 1; \
+	 fi
+	@echo "=== PGO: 3/3 optimised build ==="
+	@$(MAKE) --no-print-directory clean
+	@$(MAKE) --no-print-directory \
+	    EXTRA_CFLAGS="-fprofile-use=$(CURDIR)/$(PGO_RAW) -fprofile-correction -Wno-error=coverage-mismatch -Wno-error=missing-profile" \
+	    release-glibc
+	@echo "=== PGO build complete. Verify correctness with 'make test'. ==="
 
-pgo-collect: pgo-instrument
-	cd $(PGO_DIR) && TARGET=$(PGO_BINARY) $(MAKE) workloads
-
-pgo-merge:
-	cd $(PGO_DIR) && $(MAKE) profile
-
-pgo-build: pgo-merge
-	$(MAKE) clean CC=$(CC) \
-	        CFLAGS="$(CFLAGS_RELEASE) -fprofile-use=$(PGO_MERGED) -fprofile-correction" all
-
-pgo-report:
-	cd $(PGO_DIR) && TARGET=$(BINDIR)/silex $(MAKE) report
-
-pgo-validate:
-	cd $(PGO_DIR) && TARGET=$(BINDIR)/silex $(MAKE) validate
-
-pgo: pgo-instrument pgo-collect pgo-build
-	@echo "PGO build complete."
-
-.PHONY: pgo pgo-instrument pgo-collect pgo-merge pgo-build pgo-report pgo-validate bench coverage
+.PHONY: pgo bench coverage
 
 # --- Git hooks ----------------------------------------------------------------
 # core/ is not the repo root, so .git and .githooks live above it. Ask git where

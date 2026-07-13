@@ -5,7 +5,7 @@
 #   make verify-sources   (once, to populate SHA256 values)
 #   make bootstrap        (slow: ~90-120 min cold start)
 #   make build            (fast: ~15-20 min, requires silex:slim in registry)
-#   make release          (PGO + BOLT, runs after build)
+#   make release          (currently identical to build; see below)
 #   make cache            (companion cache image)
 #   make test             (compat + integration tests)
 
@@ -60,14 +60,16 @@ build:
 	    .
 
 # ---------------------------------------------------------------------------
-# release: PGO + BOLT pass. Runs after build.
-# Rebuilds sccache and zstd with profile data, then runs BOLT.
+# release: was documented as "PGO + BOLT pass", but neither was ever implemented
+# -- SILEX_PGO is a dead build-arg the Dockerfile declares and never reads, and
+# there is no BOLT step anywhere. Until they exist, this is the build target with
+# the same inputs. The silex BINARY has a real PGO target (core: `make pgo`);
+# the toolchain in the IMAGE does not yet.
 # ---------------------------------------------------------------------------
 release:
 	$(DOCKER) build $(DOCKER_FLAGS) \
 	    -f dockerfiles/Dockerfile \
 	    -t $(FULL_TAG) \
-	    --build-arg SILEX_PGO=1 \
 	    --build-arg TARGETARCH=$(shell uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') \
 	    .
 
