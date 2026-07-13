@@ -25,8 +25,19 @@ else
 endif
 
 # --- Architecture baseline (overridable: make MARCH=x86-64-v3 for newer CPUs) -
+#
+# Ask the COMPILER what it targets, not `uname -m` what the host is. Deriving
+# this from the host meant that cross-compiling -- e.g.
+# `make CC=aarch64-linux-gnu-gcc`, which CI does -- passed -march=x86-64-v2 to an
+# aarch64 compiler and died with "unknown value 'x86-64-v2' for '-march'".
+# That job could never have passed; nobody noticed, because the gates could not
+# fail.
+#
+# -dumpmachine gives the target triple (x86_64-linux-gnu, aarch64-linux-gnu, ...).
+# Fall back to uname if the compiler doesn't support it.
 MARCH ?= x86-64-v2
-ARCH  := $(shell uname -m)
+TARGET_TRIPLE := $(shell $(CC) -dumpmachine 2>/dev/null || uname -m)
+ARCH          := $(firstword $(subst -, ,$(TARGET_TRIPLE)))
 
 ifeq ($(ARCH),x86_64)
     MARCH_FLAG = -march=$(MARCH)

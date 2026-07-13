@@ -1711,12 +1711,14 @@ static int exec_builtin_trap(shell_ctx_t *sh, int argc, char **argv)
 
 static int exec_builtin_read(shell_ctx_t *sh, int argc, char **argv)
 {
-    /* read [-r] VAR... */
+    /* read [-r] VAR...
+     * NB: not `optind` -- that is getopt's global in <unistd.h>, and clang's
+     * -Wshadow (unlike gcc's) rejects shadowing it. */
     int raw = 0;
-    int optind = 1;
-    while (optind < argc && argv[optind][0] == '-') {
-        if (strcmp(argv[optind], "-r") == 0) { raw = 1; optind++; }
-        else if (strcmp(argv[optind], "--") == 0) { optind++; break; }
+    int opt_i = 1;
+    while (opt_i < argc && argv[opt_i][0] == '-') {
+        if (strcmp(argv[opt_i], "-r") == 0) { raw = 1; opt_i++; }
+        else if (strcmp(argv[opt_i], "--") == 0) { opt_i++; break; }
         else break;
     }
 
@@ -1743,7 +1745,7 @@ static int exec_builtin_read(shell_ctx_t *sh, int argc, char **argv)
     const char *ifs = vars_get(&sh->vars, "IFS");
     if (!ifs) ifs = " \t\n";
 
-    int nvars = argc - optind;
+    int nvars = argc - opt_i;
     if (nvars == 0) {
         /* No variable names: discard */
         sb_free(&line);
@@ -1755,14 +1757,14 @@ static int exec_builtin_read(shell_ctx_t *sh, int argc, char **argv)
     if (!linecopy) return 1;
 
     char *p = linecopy;
-    for (int vi = optind; vi < argc; vi++) {
+    for (int vi = opt_i; vi < argc; vi++) {
         /* Trim leading IFS on all but last */
         if (vi < argc - 1) {
             while (*p && strchr(ifs, (unsigned char)*p)) p++;
         }
         if (vi == argc - 1) {
             /* Last var gets rest of line (stripped of leading IFS if >1 var) */
-            if (argc - optind > 1) {
+            if (argc - opt_i > 1) {
                 while (*p && strchr(ifs, (unsigned char)*p)) p++;
             }
             vars_set(&sh->vars, argv[vi], p);
@@ -2394,10 +2396,10 @@ static int exec_builtin_getopts(shell_ctx_t *sh, int argc, char **argv)
     /* Get OPTIND (1-based; default 1) */
     const char *optind_str = vars_get(&sh->vars, "OPTIND");
     /* OPTIND is user-settable (OPTIND=abc), so it is untrusted. */
-    int optind = 1;
-    if (optind_str && sh_parse_int(optind_str, 1, INT_MAX, &optind) != 0)
-        optind = 1;
-    if (optind < 1) optind = 1;
+    int opt_i = 1;  /* not `opt_i`: getopt's global (clang -Wshadow) */
+    if (optind_str && sh_parse_int(optind_str, 1, INT_MAX, &opt_i) != 0)
+        opt_i = 1;
+    if (opt_i < 1) opt_i = 1;
 
     /* Build args array: argv[3..] if given, else sh->positional */
     const char **args;
@@ -2418,11 +2420,11 @@ static int exec_builtin_getopts(shell_ctx_t *sh, int argc, char **argv)
     if (optpos < 1) optpos = 1;
 
     /* Check bounds */
-    if (optind > nargs) {
+    if (opt_i > nargs) {
         vars_set(&sh->vars, varname, "?");
         return 1;
     }
-    const char *arg = args[optind - 1];
+    const char *arg = args[opt_i - 1];
 
     /* Check if arg is an option */
     if (arg[0] != '-' || arg[1] == '\0') {
@@ -2431,7 +2433,7 @@ static int exec_builtin_getopts(shell_ctx_t *sh, int argc, char **argv)
     }
     if (strcmp(arg, "--") == 0) {
         char buf[32];
-        snprintf(buf, sizeof(buf), "%d", optind + 1);
+        snprintf(buf, sizeof(buf), "%d", opt_i + 1);
         vars_set(&sh->vars, "OPTIND", buf);
         vars_set(&sh->vars, "__OPTPOS", "1");
         vars_set(&sh->vars, varname, "?");
@@ -2441,13 +2443,13 @@ static int exec_builtin_getopts(shell_ctx_t *sh, int argc, char **argv)
     /* Get option char at optpos within arg */
     if ((size_t)optpos >= strlen(arg)) {
         /* Move to next arg */
-        optind++;
+        opt_i++;
         optpos = 1;
-        if (optind > nargs) {
+        if (opt_i > nargs) {
             vars_set(&sh->vars, varname, "?");
             return 1;
         }
-        arg = args[optind - 1];
+        arg = args[opt_i - 1];
         if (arg[0] != '-' || arg[1] == '\0' || strcmp(arg, "--") == 0) {
             vars_set(&sh->vars, varname, "?");
             return 1;
@@ -2470,25 +2472,25 @@ static int exec_builtin_getopts(shell_ctx_t *sh, int argc, char **argv)
             /* Requires argument */
             if (arg[optpos + 1] != '\0') {
                 vars_set(&sh->vars, "OPTARG", arg + optpos + 1);
-                optind++;
+                opt_i++;
                 optpos = 1;
             } else {
-                optind++;
+                opt_i++;
                 optpos = 1;
-                if (optind > nargs) {
+                if (opt_i > nargs) {
                     if (!silent) fprintf(stderr, "silex: getopts: option requires an argument -- %c\n", opt);
                     vars_set(&sh->vars, varname, silent ? ":" : "?");
                     vars_set(&sh->vars, "OPTARG", opt_str);
                 } else {
-                    vars_set(&sh->vars, "OPTARG", args[optind - 1]);
-                    optind++;
+                    vars_set(&sh->vars, "OPTARG", args[opt_i - 1]);
+                    opt_i++;
                 }
             }
         } else {
             vars_set(&sh->vars, "OPTARG", "");
             optpos++;
             if ((size_t)optpos >= strlen(arg)) {
-                optind++;
+                opt_i++;
                 optpos = 1;
             }
         }
@@ -2496,7 +2498,7 @@ static int exec_builtin_getopts(shell_ctx_t *sh, int argc, char **argv)
 
     /* Update OPTIND and __OPTPOS */
     char buf[32];
-    snprintf(buf, sizeof(buf), "%d", optind);
+    snprintf(buf, sizeof(buf), "%d", opt_i);
     vars_set(&sh->vars, "OPTIND", buf);
     snprintf(buf, sizeof(buf), "%d", optpos);
     vars_set(&sh->vars, "__OPTPOS", buf);
