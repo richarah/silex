@@ -131,18 +131,15 @@ case "$CACHE" in
         ;;
 esac
 
-# ============================================================================
-# DNS cache refresh
-# Remove stale baked-in entries, re-resolve in background.
-# ============================================================================
-(
-    sed -i '/# silex-dns-cache$/d' /etc/hosts 2>/dev/null || true
-    for _h in richarah.github.io github.com objects.githubusercontent.com \
-               pypi.org registry.npmjs.org crates.io proxy.golang.org; do
-        _ip=$(getent ahosts "$_h" 2>/dev/null | awk '/STREAM/{print $1;exit}')
-        [ -n "$_ip" ] && echo "$_ip $_h  # silex-dns-cache" >> /etc/hosts
-    done
-) 2>/dev/null &
+# DNS cache refresh was here. Removed.
+#
+# It re-resolved seven hosts and rewrote /etc/hosts from a DETACHED BACKGROUND
+# SUBSHELL on every single container start -- racing the user's command, with no
+# synchronisation. A fast `RUN` could read /etc/hosts while it was half-written.
+#
+# And the addresses it cached are Fastly/GitHub anycast IPs, which rotate. A
+# stale pin does not make the build faster; it sends package installs to whoever
+# holds that address next. The resolver already caches. Let it.
 
 # ============================================================================
 # Print configuration summary (unless SILEX_QUIET=on)

@@ -662,6 +662,18 @@ COPY scripts/silex             /usr/local/bin/silex
 COPY scripts/shims/            /usr/local/silex/shims/
 COPY scripts/wrappers/         /usr/local/silex/bin/
 
+# The git wrapper execs /usr/bin/git, and git is NOT in slim ("git not in
+# slim" -- README). But /usr/local/silex/bin is FIRST on PATH, so the wrapper
+# made `command -v git` SUCCEED while `git` then failed with a confusing
+# "no such file". Configure scripts probe for git exactly this way and take
+# the git code path on the strength of it.
+#
+# Only ship a wrapper for a tool that actually exists.
+RUN for _w in /usr/local/silex/bin/*; do \
+        _t="/usr/bin/$(basename "$_w")"; \
+        [ -x "$_t" ] || { echo "silex: no $_t, dropping wrapper $(basename "$_w")"; rm -f "$_w"; }; \
+    done
+
 RUN chmod +x /usr/local/bin/apt-get \
     /usr/local/bin/silex-entrypoint \
     /usr/local/bin/silex \
@@ -673,20 +685,16 @@ RUN chmod +x /usr/local/bin/apt-get \
            ln -sf "$f" "/usr/local/bin/$(basename "$f")"; \
        done
 
-# ============================================================================
-# DNS pre-warming.
-# ============================================================================
-RUN for _host in \
-        richarah.github.io \
-        github.com \
-        objects.githubusercontent.com \
-        pypi.org \
-        registry.npmjs.org \
-        crates.io \
-        proxy.golang.org; do \
-    _ip=$(getent ahosts "$_host" 2>/dev/null | awk '/STREAM/{print $1;exit}'); \
-    [ -n "$_ip" ] && echo "$_ip $_host  # silex-dns-cache" >> /etc/hosts; \
-    done || true
+# DNS pre-warming was here. Removed.
+#
+# It resolved github.com, pypi.org, crates.io etc AT IMAGE BUILD TIME and
+# appended the A records to /etc/hosts. Those are Fastly/GitHub anycast IPs
+# that rotate: a stale pin sends every package install to whoever holds that
+# address next. It also made the image non-deterministic by construction --
+# the layer hash changed on every build, which rather undercuts the
+# SOURCE_DATE_EPOCH a few lines below.
+#
+# What it bought: one DNS lookup, once, per host. That is not a trade.
 
 # ============================================================================
 # Remove locale and timezone data.
