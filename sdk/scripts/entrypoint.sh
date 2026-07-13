@@ -131,6 +131,58 @@ case "$CACHE" in
         ;;
 esac
 
+# ----------------------------------------------------------------------------
+# sccache backend.
+#
+# The README's headline is "18x warm sccache rebuild" -- and that number is only
+# real if the cache SURVIVES between builds. The default backend is a local
+# directory (SCCACHE_DIR), which persists on one developer's machine via a
+# BuildKit `--mount=type=cache`, but is EMPTY on every fresh CI runner. So the
+# advertised win never materialised in the one place people most want it: CI.
+#
+# sccache reads its backend from environment variables, and it prefers, in order:
+# GitHub Actions cache, S3/R2, Redis, memcached, then the local dir. We do not
+# hardcode credentials -- we just make the common backends work when the caller
+# supplies them, and say which one is active.
+#
+#   GitHub Actions:  set SILEX_SCCACHE=gha and pass ACTIONS_CACHE_URL +
+#                    ACTIONS_RUNTIME_TOKEN (the standard `docker/build-push` +
+#                    `crazy-max/ghaction-github-runtime` combination).
+#   S3 / R2 / MinIO: set SILEX_SCCACHE=s3 and the SCCACHE_BUCKET / SCCACHE_ENDPOINT
+#                    / AWS_* variables sccache already understands.
+#   local (default): a directory, persisted across builds only by a cache mount.
+#
+# This is opt-in: with nothing set, behaviour is exactly as before.
+if [ "$CACHE" = "sccache" ]; then
+    case "${SILEX_SCCACHE:-local}" in
+        gha)
+            if [ -n "${ACTIONS_CACHE_URL:-}" ] && [ -n "${ACTIONS_RUNTIME_TOKEN:-}" ]; then
+                export SCCACHE_GHA_ENABLED=true
+                unset SCCACHE_DIR
+                [ "${SILEX_QUIET:-off}" = on ] || echo "silex: sccache -> GitHub Actions cache" >&2
+            else
+                echo "silex: SILEX_SCCACHE=gha but ACTIONS_CACHE_URL/ACTIONS_RUNTIME_TOKEN are unset;" >&2
+                echo "       falling back to the local cache dir. In a workflow, add" >&2
+                echo "       'uses: crazy-max/ghaction-github-runtime@v3' to export them." >&2
+            fi
+            ;;
+        s3)
+            if [ -n "${SCCACHE_BUCKET:-}" ]; then
+                unset SCCACHE_DIR
+                [ "${SILEX_QUIET:-off}" = on ] || echo "silex: sccache -> S3 bucket $SCCACHE_BUCKET" >&2
+            else
+                echo "silex: SILEX_SCCACHE=s3 but SCCACHE_BUCKET is unset; using the local cache dir." >&2
+            fi
+            ;;
+        local|"")
+            : # SCCACHE_DIR as set in the Dockerfile
+            ;;
+        *)
+            echo "silex: warning: unknown SILEX_SCCACHE='$SILEX_SCCACHE'; using the local cache dir." >&2
+            ;;
+    esac
+fi
+
 # DNS cache refresh was here. Removed.
 #
 # It re-resolved seven hosts and rewrote /etc/hosts from a DETACHED BACKGROUND

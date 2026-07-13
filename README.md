@@ -107,6 +107,7 @@ Override in Dockerfile or at runtime.
 | `SILEX_GENERATOR` | Ninja | Ninja, "Unix Makefiles" |
 | `SILEX_PARALLEL` | auto | auto, off, or a number |
 | `SILEX_CACHE` | sccache | sccache, ccache, off |
+| `SILEX_SCCACHE` | local | local, gha, s3 (see below) |
 | `SILEX_MALLOC` | mimalloc | mimalloc, jemalloc, system |
 | `SILEX_WRAPPERS` | on | on, off |
 | `SILEX_QUIET` | off | on, off |
@@ -129,6 +130,29 @@ or fsync. That's where the thirty seconds went.
 
 `ENV SILEX_WRAPPERS=off` disables the apt compatibility
 layer if you need raw package management.
+
+### The 18x is only real if the cache survives
+
+sccache's default backend is a local directory. It persists on a
+developer's machine via `--mount=type=cache`, but is **empty on
+every fresh CI runner** -- which is where "18x warm rebuild" is
+most wanted and where it silently did not happen.
+
+To make it real, point sccache at a shared backend:
+
+```dockerfile
+# GitHub Actions cache
+ENV SILEX_SCCACHE=gha
+# in the workflow: uses: crazy-max/ghaction-github-runtime@v3
+```
+
+```dockerfile
+# S3 / R2 / MinIO
+ENV SILEX_SCCACHE=s3 SCCACHE_BUCKET=my-cache SCCACHE_ENDPOINT=...
+```
+
+Opt-in: with nothing set, the local cache behaves exactly as
+before.
 
 ### Also shimmed
 

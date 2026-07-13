@@ -1,5 +1,15 @@
 #!/bin/sh
 # build-cache.sh — build the silex-cache companion image.
+#
+# STALE: this snapshots the Wolfi/Chainguard APKINDEX (apk.cgr.dev), but the
+# image was migrated off Wolfi to richarah.github.io/silex-packages months ago
+# (see the "drop Wolfi" commits). So it caches a package source the image no
+# longer uses, and `make cache` is NOT wired into any build for that reason --
+# wiring it in as-is would pre-fetch from the wrong repo.
+#
+# To revive it: repoint the snapshot below at silex-packages, and add a
+# `COPY --from=silex-cache` to the Dockerfile's package-install stage. Until
+# then it is kept, unwired, as the skeleton of that work.
 # Usage: sh build-cache.sh [VERSION]
 #
 # The cache image contains:
