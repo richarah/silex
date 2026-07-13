@@ -295,3 +295,78 @@ jobs:
 
           echo ""
           echo "✓ All critical checks passed"
+
+  # Job 13: Benchmark. Times silex against dash on a REAL build and ASSERTS THE
+  # ARTIFACT.
+  #
+  # This project reported silex "44% faster on configure+make" when silex's make
+  # was in fact FAILING -- 16 of 19 objects, no libz.a. A benchmark that does not
+  # check what the build produced is measuring time-to-fail and calling it speed.
+  # This job exists so that number cannot rot back into folklore.
+  benchmark:
+    name: Benchmark (asserts artifacts)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y gcc make dash
+      - name: Build release
+        run: make release-glibc
+      - name: Fetch benchmark source (zlib)
+        run: |
+          mkdir -p tests/external/repos/projects
+          if [ ! -f tests/external/repos/projects/zlib/configure ]; then
+            curl -fsSL https://zlib.net/zlib-1.3.1.tar.gz -o /tmp/z.tgz
+            tar xzf /tmp/z.tgz -C /tmp
+            mv /tmp/zlib-1.3.1 tests/external/repos/projects/zlib
+          fi
+      - name: Benchmark vs dash
+        run: make bench-ci
+
+  # Job 14: Fuzzing. Five libFuzzer harnesses have existed in tests/fuzz/ since
+  # before this branch and CI has never run one of them.
+  fuzz:
+    name: Fuzz (libFuzzer, short run)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang
+        run: sudo apt-get update && sudo apt-get install -y clang make
+      - name: Build fuzz harnesses
+        run: make CC=clang fuzz
+      - name: Run each harness briefly
+        run: |
+          set -eu
+          for f in build/fuzz/fuzz_*; do
+            [ -x "$f" ] || continue
+            echo "=== $(basename "$f") ==="
+            # -runs bounds the job; a crash still fails it, which is the point.
+            "$f" -runs=20000 -max_total_time=120 -timeout=10
+          done
+      - name: Upload crashers
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashers
+          path: |
+            crash-*
+            leak-*
+            timeout-*
+          if-no-files-found: ignore
+
+  # Job 15: Coverage. Reports; does not gate. An arbitrary coverage floor blocks
+  # honest work, but flying with no number at all is how tests/unit/shell/ ended
+  # up with ten suites that CI never executed.
+  coverage:
+    name: Coverage (report only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y gcc make dash gcovr
+      - name: Coverage
+        run: make coverage

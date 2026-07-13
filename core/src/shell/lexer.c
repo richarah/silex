@@ -21,15 +21,25 @@
  * Using a table lookup avoids 11 comparisons on every character in the
  * hot word-scanning loop.
  *
- * EOF is represented as (unsigned char)(-1) == 0xFF; entry [0xFF] = 1
- * ensures a single `word_stop[(unsigned char)c]` covers all cases.
+ * There used to be a [0xFF] = 1 entry here, on the theory that EOF is
+ * (unsigned char)(-1) == 0xFF so one table lookup could cover EOF too.
+ *
+ * That was an INFINITE LOOP. 0xFF is a perfectly real byte, and it indexes the
+ * same slot as the EOF sentinel: the word loop saw a literal 0xFF, decided it
+ * was a word terminator, ungetc'd it, and read the very same byte back on the
+ * next iteration -- forever. A single stray high byte in a script hung the
+ * shell. (Found by fuzz_shell_lexer, the first time it was ever built and run;
+ * minimised to the one byte 0xFF.)
+ *
+ * EOF is an int -1 and is already handled explicitly at the bottom of the word
+ * loop. The table only ever indexes genuine bytes, so it must not claim any
+ * byte value is EOF.
  * ------------------------------------------------------------------------- */
 static const uint8_t word_stop[256] = {
     ['\n']  = 1, [' ']  = 1, ['\t'] = 1,
     [';']   = 1, ['&']  = 1, ['|']  = 1,
     ['<']   = 1, ['>']  = 1, ['(']  = 1,  [')'] = 1,
     ['#']   = 1,
-    [0xFF]  = 1,  /* (unsigned char)EOF — terminates word scan */
 };
 
 /* -------------------------------------------------------------------------
@@ -724,7 +734,7 @@ restart:
             }
         } else {
             /* Check for word-terminating characters via LUT (one table lookup
-             * vs. 11 comparisons; also covers EOF via 0xFF entry). */
+                 * EOF is handled by the loop tail; here c is always a real byte). */
             if (word_stop[(unsigned char)c]) {
                 lexer_ungetc(l, c);
                 break;

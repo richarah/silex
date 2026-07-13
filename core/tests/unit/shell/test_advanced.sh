@@ -337,3 +337,17 @@ check 'empty string: [ -z "" ]' "$got" "yes"
 echo ""
 echo "advanced tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
+
+# --- lexer: high bytes must not hang (regression for the word_stop[0xFF] EOF
+# collision found by fuzz_shell_lexer; a single 0xFF byte spun forever) ---
+for _b in '\377' '\377\001' '\376\377\365'; do
+    timeout 5 "$SILEX" -c "$(printf "$_b")" >/dev/null 2>&1
+    _rc=$?
+    if [ "$_rc" -eq 124 ]; then
+        echo "FAIL: lexer hangs on high byte sequence $_b"
+        FAIL=$((FAIL + 1))
+    else
+        echo "PASS: lexer terminates on high byte sequence $_b"
+        PASS=$((PASS + 1))
+    fi
+done

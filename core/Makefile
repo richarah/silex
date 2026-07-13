@@ -266,7 +266,7 @@ TARGET = $(BINDIR)/silex
 
 .PHONY: all clean debug release release-glibc release-docker test install check \
         test-asan compat-test shell-test security-test \
-        bench integration-test fuzz fuzz-run \
+        bench bench-ci coverage integration-test fuzz fuzz-run \
         analyze cppcheck test-valgrind cross-check \
         size-check install-hooks musl \
         stress-test edge-test external-test external-fetch \
@@ -380,6 +380,19 @@ test: $(TARGET) $(TEST_CHARCLASS) $(TEST_LINESCAN) $(TEST_REGEX) $(TEST_ARENA)
 	@echo "--- test_arena (C) ---"
 	@$(TEST_ARENA) && echo "PASS: test_arena"
 
+# --- Coverage -----------------------------------------------------------------
+# Line coverage over the unit + compat suites. Reports; does not gate (a coverage
+# floor is a policy decision, and an arbitrary one blocks honest work).
+coverage:
+	@$(MAKE) clean
+	@$(MAKE) CFLAGS="$(CFLAGS_COMMON) -O0 -g --coverage" LDFLAGS="--coverage" $(TARGET)
+	@bash tests/unit/run_tests.sh $(abspath $(TARGET)) >/dev/null 2>&1 || true
+	@sh tests/compat/run_compat.sh $(abspath $(TARGET)) >/dev/null 2>&1 || true
+	@command -v gcovr >/dev/null 2>&1 && \
+	    gcovr -r . --exclude tests --print-summary || \
+	    { echo "coverage: gcovr not installed; raw .gcda written under $(OBJDIR)"; \
+	      gcov -o $(OBJDIR)/shell $(SRCDIR)/shell/*.c 2>/dev/null | tail -20; }
+
 # check = build + unit tests + the check.sh conformance script.
 # This used to be two separate `check:` rules (one with no recipe), which GNU
 # make silently merged. Adding a recipe to the other would have dropped one.
@@ -409,12 +422,28 @@ security-test: $(TARGET)
 	    bash $$f $(TARGET); \
 	done
 
+# The `for` loop here used to discard each script's exit status, so this target
+# could not fail -- the same bug shell-test and security-test had. A benchmark
+# that cannot fail cannot defend a number.
+#
+# NOTE: no `ulimit -v` any more. AddressSanitizer reserves ~20TB of virtual
+# address space, so a virtual-memory cap makes every sanitised run die for
+# reasons that have nothing to do with the benchmark.
+# The CI gate. Just the shell benchmark -- the one that times a REAL build and
+# ASSERTS THE ARTIFACT. The microbenchmarks under `make bench` are dev tools;
+# they measure `wc -l` against GNU wc, which is not a container-build number and
+# must never be presented as one (see core/docs/WHERE_THE_TIME_GOES.md).
+bench-ci: $(TARGET)
+	@sh tests/bench/bench_shell.sh $(abspath $(TARGET))
+
 bench: $(TARGET)
 	@echo "=== Running benchmarks ==="
-	@for f in tests/bench/bench_*.sh; do \
+	@rc=0; \
+	for f in tests/bench/bench_*.sh; do \
 	    echo "--- $$f ---"; \
-	    (ulimit -v 4194304; ulimit -f 1048576; ulimit -t 300; ulimit -d 2097152; bash $$f $(TARGET)); \
-	done
+	    (ulimit -f 1048576; ulimit -t 600; bash $$f $(abspath $(TARGET))) || rc=1; \
+	done; \
+	exit $$rc
 
 integration-test: $(TARGET)
 	@echo "=== Running integration tests ==="
@@ -498,7 +527,12 @@ clean-modules:
 
 # --- Fuzz targets -------------------------------------------------------------
 FUZZ_CC    = clang
-FUZZ_FLAGS = -fsanitize=fuzzer,address,undefined -std=c11 -I$(SRCDIR)
+# The feature-test macros are NOT optional. Without them realpath(), strdup()
+# and friends are not declared, and the harnesses do not compile -- which is why
+# all five have been silently broken: nothing ever built them. CI does now.
+FUZZ_FLAGS = -fsanitize=fuzzer,address,undefined -std=c11 -I$(SRCDIR) \
+             -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE \
+             -DSILEX_VERSION=\"$(VERSION)\" $(LIBC_DEFINE)
 FUZZ_DIR   = build/fuzz
 
 fuzz: $(FUZZ_DIR)/fuzz_shell_lexer $(FUZZ_DIR)/fuzz_shell_parser \
@@ -508,8 +542,18 @@ fuzz: $(FUZZ_DIR)/fuzz_shell_lexer $(FUZZ_DIR)/fuzz_shell_parser \
 $(FUZZ_DIR):
 	mkdir -p $(FUZZ_DIR)
 
+# charclass.c is not optional: lexer.c references char_class[]. Its absence is
+# why every harness failed to LINK, on top of failing to compile. Five fuzzers,
+# none of which had ever been built.
 FUZZ_CORE = $(SRCDIR)/util/arena.c $(SRCDIR)/util/strbuf.c \
-            $(SRCDIR)/util/path.c  $(SRCDIR)/util/error.c
+            $(SRCDIR)/util/path.c  $(SRCDIR)/util/error.c \
+            $(SRCDIR)/util/charclass.c $(SRCDIR)/util/intern.c
+
+# grep and sed pull in the regex engine, the module registry (they consult it for
+# unrecognised flags) and vcsignore.
+FUZZ_TOOL_DEPS = $(REGEX_TEST_SRCS) $(SRCDIR)/util/vcsignore.c \
+                 $(SRCDIR)/module/registry.c $(SRCDIR)/module/loader.c \
+                 $(LINESCAN_SRC)
 
 $(FUZZ_DIR)/fuzz_shell_lexer: tests/fuzz/fuzz_shell_lexer.c \
     $(SRCDIR)/shell/lexer.c $(FUZZ_CORE) | $(FUZZ_DIR)
@@ -524,12 +568,12 @@ $(FUZZ_DIR)/fuzz_path_canon: tests/fuzz/fuzz_path_canon.c \
 	$(FUZZ_CC) $(FUZZ_FLAGS) -o $@ $^
 
 $(FUZZ_DIR)/fuzz_grep_pattern: tests/fuzz/fuzz_grep_pattern.c \
-    $(SRCDIR)/core/grep.c $(FUZZ_CORE) | $(FUZZ_DIR)
-	$(FUZZ_CC) $(FUZZ_FLAGS) -o $@ $^
+    $(SRCDIR)/core/grep.c $(FUZZ_CORE) $(FUZZ_TOOL_DEPS) | $(FUZZ_DIR)
+	$(FUZZ_CC) $(FUZZ_FLAGS) $(CFLAGS_LINESCAN) -o $@ $^ -ldl
 
 $(FUZZ_DIR)/fuzz_sed_expr: tests/fuzz/fuzz_sed_expr.c \
-    $(SRCDIR)/core/sed.c $(FUZZ_CORE) | $(FUZZ_DIR)
-	$(FUZZ_CC) $(FUZZ_FLAGS) -o $@ $^
+    $(SRCDIR)/core/sed.c $(FUZZ_CORE) $(FUZZ_TOOL_DEPS) | $(FUZZ_DIR)
+	$(FUZZ_CC) $(FUZZ_FLAGS) $(CFLAGS_LINESCAN) -o $@ $^ -ldl
 
 ITERS ?= 1000000
 fuzz-run: fuzz
@@ -613,7 +657,7 @@ pgo-validate:
 pgo: pgo-instrument pgo-collect pgo-build
 	@echo "PGO build complete."
 
-.PHONY: pgo pgo-instrument pgo-collect pgo-merge pgo-build pgo-report pgo-validate
+.PHONY: pgo pgo-instrument pgo-collect pgo-merge pgo-build pgo-report pgo-validate bench coverage
 
 # --- Git hooks ----------------------------------------------------------------
 # core/ is not the repo root, so .git and .githooks live above it. Ask git where
