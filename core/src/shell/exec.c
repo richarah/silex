@@ -571,6 +571,29 @@ int exec_simple_cmd(shell_ctx_t *sh, char **words, char **assigns, redir_t *redi
             }
         } else {
             cmd_rc = sfn(sh, argc, expanded);
+
+            /* A builtin whose output could not be written has not succeeded.
+             *
+             * stdio buffers, so a failing write() is not seen by the builtin's
+             * printf -- it surfaces at the flush, which for a builtin never
+             * happens before the redirection is torn down. So `times >/dev/full`,
+             * `export -p >/dev/full`, `type echo >/dev/full` and friends all
+             * reported success while writing nothing. smoosh calls this class
+             * "silently failing commands" and tests for it directly.
+             *
+             * Flush while the redirection is still applied -- after
+             * redirect_restore() below, stdout points somewhere else and the
+             * error is lost. EPIPE stays silent (`yes | head` is not an error).
+             */
+            if (fflush(stdout) != 0 || ferror(stdout)) {
+                if (errno != EPIPE) {
+                    fprintf(stderr, "silex: %s: write error: %s\n",
+                            cmd, strerror(errno));
+                    if (cmd_rc == 0)
+                        cmd_rc = 1;
+                }
+                clearerr(stdout);
+            }
         }
         /* 'exec' with no command: redirections are permanent (not restored) */
         if (strcmp(cmd, "exec") == 0 && argc == 1)
