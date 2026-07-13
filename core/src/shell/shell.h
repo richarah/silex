@@ -49,6 +49,12 @@ typedef struct shell_ctx {
     int         loop_depth;  /* current loop nesting depth; 0 = not in loop */
     int         interactive; /* 1 if shell is interactive (stdin is tty), 0 otherwise */
     int         in_command_builtin; /* 1 if executing via 'command' prefix (disables special builtin semantics) */
+    /* Set while expanding a word that contained a quoted "$@" with no positional
+     * parameters. POSIX 2.5.2: "$@" with zero positionals generates ZERO fields,
+     * even though it is double-quoted -- unlike "$*", which generates one empty
+     * field. Without this, `exec cmd "$0" "$@"` (the autosetup/jimsh idiom, and
+     * sqlite's ./configure) passes a phantom empty argument. */
+    int         at_expanded_empty;
     /* PATH resolution cache: command name → resolved absolute path.
      * Invalidated (path_cache_hash reset) when PATH changes. */
     void       *path_cache[256];  /* path_cache_entry_t*, open-addressing by FNV-1a */

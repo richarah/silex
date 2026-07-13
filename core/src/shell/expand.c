@@ -1308,6 +1308,20 @@ static void expand_into(shell_ctx_t *sh, const char *word, strbuf_t *out,
             if (*p == '@' || *p == '*') {
                 if (*p == '@' && in_dquote) {
                     /* "$@": each positional as a separate word; use \x01 boundary */
+                    if (sh->positional_n == 0) {
+                        /* POSIX 2.5.2: "$@" with no positional parameters
+                         * generates ZERO fields, even though it is double-quoted
+                         * -- unlike "$*", which generates one empty field.
+                         *
+                         * Appending nothing here left an empty word, and the
+                         * empty-word path below then manufactured one empty
+                         * field. So `f "$@"` passed one empty argument instead
+                         * of none, and `exec cmd "$0" "$@"` -- the autosetup
+                         * idiom, and sqlite's ./configure -- died with
+                         * "Unexpected parameter:". Flag it so the field-splitting
+                         * phase can drop the word entirely. */
+                        sh->at_expanded_empty = 1;
+                    }
                     for (int pi = 0; pi < sh->positional_n; pi++) {
                         if (pi > 0) sb_appendc(out, '\x01');
                         sb_append(out, sh->positional[pi]);
@@ -1572,6 +1586,11 @@ expand_result_t expand_word_full(shell_ctx_t *sh, const char *word)
     res.words = NULL;
     res.count = 0;
 
+    /* Cleared per word; set by expand_into() if this word contains a quoted
+     * "$@" and there are no positional parameters. See the nfields == 0 branch
+     * below, and shell.h. */
+    sh->at_expanded_empty = 0;
+
     /* Determine whether this word contains unquoted expansions / globs.
      * These checks must be done on the original token text (before expansion),
      * so that quoted chars like "*" in '"*"' are not treated as glob chars. */
@@ -1627,6 +1646,21 @@ expand_result_t expand_word_full(shell_ctx_t *sh, const char *word)
     int nfields   = 0;
 
     if (!do_ifs_split) {
+        /* "$@" with no positional parameters generates ZERO fields (POSIX
+         * 2.5.2), even though it is double-quoted -- unlike "$*", which yields
+         * one empty field. This branch is the one that runs for it: the word is
+         * quoted, so do_ifs_split is false, and it used to unconditionally
+         * manufacture a single empty field here.
+         *
+         * The guard is on the word expanding to empty, so `a"$@"b` still yields
+         * the single field "ab"; only a word that is entirely "$@" disappears.
+         *
+         * `f "$@"` therefore passed one empty argument instead of none, and
+         * `exec cmd "$0" "$@"` -- the autosetup idiom, and sqlite's
+         * ./configure -- died with "Unexpected parameter:". */
+        if (sh->at_expanded_empty && expanded[0] == '\0')
+            goto no_fields;
+
         /* No IFS splitting: treat the entire expanded string as one field */
         fields = malloc(sizeof(char *));
         if (fields) { fields[0] = expanded; nfields = 1; }
@@ -1698,7 +1732,17 @@ glob_phase:
     if (nfields == 0) {
         /* POSIX: if an unquoted expansion produces an empty result,
          * it yields zero fields, not one empty field. Only produce an empty
-         * field if the original word was literally empty or quoted empty. */
+         * field if the original word was literally empty or quoted empty.
+         *
+         * "$@" with no positional parameters is the other case that yields zero
+         * fields, and it is NOT covered by the do_ifs_split test above -- the
+         * word is double-quoted, so do_ifs_split is false and the branch below
+         * would manufacture one empty field. Note the guard is on the word
+         * expanding to empty: `a"$@"b` with no positionals correctly yields the
+         * single field "ab", and only a word that is entirely "$@" disappears. */
+        if (sh->at_expanded_empty && expanded[0] == '\0')
+            goto no_fields;
+
         if (!do_ifs_split || expanded[0] != '\0') {
             /* Literal word or non-empty result: create single field.
              *
@@ -1719,6 +1763,9 @@ glob_phase:
         }
         /* else: empty expansion result from unquoted param expansion yields 0 fields */
     }
+
+no_fields:
+    ;   /* a label must precede a statement, not a declaration */
 
     /* Pathname expansion (globbing) unless set -f */
     char **final = NULL;
