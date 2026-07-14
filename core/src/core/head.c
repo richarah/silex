@@ -265,7 +265,7 @@ int applet_head(int argc, char **argv)
             case 'v': opt_v = 1; break;
             case 'n': {
                 const char *val;
-                if (p[1]) { val = p + 1; stop = 1; }
+                if (p[1]) { val = p + 1; }  /* stop set unconditionally below */
                 else {
                     i++;
                     if (i >= argc) {
@@ -284,7 +284,7 @@ int applet_head(int argc, char **argv)
             }
             case 'c': {
                 const char *val;
-                if (p[1]) { val = p + 1; stop = 1; }
+                if (p[1]) { val = p + 1; }  /* stop set unconditionally below */
                 else {
                     i++;
                     if (i >= argc) {

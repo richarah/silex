@@ -317,7 +317,11 @@ jobs:
         run: |
           mkdir -p tests/external/repos/projects
           if [ ! -f tests/external/repos/projects/zlib/configure ]; then
-            curl -fsSL https://zlib.net/zlib-1.3.1.tar.gz -o /tmp/z.tgz
+            # zlib.net serves ONLY the current release at its root; older versions
+            # move to /fossils/, so the bare zlib.net/zlib-1.3.1.tar.gz 404s. Pull
+            # from the GitHub release (stable, versioned), fall back to fossils.
+            curl -fsSL https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz -o /tmp/z.tgz \
+              || curl -fsSL https://zlib.net/fossils/zlib-1.3.1.tar.gz -o /tmp/z.tgz
             tar xzf /tmp/z.tgz -C /tmp
             mv /tmp/zlib-1.3.1 tests/external/repos/projects/zlib
           fi
@@ -354,6 +358,7 @@ jobs:
             crash-*
             leak-*
             timeout-*
+            oom-*
           if-no-files-found: ignore
 
   # Job 15: Coverage. Reports; does not gate. An arbitrary coverage floor blocks

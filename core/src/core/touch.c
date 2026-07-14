@@ -264,8 +264,7 @@ int applet_touch(int argc, char **argv)
                 /* -t STAMP: next arg or remainder */
                 const char *stamp_str;
                 if (p[1]) {
-                    stamp_str = p + 1;
-                    stop = 1; /* consume rest of this arg */
+                    stamp_str = p + 1;  /* stop set unconditionally below */
                 } else {
                     i++;
                     if (i >= argc) {
@@ -286,8 +285,7 @@ int applet_touch(int argc, char **argv)
                 /* -r REF: use reference file's times */
                 const char *ref;
                 if (p[1]) {
-                    ref = p + 1;
-                    stop = 1;
+                    ref = p + 1;  /* stop set unconditionally below */
                 } else {
                     i++;
                     if (i >= argc) {
@@ -311,8 +309,7 @@ int applet_touch(int argc, char **argv)
                 /* -d DATE */
                 const char *date_str;
                 if (p[1]) {
-                    date_str = p + 1;
-                    stop = 1;
+                    date_str = p + 1;  /* stop set unconditionally below */
                 } else {
                     i++;
                     if (i >= argc) {

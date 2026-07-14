@@ -573,9 +573,12 @@ $(FUZZ_DIR)/fuzz_path_canon: tests/fuzz/fuzz_path_canon.c \
     $(SRCDIR)/util/path.c $(SRCDIR)/util/error.c $(SRCDIR)/util/strbuf.c | $(FUZZ_DIR)
 	$(FUZZ_CC) $(FUZZ_FLAGS) -o $@ $^
 
+# Fuzzes the regex ENGINE directly (mb_regex_*), which is what grep's pattern
+# compilation uses. No grep.c/registry/vcsignore needed: the harness calls the
+# engine, not the tool. REGEX_TEST_SRCS is the six src/util/regex/*.c files.
 $(FUZZ_DIR)/fuzz_grep_pattern: tests/fuzz/fuzz_grep_pattern.c \
-    $(SRCDIR)/core/grep.c $(FUZZ_CORE) $(FUZZ_TOOL_DEPS) | $(FUZZ_DIR)
-	$(FUZZ_CC) $(FUZZ_FLAGS) $(CFLAGS_LINESCAN) -o $@ $^ -ldl
+    $(REGEX_TEST_SRCS) $(FUZZ_CORE) | $(FUZZ_DIR)
+	$(FUZZ_CC) $(FUZZ_FLAGS) -o $@ $^
 
 $(FUZZ_DIR)/fuzz_sed_expr: tests/fuzz/fuzz_sed_expr.c \
     $(SRCDIR)/core/sed.c $(FUZZ_CORE) $(FUZZ_TOOL_DEPS) | $(FUZZ_DIR)
