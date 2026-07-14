@@ -257,11 +257,10 @@ static int cmp_month(const char *a, const char *b)
  */
 static int cmp_version(const char *a, const char *b)
 {
-    /* Index into the ORIGINAL a/b rather than reassigning the pointers. The
-     * clang analyzer trusts a[i] on the incoming parameters (it never flags the
-     * non-numeric scan below) but, after `a += an`, treats the moved pointer's
-     * accesses as reading undefined memory. Fixed base + running offset keeps
-     * every access analysable while preserving the exact comparison. */
+    /* Index into a/b with running offsets rather than reassigning the pointers,
+     * and NUL-guard every scan loop (see the numeric segment below). Both keep
+     * the accesses provably in-bounds for the static analyzer while preserving
+     * the exact comparison. */
     size_t ia = 0, ib = 0;
     while (a[ia] || b[ib]) {
         /* Non-numeric segment */
@@ -275,10 +274,13 @@ static int cmp_version(const char *a, const char *b)
         if (la != lb) return (la < lb) ? -1 : 1;
         ia = an; ib = bn;
 
-        /* Numeric segment */
+        /* Numeric segment. The explicit `a[nda] &&` is logically redundant
+         * (isdigit('\0') is 0) but mirrors the non-numeric scan above and lets
+         * the analyzer see the loop is NUL-bounded — without it, scan-build
+         * cannot prove nda stays in the string and flags a[nda] as undefined. */
         size_t nda = ia, ndb = ib;
-        while (isdigit((unsigned char)a[nda])) nda++;
-        while (isdigit((unsigned char)b[ndb])) ndb++;
+        while (a[nda] && isdigit((unsigned char)a[nda])) nda++;
+        while (b[ndb] && isdigit((unsigned char)b[ndb])) ndb++;
         size_t adlen = nda - ia, bdlen = ndb - ib;
         if (adlen == 0 && bdlen == 0) break;
         /* Compare numerically by length first (skip leading zeros) */
