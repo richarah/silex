@@ -1659,7 +1659,7 @@ expand_result_t expand_word_full(shell_ctx_t *sh, const char *word)
                     /* Same realloc-into-self leak as above. */
                     char **g2 = realloc(f2, (size_t)(cap2 * 2) * sizeof(char *));
                     if (!g2) { free(f2); f2 = NULL; }
-                    else { cap2 *= 2; f2 = g2; }
+                    else { f2 = g2; }  /* cap2 not read again on this tail path */
                 }
                 if (f2) f2[n2++] = arena_strdup(&sh->scratch_arena, tok2);
                 char **arr = arena_alloc(&sh->scratch_arena, (size_t)(n2 + 1) * sizeof(char *));
@@ -1756,9 +1756,13 @@ expand_result_t expand_word_full(shell_ctx_t *sh, const char *word)
     /* Last field */
     if (*tok) {
         if (nfields >= cap) {
-            cap = cap ? cap * 2 : 8;
-            char **tmp = realloc(fields, (size_t)cap * sizeof(char *));
-            if (tmp) { fields = tmp; }
+            /* Bump cap only if realloc SUCCEEDS. The old code raised cap
+             * first, so a failed realloc (fields left NULL/short) still
+             * satisfied `nfields < cap` and then wrote fields[nfields] —
+             * a NULL deref when cap started at 0, an overflow otherwise. */
+            size_t ncap = cap ? cap * 2 : 8;
+            char **tmp = realloc(fields, ncap * sizeof(char *));
+            if (tmp) { fields = tmp; cap = (int)ncap; }
         }
         if (nfields < cap)
             fields[nfields++] = arena_strdup(&sh->scratch_arena, tok);

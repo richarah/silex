@@ -1742,10 +1742,11 @@ static int exec_builtin_read(shell_ctx_t *sh, int argc, char **argv)
     sb_init(&line, 256);
 
     int c;
-    int cont = 1;
-    while (cont) {
+    /* EOF is signalled to the post-loop code via `c` (see the returns below),
+     * not a flag; the loop just reads until newline or EOF. */
+    while (1) {
         c = fgetc(stdin);
-        if (c == EOF) { cont = 0; break; }
+        if (c == EOF) break;
         if (c == '\n') break;
         if (!raw && c == '\\') {
             int nc = fgetc(stdin);

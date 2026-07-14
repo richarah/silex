@@ -863,8 +863,11 @@ int applet_grep(int argc, char **argv)
     grep_opts_t g;
     memset(&g, 0, sizeof(g));
 
-    /* SILEX_SMART=1: enable smart-case and VCS-aware mode by default */
-    if (getenv("SILEX_SMART") && strcmp(getenv("SILEX_SMART"), "1") == 0)
+    /* SILEX_SMART=1: enable smart-case and VCS-aware mode by default.
+     * Read getenv once: a second call is not guaranteed to return the same
+     * (non-NULL) pointer, so strcmp() could be handed NULL. */
+    const char *smart_env = getenv("SILEX_SMART");
+    if (smart_env && strcmp(smart_env, "1") == 0)
         g.opt_smart = 1;
 
     /* --color: only if stdout is a tty */
@@ -942,8 +945,8 @@ int applet_grep(int argc, char **argv)
             }
         }
         if (strcmp(arg, "--file") == 0) {
-            if (++i >= argc) { err_msg("grep", "--file requires argument"); return 2; }
-            if (load_pattern_file(argv[i], &g) != 0) return 2;
+            if (++i >= argc) { grep_opts_free(&g); err_msg("grep", "--file requires argument"); return 2; }
+            if (load_pattern_file(argv[i], &g) != 0) { grep_opts_free(&g); return 2; }
             continue;
         }
 
@@ -954,6 +957,7 @@ int applet_grep(int argc, char **argv)
                 grep_opts_free(&g);
                 return mod->handler(argc, argv, i);
             }
+            grep_opts_free(&g);
             err_msg("grep", "unrecognized option '%s'", arg);
             return 2;
         }
@@ -987,7 +991,7 @@ int applet_grep(int argc, char **argv)
             case 'S': g.opt_smart = 1; break;
             case 'm': {
                 const char *val;
-                if (p[1]) { val = p + 1; stop = 1; }
+                if (p[1]) { val = p + 1; }  /* stop set unconditionally below */
                 else {
                     if (++i >= argc) {
                         err_msg("grep", "-m requires argument"); return 2;
@@ -1000,7 +1004,7 @@ int applet_grep(int argc, char **argv)
             }
             case 'A': {
                 const char *val;
-                if (p[1]) { val = p + 1; stop = 1; }
+                if (p[1]) { val = p + 1; }  /* stop set unconditionally below */
                 else {
                     if (++i >= argc) {
                         err_msg("grep", "-A requires argument"); return 2;
@@ -1013,7 +1017,7 @@ int applet_grep(int argc, char **argv)
             }
             case 'B': {
                 const char *val;
-                if (p[1]) { val = p + 1; stop = 1; }
+                if (p[1]) { val = p + 1; }  /* stop set unconditionally below */
                 else {
                     if (++i >= argc) {
                         err_msg("grep", "-B requires argument"); return 2;
@@ -1026,7 +1030,7 @@ int applet_grep(int argc, char **argv)
             }
             case 'C': {
                 const char *val;
-                if (p[1]) { val = p + 1; stop = 1; }
+                if (p[1]) { val = p + 1; }  /* stop set unconditionally below */
                 else {
                     if (++i >= argc) {
                         err_msg("grep", "-C requires argument"); return 2;
@@ -1069,13 +1073,16 @@ int applet_grep(int argc, char **argv)
                     p += strlen(p) - 1;
                 } else {
                     if (++i >= argc) {
+                        grep_opts_free(&g);
                         err_msg("grep", "-f requires argument");
                         return 2;
                     }
                     fname = argv[i];
                 }
-                if (load_pattern_file(fname, &g) != 0)
+                if (load_pattern_file(fname, &g) != 0) {
+                    grep_opts_free(&g);
                     return 2;
+                }
                 stop = 1;
                 break;
             }

@@ -1081,8 +1081,11 @@ int applet_find(int argc, char **argv)
     fa.maxdepth = -1; /* unlimited */
     fa.mindepth = 0;
 
-    /* SILEX_SMART=1: enable VCS-aware traversal and smart-case by default */
-    if (getenv("SILEX_SMART") && strcmp(getenv("SILEX_SMART"), "1") == 0) {
+    /* SILEX_SMART=1: enable VCS-aware traversal and smart-case by default.
+     * Read getenv once: a second call is not guaranteed to return the same
+     * (non-NULL) pointer, so strcmp() could be handed NULL. */
+    const char *smart_env = getenv("SILEX_SMART");
+    if (smart_env && strcmp(smart_env, "1") == 0) {
         fa.opt_smart = 1;
         fa.opt_vcs   = 1;
     }

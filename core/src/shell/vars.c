@@ -103,7 +103,11 @@ int vars_set_context(vars_t *v, const char *name, const char *value, const char 
         }
     }
 
-    /* Not found — create in current scope */
+    /* Not found — create in current scope. The search loop above tolerates a
+     * NULL scope (it just iterates zero times); this path dereferences it, so
+     * guard explicitly rather than deref NULL if there is no scope to set in. */
+    if (!v->scope)
+        return 1;
     var_entry_t *e    = arena_alloc(v->arena, sizeof(var_entry_t));
     e->name           = arena_strdup(v->arena, name);
     e->value          = arena_strdup(v->arena, value);

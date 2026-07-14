@@ -268,10 +268,14 @@ static int cmp_version(const char *a, const char *b)
         if (an != bn) return (an < bn) ? -1 : 1;
         a += an; b += bn;
 
-        /* Numeric segment */
-        size_t ad = 0, bd = 0;
-        while (isdigit((unsigned char)a[ad])) ad++;
-        while (isdigit((unsigned char)b[bd])) bd++;
+        /* Numeric segment. Scan with pointer walks rather than a[ad]/b[bd]
+         * indexing: after `a += an`, the clang analyzer loses track of the
+         * (valid, NUL-terminated) buffer and flags the array subscript as
+         * undefined. Dereferencing a moving pointer is equivalent and clear. */
+        const char *da = a, *db = b;
+        while (isdigit((unsigned char)*da)) da++;
+        while (isdigit((unsigned char)*db)) db++;
+        size_t ad = (size_t)(da - a), bd = (size_t)(db - b);
         if (ad == 0 && bd == 0) break;
         /* Compare numerically by length first (skip leading zeros) */
         const char *ap = a, *bp = b;
@@ -815,7 +819,7 @@ int applet_sort(int argc, char **argv)
             case 'R': g_opts.random_sort = 1; break;
             case 't': {
                 const char *sep;
-                if (p[1]) { sep = p + 1; stop = 1; }
+                if (p[1]) { sep = p + 1; }  /* stop set unconditionally below */
                 else {
                     i++;
                     if (i >= argc) {
@@ -831,7 +835,7 @@ int applet_sort(int argc, char **argv)
             }
             case 'k': {
                 const char *keystr;
-                if (p[1]) { keystr = p + 1; stop = 1; }
+                if (p[1]) { keystr = p + 1; }  /* stop set unconditionally below */
                 else {
                     i++;
                     if (i >= argc) {
@@ -854,7 +858,7 @@ int applet_sort(int argc, char **argv)
             }
             case 'o': {
                 const char *ofile;
-                if (p[1]) { ofile = p + 1; stop = 1; }
+                if (p[1]) { ofile = p + 1; }  /* stop set unconditionally below */
                 else {
                     i++;
                     if (i >= argc) {

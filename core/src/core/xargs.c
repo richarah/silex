@@ -708,7 +708,6 @@ int applet_xargs(int argc, char **argv)
         if (rc > worst) worst = rc;
 
         for (int k = 0; k < n_items; k++) free(items[k]);
-        n_items = 0;
     } else if (!got_input && !opts.opt_r && !opts.opt_I) {
         /*
          * -r not set and no input received: run command with no appended args
