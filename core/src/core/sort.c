@@ -257,35 +257,38 @@ static int cmp_month(const char *a, const char *b)
  */
 static int cmp_version(const char *a, const char *b)
 {
-    while (*a || *b) {
+    /* Index into the ORIGINAL a/b rather than reassigning the pointers. The
+     * clang analyzer trusts a[i] on the incoming parameters (it never flags the
+     * non-numeric scan below) but, after `a += an`, treats the moved pointer's
+     * accesses as reading undefined memory. Fixed base + running offset keeps
+     * every access analysable while preserving the exact comparison. */
+    size_t ia = 0, ib = 0;
+    while (a[ia] || b[ib]) {
         /* Non-numeric segment */
-        size_t an = 0, bn = 0;
+        size_t an = ia, bn = ib;
         while (a[an] && !isdigit((unsigned char)a[an])) an++;
         while (b[bn] && !isdigit((unsigned char)b[bn])) bn++;
-        size_t minnn = (an < bn) ? an : bn;
-        int rc = strncmp(a, b, minnn);
+        size_t la = an - ia, lb = bn - ib;
+        size_t minnn = (la < lb) ? la : lb;
+        int rc = strncmp(a + ia, b + ib, minnn);
         if (rc != 0) return rc;
-        if (an != bn) return (an < bn) ? -1 : 1;
-        a += an; b += bn;
+        if (la != lb) return (la < lb) ? -1 : 1;
+        ia = an; ib = bn;
 
-        /* Numeric segment. Scan with pointer walks rather than a[ad]/b[bd]
-         * indexing: after `a += an`, the clang analyzer loses track of the
-         * (valid, NUL-terminated) buffer and flags the array subscript as
-         * undefined. Dereferencing a moving pointer is equivalent and clear. */
-        const char *da = a, *db = b;
-        while (isdigit((unsigned char)*da)) da++;
-        while (isdigit((unsigned char)*db)) db++;
-        size_t ad = (size_t)(da - a), bd = (size_t)(db - b);
-        if (ad == 0 && bd == 0) break;
+        /* Numeric segment */
+        size_t nda = ia, ndb = ib;
+        while (isdigit((unsigned char)a[nda])) nda++;
+        while (isdigit((unsigned char)b[ndb])) ndb++;
+        size_t adlen = nda - ia, bdlen = ndb - ib;
+        if (adlen == 0 && bdlen == 0) break;
         /* Compare numerically by length first (skip leading zeros) */
-        const char *ap = a, *bp = b;
-        while (*ap == '0' && ad > 1) { ap++; ad--; }
-        while (*bp == '0' && bd > 1) { bp++; bd--; }
-        if (ad != bd) return (ad < bd) ? -1 : 1;
-        rc = strncmp(ap, bp, ad);
+        size_t za = ia, zb = ib;
+        while (a[za] == '0' && adlen > 1) { za++; adlen--; }
+        while (b[zb] == '0' && bdlen > 1) { zb++; bdlen--; }
+        if (adlen != bdlen) return (adlen < bdlen) ? -1 : 1;
+        rc = strncmp(a + za, b + zb, adlen);
         if (rc != 0) return rc;
-        a += (size_t)(ap - a) + ad;
-        b += (size_t)(bp - b) + bd;
+        ia = nda; ib = ndb;
     }
     return 0;
 }

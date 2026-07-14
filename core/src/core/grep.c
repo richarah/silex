@@ -844,13 +844,19 @@ static int load_pattern_file(const char *fname, grep_opts_t *g)
 }
 
 /* Free all resources in grep_opts_t */
+/* Idempotent: resets npatterns so a second call (e.g. an error path that also
+ * frees, then falls through to the cleanup label) cannot double-free. */
 static void grep_opts_free(grep_opts_t *g)
 {
     for (int i = 0; i < g->npatterns; i++) {
         free(g->patterns[i]);
+        g->patterns[i] = NULL;
         if (g->compiled_ok[i] && g->mb_compiled[i])
             mb_regex_free(g->mb_compiled[i]);
+        g->compiled_ok[i] = 0;
+        g->mb_compiled[i] = NULL;
     }
+    g->npatterns = 0;
     if (g->vcs_ign) { vcsignore_free(g->vcs_ign); g->vcs_ign = NULL; }
 }
 
@@ -911,24 +917,24 @@ int applet_grep(int argc, char **argv)
             strcmp(arg, "--colour=never")    == 0)   { g.opt_color = 0; continue; }
 
         if (strncmp(arg, "--include=", 10) == 0) {
-            if (g.n_include >= MAX_GLOBS) { err_msg("grep", "too many --include globs"); return 2; }
+            if (g.n_include >= MAX_GLOBS) { err_msg("grep", "too many --include globs"); goto parse_error; }
             g.include_globs[g.n_include++] = (char *)(arg + 10);
             continue;
         }
         if (strcmp(arg, "--include") == 0) {
-            if (++i >= argc) { err_msg("grep", "--include requires argument"); return 2; }
-            if (g.n_include >= MAX_GLOBS) { err_msg("grep", "too many --include globs"); return 2; }
+            if (++i >= argc) { err_msg("grep", "--include requires argument"); goto parse_error; }
+            if (g.n_include >= MAX_GLOBS) { err_msg("grep", "too many --include globs"); goto parse_error; }
             g.include_globs[g.n_include++] = argv[i];
             continue;
         }
         if (strncmp(arg, "--exclude=", 10) == 0) {
-            if (g.n_exclude >= MAX_GLOBS) { err_msg("grep", "too many --exclude globs"); return 2; }
+            if (g.n_exclude >= MAX_GLOBS) { err_msg("grep", "too many --exclude globs"); goto parse_error; }
             g.exclude_globs[g.n_exclude++] = (char *)(arg + 10);
             continue;
         }
         if (strcmp(arg, "--exclude") == 0) {
-            if (++i >= argc) { err_msg("grep", "--exclude requires argument"); return 2; }
-            if (g.n_exclude >= MAX_GLOBS) { err_msg("grep", "too many --exclude globs"); return 2; }
+            if (++i >= argc) { err_msg("grep", "--exclude requires argument"); goto parse_error; }
+            if (g.n_exclude >= MAX_GLOBS) { err_msg("grep", "too many --exclude globs"); goto parse_error; }
             g.exclude_globs[g.n_exclude++] = argv[i];
             continue;
         }
@@ -936,17 +942,17 @@ int applet_grep(int argc, char **argv)
         if (strcmp(arg, "--regexp") == 0 || strcmp(arg, "-e") == 0) {
             /* handled in short-flag section below; but long form: */
             if (strcmp(arg, "--regexp") == 0) {
-                if (++i >= argc) { err_msg("grep", "--regexp requires argument"); return 2; }
-                if (g.npatterns >= MAX_PATTERNS) { err_msg("grep", "too many patterns"); return 2; }
+                if (++i >= argc) { err_msg("grep", "--regexp requires argument"); goto parse_error; }
+                if (g.npatterns >= MAX_PATTERNS) { err_msg("grep", "too many patterns"); goto parse_error; }
                 g.patterns[g.npatterns] = strdup(argv[i]);
-                if (!g.patterns[g.npatterns]) { err_msg("grep", "out of memory"); return 2; }
+                if (!g.patterns[g.npatterns]) { err_msg("grep", "out of memory"); goto parse_error; }
                 g.npatterns++;
                 continue;
             }
         }
         if (strcmp(arg, "--file") == 0) {
-            if (++i >= argc) { grep_opts_free(&g); err_msg("grep", "--file requires argument"); return 2; }
-            if (load_pattern_file(argv[i], &g) != 0) { grep_opts_free(&g); return 2; }
+            if (++i >= argc) { grep_opts_free(&g); err_msg("grep", "--file requires argument"); goto parse_error; }
+            if (load_pattern_file(argv[i], &g) != 0) { grep_opts_free(&g); goto parse_error; }
             continue;
         }
 
@@ -959,7 +965,7 @@ int applet_grep(int argc, char **argv)
             }
             grep_opts_free(&g);
             err_msg("grep", "unrecognized option '%s'", arg);
-            return 2;
+            goto parse_error;
         }
 
         if (arg[0] != '-' || arg[1] == '\0')
@@ -994,7 +1000,7 @@ int applet_grep(int argc, char **argv)
                 if (p[1]) { val = p + 1; }  /* stop set unconditionally below */
                 else {
                     if (++i >= argc) {
-                        err_msg("grep", "-m requires argument"); return 2;
+                        err_msg("grep", "-m requires argument"); goto parse_error;
                     }
                     val = argv[i];
                 }
@@ -1007,7 +1013,7 @@ int applet_grep(int argc, char **argv)
                 if (p[1]) { val = p + 1; }  /* stop set unconditionally below */
                 else {
                     if (++i >= argc) {
-                        err_msg("grep", "-A requires argument"); return 2;
+                        err_msg("grep", "-A requires argument"); goto parse_error;
                     }
                     val = argv[i];
                 }
@@ -1020,7 +1026,7 @@ int applet_grep(int argc, char **argv)
                 if (p[1]) { val = p + 1; }  /* stop set unconditionally below */
                 else {
                     if (++i >= argc) {
-                        err_msg("grep", "-B requires argument"); return 2;
+                        err_msg("grep", "-B requires argument"); goto parse_error;
                     }
                     val = argv[i];
                 }
@@ -1033,7 +1039,7 @@ int applet_grep(int argc, char **argv)
                 if (p[1]) { val = p + 1; }  /* stop set unconditionally below */
                 else {
                     if (++i >= argc) {
-                        err_msg("grep", "-C requires argument"); return 2;
+                        err_msg("grep", "-C requires argument"); goto parse_error;
                     }
                     val = argv[i];
                 }
@@ -1049,18 +1055,18 @@ int applet_grep(int argc, char **argv)
                 } else {
                     if (++i >= argc) {
                         err_msg("grep", "-e requires argument");
-                        return 2;
+                        goto parse_error;
                     }
                     pat = argv[i];
                 }
                 if (g.npatterns >= MAX_PATTERNS) {
                     err_msg("grep", "too many patterns");
-                    return 2;
+                    goto parse_error;
                 }
                 g.patterns[g.npatterns] = strdup(pat);
                 if (!g.patterns[g.npatterns]) {
                     err_msg("grep", "out of memory");
-                    return 2;
+                    goto parse_error;
                 }
                 g.npatterns++;
                 stop = 1;
@@ -1075,13 +1081,13 @@ int applet_grep(int argc, char **argv)
                     if (++i >= argc) {
                         grep_opts_free(&g);
                         err_msg("grep", "-f requires argument");
-                        return 2;
+                        goto parse_error;
                     }
                     fname = argv[i];
                 }
                 if (load_pattern_file(fname, &g) != 0) {
                     grep_opts_free(&g);
-                    return 2;
+                    goto parse_error;
                 }
                 stop = 1;
                 break;
@@ -1097,7 +1103,7 @@ int applet_grep(int argc, char **argv)
                     }
                 }
                 err_msg("grep", "unrecognized option '-%c'", *p);
-                return 2;
+                goto parse_error;
             }
             p++;
         }
@@ -1107,12 +1113,12 @@ int applet_grep(int argc, char **argv)
     if (g.npatterns == 0) {
         if (i >= argc) {
             err_usage("grep", "[-EFciln qsvwrR] [-e PAT] [-f FILE] PATTERN [FILE...]");
-            return 2;
+            goto parse_error;
         }
         g.patterns[0] = strdup(argv[i]);
         if (!g.patterns[0]) {
             err_msg("grep", "out of memory");
-            return 2;
+            goto parse_error;
         }
         g.npatterns = 1;
         i++;
@@ -1140,7 +1146,7 @@ int applet_grep(int argc, char **argv)
     if (!g.opt_F) {
         if (compile_patterns(&g) != 0) {
             grep_opts_free(&g);
-            return 2;
+            goto parse_error;
         }
     }
 
@@ -1171,4 +1177,12 @@ int applet_grep(int argc, char **argv)
     if (g.opt_q && g_matched_any)
         return 0;
     return final_result;
+
+parse_error:
+    /* Every option-parsing error jumps here so the strdup'd pattern list is
+     * freed before we exit. grep runs in-process as a builtin, so leaking it
+     * would accumulate across a shell session. grep_opts_free is idempotent,
+     * so paths that already freed can still fall through safely. */
+    grep_opts_free(&g);
+    return 2;
 }

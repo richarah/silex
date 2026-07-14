@@ -147,10 +147,15 @@ static int sed_regcomp(regex_t **out, const char *src, int flags,
     }
     /* Track last compiled pattern for empty-pattern reuse (non-owning pointer).
      * Each sed_cmd_t owns its own regex_t; we do NOT free the old g_last_re
-     * here because the previous cmd still holds a reference to it. */
+     * here because the previous cmd still holds a reference to it.
+     *
+     * Copy the new source BEFORE freeing the old one: if a caller ever passes
+     * src == g_last_src, freeing first would make strdup(src) read freed
+     * memory. Ordering it this way is correct regardless of aliasing. */
+    char *new_src = strdup(src);
     free(g_last_src);
     g_last_re  = re;
-    g_last_src = strdup(src);
+    g_last_src = new_src;
     *out = re;
     return 0;
 }
