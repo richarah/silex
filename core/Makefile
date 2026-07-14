@@ -389,15 +389,29 @@ test: $(TARGET) $(TEST_CHARCLASS) $(TEST_LINESCAN) $(TEST_REGEX) $(TEST_ARENA)
 # --- Coverage -----------------------------------------------------------------
 # Line coverage over the unit + compat suites. Reports; does not gate (a coverage
 # floor is a policy decision, and an arbitrary one blocks honest work).
+# The build flags are applied via a target-specific variable on coverage-build,
+# NOT by passing CFLAGS="$(CFLAGS_COMMON) ..." to a recursive make. CFLAGS_COMMON
+# contains -DSILEX_VERSION=\"$(VERSION)\"; routed through `$(MAKE) CFLAGS=...`
+# the shell strips one layer of the \" escaping, so the compiler saw a bare
+# -DSILEX_VERSION=0.3.0 and main.c failed with "invalid suffix '.0' on floating
+# constant". A target-specific variable is expanded once, inside this make.
 coverage:
 	@$(MAKE) clean
-	@$(MAKE) CFLAGS="$(CFLAGS_COMMON) -O0 -g --coverage" LDFLAGS="--coverage" $(TARGET)
+	@$(MAKE) coverage-build
 	@bash tests/unit/run_tests.sh $(abspath $(TARGET)) >/dev/null 2>&1 || true
 	@sh tests/compat/run_compat.sh $(abspath $(TARGET)) >/dev/null 2>&1 || true
 	@command -v gcovr >/dev/null 2>&1 && \
 	    gcovr -r . --exclude tests --print-summary || \
 	    { echo "coverage: gcovr not installed; raw .gcda written under $(OBJDIR)"; \
 	      gcov -o $(OBJDIR)/shell $(SRCDIR)/shell/*.c 2>/dev/null | tail -20; }
+
+# Instrumented build for `coverage`. CFLAGS_COMMON (with the correctly-escaped
+# version define) is expanded here as a target-specific variable, so the \"
+# survives to the compiler intact. -O0 -g for line-accurate coverage; no LTO,
+# no strip (unlike release-glibc), both of which would erase gcov data.
+coverage-build: CFLAGS  = $(CFLAGS_COMMON) -O0 -g --coverage
+coverage-build: LDFLAGS = --coverage
+coverage-build: $(TARGET)
 
 # check = build + unit tests + the check.sh conformance script.
 # This used to be two separate `check:` rules (one with no recipe), which GNU
@@ -691,7 +705,7 @@ pgo:
 	    release-glibc
 	@echo "=== PGO build complete. Verify correctness with 'make test'. ==="
 
-.PHONY: pgo bench coverage
+.PHONY: pgo bench coverage coverage-build
 
 # --- Git hooks ----------------------------------------------------------------
 # core/ is not the repo root, so .git and .githooks live above it. Ask git where
