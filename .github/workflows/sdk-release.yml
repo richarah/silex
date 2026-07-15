@@ -74,10 +74,26 @@ jobs:
       # pushed to the registry. buildx does both from a single build -- no rebuild.
       - name: Build and push silex:slim (bootstrap, amd64, zstd)
         run: |
+          set -eux
           IMG="${{ env.REGISTRY }}/$(echo "${{ env.IMAGE_NAME }}" | tr '[:upper:]' '[:lower:]')"
-          make bootstrap TARGETARCH=amd64 DOCKER_FLAGS="--progress=plain \
+          VER="${{ steps.version.outputs.VERSION }}"
+          # Call buildx directly rather than through `make bootstrap`. The Makefile
+          # wrapper forced DOCKER_FLAGS through an extra make+shell layer that ate
+          # the CSV quoting around --output "name=a,b,c", so buildx parsed the
+          # second tag as a keyless field ("invalid value ...:slim-0.3.0"). Passing
+          # the tags as repeatable -t flags removes the comma-list entirely, and
+          # two --output exporters give us a local docker image (for the size
+          # report) plus a zstd-compressed push in one build.
+          docker buildx build \
+            -f dockerfiles/Dockerfile.bootstrap \
+            --build-arg TARGETARCH=amd64 \
+            --progress=plain \
+            -t "${IMG}:slim" \
+            -t "${IMG}:slim-${VER}" \
+            -t "${IMG}:slim-latest" \
             --output type=docker,name=localhost/silex:slim \
-            --output type=image,\"name=${IMG}:slim,${IMG}:slim-${{ steps.version.outputs.VERSION }},${IMG}:slim-latest\",compression=zstd,compression-level=19,force-compression=true,push=true"
+            --output type=image,push=true,compression=zstd,compression-level=19,force-compression=true \
+            .
 
       - name: Get image size
         id: image_size
