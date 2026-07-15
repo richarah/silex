@@ -483,9 +483,9 @@ RUN --mount=type=cache,id=silex-rust-toolchain,target=/dl,sharing=locked \
     && ARCH=$([ "${TARGETARCH}" = "arm64" ] && echo "aarch64" || echo "x86_64") \
     && RUST_SHA256=$([ "${TARGETARCH}" = "arm64" ] && echo "${RUST_SHA256_AARCH64}" || echo "${RUST_SHA256_X86_64}") \
     && _tarball="rust-${RUST_VERSION}-${ARCH}-unknown-linux-gnu.tar.xz" \
-    && [ -f "/dl/${_tarball}" ] \
-        || curl -fsSL "https://static.rust-lang.org/dist/${_tarball}" \
-               -o "/dl/${_tarball}" \
+    && { [ -s "/dl/${_tarball}" ] \
+        || { curl -fsSL --retry 10 --retry-all-errors --retry-delay 5 "https://static.rust-lang.org/dist/${_tarball}" \
+               -o "/dl/${_tarball}.part" && mv "/dl/${_tarball}.part" "/dl/${_tarball}"; }; } \
     && echo "${RUST_SHA256}  /dl/${_tarball}" | sha256sum -c - \
     && tar xf "/dl/${_tarball}" -C /src \
     && /src/rust-${RUST_VERSION}-${ARCH}-unknown-linux-gnu/install.sh \
@@ -497,32 +497,24 @@ ENV PATH="/opt/rust/bin:${PATH}"
 ENV RUSTFLAGS="-C target-cpu=x86-64-v3 -C link-arg=-fuse-ld=lld"
 ENV CARGO_PROFILE_RELEASE_LTO=thin
 
-# Download and verify Rust tool sources.
+# Download and verify Rust tool sources. Same fail-fast fetch() as the C stage:
+# the old && [ -f ] || curl chain silently skipped a package on a transient
+# fetch failure (masked by the next package's || curl) and failed later at cargo.
 RUN --mount=type=cache,id=silex-rust-sources,target=/dl,sharing=locked \
-    set -ex \
-    && [ -f /dl/sccache.tar.gz ] \
-        || curl -fsSL "https://github.com/mozilla/sccache/archive/refs/tags/v${SCCACHE_VERSION}.tar.gz" \
-               -o /dl/sccache.tar.gz \
-    && echo "${SCCACHE_SHA256}  /dl/sccache.tar.gz" | sha256sum -c - \
-    && cp /dl/sccache.tar.gz /src/sccache.tar.gz \
-    \
-    && [ -f /dl/fd.tar.gz ] \
-        || curl -fsSL "https://github.com/sharkdp/fd/archive/refs/tags/v${FD_VERSION}.tar.gz" \
-               -o /dl/fd.tar.gz \
-    && echo "${FD_SHA256}  /dl/fd.tar.gz" | sha256sum -c - \
-    && cp /dl/fd.tar.gz /src/fd.tar.gz \
-    \
-    && [ -f /dl/ripgrep.tar.gz ] \
-        || curl -fsSL "https://github.com/BurntSushi/ripgrep/archive/refs/tags/${RG_VERSION}.tar.gz" \
-               -o /dl/ripgrep.tar.gz \
-    && echo "${RG_SHA256}  /dl/ripgrep.tar.gz" | sha256sum -c - \
-    && cp /dl/ripgrep.tar.gz /src/ripgrep.tar.gz \
-    \
-    && [ -f /dl/uv.tar.gz ] \
-        || curl -fsSL "https://github.com/astral-sh/uv/archive/refs/tags/${UV_VERSION}.tar.gz" \
-               -o /dl/uv.tar.gz \
-    && echo "${UV_SHA256}  /dl/uv.tar.gz" | sha256sum -c - \
-    && cp /dl/uv.tar.gz /src/uv.tar.gz
+    set -eu; \
+    fetch() { \
+        f="$1"; sha="$2"; url="$3"; \
+        if [ ! -s "/dl/$f" ]; then \
+            curl -fsSL --retry 10 --retry-all-errors --retry-delay 5 "$url" -o "/dl/$f.part"; \
+            mv "/dl/$f.part" "/dl/$f"; \
+        fi; \
+        echo "$sha  /dl/$f" | sha256sum -c -; \
+        cp "/dl/$f" "/src/$f"; \
+    }; \
+    fetch sccache.tar.gz "${SCCACHE_SHA256}" "https://github.com/mozilla/sccache/archive/refs/tags/v${SCCACHE_VERSION}.tar.gz"; \
+    fetch fd.tar.gz      "${FD_SHA256}"      "https://github.com/sharkdp/fd/archive/refs/tags/v${FD_VERSION}.tar.gz"; \
+    fetch ripgrep.tar.gz "${RG_SHA256}"      "https://github.com/BurntSushi/ripgrep/archive/refs/tags/${RG_VERSION}.tar.gz"; \
+    fetch uv.tar.gz      "${UV_SHA256}"      "https://github.com/astral-sh/uv/archive/refs/tags/${UV_VERSION}.tar.gz"
 
 RUN set -ex \
     && tar xf /src/sccache.tar.gz -C /src \
