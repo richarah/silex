@@ -42,7 +42,12 @@ jobs:
 
       - name: Extract version from tag
         id: version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+        # Tags are sdk-v* (the tag namespace that keeps a core release from
+        # firing the image build). Strip the full 'refs/tags/sdk-v' prefix --
+        # stripping only 'refs/tags/v' left the whole ref in VERSION, which then
+        # produced an image tag 'silex:slim-refs/tags/sdk-v0.3.0' and failed the
+        # push with "invalid value" before the build even started.
+        run: echo "VERSION=${GITHUB_REF#refs/tags/sdk-v}" >> "$GITHUB_OUTPUT"
 
       # Bootstrap build from source, and push WITH ZSTD compression in one step.
       #
