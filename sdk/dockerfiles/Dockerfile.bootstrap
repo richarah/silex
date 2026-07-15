@@ -117,88 +117,40 @@ RUN mkdir -p /src /build /out/bin /out/lib /out/share
 # downloaded at most once per self-hosted runner. SHA256 always verified;
 # a stale /dl entry with wrong hash fails the build here, not silently.
 # ============================================================================
+# fetch <file> <sha256> <url>: download to a cache mount (atomically, with
+# retries), verify the checksum, and copy into /src. Each call is its own
+# statement under `set -eu`, so ANY failure aborts the build immediately.
+#
+# The old form chained every package with `&& [ -f X ] || curl && sha && cp`.
+# Because && and || share precedence, a failed curl/sha for one package was
+# "recovered" by the NEXT package's `|| curl`, so the RUN exited 0 with a
+# tarball silently missing -- and the build then died ~2h later at `tar xf`.
+# (pigz, fetched from a flaky host with no retry, hit exactly this.) A fail-fast
+# function with atomic .part->rename and universal retry removes the whole class.
 RUN --mount=type=cache,id=silex-c-sources,target=/dl,sharing=locked \
-    set -ex \
-    \
-    && [ -f /dl/llvm.tar.xz ] \
-        || curl -fsSL "https://github.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_VERSION}/llvm-project-${LLVM_VERSION}.src.tar.xz" \
-               -o /dl/llvm.tar.xz \
-    && echo "${LLVM_SHA256}  /dl/llvm.tar.xz" | sha256sum -c - \
-    && cp /dl/llvm.tar.xz /src/llvm.tar.xz \
-    \
-    && [ -f /dl/mold.tar.gz ] \
-        || curl -fsSL "https://github.com/rui314/mold/archive/refs/tags/v${MOLD_VERSION}.tar.gz" \
-               -o /dl/mold.tar.gz \
-    && echo "${MOLD_SHA256}  /dl/mold.tar.gz" | sha256sum -c - \
-    && cp /dl/mold.tar.gz /src/mold.tar.gz \
-    \
-    && [ -f /dl/ninja.tar.gz ] \
-        || curl -fsSL "https://github.com/ninja-build/ninja/archive/refs/tags/v${NINJA_VERSION}.tar.gz" \
-               -o /dl/ninja.tar.gz \
-    && echo "${NINJA_SHA256}  /dl/ninja.tar.gz" | sha256sum -c - \
-    && cp /dl/ninja.tar.gz /src/ninja.tar.gz \
-    \
-    && [ -f /dl/zstd.tar.gz ] \
-        || curl -fsSL "https://github.com/facebook/zstd/releases/download/v${ZSTD_VERSION}/zstd-${ZSTD_VERSION}.tar.gz" \
-               -o /dl/zstd.tar.gz \
-    && echo "${ZSTD_SHA256}  /dl/zstd.tar.gz" | sha256sum -c - \
-    && cp /dl/zstd.tar.gz /src/zstd.tar.gz \
-    \
-    && [ -f /dl/xxhash.tar.gz ] \
-        || curl -fsSL "https://github.com/Cyan4973/xxHash/archive/refs/tags/v${XXHASH_VERSION}.tar.gz" \
-               -o /dl/xxhash.tar.gz \
-    && echo "${XXHASH_SHA256}  /dl/xxhash.tar.gz" | sha256sum -c - \
-    && cp /dl/xxhash.tar.gz /src/xxhash.tar.gz \
-    \
-    && [ -f /dl/mimalloc.tar.gz ] \
-        || curl -fsSL "https://github.com/microsoft/mimalloc/archive/refs/tags/v${MIMALLOC_VERSION}.tar.gz" \
-               -o /dl/mimalloc.tar.gz \
-    && echo "${MIMALLOC_SHA256}  /dl/mimalloc.tar.gz" | sha256sum -c - \
-    && cp /dl/mimalloc.tar.gz /src/mimalloc.tar.gz \
-    \
-    && [ -f /dl/busybox.tar.bz2 ] \
-        || curl -fsSL --retry 10 --retry-all-errors --retry-delay 10 \
-               "https://busybox.net/downloads/busybox-${BUSYBOX_VERSION}.tar.bz2" \
-               -o /dl/busybox.tar.bz2 \
-    && echo "${BUSYBOX_SHA256}  /dl/busybox.tar.bz2" | sha256sum -c - \
-    && cp /dl/busybox.tar.bz2 /src/busybox.tar.bz2 \
-    \
-    && [ -f /dl/dash.tar.gz ] \
-        || curl -fsSL --retry 10 --retry-all-errors --retry-delay 10 \
-               "http://gondor.apana.org.au/~herbert/dash/files/dash-${DASH_VERSION}.tar.gz" \
-               -o /dl/dash.tar.gz \
-    && echo "${DASH_SHA256}  /dl/dash.tar.gz" | sha256sum -c - \
-    && cp /dl/dash.tar.gz /src/dash.tar.gz \
-    \
-    && [ -f /dl/apk-tools.tar.gz ] \
-        || curl -fsSL "https://gitlab.alpinelinux.org/alpine/apk-tools/-/archive/v${APK_VERSION}/apk-tools-v${APK_VERSION}.tar.gz" \
-               -o /dl/apk-tools.tar.gz \
-    && echo "${APK_SHA256}  /dl/apk-tools.tar.gz" | sha256sum -c - \
-    && cp /dl/apk-tools.tar.gz /src/apk-tools.tar.gz \
-    \
-    && [ -f /dl/tini.tar.gz ] \
-        || curl -fsSL "https://github.com/krallin/tini/archive/refs/tags/v${TINI_VERSION}.tar.gz" \
-               -o /dl/tini.tar.gz \
-    && echo "${TINI_SHA256}  /dl/tini.tar.gz" | sha256sum -c - \
-    && cp /dl/tini.tar.gz /src/tini.tar.gz \
-    \
-    && [ -f /dl/pigz.tar.gz ] \
-        || curl -fsSL "https://zlib.net/pigz/pigz-${PIGZ_VERSION}.tar.gz" \
-               -o /dl/pigz.tar.gz \
-    && echo "${PIGZ_SHA256}  /dl/pigz.tar.gz" | sha256sum -c - \
-    && cp /dl/pigz.tar.gz /src/pigz.tar.gz \
-    \
-    && [ -f /dl/pixz.tar.xz ] \
-        || curl -fsSL "https://github.com/vasi/pixz/releases/download/v${PIXZ_VERSION}/pixz-${PIXZ_VERSION}.tar.xz" \
-               -o /dl/pixz.tar.xz \
-    && echo "${PIXZ_SHA256}  /dl/pixz.tar.xz" | sha256sum -c - \
-    && cp /dl/pixz.tar.xz /src/pixz.tar.xz \
-    \
-    && [ -f /dl/jemalloc.tar.bz2 ] \
-        || curl -fsSL "https://github.com/jemalloc/jemalloc/releases/download/${JEMALLOC_VERSION}/jemalloc-${JEMALLOC_VERSION}.tar.bz2" \
-               -o /dl/jemalloc.tar.bz2 \
-    && echo "${JEMALLOC_SHA256}  /dl/jemalloc.tar.bz2" | sha256sum -c - \
-    && cp /dl/jemalloc.tar.bz2 /src/jemalloc.tar.bz2
+    set -eu; \
+    fetch() { \
+        f="$1"; sha="$2"; url="$3"; \
+        if [ ! -s "/dl/$f" ]; then \
+            curl -fsSL --retry 10 --retry-all-errors --retry-delay 5 "$url" -o "/dl/$f.part"; \
+            mv "/dl/$f.part" "/dl/$f"; \
+        fi; \
+        echo "$sha  /dl/$f" | sha256sum -c -; \
+        cp "/dl/$f" "/src/$f"; \
+    }; \
+    fetch llvm.tar.xz      "${LLVM_SHA256}"     "https://github.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_VERSION}/llvm-project-${LLVM_VERSION}.src.tar.xz"; \
+    fetch mold.tar.gz      "${MOLD_SHA256}"     "https://github.com/rui314/mold/archive/refs/tags/v${MOLD_VERSION}.tar.gz"; \
+    fetch ninja.tar.gz     "${NINJA_SHA256}"    "https://github.com/ninja-build/ninja/archive/refs/tags/v${NINJA_VERSION}.tar.gz"; \
+    fetch zstd.tar.gz      "${ZSTD_SHA256}"     "https://github.com/facebook/zstd/releases/download/v${ZSTD_VERSION}/zstd-${ZSTD_VERSION}.tar.gz"; \
+    fetch xxhash.tar.gz    "${XXHASH_SHA256}"   "https://github.com/Cyan4973/xxHash/archive/refs/tags/v${XXHASH_VERSION}.tar.gz"; \
+    fetch mimalloc.tar.gz  "${MIMALLOC_SHA256}" "https://github.com/microsoft/mimalloc/archive/refs/tags/v${MIMALLOC_VERSION}.tar.gz"; \
+    fetch busybox.tar.bz2  "${BUSYBOX_SHA256}"  "https://busybox.net/downloads/busybox-${BUSYBOX_VERSION}.tar.bz2"; \
+    fetch dash.tar.gz      "${DASH_SHA256}"     "http://gondor.apana.org.au/~herbert/dash/files/dash-${DASH_VERSION}.tar.gz"; \
+    fetch apk-tools.tar.gz "${APK_SHA256}"      "https://gitlab.alpinelinux.org/alpine/apk-tools/-/archive/v${APK_VERSION}/apk-tools-v${APK_VERSION}.tar.gz"; \
+    fetch tini.tar.gz      "${TINI_SHA256}"     "https://github.com/krallin/tini/archive/refs/tags/v${TINI_VERSION}.tar.gz"; \
+    fetch pigz.tar.gz      "${PIGZ_SHA256}"     "https://zlib.net/pigz/pigz-${PIGZ_VERSION}.tar.gz"; \
+    fetch pixz.tar.xz      "${PIXZ_SHA256}"     "https://github.com/vasi/pixz/releases/download/v${PIXZ_VERSION}/pixz-${PIXZ_VERSION}.tar.xz"; \
+    fetch jemalloc.tar.bz2 "${JEMALLOC_SHA256}" "https://github.com/jemalloc/jemalloc/releases/download/${JEMALLOC_VERSION}/jemalloc-${JEMALLOC_VERSION}.tar.bz2"
 
 # ============================================================================
 # Build mold (with Debian gcc).
