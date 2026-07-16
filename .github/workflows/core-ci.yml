@@ -49,7 +49,28 @@ jobs:
       - name: Unit tests under ASan
         run: make test
 
-  # Job 3: Compatibility tests
+  # Job 3: Arena lifetime checking
+  #
+  # This covers a bug class the asan job structurally CANNOT catch. arena_reset()
+  # only sets used = 0 and keeps every block malloc'd, so a pointer that outlives
+  # a reset still lands on mapped memory that ASan and valgrind both consider
+  # live. The stale read usually returns the old bytes and the test passes --
+  # until an unrelated allocation reuses the offset.
+  #
+  # It is not theoretical: `for x in a b c; do eval ...; done` walked a freed word
+  # list and printed "alpha", "pha", then stopped, and every suite was green.
+  # -DARENA_POISON fills blocks with 0xDD on reset, so such a bug fails loudly.
+  arena-poison:
+    name: Arena poisoning
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y gcc make dash
+      - name: Unit + compat tests with arena poisoning
+        run: make test-poison
+
+  # Job 4: Compatibility tests
   compat:
     name: Compat tests
     runs-on: ubuntu-latest
@@ -62,7 +83,7 @@ jobs:
       - name: Compat tests
         run: make compat-test
 
-  # Job 4: Static analysis
+  # Job 5: Static analysis
   static-analysis:
     name: Static analysis
     runs-on: ubuntu-latest
@@ -87,7 +108,7 @@ jobs:
       - name: cppcheck
         run: make cppcheck
 
-  # Job 5: Shellcheck on test scripts
+  # Job 6: Shellcheck on test scripts
   shellcheck:
     name: Shellcheck
     runs-on: ubuntu-latest
@@ -112,7 +133,7 @@ jobs:
           find tests/ -name '*.sh' -not -path '*/external/repos/*' -print0 \
             | xargs -0 shellcheck --severity=error
 
-  # Job 6: Binary size check (musl/alpine) -- uses canonical release target
+  # Job 7: Binary size check (musl/alpine) -- uses canonical release target
   binary-size:
     name: Binary size (musl/alpine)
     runs-on: ubuntu-latest
@@ -134,7 +155,7 @@ jobs:
           fi
           echo "OK: binary within 1.5MB limit"
 
-  # Job 7: Cross-compile for aarch64 (QEMU)
+  # Job 8: Cross-compile for aarch64 (QEMU)
   aarch64:
     name: aarch64 cross-compile
     runs-on: ubuntu-latest
@@ -152,7 +173,7 @@ jobs:
       - name: Run under QEMU
         run: qemu-aarch64-static build/bin/silex --version
 
-  # Job 8: Build and test on musl (Alpine)
+  # Job 9: Build and test on musl (Alpine)
   test-musl:
     name: Build and test (musl/Alpine)
     runs-on: ubuntu-latest
@@ -173,7 +194,7 @@ jobs:
       - name: Compat tests
         run: make compat-test
 
-  # Job 9: Build and test on glibc (Ubuntu)
+  # Job 10: Build and test on glibc (Ubuntu)
   test-glibc:
     name: Build and test (glibc/Ubuntu)
     runs-on: ubuntu-latest
@@ -188,7 +209,7 @@ jobs:
       - name: Compat tests
         run: make compat-test
 
-  # Job 10: ASan/UBSan on musl (Alpine)
+  # Job 11: ASan/UBSan on musl (Alpine)
   test-musl-asan:
     name: ASan/UBSan (musl/Alpine)
     runs-on: ubuntu-latest
@@ -207,7 +228,7 @@ jobs:
       - name: Unit tests under ASan
         run: make test
 
-  # Job 11: ASan/UBSan on glibc (Ubuntu)
+  # Job 12: ASan/UBSan on glibc (Ubuntu)
   test-glibc-asan:
     name: ASan/UBSan (glibc/Ubuntu)
     runs-on: ubuntu-latest
@@ -220,7 +241,7 @@ jobs:
       - name: Unit tests under ASan
         run: make test
 
-  # Job 12: External test suites (comprehensive conformance validation)
+  # Job 13: External test suites (comprehensive conformance validation)
   external-tests:
     name: External test suites
     runs-on: ubuntu-latest
@@ -296,7 +317,7 @@ jobs:
           echo ""
           echo "✓ All critical checks passed"
 
-  # Job 13: Benchmark. Times silex against dash on a REAL build and ASSERTS THE
+  # Job 14: Benchmark. Times silex against dash on a REAL build and ASSERTS THE
   # ARTIFACT.
   #
   # This project reported silex "44% faster on configure+make" when silex's make
@@ -328,7 +349,7 @@ jobs:
       - name: Benchmark vs dash
         run: make bench-ci
 
-  # Job 14: Fuzzing. Five libFuzzer harnesses have existed in tests/fuzz/ since
+  # Job 15: Fuzzing. Five libFuzzer harnesses have existed in tests/fuzz/ since
   # before this branch and CI has never run one of them.
   fuzz:
     name: Fuzz (libFuzzer, short run)
@@ -361,7 +382,7 @@ jobs:
             oom-*
           if-no-files-found: ignore
 
-  # Job 15: Coverage. Reports; does not gate. An arbitrary coverage floor blocks
+  # Job 16: Coverage. Reports; does not gate. An arbitrary coverage floor blocks
   # honest work, but flying with no number at all is how tests/unit/shell/ ended
   # up with ten suites that CI never executed.
   coverage:

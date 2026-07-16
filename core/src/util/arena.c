@@ -13,10 +13,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-COLD void arena_init(arena_t *a)
+COLD void arena_init(arena_t *a, const char *name)
 {
     a->head        = NULL;
     a->total_bytes = 0;
+    a->name        = name ? name : "anon";
 }
 
 HOT void *arena_alloc(arena_t *a, size_t size)
@@ -26,7 +27,7 @@ HOT void *arena_alloc(arena_t *a, size_t size)
      * 0 and hand back a zero-length allocation the caller then writes through. */
     size_t align = sizeof(void *);
     if (unlikely(size > SIZE_MAX - (align - 1))) {
-        fprintf(stderr, "silex: arena: allocation too large\n");
+        fprintf(stderr, "silex: arena: %s: allocation too large\n", a->name);
         abort();
     }
     size = (size + align - 1) & ~(align - 1);
@@ -68,8 +69,8 @@ HOT void *arena_alloc(arena_t *a, size_t size)
         size_t block_data_size = size > ARENA_BLOCK_SIZE ? size : ARENA_BLOCK_SIZE;
 
         if (a->total_bytes > ARENA_MAX_BYTES - block_data_size) {
-            fprintf(stderr, "silex: arena: exceeded maximum size (%u MB)\n",
-                    (unsigned)(ARENA_MAX_BYTES / (1024u * 1024u)));
+            fprintf(stderr, "silex: arena: %s: exceeded maximum size (%u MB)\n",
+                    a->name, (unsigned)(ARENA_MAX_BYTES / (1024u * 1024u)));
             abort();
         }
 
@@ -115,8 +116,24 @@ void arena_reset(arena_t *a)
 {
     /* Reuse existing block capacity — do not free blocks, just reset offsets.
      * total_bytes is preserved: it tracks allocated capacity, not current usage. */
-    for (arena_block_t *blk = a->head; blk != NULL; blk = blk->next)
+#ifdef ARENA_POISON
+    if (getenv("SILEX_ARENA_TRACE"))
+        fprintf(stderr, "[arena_reset: %s]\n", a->name);
+#endif
+    for (arena_block_t *blk = a->head; blk != NULL; blk = blk->next) {
+#ifdef ARENA_POISON
+        /* A pointer that outlives a reset is a use-after-free that neither
+         * valgrind nor ASan can see: the block is still legitimately malloc'd,
+         * so the stale read hits mapped memory and usually returns the old
+         * bytes intact. That makes such bugs pass every test until an unrelated
+         * allocation happens to land on the same offset.
+         *
+         * Poisoning on reset turns "usually works" into "always fails", which
+         * is the only way to test lifetime assumptions about this arena. */
+        memset(blk->base, 0xDD, blk->used);
+#endif
         blk->used = 0;
+    }
 }
 
 void arena_free(arena_t *a)

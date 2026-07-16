@@ -28,7 +28,7 @@ static void check(const char *desc, int ok)
 static void test_reset_reuses_capacity(void)
 {
     arena_t a;
-    arena_init(&a);
+    arena_init(&a, "test");
 
     size_t baseline = 0;
     for (int cycle = 0; cycle < 5000; cycle++) {
@@ -49,7 +49,7 @@ static void test_reset_reuses_capacity(void)
 static void test_alloc_is_sane(void)
 {
     arena_t a;
-    arena_init(&a);
+    arena_init(&a, "test");
 
     char *p = arena_alloc(&a, 16);
     char *q = arena_alloc(&a, 16);
@@ -73,7 +73,7 @@ static void test_alloc_is_sane(void)
 static void test_oversized_alloc(void)
 {
     arena_t a;
-    arena_init(&a);
+    arena_init(&a, "test");
 
     size_t big = ARENA_BLOCK_SIZE * 2;
     char *p = arena_alloc(&a, big);
@@ -87,7 +87,7 @@ static void test_oversized_alloc(void)
 static void test_strdup(void)
 {
     arena_t a;
-    arena_init(&a);
+    arena_init(&a, "test");
 
     char *s = arena_strdup(&a, "hello");
     check("arena: strdup copies the string", s && strcmp(s, "hello") == 0);

@@ -21,9 +21,10 @@ typedef struct arena_block {
 typedef struct {
     arena_block_t *head;
     size_t         total_bytes;  /* total bytes allocated across all blocks */
+    const char    *name;         /* for diagnostics; identifies which arena aborted */
 } arena_t;
 
-void  arena_init(arena_t *a);
+void  arena_init(arena_t *a, const char *name);
 void *arena_alloc(arena_t *a, size_t size);   /* aborts on OOM */
 char *arena_strdup(arena_t *a, const char *s);
 char *arena_strndup(arena_t *a, const char *s, size_t n);

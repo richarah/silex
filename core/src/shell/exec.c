@@ -480,7 +480,7 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
             /* Store expanded target back (will be used by redirect_apply later).
              * exec_simple_cmd() restores the AST pointer afterwards. */
             if (target && target != r->target) {
-                r->target = arena_strdup(&sh->scratch_arena, target);
+                r->target = arena_strdup(sh->scratch, target);
             }
         }
     }
@@ -565,7 +565,7 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
         }
         /* Simple word splitting on spaces (simplified - doesn't handle quotes properly)
          * Full POSIX alias expansion would require re-lexing/parsing */
-        char *alias_copy = arena_strdup(&sh->scratch_arena, alias_value);
+        char *alias_copy = arena_strdup(sh->scratch, alias_value);
         int alias_argc = 0;
         char *alias_words[256];  /* Max 256 words in alias expansion */
 
@@ -589,7 +589,7 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
 
             /* Build new expanded array: alias_words + original args[1..] */
             int new_argc = alias_argc + (orig_argc - 1);
-            char **new_expanded = arena_alloc(&sh->scratch_arena, (size_t)(new_argc + 1) * sizeof(char *));
+            char **new_expanded = arena_alloc(sh->scratch, (size_t)(new_argc + 1) * sizeof(char *));
             for (int i = 0; i < alias_argc; i++)
                 new_expanded[i] = alias_words[i];
             for (int i = 1; i < orig_argc; i++)
@@ -1053,6 +1053,56 @@ int exec_pipeline(shell_ctx_t *sh, node_t *node)
 }
 
 /* -------------------------------------------------------------------------
+ * Per-loop scratch reclamation
+ *
+ * A loop is a single top-level command, so without this every iteration's
+ * expansions pile up in the scratch arena until the loop finishes: memory grew
+ * ~220 bytes per iteration and `while [ $i -lt 300000 ]` aborted at the 64 MB
+ * arena cap.
+ *
+ * Two simpler fixes do not work:
+ *   - Resetting the shared scratch arena per iteration frees memory the loop
+ *     itself owns -- a `for` word list, and the positionals of an enclosing
+ *     function call -- both allocated from scratch before the loop starts.
+ *   - Mark/release cannot work at all: arena_alloc() scans blocks below head
+ *     before growing, so allocation is not LIFO and there is no offset to
+ *     rewind to.
+ *
+ * Instead the loop gets its own arena and points sh->scratch at it. Anything
+ * allocated before the swap stays in the parent arena and is untouched; only
+ * what the condition and body allocate is reclaimed each iteration. Nested
+ * loops compose: each swaps to its own arena and restores the parent's on exit.
+ *
+ * arena_init() does not allocate (the first arena_alloc does), so a loop whose
+ * body never expands anything costs nothing.
+ * ------------------------------------------------------------------------- */
+
+typedef struct {
+    arena_t  arena;
+    arena_t *saved;
+} loop_scratch_t;
+
+static void loop_scratch_begin(shell_ctx_t *sh, loop_scratch_t *ls)
+{
+    arena_init(&ls->arena, "loop");
+    ls->saved = sh->scratch;
+}
+
+/* Call at the top of every iteration, before the condition is evaluated. */
+static void loop_scratch_iter(shell_ctx_t *sh, loop_scratch_t *ls)
+{
+    sh->scratch = &ls->arena;
+    arena_reset(&ls->arena);
+}
+
+/* Must run on every exit path, including break/continue and flow control. */
+static void loop_scratch_end(shell_ctx_t *sh, loop_scratch_t *ls)
+{
+    sh->scratch = ls->saved;
+    arena_free(&ls->arena);
+}
+
+/* -------------------------------------------------------------------------
  * exec_node
  * ------------------------------------------------------------------------- */
 
@@ -1236,18 +1286,22 @@ int exec_node(shell_ctx_t *sh, node_t *node)
     }
 
     case N_WHILE: {
+        loop_scratch_t ls;
+        loop_scratch_begin(sh, &ls);
         rc = 0;
         sh->loop_depth++;
         for (;;) {
+            loop_scratch_iter(sh, &ls);
             int save_cond = sh->in_cond;
             sh->in_cond = 1;
             int cond = exec_node(sh, node->u.loop.cond);
             sh->in_cond = save_cond;
-            /* If condition returns flow control (return/break/continue), propagate immediately */
+            /* If condition returns flow control (return/break/continue), propagate immediately.
+             * Breaking rather than returning so the loop arena is released; rc >= FLOW_BREAK
+             * here, so the `rc < FLOW_BREAK` tail check below is a no-op either way. */
             if (cond >= FLOW_BREAK) {
                 rc = cond;
-                sh->loop_depth--;
-                return rc;
+                break;
             }
             if (cond != 0) break;
             rc = exec_node(sh, node->u.loop.body);
@@ -1262,22 +1316,25 @@ int exec_node(shell_ctx_t *sh, node_t *node)
             if (sh->opt_e && rc != 0) break;
         }
         sh->loop_depth--;
+        loop_scratch_end(sh, &ls);
         break;
     }
 
     case N_UNTIL: {
+        loop_scratch_t ls;
+        loop_scratch_begin(sh, &ls);
         rc = 0;
         sh->loop_depth++;
         for (;;) {
+            loop_scratch_iter(sh, &ls);
             int save_cond = sh->in_cond;
             sh->in_cond = 1;
             int cond = exec_node(sh, node->u.loop.cond);
             sh->in_cond = save_cond;
-            /* If condition returns flow control (return/break/continue), propagate immediately */
+            /* See N_WHILE: break rather than return so the loop arena is released. */
             if (cond >= FLOW_BREAK) {
                 rc = cond;
-                sh->loop_depth--;
-                return rc;
+                break;
             }
             if (cond == 0) break;
             rc = exec_node(sh, node->u.loop.body);
@@ -1292,24 +1349,32 @@ int exec_node(shell_ctx_t *sh, node_t *node)
             if (sh->opt_e && rc != 0) break;
         }
         sh->loop_depth--;
+        loop_scratch_end(sh, &ls);
         break;
     }
 
     case N_FOR: {
         char **wlist;
+        /* Expanded BEFORE loop_scratch_begin, so the word list and the strings
+         * it points at stay in the parent arena and survive every iteration's
+         * reset. This is the allocation that makes a blanket per-iteration
+         * reset of the shared scratch arena a use-after-free. */
         if (node->u.for_node.words) {
             wlist = expand_words(sh, node->u.for_node.words);
         } else {
             /* `for x; do` with no `in` clause: iterate $@ */
-            wlist = arena_alloc(&sh->scratch_arena,
+            wlist = arena_alloc(sh->scratch,
                                 (size_t)(sh->positional_n + 1) * sizeof(char *));
             for (int i = 0; i < sh->positional_n; i++)
                 wlist[i] = sh->positional[i];
             wlist[sh->positional_n] = NULL;
         }
+        loop_scratch_t ls;
+        loop_scratch_begin(sh, &ls);
         rc = 0;
         sh->loop_depth++;
         for (int i = 0; wlist && wlist[i]; i++) {
+            loop_scratch_iter(sh, &ls);
             /* Check for readonly variable - exit loop immediately */
             if (vars_set(&sh->vars, node->u.for_node.var, wlist[i]) != 0) {
                 rc = 1;
@@ -1327,6 +1392,7 @@ int exec_node(shell_ctx_t *sh, node_t *node)
             if (sh->opt_e && rc != 0) break;
         }
         sh->loop_depth--;
+        loop_scratch_end(sh, &ls);
         break;
     }
 
@@ -1485,8 +1551,28 @@ static int exec_builtin_set(shell_ctx_t *sh, int argc, char **argv)
     if (i < argc) {
         int n = argc - i;
         char **pos = arena_alloc(&sh->parse_arena, (size_t)(n + 1) * sizeof(char *));
+        /* Copy the strings, don't alias them. argv points into the scratch arena
+         * (exec_command expands into it), but positionals outlive the command
+         * that set them. This was harmless only because scratch was in practice
+         * never reset between commands; now that a loop reclaims its arena every
+         * iteration, `while ...; do set -- $x; done` would leave $1 dangling.
+         * parse_arena is where shell_init puts the initial positionals too.
+         *
+         * KNOWN LIMITATION: each `set --` allocates fresh and nothing reclaims
+         * the previous array, so `set --` in a hot loop grows parse_arena by
+         * ~40 bytes an iteration and aborts near 1.6M iterations. (Before the
+         * per-loop arena the same script died at ~250k against the scratch cap,
+         * so this is a ~6x improvement, not a regression.)
+         *
+         * Allocating fresh is load-bearing, not an oversight: `for x; do` copies
+         * these pointers into its word list (see N_FOR) and every function call
+         * saves/restores them by pointer, so both must keep seeing the OLD array
+         * after an inner `set --`. Reusing or freeing the storage in place would
+         * dangle those. A real fix means giving positionals ownership/lifetime
+         * of their own, which touches the same function-frame save/restore that
+         * job control needs -- worth doing there, together, rather than twice. */
         for (int j = 0; j < n; j++)
-            pos[j] = argv[i + j];
+            pos[j] = arena_strdup(&sh->parse_arena, argv[i + j]);
         pos[n] = NULL;
         sh->positional   = pos;
         sh->positional_n = n;

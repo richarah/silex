@@ -271,7 +271,7 @@ $(COLD_OBJS): PERFILE_OPT = $(if $(RELEASE_OPT),-Os)
 TARGET = $(BINDIR)/silex
 
 .PHONY: all clean debug release release-glibc release-docker test install check \
-        test-asan compat-test shell-test security-test \
+        test-asan test-poison poison-build compat-test shell-test security-test \
         bench bench-ci coverage integration-test fuzz fuzz-run \
         analyze cppcheck test-valgrind cross-check \
         size-check install-hooks musl \
@@ -429,6 +429,32 @@ test-asan: LDLIBS = -ldl
 test-asan: $(TARGET)
 	@echo "=== Running unit tests (ASan+UBSan) ==="
 	@bash tests/unit/run_tests.sh $(TARGET)
+
+# Arena lifetime checking.
+#
+# A pointer that outlives an arena_reset() is a use-after-free that neither
+# valgrind nor ASan can see: the block is still legitimately malloc'd, so the
+# stale read lands on mapped memory and usually returns the old bytes intact.
+# Such a bug passes every test until an unrelated allocation happens to reuse
+# the offset -- which is why the arena needs its own poisoning mode.
+#
+# -DARENA_POISON fills each block with 0xDD on reset, turning "usually works"
+# into "always fails". Use this whenever changing what an arena's memory is
+# assumed to outlive; a diff against a reference shell will show the garbage.
+# Cleans first, deliberately. make does not know CFLAGS changed since the last
+# build, so `make && make test-poison` would otherwise reuse the non-poisoned
+# objects and report a green run that checked nothing -- the exact failure mode
+# this target exists to catch. Same clean-then-sub-make shape as `coverage`.
+test-poison:
+	@$(MAKE) clean
+	@$(MAKE) poison-build
+	@echo "=== Running unit tests (arena poisoning) ==="
+	@bash tests/unit/run_tests.sh $(abspath $(TARGET))
+	@echo "=== Running compatibility tests (arena poisoning) ==="
+	@bash tests/compat/run.sh $(abspath $(TARGET))
+
+poison-build: CFLAGS += -DARENA_POISON
+poison-build: $(TARGET)
 
 compat-test: $(TARGET)
 	@echo "=== Running compatibility tests ==="

@@ -20,7 +20,15 @@
 typedef struct shell_ctx {
     vars_t      vars;
     arena_t     parse_arena;   /* persistent: AST, tokens, func defs, traps */
-    arena_t     scratch_arena; /* scratch: expansion temporaries; reset between top-level commands */
+    arena_t     scratch_arena; /* root scratch: expansion temporaries */
+    /* Where expansions allocate right now. Normally &scratch_arena, but a loop
+     * points it at a per-loop child arena so each iteration's expansions can be
+     * reclaimed without touching anything the loop itself owns (e.g. a `for`
+     * word list, or the positionals of an enclosing function call, both of
+     * which are allocated from the parent scratch before the swap).
+     *
+     * Always allocate expansions through this pointer, never &scratch_arena. */
+    arena_t    *scratch;
     job_list_t  jobs;
     int         last_exit;   /* $? */
     int         opt_e;       /* set -e */

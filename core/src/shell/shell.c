@@ -64,8 +64,9 @@ int shell_init(shell_ctx_t *sh, int argc, char **argv)
 {
     memset(sh, 0, sizeof(*sh));
 
-    arena_init(&sh->parse_arena);
-    arena_init(&sh->scratch_arena);
+    arena_init(&sh->parse_arena, "parse");
+    arena_init(&sh->scratch_arena, "scratch");
+    sh->scratch = &sh->scratch_arena;
     vars_init(&sh->vars, &sh->parse_arena);
     job_list_init(&sh->jobs);
 
@@ -166,6 +167,29 @@ int shell_run_string(shell_ctx_t *sh, const char *script)
     lexer_init_str(&lex, script, &sh->parse_arena);
     parser_init(&par, &lex, &sh->parse_arena);
 
+    /* Run in a private arena rather than reclaiming the caller's.
+     *
+     * This is re-entrant: `eval`, traps and `.` all route back through here
+     * while an outer command is still executing. Resetting sh->scratch_arena
+     * here therefore freed memory the *caller* still owned, and
+     *
+     *     for x in alpha bravo charlie; do eval "true"; echo "$x"; done
+     *
+     * printed "alpha", then "pha", then stopped -- eval reset the arena holding
+     * the for loop's word list, and the loop walked freed memory. It corrupted
+     * silently instead of crashing only because a reset arena keeps its blocks
+     * mapped, so the stale read usually finds the old bytes still there.
+     *
+     * `script` itself is expanded from the caller's arena, which this leaves
+     * untouched, so it stays valid for the lexer. Nothing a command produces
+     * outlives the command in this arena: variables and positionals are copied
+     * into parse_arena.
+     */
+    arena_t  local;
+    arena_t *saved_scratch = sh->scratch;
+    arena_init(&local, "run-string");
+    sh->scratch = &local;
+
     int rc = 0;
     for (;;) {
         node_t *node = parser_parse(&par);
@@ -179,11 +203,14 @@ int shell_run_string(shell_ctx_t *sh, const char *script)
             rc = exec_node(sh, node);
             sh->last_exit = rc;
             /* Reclaim scratch expansion memory after each top-level command */
-            arena_reset(&sh->scratch_arena);
+            arena_reset(&local);
             if (errexit_should_stop(sh, rc))
                 break;
         }
     }
+
+    sh->scratch = saved_scratch;
+    arena_free(&local);
 
     lexer_free(&lex);
     return sh->last_exit;
@@ -209,6 +236,15 @@ int shell_run_file(shell_ctx_t *sh, const char *path)
     lexer_init_fp(&lex, fp, &sh->parse_arena);
     parser_init(&par, &lex, &sh->parse_arena);
 
+    /* Private arena, for the same reason as shell_run_string: `.` re-enters this
+     * while the caller is mid-command, so reclaiming sh->scratch_arena here
+     * would free memory the caller still owns (e.g. an enclosing for loop's
+     * word list). */
+    arena_t  local;
+    arena_t *saved_scratch = sh->scratch;
+    arena_init(&local, "run-file");
+    sh->scratch = &local;
+
     int rc = 0;
     for (;;) {
         node_t *node = parser_parse(&par);
@@ -228,16 +264,21 @@ int shell_run_file(shell_ctx_t *sh, const char *path)
             /* FLOW_BREAK (200) and FLOW_CONTINUE (201) must propagate to caller's loop */
             if (rc == 200 || rc == 201) {  /* FLOW_BREAK or FLOW_CONTINUE */
                 /* Don't update sh->last_exit; propagate flow control code */
+                sh->scratch = saved_scratch;
+                arena_free(&local);
                 lexer_free(&lex);
                 fclose(fp);
                 return rc;
             }
             sh->last_exit = rc;
-            arena_reset(&sh->scratch_arena);
+            arena_reset(&local);
             if (errexit_should_stop(sh, rc))
                 break;
         }
     }
+
+    sh->scratch = saved_scratch;
+    arena_free(&local);
 
     lexer_free(&lex);
     fclose(fp);

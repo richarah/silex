@@ -144,6 +144,121 @@ echo $var_99
 check "arena: 200 dynamic variables (eval)" "$got" "value_99"
 
 # -----------------------------------------------------------------------
+# Loop iterations must not accumulate scratch memory
+#
+# A loop is a single top-level command, so before the per-loop arena every
+# iteration's expansions leaked: ~220 bytes each, 46 MB by 200k iterations, and
+# an abort at the 64 MB arena cap somewhere between 200k and 300k. 300k is used
+# below because it is past that cap: on the old allocator this aborts.
+# -----------------------------------------------------------------------
+
+got=$(timeout 60 "$SILEX" -c '
+i=0
+while [ $i -lt 300000 ]; do
+    i=$((i+1))
+done
+echo $i
+' 2>/dev/null)
+check "arena: 300k-iteration while loop completes" "$got" "300000"
+
+got=$(timeout 60 "$SILEX" -c '
+i=0
+until [ $i -ge 300000 ]; do
+    i=$((i+1))
+done
+echo $i
+' 2>/dev/null)
+check "arena: 300k-iteration until loop completes" "$got" "300000"
+
+# The loop body must not abort with an arena error on stderr.
+got=$(timeout 60 "$SILEX" -c '
+i=0
+while [ $i -lt 300000 ]; do
+    i=$((i+1))
+done
+' 2>&1 | grep -ci 'arena')
+check "arena: long loop reports no arena error" "${got:-0}" "0"
+
+# Memory must be FLAT in the iteration count, not merely smaller. Comparing two
+# sizes catches a leak that a single threshold would let through.
+if command -v /usr/bin/time >/dev/null 2>&1; then
+    rss_small=$(/usr/bin/time -f '%M' "$SILEX" -c \
+        'i=0; while [ $i -lt 50000 ]; do i=$((i+1)); done' 2>&1 | tail -1)
+    rss_large=$(/usr/bin/time -f '%M' "$SILEX" -c \
+        'i=0; while [ $i -lt 400000 ]; do i=$((i+1)); done' 2>&1 | tail -1)
+    # 8x the iterations must not cost 2x the memory. The old code grew ~linearly
+    # (13 MB -> 67 MB over this range), so it would fail this by a wide margin.
+    if [ "${rss_small:-0}" -gt 0 ] 2>/dev/null && [ "${rss_large:-0}" -gt 0 ] 2>/dev/null; then
+        if [ "$rss_large" -lt $((rss_small * 2)) ]; then
+            echo "PASS: arena: loop RSS flat across 50k->400k (${rss_small}K -> ${rss_large}K)"
+            PASS=$((PASS+1))
+        else
+            echo "FAIL: arena: loop RSS grew with iterations (${rss_small}K -> ${rss_large}K)"
+            FAIL=$((FAIL+1))
+        fi
+    else
+        echo "SKIP: arena: RSS measurement unavailable"
+    fi
+else
+    echo "SKIP: arena: /usr/bin/time not available for RSS check"
+fi
+
+# Reclaiming per iteration must not dangle anything the loop still owns.
+# Each of these reads memory allocated on an earlier iteration or before the
+# loop; all of them regress if the loop arena is reset too aggressively.
+got=$("$SILEX" -c '
+i=0
+while [ $i -lt 3 ]; do i=$((i+1)); set -- "arg$i"; done
+echo "$1"
+' 2>/dev/null)
+check "arena: set -- inside loop survives the loop" "$got" "arg3"
+
+got=$("$SILEX" -c '
+f() { j=0; while [ $j -lt 3 ]; do j=$((j+1)); done; echo "$1"; }
+f keepme
+' 2>/dev/null)
+check "arena: function positionals survive an inner loop" "$got" "keepme"
+
+got=$("$SILEX" -c 'for w in a b c; do printf "%s" "$w"; done' 2>/dev/null)
+check "arena: for word list survives its own loop" "$got" "abc"
+
+got=$("$SILEX" -c '
+for o in x y; do k=0; while [ $k -lt 2 ]; do k=$((k+1)); done; printf "%s" "$o"; done
+' 2>/dev/null)
+check "arena: outer for word survives nested inner loop" "$got" "xy"
+
+# eval/./trap re-enter the interpreter while the caller is mid-command. If they
+# reclaim the caller's arena instead of their own, the enclosing loop's word
+# list is freed underneath it: this printed "alpha pha" and then stopped early,
+# silently corrupting rather than crashing, because a reset arena keeps its
+# blocks mapped and the stale read usually still finds the old bytes.
+got=$("$SILEX" -c 'for x in alpha bravo charlie; do eval "true"; printf "%s " "$x"; done' 2>/dev/null)
+check "arena: eval inside for loop does not corrupt the word list" "$got" "alpha bravo charlie "
+
+# Same, with an eval that allocates enough to actually reuse the freed region.
+got=$("$SILEX" -c '
+for x in alpha bravo charlie; do
+    eval "z=BBBBBBBBBBBBBBBBBBBBBBBB; w=\"\$z\$z\$z\$z\"; echo \"\$w\" > /dev/null"
+    printf "%s " "$x"
+done' 2>/dev/null)
+check "arena: allocating eval inside for loop preserves word list" "$got" "alpha bravo charlie "
+
+got=$("$SILEX" -c 'i=0; while [ $i -lt 3 ]; do i=$((i+1)); eval "true"; done; echo $i' 2>/dev/null)
+check "arena: eval inside while loop" "$got" "3"
+
+got=$("$SILEX" -c '
+f() { for x in p q; do eval "true"; done; echo "$1"; }
+f keepme' 2>/dev/null)
+check "arena: eval in loop keeps enclosing function positionals" "$got" "keepme"
+
+# `.` re-enters through shell_run_file, the same hazard as eval.
+_tmpsrc=$(mktemp 2>/dev/null || echo /tmp/silex_src_$$)
+echo 'true' > "$_tmpsrc"
+got=$("$SILEX" -c "for x in alpha bravo charlie; do . $_tmpsrc; printf '%s ' \"\$x\"; done" 2>/dev/null)
+check "arena: sourcing a file inside for loop preserves word list" "$got" "alpha bravo charlie "
+rm -f "$_tmpsrc"
+
+# -----------------------------------------------------------------------
 # Summary
 # -----------------------------------------------------------------------
 
