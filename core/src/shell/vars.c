@@ -103,13 +103,30 @@ static void var_store_value(vars_t *v, var_entry_t *e, const char *value)
     size_t need = strlen(value) + 1;
     if (e->value != NULL && e->value_cap >= need) {
         memcpy(e->value, value, need);
-        return;
+    } else {
+        size_t cap = need * 2;
+        if (cap < need) cap = need;      /* overflow guard */
+        e->value     = arena_alloc(v->arena, cap);
+        e->value_cap = cap;
+        memcpy(e->value, value, need);
     }
-    size_t cap = need * 2;
-    if (cap < need) cap = need;          /* overflow guard */
-    e->value     = arena_alloc(v->arena, cap);
-    e->value_cap = cap;
-    memcpy(e->value, value, need);
+
+    /* Keep the process environment in sync with an already-exported variable.
+     *
+     * setenv() COPIES its argument, so the environment entry is a snapshot taken
+     * at the moment `export` ran. Assigning again updated e->value but never
+     * re-synced, so the child of
+     *
+     *     export CC; CC=clang; make
+     *
+     * saw the value CC had when it was exported, not the current one -- silex
+     * printed E=one where dash prints E=two, for both `export E=one; E=two` and
+     * `E=one; export E; E=two`. POSIX requires the current value. Re-syncing on
+     * store is the cheapest correct point: it only costs anything for variables
+     * that are actually exported.
+     */
+    if (e->exported)
+        setenv(e->name, e->value, 1);
 }
 
 int vars_set_context(vars_t *v, const char *name, const char *value, const char *ctx)
@@ -139,11 +156,13 @@ int vars_set_context(vars_t *v, const char *name, const char *value, const char 
         return 1;
     var_entry_t *e    = arena_alloc(v->arena, sizeof(var_entry_t));
     e->name           = arena_strdup(v->arena, name);
-    e->value          = NULL;   /* arena_alloc does not zero: init before store */
+    /* arena_alloc does not zero. Every field var_store_value() reads --
+     * value, value_cap, exported -- must be initialised BEFORE the store. */
+    e->value          = NULL;
     e->value_cap      = 0;
-    var_store_value(v, e, value);
     e->exported       = 0;
     e->readonly       = 0;
+    var_store_value(v, e, value);
     e->next           = v->scope->buckets[idx];
     v->scope->buckets[idx] = e;
     return 0;
@@ -172,11 +191,12 @@ int vars_set_local(vars_t *v, const char *name, const char *value)
     /* Create in current scope */
     e               = arena_alloc(v->arena, sizeof(var_entry_t));
     e->name         = arena_strdup(v->arena, name);
-    e->value        = NULL;   /* arena_alloc does not zero: init before store */
+    /* arena_alloc does not zero: init everything var_store_value reads first. */
+    e->value        = NULL;
     e->value_cap    = 0;
-    var_store_value(v, e, value);
     e->exported     = 0;
     e->readonly     = 0;
+    var_store_value(v, e, value);
     e->next         = v->scope->buckets[idx];
     v->scope->buckets[idx] = e;
     return 0;
