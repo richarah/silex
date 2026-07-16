@@ -413,7 +413,62 @@ static char *path_resolve(shell_ctx_t *sh, const char *name,
  * exec_simple_cmd
  * ------------------------------------------------------------------------- */
 
+static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
+                                 redir_t *redirs);
+
+/*
+ * Run a simple command, restoring any redirect targets the pre-expansion below
+ * overwrote.
+ *
+ * exec_simple_cmd_inner() pre-expands each redirect target and writes the result
+ * back into r->target. But `r` is part of the PARSED AST, which is reused on
+ * every pass, so that write is destructive: the second time a command runs, the
+ * "target" it expands is the first run's expansion. Inside a loop that silently
+ * collapses every iteration onto the first iteration's filename --
+ *
+ *     for f in a b c; do echo hi > /tmp/t_$f.txt; done
+ *
+ * created only /tmp/t_a.txt, where dash creates t_a, t_b and t_c. A loop meant to
+ * write N files wrote one, with no error.
+ *
+ * The write-back cannot simply be dropped: redirect.c expands r->target again
+ * itself, so without it a `> $(cmd)` target would run cmd twice. Instead the AST
+ * pointers are saved here and restored once the command is done, whichever of
+ * the inner function's many exits it takes.
+ */
 int exec_simple_cmd(shell_ctx_t *sh, char **words, char **assigns, redir_t *redirs)
+{
+    enum { SAVED_INLINE = 16 };
+    char   *inline_slots[SAVED_INLINE];
+    redir_t *inline_who[SAVED_INLINE];
+    char   **saved = inline_slots;
+    redir_t **who  = inline_who;
+    int n = 0, cap = SAVED_INLINE, heap = 0;
+
+    for (redir_t *r = redirs; r != NULL; r = r->next) {
+        if (n == cap) {                     /* rare: more than 16 redirects */
+            int ncap = cap * 2;
+            char **s2 = malloc((size_t)ncap * sizeof *s2);
+            redir_t **w2 = malloc((size_t)ncap * sizeof *w2);
+            if (!s2 || !w2) { free(s2); free(w2); break; }  /* restore what we have */
+            memcpy(s2, saved, (size_t)n * sizeof *s2);
+            memcpy(w2, who, (size_t)n * sizeof *w2);
+            if (heap) { free(saved); free(who); }
+            saved = s2; who = w2; cap = ncap; heap = 1;
+        }
+        who[n] = r; saved[n] = r->target; n++;
+    }
+
+    int rc = exec_simple_cmd_inner(sh, words, assigns, redirs);
+
+    for (int i = 0; i < n; i++)
+        who[i]->target = saved[i];
+    if (heap) { free(saved); free(who); }
+    return rc;
+}
+
+static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
+                                 redir_t *redirs)
 {
     /* POSIX: expand redirections BEFORE command arguments
      * This ensures that variable assignments in redirect targets
@@ -422,7 +477,8 @@ int exec_simple_cmd(shell_ctx_t *sh, char **words, char **assigns, redir_t *redi
         if (r->op != TOK_DLESS && r->op != TOK_DLESSDASH) {
             /* Pre-expand redirect target to trigger any variable assignments */
             char *target = expand_word(sh, r->target);
-            /* Store expanded target back (will be used by redirect_apply later) */
+            /* Store expanded target back (will be used by redirect_apply later).
+             * exec_simple_cmd() restores the AST pointer afterwards. */
             if (target && target != r->target) {
                 r->target = arena_strdup(&sh->scratch_arena, target);
             }
