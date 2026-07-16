@@ -17,45 +17,31 @@ A considered Docker base image.
 + FROM silex:slim
 ```
 
-Cold builds 2-3x faster, if your Dockerfile installs its toolchain every build —
-which most do. Warm sccache rebuilds are faster again.
+Cold builds 2-3x faster. Warm sccache rebuilds ~2x.
 
-**Where that speedup comes from matters**, because it decides whether it applies
-to you. It is the toolchain already being in the image (and apk instead of apt),
-**not** faster compilation. Measured like-for-like against a Debian image with
-the toolchain preinstalled, compiling zlib 3 runs each:
+The speedup is packaging, not compilers. Ubuntu spends ~44s
+on `apt-get install build-essential cmake ninja-build` every
+build; silex doesn't. Compilation itself is not faster: against
+an image that already has a toolchain, zlib builds in 1958ms
+vs Debian's 1866ms. If you already bake a toolchain into a base
+image, expect parity, and read the sccache section instead.
 
-| | silex:slim | debian + toolchain preinstalled |
-|---|---|---|
-| toolchain setup | **none** | ~44 s of `apt-get` |
-| compile | 1958 ms | 1866 ms |
-
-With both sides already holding a toolchain, silex is **not faster at compiling**
-— stock Debian measured marginally ahead. So the honest rule: you get the 2-3x
-if you are currently paying for `apt-get install build-essential cmake ninja` on
-every build. If you have already baked your toolchain into an image, expect
-roughly parity, and look to sccache below for the win instead.
-(Boost.Spirit X3 in [Benchmarks](#benchmarks) is the same finding from the other
-end: header-only, no linking, **1.0x**.)
-
-Your Dockerfile mostly doesn't change, but **one line is load-bearing**:
+Your Dockerfile changes one line:
 
 ```dockerfile
-RUN apt-get install -y libssl-dev libcurl4-openssl-dev   # still works, same names
+RUN apt-get install -y libssl-dev libcurl4-openssl-dev
 COPY . /src
 WORKDIR /src
 RUN --mount=type=cache,target=/root/.cache/sccache \
     cmake -B build && cmake --build build
 ```
 
-Without that `--mount=type=cache`, **sccache does nothing at all**: every `RUN`
-is a fresh container, so its cache starts empty every build and the rebuild win
-never happens. It is not optional decoration; it is where the speed is.
+The cache mount is the line. Without it every `RUN` gets an
+empty sccache and the rebuild win never happens.
 
 `apt-get install` still works, same packages, same
 names. cmake picks up ninja automatically. The linker,
 the allocator, the compiler cache are all invisible.
-You change one line and the build gets faster.
 
 Every default tool has a faster replacement that
 distros can't ship. Here's what Silex ships instead:
@@ -254,42 +240,30 @@ highest dropped, 3-run average.
     Boost.Spirit X3  15,672ms     15,757ms     1.0x
     SQLite amalgam    9,928ms     13,670ms     1.4x
 
-The cold speedup is 2-3x, and note what is being compared:
-ubuntu:24.04 pays for `apt-get install build-essential
-cmake ninja-build` on every build, silex does not. That
-setup cost — measured separately at ~44s — is most of the
-gap.
+The cold speedup is 2-3x. ubuntu:24.04 pays ~44s for
+`apt-get install build-essential cmake ninja-build` on
+every build; silex doesn't. That is most of the gap.
 
-It is tempting to read this table as clang/mold/ninja
-compounding into faster compilation. It is not. Compiling
-the same source in silex:slim versus a Debian image with
-the toolchain already installed is a wash (1958ms vs
-1866ms on zlib, 3 runs each) — the compile is not faster,
-the toolchain is just already there. Boost.Spirit X3 below
-shows the same thing from the other end.
-
-So: this speedup is real and it is worth having, but it is
-a packaging win plus apk-over-apt, not a compiler win.
-Bake your toolchain into your own base image and you get
-most of it without silex.
+Not faster compilation. Same source, silex:slim against a
+Debian image with the toolchain preinstalled: 1958ms vs
+1866ms on zlib. Packaging win, not a compiler win. Bake a
+toolchain into your own base image and you get most of it
+without silex.
 
 Boost.Spirit X3 is header-only: one file, no linking,
 pure template instantiation. That's compiler frontend
 work. Silex replaces everything around the compiler,
-not the compiler itself. This is the ceiling.
+not the compiler itself. This is the ceiling, and it
+agrees: 1.0x.
 
-Warm sccache rebuild: 2.4s vs 44s cold. 18x. That 44s is a
-cold *ubuntu* build including toolchain install, so the 18x
-is warm-silex against cold-ubuntu, not a like-for-like
-rebuild.
+Warm sccache rebuild: 2.4s vs 44s cold. 18x — but that is
+warm silex against *cold ubuntu*, toolchain install and all.
 
-Silex against its own cold build is the more useful number,
-and it is smaller: on zlib, across separate `docker build`
-invocations with the sccache cache mounted, 1724ms cold ->
-868ms warm (~2x, 35 of 41 compilations served from cache).
-Expect it to land nearer the 18x end as compilation grows
-as a share of the build: zlib is 2 seconds, most of which
-is cmake and ninja overhead that sccache cannot remove.
+Against its own cold build silex is ~2x: zlib, 1724ms ->
+868ms across separate `docker build` invocations, 35 of 41
+compilations served from cache. Nearer 18x as compilation
+grows as a share of the build; zlib is 2 seconds, mostly
+cmake and ninja overhead sccache cannot remove.
 
 The cache mount is required for any of this. Without
 `--mount=type=cache,target=/root/.cache/sccache` every RUN
@@ -454,14 +428,10 @@ Possibly. `SILEX_WRAPPERS=off` for raw apk. File a
 bug if the issue persists.
 
 **Are the speedups real?**
-Yes, with the caveat that they are packaging wins, not
-compiler wins. 2-3x cold is silex-with-a-toolchain against
-ubuntu `apt-get install`ing one every build; against an
-image that already has a toolchain, compilation is a wash
-(1958ms vs 1866ms on zlib). The 18x is warm-silex against
-cold-ubuntu; silex warm against its own cold build is ~2x
-on zlib, and needs the sccache cache mount to happen at
-all. Methodology and harness in `benchmarks/`.
+Yes. Packaging wins, not compiler wins. Compilation against
+a toolchain-equipped image is a wash. 18x is warm silex vs
+cold ubuntu; against its own cold build it's ~2x, and only
+with the cache mount. Harness in `benchmarks/`.
 
 **Rust rewrite?**
 It's a Dockerfile.
