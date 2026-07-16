@@ -1,5 +1,5 @@
 # Multi-stage: build with silex:slim, run with silex:runtime (minimal, no compiler)
-# silex:runtime is <30MB vs silex:slim's ~500MB.
+# silex:runtime is <30MB vs silex:slim's ~859MB.
 
 # Build stage
 FROM ghcr.io/richarah/silex:slim AS builder
