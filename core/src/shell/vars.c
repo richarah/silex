@@ -83,6 +83,35 @@ static var_entry_t *vars_find(vars_t *v, const char *name)
     return NULL;
 }
 
+/*
+ * Store value in e, reusing e's existing buffer whenever the new value fits.
+ *
+ * Values live in an arena, and an arena has no per-allocation free. Every
+ * reassignment used to arena_strdup() a fresh copy and abandon the old one, so
+ * the arena grew ~236 bytes per assignment and a loop like
+ *
+ *     i=0; while [ $i -lt 300000 ]; do i=$((i+1)); done
+ *
+ * hit the 64 MB arena cap and aborted after ~270k iterations -- i.e. any
+ * long-running script, which is exactly the workload this shell targets.
+ * Overwriting in place keeps such a loop flat; only a genuinely longer value
+ * allocates, and the doubled capacity makes repeated growth ("9" -> "10" ->
+ * "100") amortise instead of reallocating on every digit.
+ */
+static void var_store_value(vars_t *v, var_entry_t *e, const char *value)
+{
+    size_t need = strlen(value) + 1;
+    if (e->value != NULL && e->value_cap >= need) {
+        memcpy(e->value, value, need);
+        return;
+    }
+    size_t cap = need * 2;
+    if (cap < need) cap = need;          /* overflow guard */
+    e->value     = arena_alloc(v->arena, cap);
+    e->value_cap = cap;
+    memcpy(e->value, value, need);
+}
+
 int vars_set_context(vars_t *v, const char *name, const char *value, const char *ctx)
 {
     unsigned int idx = fnv1a(name);
@@ -98,7 +127,7 @@ int vars_set_context(vars_t *v, const char *name, const char *value, const char 
                     fprintf(stderr, "silex: %s: readonly variable\n", name);
                 return 1;
             }
-            e->value = arena_strdup(v->arena, value);
+            var_store_value(v, e, value);
             return 0;
         }
     }
@@ -110,7 +139,9 @@ int vars_set_context(vars_t *v, const char *name, const char *value, const char 
         return 1;
     var_entry_t *e    = arena_alloc(v->arena, sizeof(var_entry_t));
     e->name           = arena_strdup(v->arena, name);
-    e->value          = arena_strdup(v->arena, value);
+    e->value          = NULL;   /* arena_alloc does not zero: init before store */
+    e->value_cap      = 0;
+    var_store_value(v, e, value);
     e->exported       = 0;
     e->readonly       = 0;
     e->next           = v->scope->buckets[idx];
@@ -134,14 +165,16 @@ int vars_set_local(vars_t *v, const char *name, const char *value)
             fprintf(stderr, "silex: %s: readonly variable\n", name);
             return 1;
         }
-        e->value = arena_strdup(v->arena, value);
+        var_store_value(v, e, value);
         return 0;
     }
 
     /* Create in current scope */
     e               = arena_alloc(v->arena, sizeof(var_entry_t));
     e->name         = arena_strdup(v->arena, name);
-    e->value        = arena_strdup(v->arena, value);
+    e->value        = NULL;   /* arena_alloc does not zero: init before store */
+    e->value_cap    = 0;
+    var_store_value(v, e, value);
     e->exported     = 0;
     e->readonly     = 0;
     e->next         = v->scope->buckets[idx];

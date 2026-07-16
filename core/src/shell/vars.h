@@ -13,6 +13,7 @@
 typedef struct var_entry {
     char             *name;
     char             *value;
+    size_t            value_cap;  /* bytes allocated at value, including NUL */
     int               exported;
     int               readonly;
     struct var_entry *next;

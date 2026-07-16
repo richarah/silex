@@ -288,15 +288,21 @@ $(TARGET): $(OBJS) | $(BINDIR)
 
 # --- Release targets ----------------------------------------------------------
 
-release: CFLAGS = $(CFLAGS_RELEASE) -DSILEX_BUILD_STATIC=1 -DSILEX_LIBC_MUSL=1
-release: LDFLAGS = $(LDFLAGS_MUSL)
+# $(EXTRA_CFLAGS)/$(EXTRA_LDFLAGS) must be repeated here. The global
+# `CFLAGS += $(EXTRA_CFLAGS)` above does NOT survive a target-specific
+# `CFLAGS = ...`, which replaces the variable outright for this target and its
+# prerequisites. Without this, every EXTRA_CFLAGS caller is silently ignored --
+# which is why `make pgo` produced an "instrumented" build with no
+# -fprofile-generate in it, hence zero profiles and no PGO at all.
+release: CFLAGS = $(CFLAGS_RELEASE) -DSILEX_BUILD_STATIC=1 -DSILEX_LIBC_MUSL=1 $(EXTRA_CFLAGS)
+release: LDFLAGS = $(LDFLAGS_MUSL) $(EXTRA_LDFLAGS)
 release: RELEASE_OPT = 1
 release: $(TARGET)
 	strip -s $(TARGET)
 	@echo "Release (musl static): $$(wc -c < $(TARGET)) bytes"
 
-release-glibc: CFLAGS = $(CFLAGS_RELEASE) -DSILEX_BUILD_DYNAMIC=1 -DSILEX_LIBC_GLIBC=1
-release-glibc: LDFLAGS = $(LDFLAGS_GLIBC)
+release-glibc: CFLAGS = $(CFLAGS_RELEASE) -DSILEX_BUILD_DYNAMIC=1 -DSILEX_LIBC_GLIBC=1 $(EXTRA_CFLAGS)
+release-glibc: LDFLAGS = $(LDFLAGS_GLIBC) $(EXTRA_LDFLAGS)
 release-glibc: RELEASE_OPT = 1
 release-glibc: $(TARGET)
 	strip -s $(TARGET)
