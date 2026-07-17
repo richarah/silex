@@ -1,0 +1,123 @@
+#!/bin/sh
+# Silex wrapper: tar with parallel compressor injection (creation only).
+#
+# Uses pigz for .tar.gz and pixz for .tar.xz when CREATING archives.
+# Extraction and listing pass through untouched.
+#
+# The previous version had two bugs which between them meant it corrupted
+# ordinary extraction AND never actually delivered parallel compression:
+#
+#   1. It decided "creating" with `case "$1" in *c*)`, which matches ANY first
+#      argument containing the letter c -- and it ran AFTER the option loop, so
+#      it overrode the correct answer:
+#
+#          tar --extract -f x.tgz       <- the c in "extra(c)t"    -> "creating"
+#          tar --directory=/tmp -xzf f  <- the c in "dire(c)tory"  -> "creating"
+#
+#   2. When it did inject a compressor it ran `tar -I pigz "$@"` with -z still
+#      in "$@". GNU tar rejects that outright ("Conflicting compression
+#      options"), so every invocation that reached the fast path simply failed.
+#
+# Now the mode comes from real option parsing, and the compression flags are
+# stripped from the argument list before -I is injected.
+
+[ "$SILEX_WRAPPERS" = "off" ] && exec /usr/bin/tar "$@"
+
+_mode=""      # create | extract | list  ("" = could not tell)
+_want=""      # pigz | pixz
+_endopts=0    # everything after `--` is an operand
+
+for _arg in "$@"; do
+    [ "$_endopts" -eq 1 ] && continue
+    case "$_arg" in
+        --) _endopts=1 ;;
+
+        # Long options: EXACT matches only. Never substring-scan these.
+        --create)                 _mode=create ;;
+        --extract|--get)          _mode=extract ;;
+        --list)                   _mode=list ;;
+        --gzip|--gunzip|--ungzip) _want=pigz ;;
+        --xz)                     _want=pixz ;;
+
+        # Caller picked their own compressor: do not second-guess them.
+        --use-compress-program|--use-compress-program=*)
+            exec /usr/bin/tar "$@" ;;
+
+        # Any other long option is neither a mode nor a compressor. Critically,
+        # do NOT scan it for c/x/t/z/J characters -- that was bug 1.
+        --*) ;;
+
+        # Short-option cluster: -czf, -xzf, or the historic dashless form czf.
+        -?*|[cxtr]?*)
+            _rest=${_arg#-}
+            while [ -n "$_rest" ]; do
+                _ch=${_rest%"${_rest#?}"}
+                _rest=${_rest#?}
+                case "$_ch" in
+                    c) _mode=create ;;
+                    x) _mode=extract ;;
+                    t) _mode=list ;;
+                    z) _want=pigz ;;
+                    J) _want=pixz ;;
+                esac
+            done ;;
+    esac
+done
+
+# Infer the compressor from the archive name only if the caller did not say.
+if [ -z "$_want" ]; then
+    for _arg in "$@"; do
+        case "$_arg" in
+            *.tar.gz|*.tgz) _want=pigz; break ;;
+            *.tar.xz|*.txz) _want=pixz; break ;;
+        esac
+    done
+fi
+
+# Anything not unambiguously a creation passes straight through -- including the
+# case where we could not determine the mode. Passing through is always correct;
+# injecting a compressor is not.
+[ "$_mode" = "create" ] || exec /usr/bin/tar "$@"
+[ -n "$_want" ]         || exec /usr/bin/tar "$@"
+command -v "$_want" >/dev/null 2>&1 || exec /usr/bin/tar "$@"
+
+# Rebuild the args with the compression flags removed: `-I prog` alongside `-z`
+# is an error, not an optimisation. That was bug 2.
+_argc=$#
+_kept=0
+_endopts=0
+for _arg in "$@"; do
+    _keep=1
+    if [ "$_endopts" -eq 0 ]; then
+        case "$_arg" in
+            --) _endopts=1 ;;
+            --gzip|--gunzip|--ungzip|--xz) _keep=0 ;;
+            --*) ;;
+            -?*|[cxtr]?*)
+                _lead=""
+                case "$_arg" in -*) _lead="-" ;; esac
+                _rest=${_arg#-}
+                _out=""
+                while [ -n "$_rest" ]; do
+                    _ch=${_rest%"${_rest#?}"}
+                    _rest=${_rest#?}
+                    case "$_ch" in
+                        z|J) ;;                 # drop the compression letter
+                        *)   _out="$_out$_ch" ;;
+                    esac
+                done
+                if [ -z "$_out" ]; then
+                    _keep=0                     # the cluster was just "-z"
+                else
+                    _arg="$_lead$_out"
+                fi ;;
+        esac
+    fi
+    if [ "$_keep" -eq 1 ]; then
+        set -- "$@" "$_arg"
+        _kept=$((_kept + 1))
+    fi
+done
+shift "$_argc"          # drop the originals, keep only the rebuilt ones
+
+exec /usr/bin/tar -I "$_want" "$@"

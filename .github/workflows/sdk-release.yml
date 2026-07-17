@@ -1,0 +1,133 @@
+name: SDK Release
+
+# paths: filters do NOT apply to tag triggers, so the tag namespace is the only
+# thing stopping a core release (core-v*) from firing a 90-minute image build.
+on:
+  push:
+    tags:
+      - 'sdk-v*'
+
+env:
+  REGISTRY: ghcr.io
+  # Resolves to richarah/silex, so the image publishes to ghcr.io/richarah/silex
+  # -- which is what setup-silex/action.yml has always tried to pull. Leave it
+  # dynamic; do not hardcode.
+  IMAGE_NAME: ${{ github.repository }}
+
+defaults:
+  run:
+    working-directory: sdk
+
+jobs:
+  release:
+    name: Build and Push
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract version from tag
+        id: version
+        # Tags are sdk-v* (the tag namespace that keeps a core release from
+        # firing the image build). Strip the full 'refs/tags/sdk-v' prefix --
+        # stripping only 'refs/tags/v' left the whole ref in VERSION, which then
+        # produced an image tag 'silex:slim-refs/tags/sdk-v0.3.0' and failed the
+        # push with "invalid value" before the build even started.
+        run: echo "VERSION=${GITHUB_REF#refs/tags/sdk-v}" >> "$GITHUB_OUTPUT"
+
+      # Bootstrap build from source, and push WITH ZSTD compression in one step.
+      #
+      # The README advertises "~360MB compressed (zstd)" against ~900MB
+      # uncompressed. But the release used to `--load` the image (gzip layers)
+      # and then `docker push` -- which ships the stored GZIP layers. The zstd
+      # number was aspirational; every published image was gzip.
+      #
+      # zstd (level 19) compresses container layers meaningfully smaller than
+      # gzip and decompresses several times faster, so both the pull size and the
+      # cold-start-unpack cost drop -- and pull time is part of "cold build
+      # faster". Building straight to the registry with compression=zstd makes
+      # the advertised number real.
+      #
+      # COMPATIBILITY: zstd-compressed images require a containerd-aware client
+      # (Docker 23+, or containerd/BuildKit). GHCR stores and serves them. Older
+      # Docker cannot pull them; if that matters for your consumers, drop
+      # compression back to gzip here.
+      #
+      # arm64 via QEMU is too slow for a full LLVM build; native arm64 needed.
+      #
+      # One build, two outputs: a docker-format load into the local daemon (so the
+      # size-report step below can inspect localhost/silex:slim) AND a zstd image
+      # pushed to the registry. buildx does both from a single build -- no rebuild.
+      - name: Build and push silex:slim (bootstrap, amd64, zstd)
+        run: |
+          set -eux
+          IMG="${{ env.REGISTRY }}/$(echo "${{ env.IMAGE_NAME }}" | tr '[:upper:]' '[:lower:]')"
+          VER="${{ steps.version.outputs.VERSION }}"
+          # Call buildx directly rather than through `make bootstrap`. The Makefile
+          # wrapper forced DOCKER_FLAGS through an extra make+shell layer that ate
+          # the CSV quoting around --output "name=a,b,c", so buildx parsed the
+          # second tag as a keyless field ("invalid value ...:slim-0.3.0"). Passing
+          # the tags as repeatable -t flags removes the comma-list entirely, and
+          # two --output exporters give us a local docker image (for the size
+          # report) plus a zstd-compressed push in one build.
+          docker buildx build \
+            -f dockerfiles/Dockerfile.bootstrap \
+            --build-arg TARGETARCH=amd64 \
+            --progress=plain \
+            -t "${IMG}:slim" \
+            -t "${IMG}:slim-${VER}" \
+            -t "${IMG}:slim-latest" \
+            --output type=docker,name=localhost/silex:slim \
+            --output type=image,push=true,compression=zstd,compression-level=19,force-compression=true \
+            .
+
+      - name: Get image size
+        id: image_size
+        run: |
+          SIZE_MB=$(docker inspect localhost/silex:slim --format='{{.Size}}' | awk '{printf "%.0f\n", $1/1024/1024}')
+          echo "SIZE_MB=${SIZE_MB}" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          generate_release_notes: true
+          body: |
+            ## Silex ${{ github.ref_name }}
+
+            ### Images
+
+            ```
+            docker pull ghcr.io/richarah/silex:slim
+            ```
+
+            ### Image Sizes
+
+            | Image | Size |
+            |-------|------|
+            | `silex:slim` | ~${{ steps.image_size.outputs.SIZE_MB }}MB |
+            | `silex:runtime` | <30MB |
+
+            ### Quick Start
+
+            ```dockerfile
+            FROM ghcr.io/richarah/silex:slim
+
+            COPY . /workspace
+            WORKDIR /workspace
+
+            RUN cmake -B build && cmake --build build
+            ```

@@ -1,0 +1,30 @@
+name: SDK Benchmark Dashboard
+
+on:
+  push:
+    tags: ['sdk-v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+defaults:
+  run:
+    working-directory: sdk
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Generate benchmark HTML
+        run: bash docs/benchmarks/generate.sh
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          # publish_dir is a `uses:` input -- working-directory does not apply.
+          publish_dir: ./sdk/docs/benchmarks
+          destination_dir: benchmarks

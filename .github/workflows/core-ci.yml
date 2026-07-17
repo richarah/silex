@@ -1,0 +1,398 @@
+name: Core CI
+
+on:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'core/**'
+      - '.github/workflows/core-ci.yml'
+  pull_request:
+    branches: [ main, master ]
+    paths:
+      - 'core/**'
+      - '.github/workflows/core-ci.yml'
+
+# Every run: step in this workflow assumes the repo root is core/.
+# NOTE: this does NOT apply to `uses:` steps -- actions/cache, upload-artifact
+# and friends resolve their path: inputs against the workspace root, so those
+# are spelled out with the core/ prefix by hand below.
+defaults:
+  run:
+    working-directory: core
+
+jobs:
+  # Job 1: Build and test with GCC
+  build-test-gcc:
+    name: Build & test (gcc)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y gcc make
+      - name: Build
+        run: make CC=gcc
+      - name: Unit tests
+        run: make test
+      - name: Integration tests
+        run: bash tests/integration/run_integration.sh build/bin/silex
+
+  # Job 2: AddressSanitizer + UndefinedBehaviorSanitizer
+  asan:
+    name: ASan/UBSan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y gcc make
+      - name: Build (debug + sanitizers)
+        run: make debug
+      - name: Unit tests under ASan
+        run: make test
+
+  # Job 3: Arena lifetime checking
+  #
+  # This covers a bug class the asan job structurally CANNOT catch. arena_reset()
+  # only sets used = 0 and keeps every block malloc'd, so a pointer that outlives
+  # a reset still lands on mapped memory that ASan and valgrind both consider
+  # live. The stale read usually returns the old bytes and the test passes --
+  # until an unrelated allocation reuses the offset.
+  #
+  # It is not theoretical: `for x in a b c; do eval ...; done` walked a freed word
+  # list and printed "alpha", "pha", then stopped, and every suite was green.
+  # -DARENA_POISON fills blocks with 0xDD on reset, so such a bug fails loudly.
+  arena-poison:
+    name: Arena poisoning
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y gcc make dash
+      - name: Unit + compat tests with arena poisoning
+        run: make test-poison
+
+  # Job 4: Compatibility tests
+  compat:
+    name: Compat tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y gcc make dash
+      - name: Build
+        run: make
+      - name: Compat tests
+        run: make compat-test
+
+  # Job 5: Static analysis
+  static-analysis:
+    name: Static analysis
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang clang-tools cppcheck make
+      - name: Build (needed for headers)
+        run: make
+      # --status-bugs and --error-exitcode exist to make these fail. Both used to
+      # end in `|| true`, which threw that away -- this job could not fail.
+      - name: scan-build
+        # LTO_FLAG= : the Makefile picks -flto=thin when CC is clang, but
+        # scan-build's ccc-analyzer wrapper drives gcc underneath, and gcc does
+        # not know clang's thin LTO ("unrecognized argument to -flto=: thin").
+        # LTO is irrelevant to static analysis anyway.
+        run: |
+          make clean
+          scan-build --status-bugs make CC=clang LTO_FLAG=
+      - name: cppcheck
+        run: make cppcheck
+
+  # Job 6: Shellcheck on test scripts
+  shellcheck:
+    name: Shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: Run shellcheck on our test scripts
+        # Three things were wrong with this step:
+        #
+        #   1. `find tests/` walks tests/external/repos/ -- 3,478 THIRD-PARTY
+        #      shell scripts (smoosh, modernish, the GNU coreutils suite). We
+        #      were linting other people's code and failing on it.
+        #   2. `-s sh` forced POSIX mode onto scripts with a #!/bin/bash shebang,
+        #      producing 267 "local is undefined" errors for code that is
+        #      correct bash. Let shellcheck read the shebang.
+        #   3. It gated on style warnings, so it could never be green and
+        #      therefore told you nothing.
+        #
+        # Now: our scripts only, shebang respected, and it fails on real errors.
+        run: |
+          find tests/ -name '*.sh' -not -path '*/external/repos/*' -print0 \
+            | xargs -0 shellcheck --severity=error
+
+  # Job 7: Binary size check (musl/alpine) -- uses canonical release target
+  binary-size:
+    name: Binary size (musl/alpine)
+    runs-on: ubuntu-latest
+    container:
+      image: alpine:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: apk add --no-cache gcc musl-dev make binutils linux-headers
+      - name: Build (musl static release)
+        run: make release
+      - name: Check binary size <= 1.5MB
+        run: |
+          SIZE=$(wc -c < build/bin/silex)
+          echo "Stripped size: ${SIZE} bytes ($(( SIZE / 1024 ))K)"
+          if [ "$SIZE" -gt 1572864 ]; then
+            echo "FAIL: binary ${SIZE} bytes > 1.5MB limit"
+            exit 1
+          fi
+          echo "OK: binary within 1.5MB limit"
+
+  # Job 8: Cross-compile for aarch64 (QEMU)
+  aarch64:
+    name: aarch64 cross-compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install aarch64 toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu make qemu-user-static
+      - name: Cross-compile
+        run: |
+          make CC=aarch64-linux-gnu-gcc \
+               LDFLAGS="-static" \
+               LDLIBS="-ldl"
+      - name: Run under QEMU
+        run: qemu-aarch64-static build/bin/silex --version
+
+  # Job 9: Build and test on musl (Alpine)
+  test-musl:
+    name: Build and test (musl/Alpine)
+    runs-on: ubuntu-latest
+    container:
+      image: alpine:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        # coreutils: the compat suite compares silex against the SYSTEM tool, and
+        # on Alpine that is busybox, which pads `wc` output differently from GNU.
+        # silex matches GNU (correctly), so it "failed" against the wrong
+        # reference. The suite exists to check GNU compatibility -- so install GNU.
+        run: apk add --no-cache gcc musl-dev make linux-headers bash coreutils
+      - name: Build release
+        run: make release
+      - name: Unit tests
+        run: make test
+      - name: Compat tests
+        run: make compat-test
+
+  # Job 10: Build and test on glibc (Ubuntu)
+  test-glibc:
+    name: Build and test (glibc/Ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y gcc make
+      - name: Build release-glibc
+        run: make release-glibc
+      - name: Unit tests
+        run: make test
+      - name: Compat tests
+        run: make compat-test
+
+  # Job 11: ASan/UBSan on musl (Alpine)
+  test-musl-asan:
+    name: ASan/UBSan (musl/Alpine)
+    runs-on: ubuntu-latest
+    container:
+      image: alpine:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        # coreutils: the compat suite compares silex against the SYSTEM tool, and
+        # on Alpine that is busybox, which pads `wc` output differently from GNU.
+        # silex matches GNU (correctly), so it "failed" against the wrong
+        # reference. The suite exists to check GNU compatibility -- so install GNU.
+        run: apk add --no-cache gcc musl-dev make linux-headers bash coreutils
+      - name: Build debug
+        run: make debug
+      - name: Unit tests under ASan
+        run: make test
+
+  # Job 12: ASan/UBSan on glibc (Ubuntu)
+  test-glibc-asan:
+    name: ASan/UBSan (glibc/Ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y gcc make
+      - name: Build debug
+        run: make debug
+      - name: Unit tests under ASan
+        run: make test
+
+  # Job 13: External test suites (comprehensive conformance validation)
+  external-tests:
+    name: External test suites
+    runs-on: ubuntu-latest
+    timeout-minutes: 60  # Parallel execution in Docker (~45 min)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache external test repositories
+        uses: actions/cache@v4
+        with:
+          path: core/tests/external/repos
+          key: external-repos-${{ hashFiles('core/tests/external/fetch-all.sh') }}
+
+      - name: Run external tests (Docker)
+        run: make external-test-docker
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: external-test-results
+          path: core/tests/external/results/
+
+      # A missing results file means the suite did not run. That is a failure,
+      # not a pass. This step used to print "? results not found" and fall
+      # through to "✓ All critical checks passed", so a suite that crashed
+      # before producing output was indistinguishable from a suite that passed.
+      - name: Check critical requirements
+        run: |
+          set -eu
+          echo "Checking critical requirements..."
+
+          require_results() {
+            _pattern="$1"
+            _name="$2"
+            _latest=$(ls -t $_pattern 2>/dev/null | head -1 || true)
+            if [ -z "$_latest" ] || [ ! -f "$_latest" ]; then
+              echo "✗ BLOCKER: no $_name results found ($_pattern)."
+              echo "  The suite did not run. That is a failure, not a pass."
+              exit 1
+            fi
+            printf '%s' "$_latest"
+          }
+
+          # Check 1: modernish fatal-bug count must be 0
+          latest=$(require_results 'tests/external/results/modernish-*.txt' modernish)
+          ftl=$(grep -i 'Fatal bugs (FTL):' "$latest" | grep -oE '[0-9]+' | head -1 || true)
+          if [ -z "$ftl" ]; then
+            echo "✗ BLOCKER: could not read an FTL count from $latest."
+            echo "  modernish almost certainly failed to launch. A missing count is"
+            echo "  not a zero count."
+            exit 1
+          fi
+          if [ "$ftl" -ne 0 ]; then
+            echo "✗ BLOCKER: modernish FTL count = $ftl (must be 0)"
+            exit 1
+          fi
+          echo "✓ modernish FTL count = 0"
+
+          # Check 2: every Autoconf configure script must pass
+          latest=$(require_results 'tests/external/results/configure-*.txt' configure)
+          conf_fail=$(grep -i 'Failed:' "$latest" | grep -oE '[0-9]+' | head -1 || true)
+          if [ -z "$conf_fail" ]; then
+            echo "✗ BLOCKER: could not read a failure count from $latest."
+            exit 1
+          fi
+          if [ "$conf_fail" -ne 0 ]; then
+            echo "✗ BLOCKER: configure failures = $conf_fail (must be 0)"
+            exit 1
+          fi
+          echo "✓ All configure scripts passed"
+
+          echo ""
+          echo "✓ All critical checks passed"
+
+  # Job 14: Benchmark. Times silex against dash on a REAL build and ASSERTS THE
+  # ARTIFACT.
+  #
+  # This project reported silex "44% faster on configure+make" when silex's make
+  # was in fact FAILING -- 16 of 19 objects, no libz.a. A benchmark that does not
+  # check what the build produced is measuring time-to-fail and calling it speed.
+  # This job exists so that number cannot rot back into folklore.
+  benchmark:
+    name: Benchmark (asserts artifacts)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y gcc make dash
+      - name: Build release
+        run: make release-glibc
+      - name: Fetch benchmark source (zlib)
+        run: |
+          mkdir -p tests/external/repos/projects
+          if [ ! -f tests/external/repos/projects/zlib/configure ]; then
+            # zlib.net serves ONLY the current release at its root; older versions
+            # move to /fossils/, so the bare zlib.net/zlib-1.3.1.tar.gz 404s. Pull
+            # from the GitHub release (stable, versioned), fall back to fossils.
+            curl -fsSL https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz -o /tmp/z.tgz \
+              || curl -fsSL https://zlib.net/fossils/zlib-1.3.1.tar.gz -o /tmp/z.tgz
+            tar xzf /tmp/z.tgz -C /tmp
+            mv /tmp/zlib-1.3.1 tests/external/repos/projects/zlib
+          fi
+      - name: Benchmark vs dash
+        run: make bench-ci
+
+  # Job 15: Fuzzing. Five libFuzzer harnesses have existed in tests/fuzz/ since
+  # before this branch and CI has never run one of them.
+  fuzz:
+    name: Fuzz (libFuzzer, short run)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang
+        run: sudo apt-get update && sudo apt-get install -y clang make
+      - name: Build fuzz harnesses
+        run: make CC=clang fuzz
+      - name: Run each harness briefly
+        run: |
+          set -eu
+          for f in build/fuzz/fuzz_*; do
+            [ -x "$f" ] || continue
+            echo "=== $(basename "$f") ==="
+            # -runs bounds the job; a crash still fails it, which is the point.
+            "$f" -runs=20000 -max_total_time=120 -timeout=10
+          done
+      - name: Upload crashers
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashers
+          path: |
+            crash-*
+            leak-*
+            timeout-*
+            oom-*
+          if-no-files-found: ignore
+
+  # Job 16: Coverage. Reports; does not gate. An arbitrary coverage floor blocks
+  # honest work, but flying with no number at all is how tests/unit/shell/ ended
+  # up with ten suites that CI never executed.
+  coverage:
+    name: Coverage (report only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y gcc make dash gcovr
+      - name: Coverage
+        run: make coverage

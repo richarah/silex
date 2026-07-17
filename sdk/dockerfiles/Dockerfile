@@ -1,0 +1,809 @@
+# Silex v2 self-hosted build.
+# Requires a previous silex:slim image. Faster than bootstrap (~15-20 min vs ~90-120 min).
+# Produces identical output to Dockerfile.bootstrap.
+# LLVM and mold are carried forward from the previous silex:slim; not rebuilt.
+# To upgrade LLVM or mold, run Dockerfile.bootstrap instead.
+#
+# Usage:
+#   docker build -f dockerfiles/Dockerfile -t silex:slim .
+#
+# ============================================================================
+
+# ============================================================================
+# Source versions. Must match sources.json.
+# ============================================================================
+
+ARG NINJA_VERSION=1.12.1
+ARG NINJA_SHA256=821bdff48a3f683bc4bb3b6f0b5fe7b2d647cf65d52aeb63328c91a6c6df285a
+ARG ZSTD_VERSION=1.5.6
+ARG ZSTD_SHA256=8c29e06cf42aacc1eafc4077ae2ec6c6fcb96a626157e0593d5e82a34fd403c1
+ARG XXHASH_VERSION=0.8.2
+ARG XXHASH_SHA256=baee0c6afd4f03165de7a4e67988d16f0f2b257b51d0e3cb91909302a26a79c4
+ARG MIMALLOC_VERSION=2.1.7
+ARG MIMALLOC_SHA256=0eed39319f139afde8515010ff59baf24de9e47ea316a315398e8027d198202d
+ARG APK_VERSION=3.0.5
+ARG APK_SHA256=e9d7398d5f70badea596903599bfa1e05b64d67d13c929da9f0eee85828260c6
+ARG BUSYBOX_VERSION=1.37.0
+ARG BUSYBOX_SHA256=3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4
+ARG DASH_VERSION=0.5.12
+ARG DASH_SHA256=6a474ac46e8b0b32916c4c60df694c82058d3297d8b385b74508030ca4a8f28a
+ARG TINI_VERSION=0.19.0
+ARG TINI_SHA256=0fd35a7030052acd9f58948d1d900fe1e432ee37103c5561554408bdac6bbf0d
+ARG PIGZ_VERSION=2.8
+ARG PIGZ_SHA256=eb872b4f0e1f0ebe59c9f7bd8c506c4204893ba6a8492de31df416f0d5170fd0
+ARG PIXZ_VERSION=1.0.7
+ARG PIXZ_SHA256=e5e32c6eb0bf112b98e74a5da8fb63b9f2cae71800f599d97ce540e150c8ddc5
+ARG COREUTILS_VERSION=9.5
+ARG COREUTILS_SHA256=cd328edeac92f6a665de9f323c93b712af1858bc2e0d88f3f7100469470a1b8a
+ARG SCCACHE_VERSION=0.8.2
+ARG SCCACHE_SHA256=2b3e0ef8902fe7bcdcfccf393e29f4ccaafc0194cbb93681eaac238cdc9b94f8
+ARG FD_VERSION=10.2.0
+ARG FD_SHA256=73329fe24c53f0ca47cd0939256ca5c4644742cb7c14cf4114c8c9871336d342
+ARG RG_VERSION=14.1.1
+ARG RG_SHA256=4dad02a2f9c8c3c8d89434e47337aa654cb0e2aa50e806589132f186bf5c2b66
+ARG UV_VERSION=0.4.30
+ARG UV_SHA256=0f74a570e52affd82ff7987ade2553e144a326e7ff58de24ab4242999a3dc931
+ARG RUST_VERSION=1.82.0
+ARG RUST_SHA256_X86_64=8a6bf24ca1fee2bd861590431c7954674191a0c0dfa0af4169731bc1459cf58a
+ARG RUST_SHA256_AARCH64=99acf175be33bd96ac82d644125d0e2acc6962d61ee64851edc7d8ba3bd23ca4
+
+ARG SILEX_PGO=0
+ARG TARGETARCH
+
+# ============================================================================
+# Stage: build-c
+# Uses previous silex:slim — clang and mold already present.
+# Rebuilds all C/C++ tools from source using the existing toolchain.
+# LLVM and mold are NOT rebuilt; they are carried forward via COPY below.
+# ============================================================================
+# Base image, pinned by digest.
+#
+# This was `FROM debian:bookworm-slim` -- a MUTABLE tag. The README criticises
+# Wolfi for being rolling, and then floated the whole image on a tag that
+# Debian repoints whenever they cut a point release. A digest is the only
+# thing that makes `docker build` twice give you the same base twice.
+#
+# Bump: docker buildx imagetools inspect debian:bookworm-slim | grep Digest
+ARG DEBIAN_BASE=debian:bookworm-slim@sha256:60eac759739651111db372c07be67863818726f754804b8707c90979bda511df
+
+FROM silex:slim AS build-c
+
+ARG NINJA_VERSION NINJA_SHA256
+ARG ZSTD_VERSION ZSTD_SHA256
+ARG XXHASH_VERSION XXHASH_SHA256
+ARG MIMALLOC_VERSION MIMALLOC_SHA256
+ARG APK_VERSION APK_SHA256
+ARG BUSYBOX_VERSION BUSYBOX_SHA256
+ARG DASH_VERSION DASH_SHA256
+ARG TINI_VERSION TINI_SHA256
+ARG PIGZ_VERSION PIGZ_SHA256
+ARG PIXZ_VERSION PIXZ_SHA256
+ARG COREUTILS_VERSION COREUTILS_SHA256
+ARG SILEX_PGO
+ARG TARGETARCH
+
+RUN mkdir -p /src /build /out/bin /out/lib /out/share
+
+# curl is not pre-installed in silex:slim; install via apk.
+# LD_LIBRARY_PATH ensures Wolfi's /usr/lib/libcurl.so.4 is found first.
+RUN apk update && apk add curl
+ENV LD_LIBRARY_PATH="/usr/lib"
+
+# ============================================================================
+# Compile static build-time helpers for the final stage.
+# These are run during docker build (not at container runtime).
+# Compiled here in build-c where libc6-dev is available from silex:slim.
+# Use clang directly — not via CC (which is sccache clang) or CFLAGS.
+# ============================================================================
+RUN printf '%s\n' \
+    '#include <unistd.h>' \
+    '#include <sys/stat.h>' \
+    '#include <fcntl.h>' \
+    '#include <dirent.h>' \
+    '#include <string.h>' \
+    '#include <stdio.h>' \
+    '#include <limits.h>' \
+    '#include <errno.h>' \
+    'static int rmrf(const char*d){' \
+    '  DIR*dp=opendir(d);struct dirent*e;char p[4096];' \
+    '  if(!dp){return errno==ENOENT?0:(perror(d),1);}' \
+    '  while((e=readdir(dp))){' \
+    '    if(!strcmp(e->d_name,".")||!strcmp(e->d_name,".."))continue;' \
+    '    snprintf(p,sizeof p,"%s/%s",d,e->d_name);' \
+    '    if(unlink(p)!=0)rmrf(p);}' \
+    '  closedir(dp);' \
+    '  if(rmdir(d)!=0){perror(d);return 1;}return 0;}' \
+    'static int fhs(const char*d,const char*t){' \
+    '  struct stat s;' \
+    '  if(lstat(d,&s)<0||!S_ISDIR(s.st_mode))return 0;' \
+    '  if(rmrf(d))return 1;' \
+    '  if(symlink(t,d)!=0){perror(d);return 1;}return 0;}' \
+    'static void cpfile(const char*s,const char*d){' \
+    '  char b[65536];ssize_t n;' \
+    '  int r=open(s,O_RDONLY),w=open(d,O_WRONLY|O_CREAT|O_TRUNC,0644);' \
+    '  if(r<0||w<0){if(r>=0)close(r);if(w>=0)close(w);return;}' \
+    '  while((n=read(r,b,sizeof b))>0)write(w,b,n);' \
+    '  close(r);close(w);}' \
+    'static void mvtree(const char*src,const char*dst){' \
+    '  DIR*dp=opendir(src);struct dirent*e;char s[4096],d[4096];struct stat st;' \
+    '  if(!dp)return;' \
+    '  while((e=readdir(dp))){' \
+    '    if(!strcmp(e->d_name,".")||!strcmp(e->d_name,".."))continue;' \
+    '    snprintf(s,sizeof s,"%s/%s",src,e->d_name);' \
+    '    snprintf(d,sizeof d,"%s/%s",dst,e->d_name);' \
+    '    if(lstat(s,&st)!=0)continue;' \
+    '    if(S_ISDIR(st.st_mode)){mkdir(d,0755);mvtree(s,d);}' \
+    '    else{cpfile(s,d);unlink(s);}}' \
+    '  closedir(dp);rmdir(src);}' \
+    'static int fhs_mv(const char*dir,const char*newpath,const char*symtgt){' \
+    '  struct stat s;' \
+    '  if(lstat(dir,&s)<0||!S_ISDIR(s.st_mode))return 0;' \
+    '  mkdir(newpath,0755);' \
+    '  mvtree(dir,newpath);' \
+    '  if(symlink(symtgt,dir)!=0){perror(dir);return 1;}return 0;}' \
+    'int main(void){' \
+    '  struct stat s;' \
+    '  if(fhs("/usr/sbin","bin"))return 1;' \
+    '  if(fhs("/usr/lib64","lib"))return 1;' \
+    '  if(fhs_mv("/usr/lib/terminfo","/usr/share/terminfo","../share/terminfo"))return 1;' \
+    '#ifdef __x86_64__' \
+    '  if(lstat("/usr/lib/ld-linux-x86-64.so.2",&s)!=0)' \
+    '    symlink("x86_64-linux-gnu/ld-linux-x86-64.so.2","/usr/lib/ld-linux-x86-64.so.2");' \
+    '#elif defined(__aarch64__)' \
+    '  if(lstat("/usr/lib/ld-linux-aarch64.so.1",&s)!=0)' \
+    '    symlink("aarch64-linux-gnu/ld-linux-aarch64.so.1","/usr/lib/ld-linux-aarch64.so.1");' \
+    '#endif' \
+    '  return 0;}' \
+    > /src/fhs.c \
+    && clang -static -o /out/bin/silex-fhs /src/fhs.c \
+    && rm /src/fhs.c
+
+# ============================================================================
+# Compiler environment. Inherits clang + mold from silex:slim PATH.
+# ============================================================================
+ENV CC="clang"
+ENV CXX="clang++"
+ENV CFLAGS="-O3 -flto=thin -fomit-frame-pointer"
+ENV CXXFLAGS="-O3 -flto=thin -fomit-frame-pointer"
+ENV LDFLAGS="-fuse-ld=/opt/mold/bin/mold -flto=thin"
+
+ARG MARCH_FLAG="-march=x86-64-v3"
+ENV CFLAGS="${CFLAGS} ${MARCH_FLAG}"
+ENV CXXFLAGS="${CXXFLAGS} ${MARCH_FLAG}"
+
+# ============================================================================
+# sccache wrapper: accelerate C/C++ compilation in the self-hosted build.
+# Disabled with SILEX_SCCACHE=off or if sccache is not found.
+# ============================================================================
+ENV SCCACHE_DIR="/root/.cache/sccache"
+ENV RUSTC_WRAPPER="sccache"
+ENV CC="sccache clang"
+ENV CXX="sccache clang++"
+
+# ============================================================================
+# Download and verify all C/C++ source tarballs.
+# ============================================================================
+RUN set -ex \
+    \
+    && curl -fsSL "https://github.com/ninja-build/ninja/archive/refs/tags/v${NINJA_VERSION}.tar.gz" \
+        -o /src/ninja.tar.gz \
+    && echo "${NINJA_SHA256}  /src/ninja.tar.gz" | sha256sum -c - \
+    \
+    && curl -fsSL "https://github.com/facebook/zstd/releases/download/v${ZSTD_VERSION}/zstd-${ZSTD_VERSION}.tar.gz" \
+        -o /src/zstd.tar.gz \
+    && echo "${ZSTD_SHA256}  /src/zstd.tar.gz" | sha256sum -c - \
+    \
+    && curl -fsSL "https://github.com/Cyan4973/xxHash/archive/refs/tags/v${XXHASH_VERSION}.tar.gz" \
+        -o /src/xxhash.tar.gz \
+    && echo "${XXHASH_SHA256}  /src/xxhash.tar.gz" | sha256sum -c - \
+    \
+    && curl -fsSL "https://github.com/microsoft/mimalloc/archive/refs/tags/v${MIMALLOC_VERSION}.tar.gz" \
+        -o /src/mimalloc.tar.gz \
+    && echo "${MIMALLOC_SHA256}  /src/mimalloc.tar.gz" | sha256sum -c - \
+    \
+    && curl -fsSL "https://gitlab.alpinelinux.org/alpine/apk-tools/-/archive/v${APK_VERSION}/apk-tools-v${APK_VERSION}.tar.gz" \
+        -o /src/apk-tools.tar.gz \
+    && echo "${APK_SHA256}  /src/apk-tools.tar.gz" | sha256sum -c - \
+    \
+    && curl -fsSL --retry 5 --retry-delay 5 "https://busybox.net/downloads/busybox-${BUSYBOX_VERSION}.tar.bz2" \
+        -o /src/busybox.tar.bz2 \
+    && echo "${BUSYBOX_SHA256}  /src/busybox.tar.bz2" | sha256sum -c - \
+    \
+    && curl -fsSL --retry 5 --retry-delay 5 --connect-timeout 30 "http://gondor.apana.org.au/~herbert/dash/files/dash-${DASH_VERSION}.tar.gz" \
+        -o /src/dash.tar.gz \
+    && echo "${DASH_SHA256}  /src/dash.tar.gz" | sha256sum -c - \
+    \
+    && curl -fsSL "https://github.com/krallin/tini/archive/refs/tags/v${TINI_VERSION}.tar.gz" \
+        -o /src/tini.tar.gz \
+    && echo "${TINI_SHA256}  /src/tini.tar.gz" | sha256sum -c - \
+    \
+    && curl -fsSL --retry 5 --retry-delay 5 --connect-timeout 30 "https://zlib.net/pigz/pigz-${PIGZ_VERSION}.tar.gz" \
+        -o /src/pigz.tar.gz \
+    && echo "${PIGZ_SHA256}  /src/pigz.tar.gz" | sha256sum -c - \
+    \
+    && curl -fsSL "https://github.com/vasi/pixz/releases/download/v${PIXZ_VERSION}/pixz-${PIXZ_VERSION}.tar.xz" \
+        -o /src/pixz.tar.xz \
+    && echo "${PIXZ_SHA256}  /src/pixz.tar.xz" | sha256sum -c - \
+    \
+    && curl -fsSL "https://ftp.gnu.org/gnu/coreutils/coreutils-${COREUTILS_VERSION}.tar.xz" \
+        -o /src/coreutils.tar.xz \
+    && echo "${COREUTILS_SHA256}  /src/coreutils.tar.xz" | sha256sum -c -
+
+# ============================================================================
+# Build ninja (cmake generator for subsequent builds).
+# ============================================================================
+RUN set -ex \
+    && tar xf /src/ninja.tar.gz -C /build \
+    && cd /build/ninja-${NINJA_VERSION} \
+    && cmake -B _build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/out \
+        -DBUILD_TESTING=OFF \
+    && cmake --build _build -j$(nproc) \
+    && cmake --install _build \
+    && strip --strip-unneeded /out/bin/ninja \
+    && rm -rf /build/ninja-${NINJA_VERSION}
+
+ENV PATH="/out/bin:${PATH}"
+
+# ============================================================================
+# Build zstd.
+# ============================================================================
+RUN set -ex \
+    && tar xf /src/zstd.tar.gz -C /build \
+    && cd /build/zstd-${ZSTD_VERSION} \
+    && cmake -S build/cmake -B _build \
+        -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/out \
+        -DZSTD_BUILD_STATIC=OFF \
+        -DZSTD_BUILD_PROGRAMS=ON \
+        -DZSTD_BUILD_TESTS=OFF \
+    && ninja -C _build -j$(nproc) \
+    && ninja -C _build install \
+    && strip --strip-unneeded /out/bin/zstd \
+    && rm -rf /build/zstd-${ZSTD_VERSION}
+
+# ============================================================================
+# Build xxhash (library + xxhsum binary).
+# ============================================================================
+RUN set -ex \
+    && tar xf /src/xxhash.tar.gz -C /build \
+    && cd /build/xxHash-${XXHASH_VERSION} \
+    && make -j$(nproc) \
+    && make install PREFIX=/out \
+    && strip --strip-unneeded /out/bin/xxhsum 2>/dev/null || true \
+    && rm -rf /build/xxHash-${XXHASH_VERSION}
+
+# ============================================================================
+# Build mimalloc (shared library only, for LD_PRELOAD).
+# ============================================================================
+RUN set -ex \
+    && tar xf /src/mimalloc.tar.gz -C /build \
+    && cd /build/mimalloc-${MIMALLOC_VERSION} \
+    && cmake -B _build \
+        -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/out \
+        -DMI_BUILD_STATIC=OFF \
+        -DMI_BUILD_OBJECT=OFF \
+        -DMI_BUILD_TESTS=OFF \
+    && ninja -C _build -j$(nproc) \
+    && ninja -C _build install \
+    && rm -rf /build/mimalloc-${MIMALLOC_VERSION}
+
+# ============================================================================
+# Build tini (PID 1 reaper).
+# ============================================================================
+RUN set -ex \
+    && tar xf /src/tini.tar.gz -C /build \
+    && cd /build/tini-${TINI_VERSION} \
+    && cmake -B _build \
+        -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/out \
+    && ninja -C _build -j$(nproc) \
+    && install -m755 _build/tini /out/bin/tini \
+    && strip --strip-unneeded /out/bin/tini \
+    && rm -rf /build/tini-${TINI_VERSION}
+
+# ============================================================================
+# Build dash (/bin/sh).
+# ============================================================================
+RUN set -ex \
+    && tar xf /src/dash.tar.gz -C /build \
+    && cd /build/dash-${DASH_VERSION} \
+    && ./configure \
+        --bindir=/bin \
+        --prefix=/out \
+        CC="${CC}" \
+        CFLAGS="${CFLAGS}" \
+        LDFLAGS="${LDFLAGS}" \
+    && make -j$(nproc) \
+    && make install \
+    && strip --strip-unneeded /out/bin/dash 2>/dev/null || true \
+    && rm -rf /build/dash-${DASH_VERSION}
+
+# ============================================================================
+# Build busybox (dynamic, glibc, defconfig).
+# ============================================================================
+RUN set -ex \
+    && tar xf /src/busybox.tar.bz2 -C /build \
+    && cd /build/busybox-${BUSYBOX_VERSION} \
+    && make defconfig \
+    && make -j$(nproc) \
+        CC="${CC}" \
+        EXTRA_CFLAGS="${CFLAGS}" \
+        EXTRA_LDFLAGS="${LDFLAGS}" \
+    && install -m755 busybox /out/bin/busybox \
+    && strip --strip-unneeded /out/bin/busybox \
+    && rm -rf /build/busybox-${BUSYBOX_VERSION}
+
+# ============================================================================
+# Build pigz (parallel gzip).
+# ============================================================================
+RUN set -ex \
+    && tar xf /src/pigz.tar.gz -C /build \
+    && cd /build/pigz-${PIGZ_VERSION} \
+    && make -j$(nproc) CC="${CC}" CFLAGS="${CFLAGS}" LDFLAGS="${LDFLAGS}" \
+    && install -m755 pigz /out/bin/pigz \
+    && strip --strip-unneeded /out/bin/pigz \
+    && rm -rf /build/pigz-${PIGZ_VERSION}
+
+# ============================================================================
+# Build pixz (parallel xz).
+# ============================================================================
+RUN set -ex \
+    && tar xf /src/pixz.tar.xz -C /build \
+    && cd /build/pixz-${PIXZ_VERSION} \
+    && autoreconf -fi \
+    && ./configure \
+        --prefix=/out \
+        CC="${CC}" \
+        CFLAGS="${CFLAGS}" \
+        LDFLAGS="${LDFLAGS}" \
+    && make -j$(nproc) \
+    && make install \
+    && strip --strip-unneeded /out/bin/pixz \
+    && rm -rf /build/pixz-${PIXZ_VERSION}
+
+# ============================================================================
+# Build GNU coreutils — sort binary only (--parallel support).
+# ============================================================================
+RUN set -ex \
+    && tar xf /src/coreutils.tar.xz -C /build \
+    && cd /build/coreutils-${COREUTILS_VERSION} \
+    && ./configure \
+        --prefix=/out \
+        CC="${CC}" \
+        CFLAGS="${CFLAGS}" \
+        LDFLAGS="${LDFLAGS}" \
+    && make -j$(nproc) src/sort \
+    && install -m755 src/sort /out/bin/sort-parallel \
+    && strip --strip-unneeded /out/bin/sort-parallel \
+    && rm -rf /build/coreutils-${COREUTILS_VERSION}
+
+# ============================================================================
+# Build apk-tools (static, no Lua).
+# apk 3.x uses a plain Makefile; autoconf was dropped in v3.
+# STATIC=y links all deps in; zstd support is auto-enabled via pkg-config.
+# Static libs come from Wolfi's -dev + -static packages.
+# ============================================================================
+RUN set -ex \
+    && apk add --no-cache openssl-dev openssl-libs-static \
+                          zlib-dev zlib-static \
+                          zstd-dev zstd-static \
+                          make \
+    && tar xf /src/apk-tools.tar.gz -C /build \
+    && cd /build/apk-tools-v${APK_VERSION} \
+    && make -j$(nproc) \
+        CC="${CC}" \
+        CFLAGS="${CFLAGS}" \
+        LDFLAGS="${LDFLAGS}" \
+        STATIC=y \
+        LUA=no \
+    && install -m755 src/apk.static /out/bin/apk \
+    && strip --strip-unneeded /out/bin/apk \
+    && rm -rf /build/apk-tools-v${APK_VERSION}
+
+# ============================================================================
+# Build silex-nosync.so.
+# ============================================================================
+COPY src/silex-nosync.c /src/silex-nosync.c
+RUN clang -O2 -shared -fPIC -nostartfiles \
+        -o /out/lib/silex-nosync.so \
+        /src/silex-nosync.c \
+    && strip /out/lib/silex-nosync.so
+
+# ============================================================================
+# Stage: build-rust
+# Uses silex:slim for build tools. Downloads fresh Rust toolchain.
+# Uses mold (from silex:slim) instead of lld for faster link.
+# Runs in parallel with build-c (no shared dependencies).
+# ============================================================================
+FROM silex:slim AS build-rust
+
+ARG RUST_VERSION RUST_SHA256_X86_64 RUST_SHA256_AARCH64
+ARG SCCACHE_VERSION SCCACHE_SHA256
+ARG FD_VERSION FD_SHA256
+ARG RG_VERSION RG_SHA256
+ARG UV_VERSION UV_SHA256
+ARG TARGETARCH
+
+# curl is not pre-installed in silex:slim; install via apk.
+# Fetch repo index, then install curl for downloading Rust toolchain.
+RUN apk update && apk add curl
+ENV LD_LIBRARY_PATH="/usr/lib"
+
+RUN mkdir -p /src /out/bin
+
+# Download Rust toolchain (pinned, architecture-specific).
+RUN set -ex \
+    && ARCH=$([ "${TARGETARCH}" = "arm64" ] && echo "aarch64" || echo "x86_64") \
+    && RUST_SHA256=$([ "${TARGETARCH}" = "arm64" ] && echo "${RUST_SHA256_AARCH64}" || echo "${RUST_SHA256_X86_64}") \
+    && curl -fsSL "https://static.rust-lang.org/dist/rust-${RUST_VERSION}-${ARCH}-unknown-linux-gnu.tar.xz" \
+        -o /src/rust.tar.xz \
+    && echo "${RUST_SHA256}  /src/rust.tar.xz" | sha256sum -c - \
+    && tar xf /src/rust.tar.xz -C /src \
+    && /src/rust-${RUST_VERSION}-${ARCH}-unknown-linux-gnu/install.sh \
+        --prefix=/opt/rust \
+        --disable-ldconfig \
+    && rm -rf /src/rust*
+
+ENV PATH="/opt/rust/bin:${PATH}"
+# Use mold for Rust linking — available in silex:slim.
+ENV RUSTFLAGS="-C target-cpu=x86-64-v3 -C lto=thin -C link-arg=-fuse-ld=/opt/mold/bin/mold"
+
+# Download and verify Rust tool sources.
+RUN set -ex \
+    && curl -fsSL "https://github.com/mozilla/sccache/archive/refs/tags/v${SCCACHE_VERSION}.tar.gz" \
+        -o /src/sccache.tar.gz \
+    && echo "${SCCACHE_SHA256}  /src/sccache.tar.gz" | sha256sum -c - \
+    \
+    && curl -fsSL "https://github.com/sharkdp/fd/archive/refs/tags/v${FD_VERSION}.tar.gz" \
+        -o /src/fd.tar.gz \
+    && echo "${FD_SHA256}  /src/fd.tar.gz" | sha256sum -c - \
+    \
+    && curl -fsSL "https://github.com/BurntSushi/ripgrep/archive/refs/tags/${RG_VERSION}.tar.gz" \
+        -o /src/ripgrep.tar.gz \
+    && echo "${RG_SHA256}  /src/ripgrep.tar.gz" | sha256sum -c - \
+    \
+    && curl -fsSL "https://github.com/astral-sh/uv/archive/refs/tags/${UV_VERSION}.tar.gz" \
+        -o /src/uv.tar.gz \
+    && echo "${UV_SHA256}  /src/uv.tar.gz" | sha256sum -c -
+
+RUN set -ex \
+    && tar xf /src/sccache.tar.gz -C /src \
+    && cd /src/sccache-${SCCACHE_VERSION} \
+    && cargo build --release --locked \
+    && install -m755 target/release/sccache /out/bin/sccache \
+    && strip --strip-unneeded /out/bin/sccache
+
+RUN set -ex \
+    && tar xf /src/fd.tar.gz -C /src \
+    && cd /src/fd-${FD_VERSION} \
+    && cargo build --release --locked \
+    && install -m755 target/release/fd /out/bin/fd \
+    && strip --strip-unneeded /out/bin/fd
+
+RUN set -ex \
+    && tar xf /src/ripgrep.tar.gz -C /src \
+    && cd /src/ripgrep-${RG_VERSION} \
+    && cargo build --release --locked \
+    && install -m755 target/release/rg /out/bin/rg \
+    && strip --strip-unneeded /out/bin/rg
+
+RUN set -ex \
+    && tar xf /src/uv.tar.gz -C /src \
+    && cd /src/uv-${UV_VERSION} \
+    && cargo build --release --locked \
+    && install -m755 target/release/uv /out/bin/uv \
+    && strip --strip-unneeded /out/bin/uv
+
+# ============================================================================
+# Stage: final
+# Identical to bootstrap final stage.
+# Base: debian:bookworm-slim (glibc, libssl3, zlib1g, ca-certificates).
+# LLVM and mold are copied from the PREVIOUS silex:slim, not rebuilt.
+# ============================================================================
+FROM ${DEBIAN_BASE} AS final
+
+ARG TARGETARCH
+# Extract LLVM major version from the image we carry forward.
+# silex:slim carries /opt/llvm; we read the version at build time via --build-arg.
+ARG LLVM_MAJOR=18
+
+# Install only what the final image needs from Debian.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates libssl3 zlib1g \
+    && rm -rf /var/lib/apt/lists/* \
+    && rm -rf /usr/share/doc /usr/share/man /usr/share/info
+
+# Keep apt, but hide it behind the shim.
+#
+# apt is NOT purged any more. It used to be -- `dpkg --purge apt` plus rm -rf of
+# /var/lib/apt and the binaries -- which meant that if a package was not in
+# silex-packages, `apt-get install foo` had nowhere to go and HARD-FAILED. The
+# repo covers ~86% of common Dockerfile installs; the other ~14% simply broke,
+# with no escape hatch. "Same packages, same names" was true only for what the
+# repo happened to contain.
+#
+# Now the real apt is preserved as apt-get.real, the shim goes on PATH as
+# apt-get, and the shim tries apk first and falls back to apt-get.real on a miss
+# (see scripts/apt-shim). Coverage becomes 100% by construction: a miss costs a
+# few seconds of real apt, not a broken build. The apk fast path is unchanged.
+#
+# We keep the index lists pruned (apt refreshes them on demand in the fallback),
+# and we do NOT ship apt's docs/man.
+RUN cp -a /usr/bin/apt-get /usr/bin/apt-get.real \
+    && rm -f /usr/bin/apt /usr/bin/apt-cache \
+    && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb
+
+# ============================================================================
+# Align FHS with Wolfi expectations before running apk.
+# See Dockerfile.bootstrap for full explanation of the approach.
+# The static helper is compiled in build-c (where libc6-dev is available).
+# ============================================================================
+COPY --from=build-c /out/bin/silex-fhs      /tmp/fhs
+RUN /tmp/fhs && rm /tmp/fhs
+
+# ============================================================================
+# LLVM and mold: carry forward from previous silex:slim.
+# ============================================================================
+COPY --from=silex:slim /opt/llvm/ /opt/llvm/
+COPY --from=silex:slim /opt/mold/ /opt/mold/
+
+# ============================================================================
+# Copy freshly built tools from builder stages.
+# ============================================================================
+
+# Core tools.
+COPY --from=build-c /out/bin/busybox    /bin/busybox
+COPY --from=build-c /out/bin/dash       /bin/dash
+COPY --from=build-c /out/bin/tini       /usr/bin/tini
+COPY --from=build-c /out/bin/zstd       /usr/bin/zstd
+COPY --from=build-c /out/bin/xxhsum     /usr/bin/xxhsum
+COPY --from=build-c /out/bin/pigz       /usr/bin/pigz
+COPY --from=build-c /out/bin/pixz       /usr/bin/pixz
+COPY --from=build-c /out/bin/ninja      /usr/bin/ninja
+
+# Libraries.
+COPY --from=build-c /out/lib/silex-nosync.so /usr/local/silex/lib/silex-nosync.so
+
+# mimalloc shared library.
+COPY --from=build-c /out/lib/libmimalloc* /usr/lib/
+
+# Silex-internal binaries.
+RUN mkdir -p /usr/local/silex/bin
+COPY --from=build-c /out/bin/sort-parallel /usr/local/silex/bin/sort-parallel
+
+# apk package manager.
+COPY --from=build-c /out/bin/apk        /usr/bin/apk
+
+# sccache compiler cache.
+COPY --from=build-rust /out/bin/sccache /opt/sccache/bin/sccache
+
+# Rust tools.
+COPY --from=build-rust /out/bin/fd  /usr/bin/fd
+COPY --from=build-rust /out/bin/rg  /usr/bin/rg
+COPY --from=build-rust /out/bin/uv  /usr/bin/uv
+
+# ============================================================================
+# Configure busybox: install applets as symlinks.
+# ============================================================================
+RUN /bin/busybox --install -s /bin \
+    && ln -sf /bin/dash /bin/sh \
+    && ln -sf /bin/busybox /usr/bin/which \
+    && ln -sf /bin/busybox /usr/bin/find \
+    && ln -sf /bin/busybox /usr/bin/awk \
+    && ln -sf /bin/busybox /usr/bin/sed
+
+# Clang symlinks.
+RUN ln -sf /opt/llvm/bin/clang   /usr/bin/clang \
+    && ln -sf /opt/llvm/bin/clang++ /usr/bin/clang++ \
+    && ln -sf /opt/llvm/bin/clang   /usr/bin/cc \
+    && ln -sf /opt/llvm/bin/clang++ /usr/bin/c++ \
+    && ln -sf /opt/llvm/bin/clang   "/usr/bin/clang-${LLVM_MAJOR}" \
+    && ln -sf /opt/llvm/bin/clang++ "/usr/bin/clang++-${LLVM_MAJOR}" \
+    && ln -sf /opt/llvm/bin/lld     /usr/bin/lld \
+    && ln -sf /opt/llvm/bin/ld.lld  /usr/bin/ld.lld \
+    && ln -sf /opt/mold/bin/mold    /usr/bin/mold \
+    && ln -sf /opt/mold/bin/mold    /usr/bin/ld \
+    && ln -sf /opt/mold/bin/mold    /usr/bin/ld.mold
+
+# ============================================================================
+# Configure apk for silex-packages repository.
+# silex-packages repacks Debian bookworm packages under their native Debian
+# names, so no package name translation is needed in the apt-get shim.
+# ============================================================================
+COPY keys/ /etc/apk/keys/
+
+RUN mkdir -p /etc/apk/keys /etc/apk/protected_paths.d /etc/apk/commit_hooks.d \
+               /var/cache/apk /var/lib/apk /lib/apk/db /lib/apk/exec \
+    && printf 'https://richarah.github.io/silex-packages\n' \
+         > /etc/apk/repositories \
+    && touch /lib/apk/db/installed \
+    && apk update -q || true
+
+# ============================================================================
+# Install runtime libraries from silex-packages.
+#
+# These are repacked Debian packages needed by tools installed via apt-get
+# in user Dockerfiles (e.g., build-essential, python3-dev, etc.).
+#
+# Better to include comprehensive set upfront than discover missing deps
+# through test failures. List includes all common development library
+# dependencies (SSL, compression, databases, UI, interpreters, etc.).
+# ============================================================================
+RUN apk add --no-cache \
+    libssl3 \
+    libcurl4 \
+    libreadline8 \
+    libsqlite3-0 \
+    libxml2 \
+    libpcre3 \
+    libpcre16-3 \
+    libpcre32-3 \
+    libpcrecpp0v5 \
+    libpython3.11 \
+    libtinfo6 \
+    libuuid1 \
+    libtirpc3 \
+    libtirpc3t64 \
+    tar \
+    tzdata \
+    libgprofng0 \
+    libjansson4 \
+    libctf0 \
+    libctf-nobfd0 \
+    ncurses-bin \
+    ncurses-base \
+    libncurses6 \
+    libncursesw6 \
+    || echo "Warning: Some packages not yet available in silex-packages"
+
+# ============================================================================
+# Set ID_LIKE=debian so tools that check /etc/os-release see a Debian-like env.
+# ============================================================================
+RUN echo 'ID_LIKE=debian' >> /etc/os-release
+
+# ============================================================================
+# Install Silex scripts.
+# ============================================================================
+COPY scripts/apt-shim          /usr/local/bin/apt-get
+COPY scripts/entrypoint.sh     /usr/local/bin/silex-entrypoint
+COPY scripts/silex             /usr/local/bin/silex
+COPY scripts/shims/            /usr/local/silex/shims/
+COPY scripts/wrappers/         /usr/local/silex/bin/
+
+# The git wrapper execs /usr/bin/git, and git is NOT in slim ("git not in
+# slim" -- README). But /usr/local/silex/bin is FIRST on PATH, so the wrapper
+# made `command -v git` SUCCEED while `git` then failed with a confusing
+# "no such file". Configure scripts probe for git exactly this way and take
+# the git code path on the strength of it.
+#
+# Only ship a wrapper for a tool that actually exists.
+RUN for _w in /usr/local/silex/bin/*; do \
+        _t="/usr/bin/$(basename "$_w")"; \
+        [ -x "$_t" ] || { echo "silex: no $_t, dropping wrapper $(basename "$_w")"; rm -f "$_w"; }; \
+    done
+
+RUN chmod +x /usr/local/bin/apt-get \
+    /usr/local/bin/silex-entrypoint \
+    /usr/local/bin/silex \
+    && chmod +x /usr/local/silex/shims/* \
+    && chmod +x /usr/local/silex/bin/* \
+    && ln -sf /usr/local/bin/apt-get /usr/local/bin/apt \
+    && ln -sf /usr/local/bin/apt-get /usr/local/bin/aptitude \
+    && for f in /usr/local/silex/shims/*; do \
+           ln -sf "$f" "/usr/local/bin/$(basename "$f")"; \
+       done
+
+# DNS pre-warming was here. Removed.
+#
+# It resolved github.com, pypi.org, crates.io etc AT IMAGE BUILD TIME and
+# appended the A records to /etc/hosts. Those are Fastly/GitHub anycast IPs
+# that rotate: a stale pin sends every package install to whoever holds that
+# address next. It also made the image non-deterministic by construction --
+# the layer hash changed on every build, which rather undercuts the
+# SOURCE_DATE_EPOCH a few lines below.
+#
+# What it bought: one DNS lookup, once, per host. That is not a trade.
+
+# ============================================================================
+# Remove locale and timezone data.
+# ============================================================================
+RUN find /usr/share/locale -mindepth 1 -maxdepth 1 \
+        ! -name 'C' ! -name 'en_US' ! -name 'C.UTF-8' \
+        -exec rm -rf {} + 2>/dev/null || true \
+    && find /usr/share/zoneinfo -mindepth 1 -maxdepth 1 \
+        ! -name 'UTC' ! -name 'Europe' ! -name 'America' \
+        ! -name 'zone.tab' ! -name 'iso3166.tab' \
+        -exec rm -rf {} + 2>/dev/null || true
+
+# Hardlink dedup was here. Removed.
+#
+# It was documented as saving "~20-40MB in the LLVM layer" by hardlinking
+# identical files. Measured, it saved 0 and cost a 4.1kB layer: the LLVM
+# files come in via COPY --from, so they live in the COPY layer, and
+# hardlinking them in a LATER layer cannot shrink an EARLIER one. (The
+# audit feared the opposite -- a full copy-up of libLLVM.so -- but modern
+# BuildKit treats ln -f as metadata, so neither the harm nor the benefit
+# was real. It was just dead complexity.)
+
+# ============================================================================
+# Environment.
+# ============================================================================
+ENV PATH="/usr/local/silex/bin:/opt/llvm/bin:/opt/mold/bin:/opt/sccache/bin:$PATH"
+
+# Ensure Wolfi libraries in /usr/lib take precedence over Debian multiarch
+# paths left in the base image (e.g. /usr/lib/x86_64-linux-gnu from cmake deps).
+ENV LD_LIBRARY_PATH="/usr/lib"
+
+ENV CC="clang"
+ENV CXX="clang++"
+ENV LD="mold"
+ENV CMAKE_GENERATOR="Ninja"
+
+ENV RUSTC_WRAPPER="sccache"
+ENV SCCACHE_IDLE_TIMEOUT="0"
+ENV SCCACHE_CACHE_SIZE="10G"
+
+# sccache for C/C++, not just Rust.
+#
+# These were set ONLY in scripts/entrypoint.sh. Docker `RUN` uses SHELL, never
+# ENTRYPOINT -- so during `docker build`, the flagship "18x warm sccache
+# rebuild" was unreachable: RUSTC_WRAPPER was set (so Rust was cached) but
+# CMAKE_{C,CXX}_COMPILER_LAUNCHER was not, so every C and C++ compile bypassed
+# sccache entirely. Setting them here means a plain `RUN cmake --build` is
+# cached, which is the flow the README advertises.
+ENV CMAKE_C_COMPILER_LAUNCHER="sccache"
+ENV CMAKE_CXX_COMPILER_LAUNCHER="sccache"
+
+ENV SILEX_MALLOC="mimalloc"
+
+ENV LC_ALL="C"
+ENV LANG="C.UTF-8"
+ENV TZ="UTC"
+ENV CURL_HTTP_VERSION="2TLS"
+
+ENV NINJA_STATUS="[%f/%t %es] "
+
+ARG SOURCE_DATE_EPOCH=1735689600
+ENV SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH}"
+ENV SILEX_IMAGE_VERSION="slim-2.0.0"
+
+LABEL maintainer="richarah@github"
+LABEL org.opencontainers.image.title="Silex"
+LABEL org.opencontainers.image.description="Docker base image for fast builds. Everything from source."
+LABEL org.opencontainers.image.version="2.0.0"
+LABEL org.opencontainers.image.licenses="MIT"
+LABEL org.opencontainers.image.source="https://github.com/richarah/silex"
+
+# Route `RUN` through the entrypoint.
+#
+# Docker `RUN` uses SHELL (default: ["/bin/sh", "-c"]) and NEVER ENTRYPOINT.
+# Everything the entrypoint configures was therefore inert during `docker build`
+# -- which is the only thing this image exists to make faster:
+#
+#   LD_PRELOAD=libmimalloc      mimalloc was never loaded  ("9% under threaded builds")
+#   MAKEFLAGS=-j$(nproc)        `RUN make` ran SERIALLY
+#   LDFLAGS=-fuse-ld=mold       mold applied only by accident, via the /usr/bin/ld symlink
+#   CMAKE_*_COMPILER_LAUNCHER   sccache bypassed for all C/C++
+#
+# The static values above are set as ENV so they survive a user overriding
+# SHELL. This SHELL directive additionally restores the *dynamic* ones -- the
+# nproc-derived -j, the mimalloc preload, and the SILEX_* override knobs
+# (SILEX_MALLOC=system, SILEX_CACHE=off, ...) -- for every RUN in a downstream
+# Dockerfile, since SHELL is inherited by child images.
+SHELL ["/usr/local/bin/silex-entrypoint", "/bin/sh", "-c"]
+
+# One config line per RUN would drown the build log; `silex doctor` reports it
+# on demand. Set SILEX_QUIET=off to restore it.
+ENV SILEX_QUIET="on"
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/silex-entrypoint"]
+
+# bash is NOT installed in slim (README: "bash is one `apk add` away"), so
+# `docker run silex:slim` used to fail outright with "no such file".
+CMD ["/bin/sh"]

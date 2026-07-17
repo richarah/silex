@@ -1,0 +1,43 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:base"],
+  "dockerfile": {
+    "enabled": true
+  },
+  "github-actions": {
+    "enabled": true
+  },
+  "customManagers": [
+    {
+      "customType": "regex",
+      "fileMatch": ["^sdk/dockerfiles/Dockerfile(\\.bootstrap)?$"],
+      "matchStrings": [
+        "ARG MOLD_VERSION=(?<currentValue>[\\d.]+)"
+      ],
+      "depNameTemplate": "rui314/mold",
+      "datasourceTemplate": "github-releases",
+      "versioningTemplate": "semver"
+    },
+    {
+      "customType": "regex",
+      "fileMatch": ["^sdk/dockerfiles/Dockerfile(\\.bootstrap)?$"],
+      "matchStrings": [
+        "ARG SCCACHE_VERSION=(?<currentValue>[\\d.]+)"
+      ],
+      "depNameTemplate": "mozilla/sccache",
+      "datasourceTemplate": "github-releases",
+      "versioningTemplate": "semver"
+    }
+  ],
+  "packageRules": [
+    {
+      "matchManagers": ["dockerfile"],
+      "enabled": true
+    },
+    {
+      "matchManagers": ["github-actions"],
+      "automerge": true,
+      "automergeType": "pr"
+    }
+  ]
+}

@@ -1,0 +1,35 @@
+# Silex Runtime: Minimal runtime companion image
+# No compiler. Just glibc, tini, ca-certificates, C++ runtime libs.
+# Use as the final stage in multi-stage builds.
+# Base matches silex:slim (debian:bookworm-slim) so glibc ABI is identical.
+#
+# Target size: <30MB
+#
+# Example:
+#   # Base image, pinned by digest.
+#
+# This was `FROM debian:bookworm-slim` -- a MUTABLE tag. The README criticises
+# Wolfi for being rolling, and then floated the whole image on a tag that
+# Debian repoints whenever they cut a point release. A digest is the only
+# thing that makes `docker build` twice give you the same base twice.
+#
+# Bump: docker buildx imagetools inspect debian:bookworm-slim | grep Digest
+ARG DEBIAN_BASE=debian:bookworm-slim@sha256:60eac759739651111db372c07be67863818726f754804b8707c90979bda511df
+
+FROM ghcr.io/richarah/silex:slim AS builder
+#   RUN cmake -B build && cmake --build build
+#
+#   FROM ghcr.io/richarah/silex:runtime
+#   COPY --from=builder /workspace/build/my-app /usr/local/bin/
+#   CMD ["my-app"]
+
+FROM ${DEBIAN_BASE}
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    tini \
+    libstdc++6 \
+    libgcc-s1 \
+    && rm -rf /var/lib/apt/lists/*
+
+ENTRYPOINT ["/usr/bin/tini", "--"]

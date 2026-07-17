@@ -1,0 +1,160 @@
+#!/bin/sh
+# Silex apt-get shim: maps apt-get/apt/aptitude commands to apk.
+# Installed as /usr/local/bin/apt-get; symlinked as apt and aptitude.
+# See also: scripts/shims/apt-cache, apt-mark, dpkg
+# Disable with SILEX_APT_SHIM=off
+#
+# silex-packages provides Debian packages under their native Debian names,
+# so no package name translation is required.
+
+set -e
+
+NOSYNC_SO=/usr/local/silex/lib/silex-nosync.so
+
+if [ "$SILEX_APT_SHIM" = "off" ]; then
+    echo "silex: SILEX_APT_SHIM=off — apt-get shim disabled" >&2
+    exit 1
+fi
+
+# Strip common apt flags that apk does not understand.
+_strip_apt_flags() {
+    for _a in "$@"; do
+        case "$_a" in
+            -y|--yes|--assume-yes) ;;
+            --no-install-recommends) ;;
+            --install-recommends) ;;
+            -q|--quiet|-qq) ;;
+            --allow-unauthenticated) ;;
+            --allow-downgrades) ;;
+            --no-upgrade) ;;
+            --fix-broken) ;;
+            -f) ;;
+            *) printf '%s\n' "$_a" ;;
+        esac
+    done
+}
+
+# Strip version specifiers from package names (pkg=1.2 -> pkg).
+_strip_versions() {
+    for _pkg in "$@"; do
+        case "$_pkg" in -*|'') continue ;; esac
+        printf '%s\n' "$_pkg" | sed 's/[=<>!].*//'
+    done
+}
+
+# Parse leading flags before the subcommand (apt-get -y install ...)
+_CMD=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -y|--yes|--assume-yes|--no-install-recommends|--install-recommends|-q|--quiet|-qq) shift ;;
+        -*) shift ;;
+        *) _CMD="$1"; shift; break ;;
+    esac
+done
+
+case "$_CMD" in
+    install|install-recommends)
+        _pkgs=$(_strip_versions $(_strip_apt_flags "$@") | tr '\n' ' ')
+        if [ -z "$(printf '%s' "$_pkgs" | tr -d ' ')" ]; then
+            echo "silex apt-shim: no packages specified" >&2
+            exit 1
+        fi
+        # Packages are signature-verified against /etc/apk/keys/silex-packages.rsa.pub.
+        #
+        # Every apk call here used to pass --allow-untrusted, which disabled that
+        # check entirely. The reason turned out to be two filename bugs, not a
+        # missing signature:
+        #
+        #   1. The index IS signed, as .SIGN.RSA.silex-packages.rsa.pub -- but the
+        #      image installed the key as -69c32c6d.rsa.pub. apk looks the key up
+        #      BY THE NAME IN THE SIGNATURE, so it never found it and reported
+        #      "UNTRUSTED signature". Same key, wrong filename.
+        #   2. Packages were published as <name>-<ver>.<arch>.apk, while apk derives
+        #      the filename from the index as <name>-<ver>.apk (the arch comes from
+        #      the directory). Every package 404'd.
+        #
+        # Both are fixed, so verification works and --allow-untrusted is gone.
+        # Do not reintroduce it: it would silently accept arbitrary root-owned
+        # binaries from anyone who could MITM or compromise the repo.
+        # Try apk first (fast: signed static index, no dpkg, no fsync). If any
+        # requested package is not in silex-packages, fall back to REAL apt.
+        #
+        # This is what makes "same packages, same names" actually true. The repo
+        # covers ~86% of what Dockerfiles commonly install; without a fallback,
+        # the other ~14% HARD-FAILED with apt purged. Now a miss costs a few
+        # seconds of real apt-get, not a broken build -- and the repo can be
+        # pruned to whatever size fits its host without losing coverage.
+        #
+        # `apt-get.real` is the genuine apt, preserved by the Dockerfile instead
+        # of purged. SILEX_APT_FALLBACK=off disables the fallback (hard-fail on a
+        # miss, the old behaviour) for anyone who wants apk-only guarantees.
+        echo "silex apt-shim: apk add --no-cache ${_pkgs}" >&2
+        # `set -e` is on (line 10), so the apk call MUST be guarded -- otherwise a
+        # miss aborts the shim here, before the fallback below ever runs. The `if`
+        # suspends set -e for the command, and we capture its status explicitly.
+        _apk_rc=0
+        # shellcheck disable=SC2086
+        if [ -f "$NOSYNC_SO" ]; then
+            env LD_PRELOAD="${LD_PRELOAD:+$LD_PRELOAD:}$NOSYNC_SO" apk add --no-cache ${_pkgs} || _apk_rc=$?
+        else
+            apk add --no-cache ${_pkgs} || _apk_rc=$?
+        fi
+        if [ "$_apk_rc" -ne 0 ]; then
+            if [ "${SILEX_APT_FALLBACK:-on}" = off ]; then
+                echo "silex apt-shim: apk failed and SILEX_APT_FALLBACK=off; not falling back" >&2
+                exit "$_apk_rc"
+            fi
+            _real_apt="$(command -v apt-get.real || true)"
+            if [ -z "$_real_apt" ]; then
+                echo "silex apt-shim: apk could not install ${_pkgs}, and real apt is not" >&2
+                echo "                available to fall back to (apt-get.real missing)." >&2
+                exit "$_apk_rc"
+            fi
+            echo "silex apt-shim: some packages not in silex-packages; falling back to apt for: ${_pkgs}" >&2
+            # Real apt needs an index. Refresh it only if we have no lists yet, to
+            # keep the common (apk-hit) path from ever paying for it.
+            [ -n "$(ls -A /var/lib/apt/lists 2>/dev/null | grep -v lock)" ] || "$_real_apt" update -qq || true
+            # nosync applies here too: dpkg's fsync is the bulk of apt's cost.
+            # shellcheck disable=SC2086
+            if [ -f "$NOSYNC_SO" ]; then
+                exec env LD_PRELOAD="${LD_PRELOAD:+$LD_PRELOAD:}$NOSYNC_SO" \
+                    "$_real_apt" install -y --no-install-recommends ${_pkgs}
+            else
+                exec "$_real_apt" install -y --no-install-recommends ${_pkgs}
+            fi
+        fi
+        ;;
+    update)
+        # Match Debian apt-get update behaviour: warn on unavailable repos but exit 0.
+        apk update || true
+        ;;
+    upgrade)
+        apk upgrade
+        ;;
+    remove|purge)
+        _pkgs=$(_strip_apt_flags "$@" | tr '\n' ' ')
+        echo "silex apt-shim: apk del ${_pkgs}" >&2
+        # shellcheck disable=SC2086
+        exec apk del ${_pkgs}
+        ;;
+    autoremove|clean|autoclean|check)
+        # no-op
+        ;;
+    dist-upgrade|full-upgrade)
+        apk upgrade
+        ;;
+    download)
+        echo "silex apt-shim: 'apt-get download' not supported in shim" >&2
+        exit 1
+        ;;
+    "")
+        echo "silex apt-shim: no subcommand given" >&2
+        echo "Supported: install, update, upgrade, remove, purge, autoremove, clean" >&2
+        exit 1
+        ;;
+    *)
+        echo "silex apt-shim: unsupported command '$_CMD'" >&2
+        echo "Supported: install, update, upgrade, remove, purge, autoremove, clean" >&2
+        exit 1
+        ;;
+esac

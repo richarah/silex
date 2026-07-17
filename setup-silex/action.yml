@@ -1,0 +1,41 @@
+# setup-silex/action.yml
+# GitHub Action: pull silex:slim and make it available as a local image
+# Usage:
+#   - uses: richarah/silex/setup-silex@v1
+#   Then use: docker build --build-arg BASE=silex:slim ...
+#
+# This lives at the repo root, not under sdk/, so the `uses:` path above keeps
+# working. Moving it would break every downstream consumer.
+#
+# The default registry below (ghcr.io/richarah -> ghcr.io/richarah/silex) is
+# what SDK CI now publishes to, since ${{ github.repository }} resolves to
+# richarah/silex. Before the monorepo it published to ghcr.io/richarah/silex-sdk
+# and this action pulled an image that was never pushed.
+
+name: Setup silex
+description: Pull silex:slim for use in Docker builds
+
+inputs:
+  variant:
+    description: Image variant (slim, dev, runtime, cross)
+    default: slim
+  version:
+    description: Image version tag
+    default: latest
+  registry:
+    description: Registry to pull from
+    default: ghcr.io/richarah
+
+runs:
+  using: composite
+  steps:
+    - name: Pull silex image
+      shell: bash
+      run: |
+        IMAGE="${{ inputs.registry }}/silex:${{ inputs.variant }}"
+        if [ "${{ inputs.version }}" != "latest" ]; then
+          IMAGE="${IMAGE}-${{ inputs.version }}"
+        fi
+        docker pull "$IMAGE"
+        docker tag "$IMAGE" "silex:${{ inputs.variant }}"
+        echo "silex:${{ inputs.variant }} is ready"

@@ -1,0 +1,106 @@
+# Silex v2 build system.
+# Targets: verify-sources, bootstrap, build, release, cache, test
+#
+# Typical workflow:
+#   make verify-sources   (once, to populate SHA256 values)
+#   make bootstrap        (slow: ~90-120 min cold start)
+#   make build            (fast: ~15-20 min, requires silex:slim in registry)
+#   make release          (currently identical to build; see below)
+#   make cache            (companion cache image)
+#   make test             (compat + integration tests)
+
+VERSION    ?= 2.0.0
+REGISTRY   ?= localhost
+IMAGE      ?= silex
+TAG        ?= slim
+FULL_TAG    = $(REGISTRY)/$(IMAGE):$(TAG)
+
+DOCKER     ?= docker
+DOCKER_FLAGS ?= --progress=plain
+
+.PHONY: all verify-sources verify-drift bootstrap build release cache test clean
+
+all: build
+
+# ---------------------------------------------------------------------------
+# verify-sources: download all source tarballs and print SHA256.
+# Review output, then update sources.json and Dockerfile.bootstrap ARG values.
+# ---------------------------------------------------------------------------
+# Verifies. Downloads each tarball, compares its SHA256 against sources.json,
+# and fails on mismatch. It used to only PRINT hashes for you to paste in, so it
+# could not fail -- and it kept its own drifted copy of the versions.
+verify-sources:
+	@sh scripts/verify-sources.sh
+
+# Fast: checks only that the Dockerfile ARG pins still agree with sources.json.
+# No network. This is the one CI runs on every push.
+verify-drift:
+	@sh scripts/verify-sources.sh --drift-only
+
+# ---------------------------------------------------------------------------
+# bootstrap: cold-start build from debian:bookworm-slim.
+# No previous Silex image required. Slow (~90-120 min).
+# ---------------------------------------------------------------------------
+bootstrap:
+	$(DOCKER) build $(DOCKER_FLAGS) \
+	    -f dockerfiles/Dockerfile.bootstrap \
+	    -t $(FULL_TAG) \
+	    --build-arg TARGETARCH=$(shell uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') \
+	    .
+
+# ---------------------------------------------------------------------------
+# build: self-hosted build using previous silex:slim.
+# Produces identical output to bootstrap. ~15-20 min with warm sccache.
+# ---------------------------------------------------------------------------
+build:
+	$(DOCKER) build $(DOCKER_FLAGS) \
+	    -f dockerfiles/Dockerfile \
+	    -t $(FULL_TAG) \
+	    --build-arg TARGETARCH=$(shell uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') \
+	    .
+
+# ---------------------------------------------------------------------------
+# release: was documented as "PGO + BOLT pass", but neither was ever implemented
+# -- SILEX_PGO is a dead build-arg the Dockerfile declares and never reads, and
+# there is no BOLT step anywhere. Until they exist, this is the build target with
+# the same inputs. The silex BINARY has a real PGO target (core: `make pgo`);
+# the toolchain in the IMAGE does not yet.
+# ---------------------------------------------------------------------------
+release:
+	$(DOCKER) build $(DOCKER_FLAGS) \
+	    -f dockerfiles/Dockerfile \
+	    -t $(FULL_TAG) \
+	    --build-arg TARGETARCH=$(shell uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') \
+	    .
+
+# ---------------------------------------------------------------------------
+# cache: build companion silex-cache:VERSION image.
+# Run after silex:slim is built. Snapshot current APKINDEX + pre-fetch packages.
+# ---------------------------------------------------------------------------
+cache:
+	@sh build-cache.sh $(VERSION)
+
+# ---------------------------------------------------------------------------
+# test: run compat tests (7 Dockerfiles) + integration tests.
+# Requires silex:slim to be built.
+# ---------------------------------------------------------------------------
+test:
+	@sh tests/compat/run-compat.sh
+	@echo "compat: done"
+
+test-integration:
+	@sh scripts/test.sh
+
+# ---------------------------------------------------------------------------
+# lint: check Dockerfiles for silex lint rules.
+# ---------------------------------------------------------------------------
+lint:
+	$(DOCKER) run --rm silex:slim silex lint dockerfiles/Dockerfile.bootstrap
+	$(DOCKER) run --rm silex:slim silex lint dockerfiles/Dockerfile
+
+# ---------------------------------------------------------------------------
+# clean: remove all silex images from local Docker daemon.
+# ---------------------------------------------------------------------------
+clean:
+	-$(DOCKER) rmi $(FULL_TAG) 2>/dev/null
+	-$(DOCKER) rmi silex-cache:$(VERSION) 2>/dev/null
