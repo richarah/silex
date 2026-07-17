@@ -134,6 +134,56 @@ void arena_reset(arena_t *a)
 #endif
         blk->used = 0;
     }
+
+    /* Consolidate a fragmented block list into one block of the same capacity.
+     *
+     * arena_alloc() can only reuse a block that has `size` free in ONE piece. An
+     * allocation that grows a little every cycle therefore stops being able to
+     * reuse anything as soon as it exceeds ARENA_BLOCK_SIZE: each request is
+     * slightly larger than any block owned, so every cycle mallocs another
+     * block, and total_bytes climbs to the cap even though almost none of it is
+     * live. Measured on `set -- "$@" "x"` in a loop -- the standard POSIX way to
+     * build a list -- it aborted at 8192 items, exactly where the pointer array
+     * first exceeds one 64 KB block, while the live set was well under 1 MB.
+     *
+     * Everything in the arena is dead here by definition, so swapping the list
+     * for a single equally-large block is safe, and it makes that capacity
+     * contiguous again.
+     *
+     * This is self-limiting rather than a per-reset cost: it only runs when the
+     * list has more than one block, and it leaves exactly one behind, so the
+     * common single-block loop never pays for it, and a grown arena pays once
+     * and then stays consolidated. If the malloc fails, the plain reset above
+     * has already left the arena valid -- keep the existing blocks.
+     */
+    if (a->head && a->head->next) {
+        size_t total = a->total_bytes;
+        char  *mem   = malloc(total);
+        if (mem) {
+            arena_block_t *blk = a->head;
+            while (blk) {
+                arena_block_t *next = blk->next;
+                free(blk->base);
+                free(blk);
+                blk = next;
+            }
+            arena_block_t *nb = malloc(sizeof(arena_block_t));
+            if (!nb) {
+                /* Cannot rebuild the list: nothing is reachable any more, so
+                 * this must not return with a dangling head. */
+                free(mem);
+                a->head        = NULL;
+                a->total_bytes = 0;
+                return;
+            }
+            nb->base       = mem;
+            nb->cap        = total;
+            nb->used       = 0;
+            nb->next       = NULL;
+            a->head        = nb;
+            a->total_bytes = total;
+        }
+    }
 }
 
 void arena_free(arena_t *a)

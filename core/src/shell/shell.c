@@ -85,7 +85,11 @@ int shell_init(shell_ctx_t *sh, int argc, char **argv)
     else
         sh->script_name = arena_strdup(&sh->parse_arena, "silex");
 
-    /* $1..$N */
+    /* $1..$N. These live in parse_arena, so the base stays NULL: the list is
+     * not malloc'd and must never be passed to free(). The first `set --`
+     * replaces it with an owned one. */
+    sh->positional_base   = NULL;
+    sh->positional_base_n = 0;
     if (argc > 1 && argv) {
         sh->positional_n = argc - 1;
         sh->positional   = arena_alloc(&sh->parse_arena,
@@ -352,10 +356,13 @@ int shell_run_stdin(shell_ctx_t *sh)
 
 /* Declared in exec.c — free all PATH cache entries */
 void path_cache_clear(shell_ctx_t *sh);
+/* Declared in exec.c — free the positional list if this shell owns it */
+void positional_free(shell_ctx_t *sh);
 
 void shell_free(shell_ctx_t *sh)
 {
     path_cache_clear(sh);
+    positional_free(sh);
     arena_free(&sh->parse_arena);
     arena_free(&sh->scratch_arena);
     /* job list nodes were malloc'd */

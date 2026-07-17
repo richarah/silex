@@ -262,6 +262,92 @@ f() { for x in p q; do eval "true"; done; echo "$1"; }
 f keepme' 2>/dev/null)
 check "arena: eval in loop keeps enclosing function positionals" "$got" "keepme"
 
+# -----------------------------------------------------------------------
+# `set --` must release the list it replaces
+#
+# `set -- "$@" "$x"` in a loop is the standard POSIX way to build a list. It
+# re-copies every previous argument each iteration, so keeping every generation
+# is quadratic: it died at ~3k items where dash handles 50k without trouble.
+# Reclaiming is only safe where this frame owns the list -- hence the tests
+# below for shift (which advances the pointer off the malloc base), for an
+# enclosing function's arguments, and for a for-loop's word list.
+# -----------------------------------------------------------------------
+
+# ${20000} is the 20000th positional, i.e. the last one appended -- checked
+# against dash, which prints exactly this.
+got=$(timeout 180 "$SILEX" -c '
+set --
+i=0
+while [ $i -lt 20000 ]; do i=$((i+1)); set -- "$@" "item$i"; done
+echo "$# $1 ${20000}"
+' 2>&1 | tail -1)
+check "positional: append idiom scales to 20k" "$got" "20000 item1 item20000"
+
+# shift moves sh->positional off the allocation base. Freeing the shifted
+# pointer would be a free() of an interior pointer; freeing positional_n strings
+# would miss the shifted-off ones.
+got=$("$SILEX" -c 'set -- a b c; shift; set -- x y; echo "$# $1 $2"' 2>/dev/null)
+check "positional: set -- after shift" "$got" "2 x y"
+
+got=$("$SILEX" -c 'set -- a b c d; shift 2; echo "$# $1"; set -- z; echo "$# $1"' 2>/dev/null)
+check "positional: shift 2 then replace" "$got" "2 c
+1 z"
+
+got=$("$SILEX" -c '
+i=0
+while [ $i -lt 200 ]; do i=$((i+1)); set -- a b c; shift; done
+echo "$# $1"
+' 2>/dev/null)
+check "positional: repeated set--/shift cycles" "$got" "2 b"
+
+# `set -- "$@"` reads the very list it replaces: the new one must be built
+# before the old is released.
+got=$("$SILEX" -c 'set -- one two; set -- "$@"; echo "$# $1 $2"' 2>/dev/null)
+check "positional: set -- \"\$@\" reads the list it replaces" "$got" "2 one two"
+
+got=$("$SILEX" -c 'set -- a b c; set -- "$@" "$@"; echo "$# $1 $6"' 2>/dev/null)
+check "positional: set -- with doubled \"\$@\"" "$got" "6 a c"
+
+# A `set --` inside a function must not free the CALLER's list.
+got=$("$SILEX" -c '
+f() { set -- inner1 inner2; echo "in f: $# $1"; }
+set -- outer1 outer2 outer3
+f
+echo "after f: $# $1 $3"
+' 2>/dev/null)
+check "positional: set-- in function leaves caller's list intact" "$got" "in f: 2 inner1
+after f: 3 outer1 outer3"
+
+# Nested frames: each level owns only what it set.
+got=$("$SILEX" -c '
+g() { set -- g1; echo "g: $1"; }
+f() { set -- f1 f2; g; echo "f after g: $# $1"; }
+set -- top
+f
+echo "top: $# $1"
+' 2>/dev/null)
+check "positional: nested functions each own their list" "$got" "g: g1
+f after g: 2 f1
+top: 1 top"
+
+# A function's own arguments live in the caller's expansion, not in a list this
+# frame may free.
+got=$("$SILEX" -c '
+f() { echo "args: $1 $2"; set -- replaced; echo "now: $1"; }
+f argA argB
+' 2>/dev/null)
+check "positional: function args replaced by set--" "$got" "args: argA argB
+now: replaced"
+
+# `for x; do` iterates the list as it was on entry, so it must not be walking
+# storage that a set-- in the body releases.
+got=$("$SILEX" -c '
+set -- p q r
+for x; do set -- clobber; printf "%s " "$x"; done
+echo "| $# $1"
+' 2>/dev/null)
+check "positional: for-over-\$@ survives set-- in body" "$got" "p q r | 1 clobber"
+
 # `.` re-enters through shell_run_file, the same hazard as eval.
 _tmpsrc=$(mktemp 2>/dev/null || echo /tmp/silex_src_$$)
 echo 'true' > "$_tmpsrc"

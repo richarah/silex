@@ -32,6 +32,9 @@
  * Forward declarations
  * ------------------------------------------------------------------------- */
 
+/* Not static: shell_free() calls this too (see shell.c). */
+void positional_free(shell_ctx_t *sh);
+
 static int exec_builtin_set(shell_ctx_t *sh, int argc, char **argv);
 static int exec_builtin_export(shell_ctx_t *sh, int argc, char **argv);
 static int exec_builtin_unset(shell_ctx_t *sh, int argc, char **argv);
@@ -697,11 +700,18 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
         /* Set positional parameters for function */
         char **old_pos   = sh->positional;
         int old_n        = sh->positional_n;
+        char **old_base  = sh->positional_base;
+        int old_base_n   = sh->positional_base_n;
         int old_break    = sh->break_level;
         int old_loop     = sh->loop_depth;
 
         sh->positional_n = argc - 1;
         sh->positional   = expanded + 1;
+        /* The arguments live in the caller's expansion, so this frame owns
+         * nothing yet. Clearing the base is what stops a `set --` inside the
+         * function from freeing the CALLER's list, which old_pos still needs. */
+        sh->positional_base   = NULL;
+        sh->positional_base_n = 0;
         sh->break_level  = 0;  /* Isolate break/continue from caller */
         sh->loop_depth   = 0;  /* Functions don't inherit loop context */
 
@@ -716,8 +726,13 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
         sh->call_depth--;
         vars_pop_scope(&sh->vars);
 
-        sh->positional   = old_pos;
-        sh->positional_n = old_n;
+        /* Release anything a `set --` inside the function allocated; it dies
+         * with the frame. No-op if the function never ran one. */
+        positional_free(sh);
+        sh->positional        = old_pos;
+        sh->positional_n      = old_n;
+        sh->positional_base   = old_base;
+        sh->positional_base_n = old_base_n;
         sh->break_level  = old_break;
         sh->loop_depth   = old_loop;
 
@@ -1064,6 +1079,29 @@ int exec_pipeline(shell_ctx_t *sh, node_t *node)
     return last_rc;
 }
 
+/* Release the positional list, if this frame owns it.
+ *
+ * Frees from positional_base, NEVER from sh->positional: `shift` advances
+ * sh->positional into the middle of the array, and free() of an interior
+ * pointer is undefined. For the same reason the count comes from
+ * positional_base_n -- shift decrements positional_n, which would leak the
+ * shifted-off strings.
+ *
+ * A NULL base means the list belongs to someone else (the initial list lives in
+ * parse_arena; a function's arguments live in the caller's expansion), so this
+ * is a no-op and must stay one.
+ */
+void positional_free(shell_ctx_t *sh)
+{
+    if (!sh->positional_base)
+        return;
+    for (int i = 0; i < sh->positional_base_n; i++)
+        free(sh->positional_base[i]);
+    free(sh->positional_base);
+    sh->positional_base   = NULL;
+    sh->positional_base_n = 0;
+}
+
 /* -------------------------------------------------------------------------
  * Per-loop scratch reclamation
  *
@@ -1374,11 +1412,18 @@ int exec_node(shell_ctx_t *sh, node_t *node)
         if (node->u.for_node.words) {
             wlist = expand_words(sh, node->u.for_node.words);
         } else {
-            /* `for x; do` with no `in` clause: iterate $@ */
+            /* `for x; do` with no `in` clause: iterate $@.
+             *
+             * Copy the strings, not the pointers. POSIX iterates the list as it
+             * was on entry, and `set --` in the body now frees the previous
+             * list -- aliasing it would leave this walking freed memory from the
+             * second iteration on. The copies live in the parent arena (this
+             * runs before loop_scratch_begin), so they survive every iteration.
+             */
             wlist = arena_alloc(sh->scratch,
                                 (size_t)(sh->positional_n + 1) * sizeof(char *));
             for (int i = 0; i < sh->positional_n; i++)
-                wlist[i] = sh->positional[i];
+                wlist[i] = arena_strdup(sh->scratch, sh->positional[i]);
             wlist[sh->positional_n] = NULL;
         }
         loop_scratch_t ls;
@@ -1562,32 +1607,44 @@ static int exec_builtin_set(shell_ctx_t *sh, int argc, char **argv)
     /* i now points to first positional arg (or argc if none given) */
     if (i < argc) {
         int n = argc - i;
-        char **pos = arena_alloc(&sh->parse_arena, (size_t)(n + 1) * sizeof(char *));
-        /* Copy the strings, don't alias them. argv points into the scratch arena
-         * (exec_command expands into it), but positionals outlive the command
-         * that set them. This was harmless only because scratch was in practice
-         * never reset between commands; now that a loop reclaims its arena every
-         * iteration, `while ...; do set -- $x; done` would leave $1 dangling.
-         * parse_arena is where shell_init puts the initial positionals too.
+
+        /* Copy the strings rather than aliasing argv: argv points into the
+         * scratch arena (exec_command expands into it), and a loop reclaims that
+         * arena every iteration, so `while ...; do set -- $x; done` would leave
+         * $1 dangling.
          *
-         * KNOWN LIMITATION: each `set --` allocates fresh and nothing reclaims
-         * the previous array, so `set --` in a hot loop grows parse_arena by
-         * ~40 bytes an iteration and aborts near 1.6M iterations. (Before the
-         * per-loop arena the same script died at ~250k against the scratch cap,
-         * so this is a ~6x improvement, not a regression.)
-         *
-         * Allocating fresh is load-bearing, not an oversight: `for x; do` copies
-         * these pointers into its word list (see N_FOR) and every function call
-         * saves/restores them by pointer, so both must keep seeing the OLD array
-         * after an inner `set --`. Reusing or freeing the storage in place would
-         * dangle those. A real fix means giving positionals ownership/lifetime
-         * of their own, which touches the same function-frame save/restore that
-         * job control needs -- worth doing there, together, rather than twice. */
-        for (int j = 0; j < n; j++)
-            pos[j] = arena_strdup(&sh->parse_arena, argv[i + j]);
+         * Build the new list BEFORE releasing the old one. `set -- "$@"` expands
+         * from the current positionals, so argv here can point straight into the
+         * storage being replaced -- freeing first would read freed memory.
+         */
+        char **pos = malloc((size_t)(n + 1) * sizeof(char *));
+        if (!pos) {
+            fprintf(stderr, "silex: set: out of memory\n");
+            return 1;
+        }
+        for (int j = 0; j < n; j++) {
+            pos[j] = strdup(argv[i + j]);
+            if (!pos[j]) {                       /* leave positionals untouched */
+                while (j-- > 0) free(pos[j]);
+                free(pos);
+                fprintf(stderr, "silex: set: out of memory\n");
+                return 1;
+            }
+        }
         pos[n] = NULL;
-        sh->positional   = pos;
-        sh->positional_n = n;
+
+        /* Safe now: everything needed from the old list has been copied out.
+         * positional_free() is a no-op unless a `set --` in THIS frame allocated
+         * the list -- a function's arguments and the initial list belong to
+         * someone else. Without this, `set -- "$@" "$x"` in a loop (the standard
+         * POSIX way to build a list) re-copied every previous argument and kept
+         * every generation: quadratic, and it died at ~3k items where dash is
+         * fine. */
+        positional_free(sh);
+        sh->positional        = pos;
+        sh->positional_n      = n;
+        sh->positional_base   = pos;
+        sh->positional_base_n = n;
     }
     return 0;
 }

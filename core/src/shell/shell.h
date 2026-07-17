@@ -42,6 +42,20 @@ typedef struct shell_ctx {
     char       *script_name; /* $0 */
     char      **positional;  /* $1..$N, NULL-terminated */
     int         positional_n;
+    /* Storage backing `positional`, so `set --` can release the previous list
+     * instead of abandoning it.
+     *
+     * NULL means "not ours to free": the initial list (parse_arena) and a
+     * function's arguments (the caller's expansion) both live elsewhere. Only a
+     * `set --` executed in the CURRENT frame sets these, and only then may the
+     * old list be freed -- an enclosing frame's saved list must outlive us.
+     *
+     * Separate from `positional` because `shift` advances positional and
+     * decrements positional_n; base/base_n stay put, so they remain the pointer
+     * to free and the number of strings to free with it.
+     */
+    char      **positional_base;
+    int         positional_base_n;
     struct {
         char *action;
         int   set_in_this_shell; /* 1 if set in this shell level (not inherited) */
