@@ -51,7 +51,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     input[size] = '\0';
 
     arena_t arena;
-    arena_init(&arena);
+    arena_init(&arena, "fuzz");
 
     lexer_t lexer;
     lexer_init_str(&lexer, input, &arena);

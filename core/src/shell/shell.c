@@ -188,6 +188,11 @@ int shell_run_string(shell_ctx_t *sh, const char *script)
     arena_t  local;
     arena_t *saved_scratch = sh->scratch;
     arena_init(&local, "run-string");
+    /* Not a dangling pointer: saved_scratch is restored on every path out of
+     * this function, including the parse-error and EOF breaks, so sh->scratch
+     * never outlives `local`. cppcheck flags the assignment itself because it
+     * cannot see the restore below. */
+    /* cppcheck-suppress autoVariables */
     sh->scratch = &local;
 
     int rc = 0;
@@ -243,6 +248,9 @@ int shell_run_file(shell_ctx_t *sh, const char *path)
     arena_t  local;
     arena_t *saved_scratch = sh->scratch;
     arena_init(&local, "run-file");
+    /* Restored on every path out, including the FLOW_BREAK/FLOW_CONTINUE early
+     * return below. See shell_run_string. */
+    /* cppcheck-suppress autoVariables */
     sh->scratch = &local;
 
     int rc = 0;

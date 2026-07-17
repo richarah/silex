@@ -463,6 +463,11 @@ int exec_simple_cmd(shell_ctx_t *sh, char **words, char **assigns, redir_t *redi
 
     for (int i = 0; i < n; i++)
         who[i]->target = saved[i];
+    /* Not freeing the inline arrays: `heap` is set only where saved/who were
+     * reassigned to malloc'd buffers above, so this is unreachable while they
+     * still point at inline_slots/inline_who. cppcheck reports the auto-variable
+     * deallocation because it does not correlate the flag with the pointers. */
+    /* cppcheck-suppress autovarInvalidDeallocation */
     if (heap) { free(saved); free(who); }
     return rc;
 }

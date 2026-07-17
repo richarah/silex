@@ -181,7 +181,18 @@ check "arena: long loop reports no arena error" "${got:-0}" "0"
 
 # Memory must be FLAT in the iteration count, not merely smaller. Comparing two
 # sizes catches a leak that a single threshold would let through.
-if command -v /usr/bin/time >/dev/null 2>&1; then
+#
+# Meaningless under AddressSanitizer, for the same reason as the recursion tests
+# above: it asserts on process RSS, and under ASan RSS is dominated by the
+# quarantine, which holds freed chunks back in proportion to how many
+# allocations ran -- so it climbs with the iteration count no matter how flat
+# the arena is. Measured on this loop: 156 MB -> 487 MB across 50k -> 400k with
+# the default quarantine, but 24364 KB -> 24904 KB (flat) with
+# quarantine_size_mb=1. That is ASan's allocator, not a silex leak. The
+# non-sanitised CI jobs run this same assertion for real.
+if [ "$SANITIZED" -eq 1 ]; then
+    echo "SKIP: arena: loop RSS flat (ASan quarantine dominates RSS)"
+elif command -v /usr/bin/time >/dev/null 2>&1; then
     rss_small=$(/usr/bin/time -f '%M' "$SILEX" -c \
         'i=0; while [ $i -lt 50000 ]; do i=$((i+1)); done' 2>&1 | tail -1)
     rss_large=$(/usr/bin/time -f '%M' "$SILEX" -c \
