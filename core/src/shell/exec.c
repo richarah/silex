@@ -456,6 +456,13 @@ int exec_simple_cmd(shell_ctx_t *sh, char **words, char **assigns, redir_t *redi
             if (heap) { free(saved); free(who); }
             saved = s2; who = w2; cap = ncap; heap = 1;
         }
+        /* r cannot be NULL: it is the loop variable, guarded by `r != NULL`
+         * above. cppcheck 2.13 (what CI's apt ships) reports a possible null
+         * dereference here anyway, once `r` has been stored into who[n]; 2.21
+         * does not, which is why this only fails in CI. Suppressed rather than
+         * reordered, because working around a specific version's analysis by
+         * shuffling statements is guesswork that the next release would undo. */
+        /* cppcheck-suppress nullPointer */
         who[n] = r; saved[n] = r->target; n++;
     }
 
