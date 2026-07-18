@@ -489,7 +489,11 @@ static char *expand_braced(shell_ctx_t *sh, const char *body)
         p++;  /* skip the operator '#' */
         int greedy = (*p == '#');
         if (greedy) p++;
-        const char *pat = p;
+        /* The pattern is expanded (tilde/param/command/arith) and quote-aware:
+         * quoted metacharacters are literal, so `${t%"${t#a}"}` strips the
+         * literal text the nested expansion yields. Using the raw text left
+         * quotes and nested expansions unprocessed -- modernish's FTL_PSUB2. */
+        const char *pat = expand_word_pattern(sh, p);
         const char *s   = val ? val : "";
         int off = greedy ? match_prefix(s, pat) : match_prefix_shortest(s, pat);
         if (off < 0)
@@ -501,7 +505,8 @@ static char *expand_braced(shell_ctx_t *sh, const char *body)
         p++;  /* skip the operator '%' */
         int greedy = (*p == '%');
         if (greedy) p++;
-        const char *pat = p;
+        /* Quote-aware, expanded pattern -- see the '#' operator above. */
+        const char *pat = expand_word_pattern(sh, p);
         const char *s   = val ? val : "";
         int off = greedy ? match_suffix(s, pat) : match_suffix_shortest(s, pat);
         if (off < 0)

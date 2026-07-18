@@ -250,6 +250,24 @@ check "\$@: a 0x01 inside a positional still yields the field" \
     "$("$MB" -c 'p=$(printf "p\001q"); set -- "$p"; printf "%s" "$1" | od -An -tx1' 2>&1 | tr -s ' ')" \
     " 70 01 71"
 
+# --- ${v#pat} / ${v%pat} expand and quote-process the pattern (POSIX) ---------
+# The pattern used the raw text, so a nested expansion or quoting inside it was
+# ignored -- modernish FTL_PSUB2. It is now expanded and quote-aware, like a
+# case pattern.
+check "psub: %pat strips the literal a nested expansion yields" \
+    "$("$MB" -c 't=$(printf "a\${x=B}"); unset -v x; printf "%s" "${t%"${t#a}"}"')" "a"
+check "psub: unquoted pattern var is an active glob" \
+    "$("$MB" -c 'p="b*"; v=abcxyz; printf "%s" "${v#$p}"')" "abcxyz"
+check "psub: quoted pattern var is literal" \
+    "$("$MB" -c 'p="b*"; v="ab*z"; printf "%s" "${v#a"$p"}"')" "z"
+# Regression: ordinary #/% still work.
+check "psub: basename via ##*/" \
+    "$("$MB" -c 't=/a/b/c.txt; printf "%s" "${t##*/}"')" "c.txt"
+check "psub: strip extension via %.ext" \
+    "$("$MB" -c 'v=file.tar.gz; printf "%s" "${v%.gz}"')" "file.tar"
+check "psub: %%* yields empty" \
+    "$("$MB" -c 't=hello; printf "[%s]" "${t%%*}"')" "[]"
+
 echo ""
 echo "expansion tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
