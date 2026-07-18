@@ -388,6 +388,18 @@ check "command: unset of readonly does not exit the shell" \
 "$MB" -c 'readonly RO=1; unset -v RO 2>/dev/null; echo SHOULD_NOT' >/dev/null 2>&1
 check_exit "plain unset of readonly still exits (POSIX special builtin)" "$?" "1"
 
+# --- kill builtin (numeric PIDs + signal names/numbers) -----------------------
+# A kill builtin is needed so job/process signalling does not leak to the system
+# kill (which cannot see silex jobs). Job specs (%n) come with full job control.
+"$MB" -c 'kill -0 $$'; check_exit "kill: -0 on a live pid succeeds" "$?" "0"
+"$MB" -c 'kill -0 2147483646 2>/dev/null'; check_exit "kill: -0 on a dead pid fails" "$?" "1"
+"$MB" -c 'kill -s BOGUS $$ 2>/dev/null'; check_exit "kill: invalid signal name rejected" "$?" "1"
+check "kill: terminates a background process" \
+    "$("$MB" -c 'sleep 5 & p=$!; kill "$p"; wait "$p" 2>/dev/null; echo done')" "done"
+check "kill: -l lists signal names" \
+    "$("$MB" -c 'kill -l' | grep -o TERM | head -1)" "TERM"
+
+
 echo ""
 echo "control structure tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

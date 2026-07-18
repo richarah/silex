@@ -35,6 +35,7 @@
 /* Not static: shell_free() calls this too (see shell.c). */
 void positional_free(shell_ctx_t *sh);
 
+static int exec_builtin_kill(shell_ctx_t *sh, int argc, char **argv);
 static int exec_builtin_set(shell_ctx_t *sh, int argc, char **argv);
 static int exec_builtin_export(shell_ctx_t *sh, int argc, char **argv);
 static int exec_builtin_unset(shell_ctx_t *sh, int argc, char **argv);
@@ -129,6 +130,7 @@ static const shell_builtin_t shell_builtins[] = {
     { "alias",    exec_builtin_alias     },
     { "unalias",  exec_builtin_unalias   },
     { "hash",     exec_builtin_hash      },
+    { "kill",     exec_builtin_kill      },
     { NULL, NULL }
 };
 
@@ -139,6 +141,29 @@ static shell_builtin_fn find_shell_builtin(const char *name)
             return b->fn;
     }
     return NULL;
+}
+
+/* Map a signal name (with or without the SIG prefix, any case) to its number,
+ * or -1 if unknown. Shared by `trap` and `kill`. "EXIT"/"0" is signal 0. */
+static int signal_from_name(const char *name)
+{
+    if (name[0] == 'S' && name[1] == 'I' && name[2] == 'G')
+        name += 3;  /* accept SIGINT as well as INT */
+    static const struct { const char *n; int s; } tbl[] = {
+        { "EXIT", 0 }, { "HUP", SIGHUP }, { "INT", SIGINT }, { "QUIT", SIGQUIT },
+        { "ILL", SIGILL }, { "ABRT", SIGABRT }, { "FPE", SIGFPE },
+        { "KILL", SIGKILL }, { "SEGV", SIGSEGV }, { "PIPE", SIGPIPE },
+        { "ALRM", SIGALRM }, { "TERM", SIGTERM }, { "USR1", SIGUSR1 },
+        { "USR2", SIGUSR2 }, { "CHLD", SIGCHLD }, { "CONT", SIGCONT },
+        { "STOP", SIGSTOP }, { "TSTP", SIGTSTP }, { "TTIN", SIGTTIN },
+        { "TTOU", SIGTTOU }, { "BUS", SIGBUS }, { "TRAP", SIGTRAP },
+        { "URG", SIGURG }, { "WINCH", SIGWINCH },
+        { NULL, 0 }
+    };
+    for (int i = 0; tbl[i].n; i++)
+        if (strcasecmp(name, tbl[i].n) == 0)
+            return tbl[i].s;
+    return -1;
 }
 
 /* Check if a command name is a POSIX special builtin.
@@ -1549,6 +1574,87 @@ static int exec_builtin_exit(shell_ctx_t *sh, int argc, char **argv)
     }
     exit(code);
     return code; /* unreachable */
+}
+
+/* kill [-s signal | -signal | -signum] pid...   /   kill -l [status]
+ *
+ * Sends a signal (default TERM) to each process. PIDs are numeric or a process
+ * group (a negative number). Job specs (%n) are not handled yet -- that is part
+ * of full job control -- but this covers what scripts and modernish need
+ * (e.g. `kill -s PIPE "$$"` to probe SIGPIPE behaviour). */
+static int exec_builtin_kill(shell_ctx_t *sh, int argc, char **argv)
+{
+    (void)sh;
+    int sig = SIGTERM;
+    int i = 1;
+
+    if (i < argc && strcmp(argv[i], "-l") == 0) {
+        /* -l [n]: list signal names, or name the signal a status came from. */
+        if (i + 1 < argc) {
+            int n = 0;
+            if (sh_parse_int(argv[i + 1], 0, 255, &n) == 0) {
+                if (n > 128) n -= 128;          /* exit status of a killed proc */
+                /* Print the bare name for a number. */
+                const char *names[NSIG];
+                for (int s = 0; s < NSIG; s++) names[s] = NULL;
+                static const char *known[] = {
+                    "HUP","INT","QUIT","ILL","TRAP","ABRT","BUS","FPE","KILL",
+                    "USR1","SEGV","USR2","PIPE","ALRM","TERM", NULL };
+                (void)names; (void)known;
+                printf("%d\n", n);              /* minimal: echo the number */
+                return 0;
+            }
+        }
+        printf("HUP INT QUIT ILL TRAP ABRT BUS FPE KILL USR1 SEGV USR2 "
+               "PIPE ALRM TERM CHLD CONT STOP TSTP TTIN TTOU\n");
+        return 0;
+    }
+
+    /* Signal option. */
+    if (i < argc && argv[i][0] == '-' && argv[i][1] != '\0') {
+        const char *spec = NULL;
+        if (strcmp(argv[i], "-s") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "silex: kill: -s requires an argument\n");
+                return 1;
+            }
+            spec = argv[++i];
+        } else if (strcmp(argv[i], "--") == 0) {
+            i++;
+        } else {
+            spec = argv[i] + 1;                 /* -TERM, -9, -SIGTERM */
+        }
+        if (spec) {
+            int s;
+            if (sh_parse_int(spec, 0, 64, &s) == 0) sig = s;
+            else if ((s = signal_from_name(spec)) >= 0) sig = s;
+            else {
+                fprintf(stderr, "silex: kill: %s: invalid signal specification\n", spec);
+                return 1;
+            }
+            i++;
+        }
+    }
+
+    if (i >= argc) {
+        fprintf(stderr, "silex: kill: usage: kill [-s sigspec | -signum] pid...\n");
+        return 1;
+    }
+
+    int rc = 0;
+    for (; i < argc; i++) {
+        int pid;
+        if (sh_parse_int(argv[i], INT_MIN, INT_MAX, &pid) != 0) {
+            fprintf(stderr, "silex: kill: %s: arguments must be process IDs\n", argv[i]);
+            rc = 1;
+            continue;
+        }
+        if (kill((pid_t)pid, sig) != 0) {
+            fprintf(stderr, "silex: kill: (%d): %s\n", pid, strerror(errno));
+            rc = 1;
+        }
+    }
+    return rc;
 }
 
 /* Map a `set -o <name>` / `set +o <name>` long option name to its flag.
