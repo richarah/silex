@@ -197,6 +197,19 @@ check "unset IFS: default whitespace splitting" "$got" "$(printf 'a\nb\nc')"
 got=$("$MB" -c 'IFS=:; V="x:y:z"; for w in $V; do printf "%s\n" "$w"; done')
 check "IFS=: splits on colon in for loop" "$got" "$(printf 'x\ny\nz')"
 
+# --- special parameters ($#, $?, $$...) inside arithmetic --------------------
+# The arith parser read only name characters after '$', so $# / $? / $$ became
+# an empty name -- harmless normally (0) but "unbound variable" under set -u,
+# which broke modernish FTL_HASHVAR.
+check "arith: \$# is the positional count" \
+    "$("$MB" -c 'set -- a b c; echo "$(($# - 1))"')" "2"
+check "arith: \$# under set -u does not error" \
+    "$("$MB" -c 'set -u; set -- x y; echo "$(($#))"')" "2"
+check "arith: \$? under set -u" \
+    "$("$MB" -c 'set -u; true; echo "$(($? + 5))"')" "5"
+check "arith: \$\$ is usable in arithmetic" \
+    "$("$MB" -c 'set -u; echo "$(($$ - $$))"')" "0"
+
 echo ""
 echo "variable tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

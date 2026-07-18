@@ -807,6 +807,15 @@ static long arith_primary(arith_ctx_t *ac)
                    ni < sizeof(namebuf) - 1)
                 namebuf[ni++] = ac->src[ac->pos++];
             if (ac->src[ac->pos] == '}') ac->pos++;
+        } else if (is_special_var(ac->src[ac->pos]) ||
+                   (ac->src[ac->pos] >= '1' && ac->src[ac->pos] <= '9')) {
+            /* A special parameter -- $#, $?, $$, $!, $@, $*, $0..$9 -- in
+             * arithmetic, e.g. $(($# - 1)). These are single characters that
+             * are not name chars, so the loop below read nothing and looked up
+             * the empty name, which errored under `set -u` ("unbound variable")
+             * instead of yielding the count/status. Read exactly the one char;
+             * sh_getvar resolves it. Fixes modernish FTL_HASHVAR. */
+            namebuf[ni++] = ac->src[ac->pos++];
         } else {
             while (is_name_char((unsigned char)ac->src[ac->pos]) &&
                    ni < sizeof(namebuf) - 1)
