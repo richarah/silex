@@ -1732,8 +1732,13 @@ static int exec_builtin_unset(shell_ctx_t *sh, int argc, char **argv)
         } else {
             if (vars_unset_context(&sh->vars, argv[i], "unset") != 0) {
                 rc = 1;
-                /* POSIX: unset is a special builtin; exit non-interactive shell on error */
-                if (!sh->interactive) {
+                /* POSIX: unset is a special builtin, so an error exits a
+                 * non-interactive shell -- UNLESS invoked via `command`, which
+                 * demotes it to a regular builtin (in_command_builtin). Without
+                 * this guard, `command unset RO` on a readonly var killed the
+                 * shell, failing modernish's FTL_CMDSPEXIT init check. Matches
+                 * the export and readonly builtins above. */
+                if (!sh->interactive && !sh->in_command_builtin) {
                     exit(1);
                 }
             }

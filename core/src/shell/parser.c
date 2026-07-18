@@ -414,6 +414,10 @@ static node_t *parse_if_cmd(parser_t *p)
 {
     /* IF already consumed by caller */
     node_t *cond = parse_compound_list(p);
+    /* Empty condition with no error means `if` ran into EOF -- a syntax error,
+     * so `eval 'if'` fails rather than silently returning 0. See parse_subshell. */
+    if (!cond && !p->error)
+        parser_error(p, "expected condition after 'if'");
     if (!cond || p->error) return NULL;
 
     expect(p, TOK_THEN, "expected 'then'");
@@ -489,6 +493,8 @@ static node_t *parse_while_cmd(parser_t *p)
 {
     /* WHILE already consumed */
     node_t *cond = parse_compound_list(p);
+    if (!cond && !p->error)
+        parser_error(p, "expected condition after 'while'");
     if (!cond || p->error) return NULL;
 
     expect(p, TOK_DO, "expected 'do' in while");
@@ -513,6 +519,8 @@ static node_t *parse_until_cmd(parser_t *p)
 {
     /* UNTIL already consumed */
     node_t *cond = parse_compound_list(p);
+    if (!cond && !p->error)
+        parser_error(p, "expected condition after 'until'");
     if (!cond || p->error) return NULL;
 
     expect(p, TOK_DO, "expected 'do' in until");
@@ -667,6 +675,12 @@ static node_t *parse_subshell(parser_t *p)
 {
     /* LPAREN already consumed */
     node_t *body = parse_compound_list(p);
+    /* A NULL body with no error means the list was empty -- `(` hit EOF (or `)`)
+     * with nothing inside. That is a syntax error, not a clean parse. Without
+     * flagging it, `eval '('` parsed to nothing and returned 0, so modernish's
+     * FTL_EVALERR check (eval must fail on a syntax error) wrongly triggered. */
+    if (!body && !p->error)
+        parser_error(p, "expected command inside subshell");
     if (!body || p->error) return NULL;
 
     expect(p, TOK_RPAREN, "expected ')' to close subshell");
@@ -685,6 +699,8 @@ static node_t *parse_brace_group(parser_t *p)
 {
     /* LBRACE already consumed */
     node_t *body = parse_compound_list(p);
+    if (!body && !p->error)
+        parser_error(p, "expected command inside brace group");
     if (!body || p->error) return NULL;
 
     expect(p, TOK_RBRACE, "expected '}' to close brace group");

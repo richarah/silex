@@ -210,6 +210,20 @@ int shell_run_string(shell_ctx_t *sh, const char *script)
 
         if (!sh->opt_n) {
             rc = exec_node(sh, node);
+            /* Flow control (FLOW_BREAK 200 / FLOW_CONTINUE 201 / FLOW_RETURN
+             * 202) must propagate to the CALLER, because this runs the argument
+             * of `eval`, which is transparent to return/break/continue -- they
+             * act on the function or loop that encloses the eval. Storing the
+             * 202 sentinel in last_exit and continuing (as before) meant
+             * `f() { eval "return 3"; }` never returned from f; the sentinel
+             * leaked upward and exited the shell. modernish's FTL_EVALRET /
+             * FTL_EVALCOBR checks exercise exactly this. */
+            if (rc >= 200 && rc <= 202) {
+                sh->scratch = saved_scratch;
+                arena_free(&local);
+                lexer_free(&lex);
+                return rc;
+            }
             sh->last_exit = rc;
             /* Reclaim scratch expansion memory after each top-level command */
             arena_reset(&local);

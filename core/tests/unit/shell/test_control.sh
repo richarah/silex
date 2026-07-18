@@ -359,6 +359,35 @@ check "xtrace: off by default (no trace)" \
 check "xtrace: set +x stops tracing after itself" \
     "$("$MB" -c 'set -x; set +x; echo hi' 2>&1 1>/dev/null)" "+ set +x"
 
+# --- incomplete compound commands are syntax errors (rc 2), not silent no-ops --
+# The parser accepted a bare `(`, `if`, `while`, etc. as a clean empty parse
+# returning 0, so `eval '('` succeeded where it must fail (modernish FTL_EVALERR).
+for kw in '(' 'if' 'while' 'until' 'for' 'case' '{'; do
+    "$MB" -c "$kw" 2>/dev/null
+    check_exit "parse: bare '$kw' is a syntax error" "$?" "2"
+done
+# Valid forms of the same constructs still work.
+check "parse: valid subshell runs" "$("$MB" -c '(echo hi)')" "hi"
+check "parse: valid brace group runs" "$("$MB" -c '{ echo hi; }')" "hi"
+check "parse: valid if runs" "$("$MB" -c 'if true; then echo yes; fi')" "yes"
+
+# --- return / break / continue inside eval act on the enclosing function/loop --
+# eval is transparent to flow control; the sentinel used to leak out and exit
+# the shell (modernish FTL_EVALRET / FTL_EVALCOBR).
+check "eval: return exits the enclosing function (not the shell)" \
+    "$("$MB" -c 'f() { eval "return 3"; echo AFTER; }; f; echo "rc=$?"')" "rc=3"
+check "eval: continue affects the enclosing loop" \
+    "$("$MB" -c 'for i in 1 2 3; do eval continue; echo NO; done; echo done')" "done"
+check "eval: break affects the enclosing loop" \
+    "$("$MB" -c 'for i in 1 2 3; do eval break; echo NO; done; echo done')" "done"
+
+# --- `command` demotes a special builtin so its error does not exit the shell --
+# modernish FTL_CMDSPEXIT: `command unset` of a readonly var must not exit.
+check "command: unset of readonly does not exit the shell" \
+    "$("$MB" -c 'readonly RO=1; command unset -v RO 2>/dev/null; echo AFTER')" "AFTER"
+"$MB" -c 'readonly RO=1; unset -v RO 2>/dev/null; echo SHOULD_NOT' >/dev/null 2>&1
+check_exit "plain unset of readonly still exits (POSIX special builtin)" "$?" "1"
+
 echo ""
 echo "control structure tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
