@@ -254,6 +254,18 @@ fn
 echo "after fn: $#"')
 check "positional params restored after function" "$got" "$(printf 'in fn: 3\nafter fn: 2')"
 
+# --- redirections on a function definition apply on every call (POSIX) --------
+# `fn() { ...; } >f` remembers the redirect and applies it each time fn runs.
+# silex parsed it but dropped the redirect (modernish FTL_FNREDIR).
+check "fnredir: definition redirect suppresses output on call" \
+    "$("$MB" -c 'fn() { echo hi; } >/dev/null; fn; echo done')" "done"
+check "fnredir: FTL_FNREDIR fd setup is honoured" \
+    "$("$MB" -c 'fn() { command : <&5; } 5</dev/null; fn 5<&-; echo "rc=$?"')" "rc=0"
+check "fnredir: body still executes normally" \
+    "$("$MB" -c 'fn() { echo a; echo b; } 2>/dev/null; fn')" "$(printf 'a\nb')"
+check "fnredir: plain function without redirect unaffected" \
+    "$("$MB" -c 'f() { echo normal; }; f')" "normal"
+
 echo ""
 echo "function tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

@@ -750,6 +750,54 @@ static node_t *parse_compound_command(parser_t *p)
  * Detected from parse_command when we see WORD LPAREN RPAREN.
  * The WORD token is passed in as func_name.
  * ------------------------------------------------------------------------- */
+/* Collect a run of trailing redirects (e.g. `>f 2>&1`) into a redir_t list.
+ * Returns NULL if there are none. Shared by compound commands and function
+ * definitions. */
+static redir_t *collect_trailing_redirects(parser_t *p)
+{
+    redir_t  *rhead = NULL;
+    redir_t **rtail = &rhead;
+    for (;;) {
+        token_t rt = peek(p);
+        int fd = -1;
+        if (is_redir_op(rt.type)) {
+            /* direct redirect op: use default fd */
+        } else if (rt.type == TOK_WORD) {
+            token_t w = consume(p);
+            fd = try_io_number(w.text, peek(p).type);
+            if (fd < 0)
+                break; /* not an io number; stop collecting */
+        } else {
+            break;
+        }
+        redir_t *r = parse_redirect(p, fd);
+        if (r && !p->error) {
+            *rtail = r;
+            rtail  = &r->next;
+        }
+        if (p->error) break;
+    }
+    return rhead;
+}
+
+/* Wrap `body` in an N_REDIR node if any trailing redirects follow. For a
+ * function definition, POSIX says these redirects apply on every call, which is
+ * exactly what wrapping the body achieves: the N_REDIR re-applies them each time
+ * the body executes. Without this, `fn() { ...; } >f` silently dropped the
+ * redirect (modernish FTL_FNREDIR). */
+static node_t *wrap_trailing_redirects(parser_t *p, node_t *body)
+{
+    redir_t *rhead = collect_trailing_redirects(p);
+    if (p->error) return NULL;
+    if (rhead) {
+        node_t *wrap              = alloc_node(p, N_REDIR);
+        wrap->u.redir_node.body   = body;
+        wrap->u.redir_node.redirs = rhead;
+        return wrap;
+    }
+    return body;
+}
+
 static node_t *parse_function_def(parser_t *p, char *func_name)
 {
     /* '(' and ')' already consumed by caller */
@@ -759,6 +807,8 @@ static node_t *parse_function_def(parser_t *p, char *func_name)
         parser_error(p, "expected compound command as function body");
         return NULL;
     }
+    body = wrap_trailing_redirects(p, body);
+    if (!body) return NULL;
 
     node_t *n         = alloc_node(p, N_FUNC);
     n->u.func.name    = func_name;
@@ -793,6 +843,8 @@ static node_t *parse_command(parser_t *p)
             parser_error(p, "expected compound command as function body");
             return NULL;
         }
+        body = wrap_trailing_redirects(p, body);
+        if (!body) return NULL;
         node_t *n      = alloc_node(p, N_FUNC);
         n->u.func.name = name_tok.text;
         n->u.func.body = body;
@@ -802,39 +854,8 @@ static node_t *parse_command(parser_t *p)
     /* Compound command */
     {
         node_t *compound = parse_compound_command(p);
-        if (compound) {
-            /* Collect optional trailing redirects */
-            redir_t  *rhead = NULL;
-            redir_t **rtail = &rhead;
-            for (;;) {
-                token_t rt = peek(p);  /* not the outer t: -Wshadow */
-                int fd = -1;
-                if (is_redir_op(rt.type)) {
-                    /* direct redirect op: use default fd */
-                } else if (rt.type == TOK_WORD) {
-                    /* might be io-number: consume and check next */
-                    token_t w = consume(p);
-                    fd = try_io_number(w.text, peek(p).type);
-                    if (fd < 0)
-                        break; /* not an io number; stop collecting */
-                } else {
-                    break;
-                }
-                redir_t *r = parse_redirect(p, fd);
-                if (r && !p->error) {
-                    *rtail = r;
-                    rtail  = &r->next;
-                }
-                if (p->error) break;
-            }
-            if (rhead) {
-                node_t *wrap              = alloc_node(p, N_REDIR);
-                wrap->u.redir_node.body   = compound;
-                wrap->u.redir_node.redirs = rhead;
-                return wrap;
-            }
-            return compound;
-        }
+        if (compound)
+            return wrap_trailing_redirects(p, compound);
     }
 
     /* Simple command (handles function detection too) */
