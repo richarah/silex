@@ -104,15 +104,28 @@ int applet_sh(int argc, char **argv)
     char **sh_argv;
 
     if (cmd_string) {
-        /* argv[0] is "sh" or the -c arg name; rest are $1.. */
-        sh_argc = argc - arg_start + 1;
-        if (sh_argc < 1) sh_argc = 1;
-        sh_argv = malloc((size_t)(sh_argc + 1) * sizeof(char *));
-        if (!sh_argv) { perror("sh"); return 1; }
-        sh_argv[0] = argv[0];
-        for (int j = 1; j < sh_argc; j++)
-            sh_argv[j] = (arg_start + j - 1 < argc) ? argv[arg_start + j - 1] : NULL;
-        sh_argv[sh_argc] = NULL;
+        /* POSIX `sh -c command_string [command_name [argument...]]`: the FIRST
+         * operand after the command string becomes $0, and the rest are $1...
+         * The old code set $0 to the shell binary and shifted every operand by
+         * one, so `sh -c cmd name a1` gave $0=sh, $1=name, $2=a1 instead of
+         * $0=name, $1=a1. modernish's shell probe runs
+         * `sh -c '. "$1"...' shellpath std.sh fatal.sh` and expects $1=std.sh;
+         * the off-by-one made `. "$1"` try to source the shell binary itself
+         * ("ELF: command not found"), so silex was never accepted as a shell. */
+        if (arg_start < argc) {
+            sh_argc = argc - arg_start;         /* $0 = command_name, $1.. rest */
+            sh_argv = malloc((size_t)(sh_argc + 1) * sizeof(char *));
+            if (!sh_argv) { perror("sh"); return 1; }
+            for (int j = 0; j < sh_argc; j++)
+                sh_argv[j] = argv[arg_start + j];
+            sh_argv[sh_argc] = NULL;
+        } else {
+            sh_argc = 1;                        /* no command_name: $0 = shell */
+            sh_argv = malloc(2 * sizeof(char *));
+            if (!sh_argv) { perror("sh"); return 1; }
+            sh_argv[0] = argv[0];
+            sh_argv[1] = NULL;
+        }
     } else if (arg_start < argc) {
         /* Script mode: argv[arg_start] = $0, rest = $1.. */
         sh_argc = argc - arg_start;

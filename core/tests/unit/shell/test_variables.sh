@@ -210,6 +210,16 @@ check "arith: \$? under set -u" \
 check "arith: \$\$ is usable in arithmetic" \
     "$("$MB" -c 'set -u; echo "$(($$ - $$))"')" "0"
 
+# --- `sh -c cmd name arg...`: first operand after the command string is $0 -----
+# POSIX. silex used to set $0 to its own binary and shift every operand by one,
+# which broke `sh -c '. "$1"' shell std fatal` (it tried to source the shell).
+check "dashc: first operand is \$0, rest are \$1.." \
+    "$("$MB" -c 'echo "$0 $1 $2 n=$#"' NAME a1 a2)" "NAME a1 a2 n=2"
+check "dashc: \$# counts only args after command_name" \
+    "$("$MB" -c 'echo "$#"' myname x y z)" "3"
+check "dashc: no positionals when only command_name given" \
+    "$("$MB" -c 'echo "n=$# 1=[$1]"' just0)" "n=0 1=[]"
+
 echo ""
 echo "variable tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
