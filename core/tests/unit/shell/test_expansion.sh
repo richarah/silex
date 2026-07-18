@@ -268,6 +268,23 @@ check "psub: strip extension via %.ext" \
 check "psub: %%* yields empty" \
     "$("$MB" -c 't=hello; printf "[%s]" "${t%%*}"')" "[]"
 
+# --- IFS field splitting: POSIX whitespace/non-whitespace delimiter rules ------
+# IFS whitespace adjacent to a non-whitespace IFS char is absorbed into that one
+# delimiter; the previous code treated the space as a separate delimiter and
+# produced a spurious empty field. modernish's FTL_IFS* battery covers these.
+ifscount() { "$MB" -c "t='$1'; IFS='$2'; set -- \$t; printf '%s' \"\$#\""; }
+ifsflds()  { "$MB" -c "t='$1'; IFS='$2'; set -- \$t; printf '<%s>' \"\$@\""; }
+check "ifs: whitespace absorbed before non-ws delimiter" "$(ifsflds 'a :b' ': ')" "<a><b>"
+check "ifs: whitespace absorbed after non-ws delimiter"  "$(ifsflds 'a: b' ': ')" "<a><b>"
+check "ifs: two non-ws delimiters keep the empty field"  "$(ifsflds 'a::b' ': ')" "<a><><b>"
+check "ifs: non-ws delimiters separated by ws"           "$(ifsflds 'a: :b' ': ')" "<a><><b>"
+check "ifs: single trailing non-ws delimiter, no empty"  "$(ifscount 'a:' ':')" "1"
+check "ifs: two trailing non-ws delimiters, one empty"   "$(ifscount 'a::' ':')" "2"
+check "ifs: lone colon yields one empty field"           "$(ifscount ':' ':')" "1"
+check "ifs: whitespace run collapses"                    "$(ifsflds 'a  b' ' ')" "<a><b>"
+check "ifs: leading/trailing whitespace trimmed"         "$(ifsflds '  a  b  ' ' ')" "<a><b>"
+check "ifs: leading non-ws keeps empty first field"      "$(ifsflds '::b' ': ')" "<><><b>"
+
 echo ""
 echo "expansion tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

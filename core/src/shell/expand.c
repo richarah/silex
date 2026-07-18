@@ -1853,57 +1853,66 @@ expand_result_t expand_word_full(shell_ctx_t *sh, const char *word)
         return res;
     }
 
-    /* Split */
+    /* Split — POSIX 2.6.5.
+     *
+     * IFS characters are two kinds: whitespace (space/tab/newline that are in
+     * IFS) and non-whitespace. A delimiter is a run of IFS whitespace that may
+     * contain at most one IFS non-whitespace character; so whitespace ADJACENT
+     * to a non-whitespace delimiter is absorbed into it. A whitespace-only
+     * delimiter collapses (no empty field); a non-whitespace delimiter preserves
+     * the field before it, even when empty. Leading and trailing IFS whitespace
+     * are ignored, and a trailing empty field (after the final delimiter) is not
+     * produced.
+     *
+     * The previous loop treated every IFS byte as its own delimiter, so `a :b`
+     * with IFS=': ' wrongly yielded a, "", b -- the space acted as a separate
+     * delimiter instead of being absorbed into the colon. modernish's FTL_IFS*
+     * battery exercises exactly these mixed-IFS cases.
+     */
     {
-    int cap       = 0;
-    char *tok     = copy;
-    char *cp      = copy;
+    int cap   = 0;
+    char *cp  = copy;
+#define IFS_IS(c)    ((c) != '\0' && strchr(ifs, (unsigned char)(c)) != NULL)
+#define IFS_WS(c)    (IFS_IS(c) && isspace((unsigned char)(c)))
+#define IFS_NWS(c)   (IFS_IS(c) && !isspace((unsigned char)(c)))
+#define EMIT(s) do {                                                          \
+        if (nfields >= cap) {                                                 \
+            int ncap_ = cap ? cap * 2 : 8;                                    \
+            char **tmp_ = realloc(fields, (size_t)ncap_ * sizeof(char *));    \
+            if (!tmp_) { free(copy); goto glob_phase; }                       \
+            fields = tmp_; cap = ncap_;                                       \
+        }                                                                     \
+        fields[nfields++] = arena_strdup(sh->scratch, (s));                   \
+    } while (0)
+
+    /* Ignore leading IFS whitespace. */
+    while (IFS_WS(*cp)) cp++;
 
     while (*cp) {
-        if (strchr(ifs, (unsigned char)*cp)) {
-            if (cp > tok) {
-                *cp = '\0';
-                if (nfields >= cap) {
-                    cap = cap ? cap * 2 : 8;
-                    char **tmp = realloc(fields, (size_t)cap * sizeof(char *));
-                    if (!tmp) { free(copy); goto glob_phase; }
-                    fields = tmp;
-                }
-                fields[nfields++] = arena_strdup(sh->scratch, tok);
-                tok = cp + 1;
-            } else {
-                /* cp == tok: potential empty field.
-                 * POSIX: non-whitespace IFS chars preserve empty fields;
-                 * whitespace IFS chars collapse (skip empty). */
-                if (!isspace((unsigned char)*cp)) {
-                    if (nfields >= cap) {
-                        cap = cap ? cap * 2 : 8;
-                        char **tmp = realloc(fields, (size_t)cap * sizeof(char *));
-                        if (!tmp) { free(copy); goto glob_phase; }
-                        fields = tmp;
-                    }
-                    if (nfields < cap)
-                        fields[nfields++] = arena_strdup(sh->scratch, "");
-                }
-                tok = cp + 1;
-            }
+        char *fstart = cp;
+        while (*cp && !IFS_IS(*cp)) cp++;
+        char *fend = cp;                 /* field is [fstart, fend) */
+
+        if (*cp == '\0') {
+            /* Trailing field: emit only if non-empty (trailing empty dropped). */
+            if (fend > fstart) { *fend = '\0'; EMIT(fstart); }
+            break;
         }
-        cp++;
+
+        /* Consume one delimiter: IFS whitespace, then at most one IFS
+         * non-whitespace, then trailing IFS whitespace. */
+        int saw_nws = 0;
+        while (IFS_WS(*cp)) cp++;
+        if (IFS_NWS(*cp)) { saw_nws = 1; cp++; while (IFS_WS(*cp)) cp++; }
+
+        /* A whitespace-only delimiter collapses empty fields; a non-whitespace
+         * delimiter preserves the (possibly empty) field before it. */
+        if (saw_nws || fend > fstart) { *fend = '\0'; EMIT(fstart); }
     }
-    /* Last field */
-    if (*tok) {
-        if (nfields >= cap) {
-            /* Bump cap only if realloc SUCCEEDS. The old code raised cap
-             * first, so a failed realloc (fields left NULL/short) still
-             * satisfied `nfields < cap` and then wrote fields[nfields] —
-             * a NULL deref when cap started at 0, an overflow otherwise. */
-            size_t ncap = cap ? cap * 2 : 8;
-            char **tmp = realloc(fields, ncap * sizeof(char *));
-            if (tmp) { fields = tmp; cap = (int)ncap; }
-        }
-        if (nfields < cap)
-            fields[nfields++] = arena_strdup(sh->scratch, tok);
-    }
+#undef IFS_IS
+#undef IFS_WS
+#undef IFS_NWS
+#undef EMIT
     free(copy);
     }
 
