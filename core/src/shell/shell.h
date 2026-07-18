@@ -77,6 +77,14 @@ typedef struct shell_ctx {
      * field. Without this, `exec cmd "$0" "$@"` (the autosetup/jimsh idiom, and
      * sqlite's ./configure) passes a phantom empty argument. */
     int         at_expanded_empty;
+    /* Set while expanding a word in which "$@"/"$*" emitted a \x01 field
+     * boundary. The field splitter uses \x01 as an internal marker, but a
+     * literal 0x01 byte can also appear in real data (command-substitution
+     * output, a variable value -- modernish deliberately tests ^A). Splitting on
+     * every \x01 dropped such bytes: `A=$(printf '\001'); : "$A"` lost the byte,
+     * failing modernish's FTL_ROASSIGN/FTL_CASECC init checks. The splitter now
+     * runs only when this flag confirms the \x01 came from "$@", not from data. */
+    int         at_field_boundary;
     /* Exit status of the most recent command substitution performed during word
      * expansion. POSIX 2.9.1: a command with no command name but containing a
      * command substitution completes with the status of the LAST command

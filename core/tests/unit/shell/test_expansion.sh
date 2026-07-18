@@ -225,6 +225,31 @@ $a $b
 END')
 check "heredoc <<END: multiple variables expanded" "$got" "foo bar"
 
+# --- literal 0x01 bytes must survive expansion (not collide with the "$@" mark) -
+# The field splitter uses 0x01 internally to mark "$@" boundaries. A literal 0x01
+# in real data (command substitution, a variable) was indistinguishable and got
+# dropped -- breaking modernish's FTL_ROASSIGN/FTL_CASECC, which test ^A. The
+# split now runs only when "$@" actually produced a boundary.
+check "0x01: survives a command-substitution round-trip" \
+    "$("$MB" -c 'A=$(printf "x\001y"); printf "%s" "$A" | od -An -tx1' 2>&1 | tr -s ' ')" \
+    " 78 01 79"
+check "0x01: stored variable length is 1" \
+    "$("$MB" -c 'Z=$(printf "\001"); echo ${#Z}')" "1"
+check "0x01: a var with 0x01 matches an identical var pattern in case" \
+    "$("$MB" -c 'A=$(printf "\001"); B=$A; case "$A" in "$B") echo M;; *) echo N;; esac')" "M"
+check "0x01: 0x02 also survives (control bytes generally)" \
+    "$("$MB" -c 'A=$(printf "a\002b"); printf "%s" "$A" | od -An -tx1' 2>&1 | tr -s ' ')" \
+    " 61 02 62"
+
+# The 0x01 fix must NOT break "$@" field splitting.
+check "\$@: still splits into separate fields" \
+    "$("$MB" -c 'set -- a b c; for x in "$@"; do printf "[%s]" "$x"; done')" "[a][b][c]"
+check "\$@: preserves embedded spaces as field boundaries" \
+    "$("$MB" -c 'set -- "a b" "c d"; printf "[%s]" "$@"')" "[a b][c d]"
+check "\$@: a 0x01 inside a positional still yields the field" \
+    "$("$MB" -c 'p=$(printf "p\001q"); set -- "$p"; printf "%s" "$1" | od -An -tx1' 2>&1 | tr -s ' ')" \
+    " 70 01 71"
+
 echo ""
 echo "expansion tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

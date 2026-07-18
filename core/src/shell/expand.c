@@ -1349,7 +1349,7 @@ static void expand_into(shell_ctx_t *sh, const char *word, strbuf_t *out,
                         sh->at_expanded_empty = 1;
                     }
                     for (int pi = 0; pi < sh->positional_n; pi++) {
-                        if (pi > 0) sb_appendc(out, '\x01');
+                        if (pi > 0) { sb_appendc(out, '\x01'); sh->at_field_boundary = 1; }
                         sb_append(out, sh->positional[pi]);
                     }
                 } else if (*p == '*' && in_dquote) {
@@ -1366,7 +1366,7 @@ static void expand_into(shell_ctx_t *sh, const char *word, strbuf_t *out,
                     if (ifs && ifs[0] == '\0') {
                         /* Empty IFS: use \x01 to separate positionals */
                         for (int pi = 0; pi < sh->positional_n; pi++) {
-                            if (pi > 0) sb_appendc(out, '\x01');
+                            if (pi > 0) { sb_appendc(out, '\x01'); sh->at_field_boundary = 1; }
                             sb_append(out, sh->positional[pi]);
                         }
                     } else {
@@ -1733,6 +1733,10 @@ expand_result_t expand_word_full(shell_ctx_t *sh, const char *word)
      * "$@" and there are no positional parameters. See the nfields == 0 branch
      * below, and shell.h. */
     sh->at_expanded_empty = 0;
+    /* Cleared per word; set by expand_into() only when "$@"/"$*" emits a real
+     * \x01 field boundary, so the splitter below can tell a boundary from a
+     * literal 0x01 byte in the data. See shell.h. */
+    sh->at_field_boundary = 0;
 
     /* Determine whether this word contains unquoted expansions / globs.
      * These checks must be done on the original token text (before expansion),
@@ -1748,8 +1752,10 @@ expand_result_t expand_word_full(shell_ctx_t *sh, const char *word)
         return res;
     }
 
-    /* "$@" word-boundary split: \x01 markers inserted by expand_into for "$@" */
-    if (strchr(expanded, '\x01')) {
+    /* "$@" word-boundary split: \x01 markers inserted by expand_into for "$@".
+     * Gated on at_field_boundary so a literal 0x01 byte in the data (not from
+     * "$@") is left intact rather than treated as a field boundary and dropped. */
+    if (sh->at_field_boundary && strchr(expanded, '\x01')) {
         char *copy2 = strdup(expanded);
         if (copy2) {
             int cap2 = 4, n2 = 0;
