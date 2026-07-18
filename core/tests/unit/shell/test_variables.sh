@@ -220,6 +220,23 @@ check "dashc: \$# counts only args after command_name" \
 check "dashc: no positionals when only command_name given" \
     "$("$MB" -c 'echo "n=$# 1=[$1]"' just0)" "n=0 1=[]"
 
+# --- $$ is the main shell PID, constant across subshells (POSIX) ---------------
+# It was re-read with getpid() each time, so a fork for $(...), a pipeline, or
+# ( ) changed it -- breaking `case $(...) in ($$)`, which is how modernish
+# identifies a usable shell.
+check "dollardollar: constant inside command substitution" \
+    "$("$MB" -c 'a=$$; b=$(echo $$); [ "$a" = "$b" ] && echo SAME || echo DIFF')" "SAME"
+check "dollardollar: constant inside ( ) subshell" \
+    "$("$MB" -c 'a=$$; ( [ "$a" = "$$" ] && echo SAME || echo DIFF )')" "SAME"
+check "dollardollar: case \$(echo \$\$) matches \$\$ pattern" \
+    "$("$MB" -c 'case $(echo $$) in ( $$ ) echo MATCH;; *) echo NO;; esac')" "MATCH"
+
+# --- command -v on a pathname reports it verbatim if executable (POSIX) --------
+check "commandv: absolute path to executable is echoed" \
+    "$("$MB" -c 'command -v /bin/sh')" "/bin/sh"
+"$MB" -c 'command -v /nonexistent/xyz' >/dev/null 2>&1
+check_exit "commandv: nonexistent pathname returns non-zero" "$?" "127"
+
 echo ""
 echo "variable tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

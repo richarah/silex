@@ -65,6 +65,11 @@ typedef struct shell_ctx {
     /* Alias definitions: name -> value string */
     void       *aliases[256]; /* alias_entry_t* array for alias lookup */
     pid_t       last_bg_pid; /* $! */
+    pid_t       shell_pid;   /* $$: PID of the main shell, captured once at init.
+                              * POSIX requires $$ to stay constant in subshells,
+                              * so it must NOT be re-read with getpid() -- a fork
+                              * for `( )`, a pipeline, or $(...) would otherwise
+                              * change it, breaking `case $(...) in ($$)`. */
     int         call_depth;  /* function call nesting depth (recursion guard) */
     int         trace_level; /* SILEX_TRACE=1: +cmd, =2: +[builtin/fork/module] tag */
     int         break_level; /* for break N / continue N; 0 = normal */

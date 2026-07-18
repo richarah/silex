@@ -48,7 +48,9 @@ static const char *sh_getvar(shell_ctx_t *sh, const char *name)
             snprintf(buf, sizeof(buf), "%d", sh->last_exit);
             return arena_strdup(sh->scratch, buf);
         case '$':
-            snprintf(buf, sizeof(buf), "%ld", (long)getpid());
+            /* Cached at init, not getpid(): POSIX $$ is the main shell's PID and
+             * must not change in a subshell fork. See shell.h. */
+            snprintf(buf, sizeof(buf), "%ld", (long)sh->shell_pid);
             return arena_strdup(sh->scratch, buf);
         case '!':
             if (sh->last_bg_pid == 0) return "";
@@ -628,6 +630,8 @@ static char *cmd_subst(shell_ctx_t *sh, const char *cmd)
         sub.positional_n = sh->positional_n;
         sub.script_name  = sh->script_name;
         sub.last_exit    = sh->last_exit;  /* inherit $? */
+        sub.shell_pid    = sh->shell_pid;  /* $$ is the main shell's PID, not the
+                                            * command-substitution child's */
         memcpy(sub.funcs, sh->funcs, sizeof(sh->funcs)); /* inherit functions */
         /* Clear set_in_this_shell for inherited traps */
         for (int i = 0; i < NSIG; i++)

@@ -2524,6 +2524,21 @@ static int exec_builtin_command(shell_ctx_t *sh, int argc, char **argv)
     const char *name = argv[i];
 
     if (describe || verbose) {
+        /* A name containing a slash is a pathname, not a command to look up:
+         * POSIX says `command -v` reports it verbatim if it is an executable
+         * file, else fails. Without this, `command -v /bin/sh` returned failure,
+         * so modernish's shell probe -- which guards each candidate with
+         * `command -v "$shell"` on an absolute path -- skipped every candidate
+         * and could not find a usable shell. */
+        if (strchr(name, '/')) {
+            if (access(name, X_OK) == 0) {
+                if (verbose) printf("%s is %s\n", name, name);
+                else         printf("%s\n", name);
+                return 0;
+            }
+            return 127;
+        }
+
         /* Check shell keywords first */
         const char *keywords[] = {
             "!", "{", "}", "case", "do", "done", "elif", "else", "esac",

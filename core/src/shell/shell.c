@@ -64,6 +64,7 @@ int shell_init(shell_ctx_t *sh, int argc, char **argv)
 {
     memset(sh, 0, sizeof(*sh));
 
+    sh->shell_pid = getpid();  /* $$: captured once; stable across subshells */
     arena_init(&sh->parse_arena, "parse");
     arena_init(&sh->scratch_arena, "scratch");
     sh->scratch = &sh->scratch_arena;
