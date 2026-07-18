@@ -297,6 +297,56 @@ check "set -e: while condition failure doesn't exit" "$got" "PASS"
 got=$("$MB" -c 'set -e; ! false; echo PASS')
 check "set -e: negated false doesn't trigger exit" "$got" "PASS"
 
+# --- case-pattern quoting (POSIX 2.13): quoted metacharacters are literal ------
+# Regression for the FTL_SQBKSL modernish blocker and the general bug where
+# expand_word() quote-removed the pattern, letting quoted '*'/'?'/'['/'\' reach
+# fnmatch as active wildcards. Every expected value matches dash.
+
+# Quoted metacharacters must NOT act as wildcards.
+check "case: quoted * is literal (no match)" \
+    "$("$MB" -c 'case a in "*") echo M;; *) echo N;; esac')" "N"
+check "case: quoted * matches literal *" \
+    "$("$MB" -c 'case "*" in "*") echo M;; *) echo N;; esac')" "M"
+check "case: quoted a* is literal (no match)" \
+    "$("$MB" -c 'case abc in "a*") echo M;; *) echo N;; esac')" "N"
+check "case: quoted ? is literal (no match)" \
+    "$("$MB" -c 'case x in "?") echo M;; *) echo N;; esac')" "N"
+check "case: quoted [fb] is literal (no match)" \
+    "$("$MB" -c 'case foo in "[fb]oo") echo M;; *) echo N;; esac')" "N"
+check "case: backslash-escaped * is literal" \
+    "$("$MB" -c 'case abc in a\*) echo M;; *) echo N;; esac')" "N"
+check "case: backslash-escaped * matches literal" \
+    "$("$MB" -c 'case "a*" in a\*) echo M;; *) echo N;; esac')" "M"
+
+# Unquoted metacharacters -- literal or from expansion -- stay active.
+check "case: unquoted * is an active wildcard" \
+    "$("$MB" -c 'case abc in a*) echo M;; *) echo N;; esac')" "M"
+check "case: unquoted expansion \$p=* is active" \
+    "$("$MB" -c 'p="*"; case a in $p) echo M;; *) echo N;; esac')" "M"
+
+# A quoted expansion result is literal; an unquoted one is active.
+check "case: quoted \"\$x\"=* is literal (no match)" \
+    "$("$MB" -c 'x="*"; case abc in "$x") echo M;; *) echo N;; esac')" "N"
+check "case: unquoted \$x=a* is active (match)" \
+    "$("$MB" -c 'x="a*"; case abc in $x) echo M;; *) echo N;; esac')" "M"
+
+# modernish FTL_SQBKSL: a backslash-newline in a single-quoted subject must
+# match a pattern with an escaped backslash and a quoted newline.
+check "case: FTL_SQBKSL backslash pattern matches" \
+    "$("$MB" -c 'v="\\"; case "$v" in "\\") echo M;; *) echo N;; esac')" "M"
+
+# --- set -o long option names --------------------------------------------------
+# modernish's debug path uses `set -o xtrace`; the long spellings must map to the
+# same flags as the short forms.
+check "set -o errexit: false exits" \
+    "$("$MB" -c 'set -o errexit; false; echo SHOULD_NOT_PRINT' 2>/dev/null; echo "rc=$?")" "rc=1"
+check "set -o noglob then +o noglob toggles" \
+    "$("$MB" -c 'set -o noglob; set +o noglob; echo ok')" "ok"
+"$MB" -c 'set -o nounset; echo "$undefined_var"' 2>/dev/null
+check_exit "set -o nounset: unset var errors" "$?" "1"
+"$MB" -c 'set -o bogusname' 2>/dev/null
+check_exit "set -o bogus: rejected" "$?" "1"
+
 echo ""
 echo "control structure tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

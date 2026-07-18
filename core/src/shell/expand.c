@@ -1546,6 +1546,123 @@ static const char *skip_construct(const char *p)
     return p;
 }
 
+/* Append `c` to `out` so fnmatch() treats it as a literal, not a metacharacter. */
+static void pat_emit_literal(strbuf_t *out, char c)
+{
+    if (c == '\\' || c == '*' || c == '?' || c == '[' || c == ']')
+        sb_appendc(out, '\\');
+    sb_appendc(out, c);
+}
+
+/* Expand `word` into an fnmatch()-ready pattern, preserving POSIX quoting.
+ *
+ * expand_word() quote-removes and returns a flat string, losing which
+ * characters were quoted -- so `case a in "*")` wrongly matched (the quoted '*'
+ * reached fnmatch as an active wildcard) and modernish's FTL_SQBKSL check (a
+ * quoted backslash in a case pattern) failed, aborting init.
+ *
+ * POSIX 2.13/2.14: a pattern undergoes tilde/parameter/command/arithmetic
+ * expansion, then characters that were QUOTED -- via '...', "...", or a
+ * backslash, INCLUDING the results of expansions performed inside double quotes
+ * -- are literal, while unquoted characters and the results of UNQUOTED
+ * expansions remain active pattern metacharacters. So `case a in "*")` must not
+ * match, but `p='*'; case a in $p)` must.
+ *
+ * Strategy: walk the source in spans. Quoted spans (single/double/backslash)
+ * are expanded (where applicable) and their bytes emitted escaped-if-meta;
+ * unquoted runs -- with ${...}, $(...), `...` skipped whole so their inner
+ * quotes are not mistaken for span boundaries -- are expanded by expand_into()
+ * and emitted as-is, keeping their metacharacters active.
+ *
+ * Known limitation: a quoted metacharacter inside an UNQUOTED expansion word,
+ * e.g. `${x-"*"}`, is not yet made literal (it needs the same quote tracking
+ * inside expand_braced that ${x+"$@"} field-splitting does). Not reached by any
+ * common construct; revisit if a modernish check needs it.
+ */
+char *expand_word_pattern(shell_ctx_t *sh, const char *word)
+{
+    if (!word) return arena_strdup(sh->scratch, "");
+
+    /* Fast path: a pattern with no quoting or expansion is already an
+     * fnmatch-ready pattern -- its metacharacters are all active and there is
+     * nothing to escape. This is the overwhelmingly common case (`a*`, `*.c`,
+     * `foo`), and skipping the walk keeps `case` in a hot loop as cheap as the
+     * old quote-removing path. */
+    {
+        int plain = 1;
+        for (const char *q = word; *q; q++) {
+            if (*q == '\'' || *q == '"' || *q == '\\' ||
+                *q == '$'  || *q == '`' || *q == '~') { plain = 0; break; }
+        }
+        if (plain)
+            return arena_strdup(sh->scratch, word);
+    }
+
+    char *tilded    = expand_tilde(sh, word, 0);
+    const char *src = tilded ? tilded : word;
+
+    strbuf_t out;
+    sb_init(&out, 128);
+
+    const char *p = src;
+    while (*p) {
+        if (*p == '\'') {
+            /* Single-quoted: literal, no expansion. */
+            p++;
+            while (*p && *p != '\'')
+                pat_emit_literal(&out, *p++);
+            if (*p == '\'') p++;
+            continue;
+        }
+        if (*p == '"') {
+            /* Double-quoted: expansions happen, but the span is quoted, so the
+             * whole result is literal. Expand into a temp, then escape. */
+            p++;
+            strbuf_t tmp;
+            sb_init(&tmp, 64);
+            expand_into(sh, p, &tmp, 1);
+            for (const char *q = sb_str(&tmp); *q; q++)
+                pat_emit_literal(&out, *q);
+            sb_free(&tmp);
+            p = skip_dquote_end(p);
+            continue;
+        }
+        if (*p == '\\') {
+            /* Backslash quotes the next character -> literal. */
+            p++;
+            if (!*p) { sb_appendc(&out, '\\'); break; }
+            pat_emit_literal(&out, *p++);
+            continue;
+        }
+        /* Unquoted run: up to the next top-level ' " \, with ${...}/$(...)/`...`
+         * skipped whole so their internal quotes don't end the run. Expanded
+         * as-is, keeping metacharacters (literal or expansion-derived) active. */
+        const char *run = p;
+        while (*p && *p != '\'' && *p != '"' && *p != '\\') {
+            if (*p == '$' && (p[1] == '{' || p[1] == '('))
+                p = skip_construct(p);
+            else if (*p == '`')
+                p = skip_construct(p);
+            else
+                p++;
+        }
+        if (p > run) {
+            char *sub = strndup(run, (size_t)(p - run));
+            strbuf_t tmp;
+            sb_init(&tmp, 64);
+            expand_into(sh, sub ? sub : "", &tmp, 0);
+            sb_append(&out, sb_str(&tmp));
+            sb_free(&tmp);
+            free(sub);
+        }
+    }
+
+    free(tilded);
+    char *result = arena_strdup(sh->scratch, sb_str(&out));
+    sb_free(&out);
+    return result;
+}
+
 char *expand_word_assign(shell_ctx_t *sh, const char *word)
 {
     if (!word) return arena_strdup(sh->scratch, "");

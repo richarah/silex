@@ -1459,7 +1459,10 @@ int exec_node(shell_ctx_t *sh, node_t *node)
         for (case_item_t *item = node->u.case_node.items; item; item = item->next) {
             int matched = 0;
             for (int pi = 0; item->patterns[pi]; pi++) {
-                char *pat = expand_word(sh, item->patterns[pi]);
+                /* Quote-aware: a quoted metacharacter in the pattern must be
+                 * literal (`case a in "*")` does not match), unlike expand_word,
+                 * which quote-removes and lets it reach fnmatch as a wildcard. */
+                char *pat = expand_word_pattern(sh, item->patterns[pi]);
                 if (fnmatch(pat, word, 0) == 0 ||
                     strcmp(pat, "*") == 0) {
                     matched = 1;
@@ -1544,6 +1547,22 @@ static int exec_builtin_exit(shell_ctx_t *sh, int argc, char **argv)
     return code; /* unreachable */
 }
 
+/* Map a `set -o <name>` / `set +o <name>` long option name to its flag.
+ * `value` is 1 for -o (enable), 0 for +o (disable). Returns 0 if recognised,
+ * -1 otherwise. Long names are the POSIX/bash spellings of the short flags, so
+ * that e.g. modernish's `set -o xtrace` works, not just `set -x`. */
+static int set_option_byname(shell_ctx_t *sh, const char *name, int value)
+{
+    if      (strcmp(name, "errexit")  == 0) sh->opt_e = value;
+    else if (strcmp(name, "nounset")  == 0) sh->opt_u = value;
+    else if (strcmp(name, "xtrace")   == 0) sh->opt_x = value;
+    else if (strcmp(name, "noglob")   == 0) sh->opt_f = value;
+    else if (strcmp(name, "noexec")   == 0) sh->opt_n = value;
+    else if (strcmp(name, "pipefail") == 0) sh->opt_pipefail = value;
+    else return -1;
+    return 0;
+}
+
 static int exec_builtin_set(shell_ctx_t *sh, int argc, char **argv)
 {
     int i;
@@ -1561,8 +1580,8 @@ static int exec_builtin_set(shell_ctx_t *sh, int argc, char **argv)
                 case 'o':
                     if (i + 1 < argc) {
                         const char *opt = argv[i+1];
-                        if (strcmp(opt, "pipefail") == 0) {
-                            sh->opt_pipefail = 1; i++;
+                        if (set_option_byname(sh, opt, 1) == 0) {
+                            i++;
                         } else {
                             fprintf(stderr, "silex: set: %s: invalid option name\n", opt);
                             return 1;
@@ -1586,8 +1605,8 @@ static int exec_builtin_set(shell_ctx_t *sh, int argc, char **argv)
                 case 'o':
                     if (i + 1 < argc) {
                         const char *opt = argv[i+1];
-                        if (strcmp(opt, "pipefail") == 0) {
-                            sh->opt_pipefail = 0; i++;
+                        if (set_option_byname(sh, opt, 0) == 0) {
+                            i++;
                         } else {
                             fprintf(stderr, "silex: set: %s: invalid option name\n", opt);
                             return 1;
