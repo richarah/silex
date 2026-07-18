@@ -149,11 +149,20 @@ int vars_set_context(vars_t *v, const char *name, const char *value, const char 
         }
     }
 
-    /* Not found — create in current scope. The search loop above tolerates a
-     * NULL scope (it just iterates zero times); this path dereferences it, so
-     * guard explicitly rather than deref NULL if there is no scope to set in. */
-    if (!v->scope)
-        return 1;
+    /* Not found — create it in the GLOBAL (outermost) scope, not the current
+     * one. POSIX: a plain assignment inside a function operates on the global
+     * variable; only `local` (vars_set_local) creates a function-local. Creating
+     * here in v->scope meant `f() { X=1; }; f; echo "$X"` lost X the moment the
+     * function's scope was popped -- and, via `MSH_SHELL=$shell` inside its
+     * search function, stopped modernish from ever recognising a usable shell.
+     *
+     * The search loop above already updates a `local` X in an inner scope, so
+     * only genuinely-new variables reach here. */
+    var_scope_t *global = v->scope;
+    if (!global)
+        return 1;                       /* no scope to set in */
+    while (global->parent != NULL)
+        global = global->parent;
     var_entry_t *e    = arena_alloc(v->arena, sizeof(var_entry_t));
     e->name           = arena_strdup(v->arena, name);
     /* arena_alloc does not zero. Every field var_store_value() reads --
@@ -163,8 +172,8 @@ int vars_set_context(vars_t *v, const char *name, const char *value, const char 
     e->exported       = 0;
     e->readonly       = 0;
     var_store_value(v, e, value);
-    e->next           = v->scope->buckets[idx];
-    v->scope->buckets[idx] = e;
+    e->next               = global->buckets[idx];
+    global->buckets[idx]  = e;
     return 0;
 }
 

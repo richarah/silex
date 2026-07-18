@@ -266,6 +266,20 @@ check "fnredir: body still executes normally" \
 check "fnredir: plain function without redirect unaffected" \
     "$("$MB" -c 'f() { echo normal; }; f')" "normal"
 
+# --- a plain assignment inside a function is global (POSIX) --------------------
+# It was created in the function's scope and lost on return; only `local` should
+# be function-local.
+check "scope: new variable set in a function is global" \
+    "$("$MB" -c 'fn() { NEWV=hi; }; fn; echo "[$NEWV]"')" "[hi]"
+check "scope: variable set in a function loop persists" \
+    "$("$MB" -c 'fn() { for x in a b c; do LAST=$x; done; }; fn; echo "[$LAST]"')" "[c]"
+check "scope: local stays local, plain assignment goes global" \
+    "$("$MB" -c 'fn() { local L=loc; G=glob; }; fn; echo "L=[$L] G=[$G]"')" "L=[] G=[glob]"
+check "scope: function modifies an existing global" \
+    "$("$MB" -c 'V=old; fn() { V=new; }; fn; echo "[$V]"')" "[new]"
+check "scope: nested function assignment reaches the top" \
+    "$("$MB" -c 'o() { i() { DEEP=x; }; i; }; o; echo "[$DEEP]"')" "[x]"
+
 echo ""
 echo "function tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
