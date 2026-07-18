@@ -347,6 +347,18 @@ check_exit "set -o nounset: unset var errors" "$?" "1"
 "$MB" -c 'set -o bogusname' 2>/dev/null
 check_exit "set -o bogus: rejected" "$?" "1"
 
+# --- xtrace (set -x) actually prints the command, to stderr, post-expansion ----
+# opt_x was set but never consulted, so `set -x` traced nothing.
+check "xtrace: traces a command to stderr" \
+    "$("$MB" -c 'set -x; echo hi' 2>&1 1>/dev/null)" "+ echo hi"
+check "xtrace: honors PS4" \
+    "$("$MB" -c 'PS4="# "; set -x; echo hi' 2>&1 1>/dev/null)" "# echo hi"
+check "xtrace: off by default (no trace)" \
+    "$("$MB" -c 'echo hi' 2>&1 1>/dev/null)" ""
+# `set +x` is itself traced (it runs while -x is still on), then echo is not.
+check "xtrace: set +x stops tracing after itself" \
+    "$("$MB" -c 'set -x; set +x; echo hi' 2>&1 1>/dev/null)" "+ set +x"
+
 echo ""
 echo "control structure tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

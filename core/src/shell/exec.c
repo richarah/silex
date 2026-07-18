@@ -620,9 +620,13 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
     int argc = 0;
     while (expanded[argc]) argc++;
 
-    /* SILEX_TRACE: print command before execution */
-    if (sh->trace_level >= 1) {
-        fputs("+ ", stderr);
+    /* xtrace (set -x) and the SILEX_TRACE debug env both print the command,
+     * post-expansion, to stderr before it runs -- this is POSIX `set -x`.
+     * opt_x was previously set but never consulted, so `set -x` traced nothing.
+     * PS4 supplies the prefix (POSIX; default "+ "). */
+    if (sh->opt_x || sh->trace_level >= 1) {
+        const char *ps4 = vars_get(&sh->vars, "PS4");
+        fputs(ps4 ? ps4 : "+ ", stderr);
         for (int ti = 0; ti < argc; ti++) {
             if (ti) fputc(' ', stderr);
             fputs(expanded[ti], stderr);
