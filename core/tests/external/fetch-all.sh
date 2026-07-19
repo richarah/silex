@@ -24,6 +24,7 @@ cd "$REPOS_DIR"
 # Progress counter
 SUITE=0
 TOTAL=10
+FAILED=""   # names of repos whose clone failed (reported at the end)
 
 fetch_repo() {
     SUITE=$((SUITE + 1))
@@ -37,7 +38,22 @@ fetch_repo() {
         echo "    Already exists, updating..."
         (cd "$dir" && git pull --depth 1) || echo "    Update failed (non-fatal)"
     else
-        git clone --depth 1 "$url" "$dir" 2>&1 | sed 's/^/    /'
+        # Clone into a temp dir and move into place only on success, so a failed
+        # or interrupted clone never leaves a partial repo behind. A partial repo
+        # would be cached by CI and then read as "present" -- exactly the state
+        # this fetch is meant to avoid. Success is judged by the presence of
+        # .git (the `git clone | sed` pipe hides git's own exit status). A single
+        # failure is reported and skipped rather than aborting the whole batch
+        # (this runs under `set -e`).
+        rm -rf "$dir.tmp"
+        git clone --depth 1 "$url" "$dir.tmp" 2>&1 | sed 's/^/    /'
+        if [ -d "$dir.tmp/.git" ]; then
+            mv "$dir.tmp" "$dir"
+        else
+            echo "    WARNING: clone of $name failed; skipping"
+            rm -rf "$dir.tmp"
+            FAILED="$FAILED $name"
+        fi
     fi
 
     echo "    Done."
@@ -139,3 +155,9 @@ echo "  1. Run individual suite: tests/external/run-oils-spec.sh"
 echo "  2. Run all suites:       tests/external/run-all.sh"
 echo "  3. Via Makefile:         make external-test"
 echo ""
+
+if [ -n "$FAILED" ]; then
+    echo "WARNING: these repos failed to clone and were skipped:$FAILED"
+    echo "Re-run this script to retry them (existing repos are left untouched)."
+    exit 1
+fi

@@ -20,14 +20,29 @@ make release-glibc
 echo "Testing binary..."
 ./build/bin/silex --version
 
-# Fetch external repos (skip if cached via volume mount)
-if [ ! -d tests/external/repos/oil ]; then
+# Fetch external repos (skip only if ALL are already present).
+#
+# This used to check for a single directory (repos/oil). A *partial* cache --
+# oil present but, say, modernish or coreutils missing -- then reported "Using
+# cached" and skipped the fetch, so every suite whose repo was absent failed
+# with "repo not found". A GitHub Actions cache can restore partially, so this
+# happened intermittently and made the whole gate's result depend on cache luck
+# rather than on silex. Require every repo the run-*.sh scripts consume; fetch if
+# any is missing. make external-fetch is idempotent (it updates existing repos
+# and clones only what is absent), so re-running it is safe.
+_missing=
+for _repo in oil smoosh modernish mksh shellspec coreutils grep sed toybox projects; do
+    if [ ! -d "tests/external/repos/$_repo" ]; then
+        _missing="$_missing $_repo"
+    fi
+done
+if [ -n "$_missing" ]; then
     echo ""
-    echo "Fetching external test repositories (first run only)..."
+    echo "Fetching external test repositories (missing:$_missing)..."
     make external-fetch
 else
     echo ""
-    echo "Using cached external repositories"
+    echo "Using cached external repositories (all present)"
 fi
 
 # Results directory
