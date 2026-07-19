@@ -400,6 +400,15 @@ check "kill: -l lists signal names" \
     "$("$MB" -c 'kill -l' | grep -o TERM | head -1)" "TERM"
 
 
+# --- SIGPIPE is at its default disposition (POSIX) ----------------------------
+# The shell was globally SIG_IGN, so it silently survived SIGPIPE and reported 0
+# where a POSIX shell dies with status 141. modernish probes this to identify a
+# usable shell.
+"$MB" -c 'kill -s PIPE $$'; check_exit "sigpipe: kill -s PIPE self dies with 141" "$?" "141"
+check "sigpipe: broken pipe from a pipeline stage does not kill the shell" \
+    "$("$MB" -c 'yes 2>/dev/null | head -2 | tr "\n" " "; echo survived')" "y y survived"
+
+
 echo ""
 echo "control structure tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

@@ -149,8 +149,15 @@ int shell_init(shell_ctx_t *sh, int argc, char **argv)
         if (sh->trace_level > 2) sh->trace_level = 2;
     }
 
-    /* Ignore SIGPIPE in the shell process; children restore SIG_DFL before exec */
-    signal(SIGPIPE, SIG_IGN);
+    /* SIGPIPE stays at its default disposition: POSIX requires a shell (and a
+     * `sh -c` script) to be killable by SIGPIPE and to report status 128+13, so
+     * `case $(exec sh -c 'kill -s PIPE $$') in ...` works -- modernish probes
+     * exactly this. It was previously SIG_IGN, so silex silently survived
+     * SIGPIPE and reported 0. Pipeline stages fork, so a builtin on the left of
+     * a broken pipe dies in its own child rather than taking down the shell;
+     * SIG_DFL (not merely leaving it inherited) guarantees the right disposition
+     * even when the parent that exec'd us had SIGPIPE ignored. */
+    signal(SIGPIPE, SIG_DFL);
 
     /* Register as the global trap shell */
     g_trap_shell = sh;
