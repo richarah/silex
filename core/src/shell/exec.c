@@ -66,6 +66,10 @@ static int exec_builtin_getopts(shell_ctx_t *sh, int argc, char **argv);
 static int exec_builtin_alias(shell_ctx_t *sh, int argc, char **argv);
 static int exec_builtin_unalias(shell_ctx_t *sh, int argc, char **argv);
 static int exec_builtin_hash(shell_ctx_t *sh, int argc, char **argv);
+static int exec_builtin_jobs(shell_ctx_t *sh, int argc, char **argv);
+static int exec_builtin_fg(shell_ctx_t *sh, int argc, char **argv);
+static int exec_builtin_bg(shell_ctx_t *sh, int argc, char **argv);
+static job_t *parse_jobspec(shell_ctx_t *sh, const char *spec);
 
 /* -------------------------------------------------------------------------
  * Special exit codes for break/continue/return flow control
@@ -131,6 +135,9 @@ static const shell_builtin_t shell_builtins[] = {
     { "unalias",  exec_builtin_unalias   },
     { "hash",     exec_builtin_hash      },
     { "kill",     exec_builtin_kill      },
+    { "jobs",     exec_builtin_jobs      },
+    { "fg",       exec_builtin_fg        },
+    { "bg",       exec_builtin_bg        },
     { NULL, NULL }
 };
 
@@ -1181,6 +1188,46 @@ static void loop_scratch_end(shell_ctx_t *sh, loop_scratch_t *ls)
     arena_free(&ls->arena);
 }
 
+/* Reconstruct a short command label for the jobs table. The AST keeps no source
+ * text, so this is best-effort: simple commands and pipelines are rebuilt from
+ * their words; a compound command gets a generic label. Returns a malloc'd
+ * string (owned by the caller / the job entry) or NULL. */
+static char *describe_node(node_t *node)
+{
+    if (!node) return NULL;
+    switch (node->type) {
+    case N_CMD: {
+        size_t len = 0;
+        char **w = node->u.cmd.words;
+        for (int i = 0; w && w[i]; i++)
+            len += strlen(w[i]) + 1;
+        if (len == 0) return NULL;
+        char *s = malloc(len + 1);
+        if (!s) return NULL;
+        s[0] = '\0';
+        for (int i = 0; w && w[i]; i++) {
+            if (i) strcat(s, " ");
+            strcat(s, w[i]);
+        }
+        return s;
+    }
+    case N_PIPE: {
+        char *l = describe_node(node->u.binary.left);
+        char *r = describe_node(node->u.binary.right);
+        size_t len = (l ? strlen(l) : 0) + (r ? strlen(r) : 0) + 4;
+        char *s = malloc(len);
+        if (s) snprintf(s, len, "%s | %s", l ? l : "", r ? r : "");
+        free(l);
+        free(r);
+        return s;
+    }
+    case N_REDIR:
+        return describe_node(node->u.redir_node.body);
+    default:
+        return strdup("(compound command)");
+    }
+}
+
 /* -------------------------------------------------------------------------
  * exec_node
  * ------------------------------------------------------------------------- */
@@ -1259,14 +1306,19 @@ int exec_node(shell_ctx_t *sh, node_t *node)
 
     case N_ASYNC: {
         fflush(NULL);  /* Flush all stdio buffers before fork to avoid duplicate output */
+        char *jobcmd = describe_node(node->u.binary.left);
         pid_t pid = fork();
         if (pid < 0) {
             perror("fork");
+            free(jobcmd);
             rc = 1;
             break;
         }
         if (pid == 0) {
-            /* Update PPID in child process */
+            /* Own process group so the job can be signalled as a group and does
+             * not receive the shell's terminal signals. setpgid is done in both
+             * child and parent to avoid the classic race. */
+            setpgid(0, 0);
             char ppid_buf[32];
             snprintf(ppid_buf, sizeof(ppid_buf), "%d", (int)getppid());
             vars_set(&sh->vars, "PPID", ppid_buf);
@@ -1274,8 +1326,13 @@ int exec_node(shell_ctx_t *sh, node_t *node)
             fflush(NULL);
             _exit(r);
         }
+        setpgid(pid, pid);
         sh->last_bg_pid = pid;
-        job_add(&sh->jobs, pid);
+        job_t *j = job_register(&sh->jobs, pid, pid, jobcmd);
+        free(jobcmd);
+        /* Interactive shells announce the new job: `[1] 12345`. */
+        if (sh->interactive && j)
+            fprintf(stderr, "[%d] %ld\n", j->id, (long)pid);
         rc = 0;
         break;
     }
@@ -1598,7 +1655,6 @@ static int exec_builtin_exit(shell_ctx_t *sh, int argc, char **argv)
  * (e.g. `kill -s PIPE "$$"` to probe SIGPIPE behaviour). */
 static int exec_builtin_kill(shell_ctx_t *sh, int argc, char **argv)
 {
-    (void)sh;
     int sig = SIGTERM;
     int i = 1;
 
@@ -1657,14 +1713,27 @@ static int exec_builtin_kill(shell_ctx_t *sh, int argc, char **argv)
 
     int rc = 0;
     for (; i < argc; i++) {
-        int pid;
-        if (sh_parse_int(argv[i], INT_MIN, INT_MAX, &pid) != 0) {
-            fprintf(stderr, "silex: kill: %s: arguments must be process IDs\n", argv[i]);
-            rc = 1;
-            continue;
+        pid_t target;
+        if (argv[i][0] == '%') {
+            /* Job spec: signal the whole process group (negative pgid). */
+            job_t *j = parse_jobspec(sh, argv[i]);
+            if (!j) {
+                fprintf(stderr, "silex: kill: %s: no such job\n", argv[i]);
+                rc = 1;
+                continue;
+            }
+            target = -j->pgid;
+        } else {
+            int pid;
+            if (sh_parse_int(argv[i], INT_MIN, INT_MAX, &pid) != 0) {
+                fprintf(stderr, "silex: kill: %s: arguments must be process IDs or job specs\n", argv[i]);
+                rc = 1;
+                continue;
+            }
+            target = (pid_t)pid;
         }
-        if (kill((pid_t)pid, sig) != 0) {
-            fprintf(stderr, "silex: kill: (%d): %s\n", pid, strerror(errno));
+        if (kill(target, sig) != 0) {
+            fprintf(stderr, "silex: kill: (%ld): %s\n", (long)target, strerror(errno));
             rc = 1;
         }
     }
@@ -2409,21 +2478,162 @@ static int exec_builtin_return(shell_ctx_t *sh, int argc, char **argv)
     return FLOW_RETURN;
 }
 
+/* Resolve a job spec ("%1", "%+", "%%", "%-", "%str", "%?str") to a job, or
+ * NULL with a message. Shared by jobs/fg/bg/kill/wait. A bare "%" means %+. */
+static job_t *parse_jobspec(shell_ctx_t *sh, const char *spec)
+{
+    if (spec[0] != '%') return NULL;
+    const char *s = spec + 1;
+
+    if (*s == '\0' || strcmp(s, "+") == 0 || strcmp(s, "%") == 0)
+        return job_current(&sh->jobs);
+    if (strcmp(s, "-") == 0)
+        return job_previous(&sh->jobs);
+
+    if (*s >= '0' && *s <= '9') {
+        int id = 0;
+        if (sh_parse_int(s, 1, INT_MAX, &id) != 0) return NULL;
+        return job_find_by_id(&sh->jobs, id);
+    }
+
+    /* %?str: command contains str; %str: command starts with str. */
+    int substring = (*s == '?');
+    if (substring) s++;
+    for (job_t *j = sh->jobs.head; j; j = j->next) {
+        if (!j->command) continue;
+        if (substring ? (strstr(j->command, s) != NULL)
+                      : (strncmp(j->command, s, strlen(s)) == 0))
+            return j;
+    }
+    return NULL;
+}
+
+/* Map a wait/kill argument to a pid: a job spec resolves via the job table,
+ * otherwise it is parsed as a numeric pid. Returns -1 on error. */
+static pid_t jobspec_or_pid(shell_ctx_t *sh, const char *arg)
+{
+    if (arg[0] == '%') {
+        job_t *j = parse_jobspec(sh, arg);
+        return j ? j->pid : (pid_t)-1;
+    }
+    int pid;
+    if (sh_parse_int(arg, 0, INT_MAX, &pid) != 0)
+        return (pid_t)-1;
+    return (pid_t)pid;
+}
+
 static int exec_builtin_wait(shell_ctx_t *sh, int argc, char **argv)
 {
     if (argc >= 2) {
-        pid_t pid = (pid_t)atol(argv[1]);
-        return job_wait(&sh->jobs, pid);
-    }
-    /* Wait for all background jobs */
-    int rc = 0;
-    for (job_t *j = sh->jobs.head; j; j = j->next) {
-        if (!j->done) {
-            int r = job_wait(&sh->jobs, j->pid);
-            rc = r;
+        pid_t pid = jobspec_or_pid(sh, argv[1]);
+        if (pid == (pid_t)-1) {
+            fprintf(stderr, "silex: wait: %s: no such job\n", argv[1]);
+            return 127;
         }
+        int rc = job_wait(&sh->jobs, pid);
+        job_t *j = job_find_by_pid(&sh->jobs, pid);
+        if (j && j->state == JOB_DONE) job_remove(&sh->jobs, j);
+        return rc;
+    }
+    /* Wait for all background jobs. */
+    int rc = 0;
+    job_t *j = sh->jobs.head;
+    while (j) {
+        job_t *next = j->next;
+        if (j->state == JOB_RUNNING)
+            rc = job_wait(&sh->jobs, j->pid);
+        if (j->state == JOB_DONE)
+            job_remove(&sh->jobs, j);
+        j = next;
     }
     return rc;
+}
+
+/* jobs [-l|-p]: list jobs. -l adds the pgid, -p prints only pids. */
+static int exec_builtin_jobs(shell_ctx_t *sh, int argc, char **argv)
+{
+    int show_pid_only = 0, show_pgid = 0;
+    for (int i = 1; i < argc; i++) {
+        if      (strcmp(argv[i], "-p") == 0) show_pid_only = 1;
+        else if (strcmp(argv[i], "-l") == 0) show_pgid = 1;
+        else if (strcmp(argv[i], "--") == 0) break;
+    }
+    job_reap(&sh->jobs);
+    job_t *j = sh->jobs.head;
+    while (j) {
+        job_t *next = j->next;
+        if (show_pid_only) {
+            printf("%ld\n", (long)j->pid);
+        } else {
+            char cur = (j->id == sh->jobs.current) ? '+'
+                     : (j->id == sh->jobs.previous) ? '-' : ' ';
+            const char *st = j->state == JOB_RUNNING ? "Running"
+                           : j->state == JOB_STOPPED ? "Stopped" : "Done";
+            if (show_pgid)
+                printf("[%d]%c %ld %-8s %s\n", j->id, cur, (long)j->pgid, st,
+                       j->command ? j->command : "");
+            else
+                printf("[%d]%c %-8s %s\n", j->id, cur, st,
+                       j->command ? j->command : "");
+        }
+        /* A reported Done job leaves the table after `jobs` displays it once. */
+        if (j->state == JOB_DONE)
+            job_remove(&sh->jobs, j);
+        j = next;
+    }
+    return 0;
+}
+
+/* Bring a job to the foreground (fg) or resume it in the background (bg).
+ * Without a controlling-terminal / monitor-mode layer, fg simply resumes (if
+ * stopped) and waits; bg resumes a stopped job and returns. */
+static int exec_builtin_fgbg(shell_ctx_t *sh, int argc, char **argv, int foreground)
+{
+    const char *name = foreground ? "fg" : "bg";
+    /* Consume any pending stopped/continued notifications first, so the job's
+     * recorded state is current before we decide whether to SIGCONT it. */
+    job_reap(&sh->jobs);
+    job_t *j;
+    if (argc >= 2) {
+        j = parse_jobspec(sh, argv[1]);
+        if (!j) {
+            fprintf(stderr, "silex: %s: %s: no such job\n", name, argv[1]);
+            return 1;
+        }
+    } else {
+        j = job_current(&sh->jobs);
+        if (!j) {
+            fprintf(stderr, "silex: %s: no current job\n", name);
+            return 1;
+        }
+    }
+
+    if (j->command)
+        fprintf(stderr, "%s\n", j->command);
+
+    if (j->state == JOB_STOPPED) {
+        if (kill(-j->pgid, SIGCONT) != 0 && kill(j->pid, SIGCONT) != 0)
+            perror("silex: kill (SIGCONT)");
+        j->state = JOB_RUNNING;
+    }
+
+    if (foreground) {
+        int rc = job_wait(&sh->jobs, j->pid);
+        job_t *k = job_find_by_pid(&sh->jobs, j->pid);
+        if (k && k->state == JOB_DONE) job_remove(&sh->jobs, k);
+        return rc;
+    }
+    return 0;
+}
+
+static int exec_builtin_fg(shell_ctx_t *sh, int argc, char **argv)
+{
+    return exec_builtin_fgbg(sh, argc, argv, 1);
+}
+
+static int exec_builtin_bg(shell_ctx_t *sh, int argc, char **argv)
+{
+    return exec_builtin_fgbg(sh, argc, argv, 0);
 }
 
 static int exec_builtin_times(shell_ctx_t *sh, int argc, char **argv)

@@ -1040,67 +1040,71 @@ static node_t *parse_and_or(parser_t *p)
  * list: and_or (separator and_or)*
  * separator: ';' | NEWLINE | '&'
  * ------------------------------------------------------------------------- */
+/* list : and_or ( ( ';' | '&' ) and_or )* ( ';' | '&' )?
+ *
+ * A '&' makes ONLY the and_or it immediately follows asynchronous, then that
+ * unit is folded into the accumulated left-associative sequence. The previous
+ * version wrapped the whole accumulated list in N_ASYNC on each '&', so
+ * `sleep 1 & sleep 2 &` became one async of a sequence -- both ran, but the job
+ * table saw a single "(compound command)" job instead of two. */
 static node_t *parse_list(parser_t *p)
 {
-    node_t *left = parse_and_or(p);
-    if (!left || p->error) return NULL;
+    node_t *unit = parse_and_or(p);
+    if (!unit || p->error) return NULL;
+
+    node_t *result = NULL;   /* accumulated sequence; NULL until we have >1 unit */
 
     for (;;) {
         tok_type_t t = peek(p).type;
 
         if (t == TOK_AMP) {
-            /* Async: wrap left in N_ASYNC */
             consume(p);
-            node_t *async_node           = alloc_node(p, N_ASYNC);
-            async_node->u.binary.left    = left;
-            async_node->u.binary.right   = NULL;
-            left = async_node;
-
-            skip_newlines(p);
-            /* More commands? */
-            tok_type_t nxt = peek(p).type;
-            if (nxt == TOK_EOF   || nxt == TOK_FI    || nxt == TOK_DONE  ||
-                nxt == TOK_ESAC  || nxt == TOK_THEN   || nxt == TOK_ELSE  ||
-                nxt == TOK_ELIF  || nxt == TOK_DO     || nxt == TOK_RPAREN ||
-                nxt == TOK_RBRACE || nxt == TOK_DSEMI)
-                break;
-
-            node_t *right = parse_and_or(p);
-            if (!right || p->error) break;
-
-            node_t *seq       = alloc_node(p, N_SEQ);
-            seq->u.binary.left  = left;
-            seq->u.binary.right = right;
-            left = seq;
-            continue;
+            node_t *a         = alloc_node(p, N_ASYNC);
+            a->u.binary.left  = unit;
+            a->u.binary.right = NULL;
+            unit = a;
+        } else if (t == TOK_SEMI || t == TOK_NEWLINE) {
+            consume(p);
+        } else {
+            break;   /* no separator: `unit` is the final unit of the list */
         }
 
-        if (t == TOK_SEMI || t == TOK_NEWLINE) {
-            consume(p);
-            skip_newlines(p);
-
-            /* Check for list terminators */
-            tok_type_t nxt = peek(p).type;
-            if (nxt == TOK_EOF   || nxt == TOK_FI    || nxt == TOK_DONE  ||
-                nxt == TOK_ESAC  || nxt == TOK_THEN   || nxt == TOK_ELSE  ||
-                nxt == TOK_ELIF  || nxt == TOK_DO     || nxt == TOK_RPAREN ||
-                nxt == TOK_RBRACE || nxt == TOK_DSEMI)
-                break;
-
-            node_t *right = parse_and_or(p);
-            if (!right || p->error) break;
-
-            node_t *seq        = alloc_node(p, N_SEQ);
-            seq->u.binary.left  = left;
-            seq->u.binary.right = right;
-            left = seq;
-            continue;
+        /* Fold this (possibly async-wrapped) unit into the sequence. */
+        if (!result) {
+            result = unit;
+        } else {
+            node_t *seq         = alloc_node(p, N_SEQ);
+            seq->u.binary.left  = result;
+            seq->u.binary.right = unit;
+            result = seq;
         }
+        unit = NULL;
 
-        break;
+        skip_newlines(p);
+        tok_type_t nxt = peek(p).type;
+        if (nxt == TOK_EOF   || nxt == TOK_FI    || nxt == TOK_DONE  ||
+            nxt == TOK_ESAC  || nxt == TOK_THEN   || nxt == TOK_ELSE  ||
+            nxt == TOK_ELIF  || nxt == TOK_DO     || nxt == TOK_RPAREN ||
+            nxt == TOK_RBRACE || nxt == TOK_DSEMI)
+            break;
+
+        unit = parse_and_or(p);
+        if (!unit || p->error) break;
     }
 
-    return left;
+    /* A trailing unit with no separator after it. */
+    if (unit) {
+        if (!result) {
+            result = unit;
+        } else {
+            node_t *seq         = alloc_node(p, N_SEQ);
+            seq->u.binary.left  = result;
+            seq->u.binary.right = unit;
+            result = seq;
+        }
+    }
+
+    return result;
 }
 
 /* -------------------------------------------------------------------------

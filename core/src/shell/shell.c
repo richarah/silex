@@ -393,14 +393,7 @@ void shell_free(shell_ctx_t *sh)
     positional_free(sh);
     arena_free(&sh->parse_arena);
     arena_free(&sh->scratch_arena);
-    /* job list nodes were malloc'd */
-    job_t *j = sh->jobs.head;
-    while (j) {
-        job_t *next = j->next;
-        free(j);
-        j = next;
-    }
-    sh->jobs.head = NULL;
+    job_list_free(&sh->jobs);   /* frees job nodes and their command strings */
 
     if (g_trap_shell == sh)
         g_trap_shell = NULL;
