@@ -95,11 +95,32 @@ jobs:
             --output type=image,push=true,compression=zstd,compression-level=19,force-compression=true \
             .
 
+      # silex:runtime is the minimal companion base the SDK examples run their
+      # built binaries in (multi-stage/, cross-compile/ both `FROM silex:runtime`).
+      # It was never built or pushed, so those examples referenced a 404. Built
+      # after slim because Dockerfile.runtime's builder stage bases on silex:slim.
+      - name: Build and push silex:runtime (amd64, zstd)
+        run: |
+          set -eux
+          IMG="${{ env.REGISTRY }}/$(echo "${{ env.IMAGE_NAME }}" | tr '[:upper:]' '[:lower:]')"
+          VER="${{ steps.version.outputs.VERSION }}"
+          docker buildx build \
+            -f dockerfiles/Dockerfile.runtime \
+            --progress=plain \
+            -t "${IMG}:runtime" \
+            -t "${IMG}:runtime-${VER}" \
+            -t "${IMG}:runtime-latest" \
+            --output type=docker,name=localhost/silex:runtime \
+            --output type=image,push=true,compression=zstd,compression-level=19,force-compression=true \
+            .
+
       - name: Get image size
         id: image_size
         run: |
           SIZE_MB=$(docker inspect localhost/silex:slim --format='{{.Size}}' | awk '{printf "%.0f\n", $1/1024/1024}')
           echo "SIZE_MB=${SIZE_MB}" >> $GITHUB_OUTPUT
+          RUNTIME_MB=$(docker inspect localhost/silex:runtime --format='{{.Size}}' | awk '{printf "%.0f\n", $1/1024/1024}')
+          echo "RUNTIME_MB=${RUNTIME_MB}" >> $GITHUB_OUTPUT
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
@@ -112,6 +133,7 @@ jobs:
 
             ```
             docker pull ghcr.io/richarah/silex:slim
+            docker pull ghcr.io/richarah/silex:runtime
             ```
 
             ### Image Sizes
@@ -119,7 +141,7 @@ jobs:
             | Image | Size |
             |-------|------|
             | `silex:slim` | ~${{ steps.image_size.outputs.SIZE_MB }}MB |
-            | `silex:runtime` | <30MB |
+            | `silex:runtime` | ~${{ steps.image_size.outputs.RUNTIME_MB }}MB |
 
             ### Quick Start
 

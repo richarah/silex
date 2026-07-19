@@ -233,7 +233,13 @@ int shell_run_string(shell_ctx_t *sh, const char *script)
                 return rc;
             }
             sh->last_exit = rc;
-            /* Reclaim scratch expansion memory after each top-level command */
+            /* Reclaim scratch after each parse unit. Note parser_parse() returns
+             * a whole `a; b; c`-style list as ONE node, so for a typical script
+             * this loop runs about once and the reset fires about once per input,
+             * not once per command. Intra-input accumulation is bounded instead
+             * by the per-iteration arena a loop body gets (see loop_scratch_* in
+             * exec.c) and the private arena eval/`.` run in, so a long-running
+             * loop or sourced script does not pile expansions up here. */
             arena_reset(&local);
             if (errexit_should_stop(sh, rc))
                 break;
