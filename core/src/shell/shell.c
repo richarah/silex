@@ -10,6 +10,7 @@
 #include "../util/arena.h"
 #include "../util/strbuf.h"
 
+#include <ctype.h>
 #include <errno.h>
 #include <signal.h>
 #include <stdio.h>
@@ -337,6 +338,11 @@ int shell_run_file(shell_ctx_t *sh, const char *path)
  * signals so a foreground child's SIGTSTP stops the child, not us. Silently
  * does nothing (job_control stays 0) if there is no tty or setup is not allowed
  * -- a non-interactive or piped shell then behaves exactly as before. */
+/* Set by ^C while the interactive shell waits at its prompt, so the input loop
+ * can discard the half-typed line and redraw a fresh prompt instead of dying. */
+static volatile sig_atomic_t interactive_sigint = 0;
+static void interactive_sigint_handler(int sig) { (void)sig; interactive_sigint = 1; }
+
 static void shell_init_job_control(shell_ctx_t *sh)
 {
     if (!sh->interactive || !isatty(STDIN_FILENO))
@@ -355,6 +361,16 @@ static void shell_init_job_control(shell_ctx_t *sh)
     signal(SIGTTOU, SIG_IGN);
     signal(SIGQUIT, SIG_IGN);
 
+    /* At the prompt, ^C must cancel the current input line, not kill the shell.
+     * sigaction without SA_RESTART so the getline() read returns EINTR; a
+     * foreground child still gets a default SIGINT (it resets the disposition
+     * after fork and owns the terminal while it runs). */
+    struct sigaction sa;
+    sa.sa_handler = interactive_sigint_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGINT, &sa, NULL);
+
     sh->shell_pgid = getpid();
     if (setpgid(sh->shell_pgid, sh->shell_pgid) < 0 && errno != EPERM)
         return;                       /* cannot form our own group; skip */
@@ -366,11 +382,146 @@ static void shell_init_job_control(shell_ctx_t *sh)
     sh->opt_m       = 1;              /* monitor mode on by default when interactive */
 }
 
+/* Heuristic: does `s` end in the middle of a construct, so the interactive REPL
+ * should read another line (PS2) before parsing? Covers the common cases --
+ * open quotes, a trailing line-continuation backslash, unbalanced (), `` ` ``,
+ * ${...}/$(...), and unterminated compound commands (if/for/while/until/case/{).
+ * Being wrong is benign: a false "complete" just lets the parser report the
+ * error, and a false "incomplete" waits for a line the user can abort with ^C. */
+static int input_incomplete(const char *s)
+{
+    int sq = 0, dq = 0, backtick = 0, paren = 0, brace = 0, compound = 0;
+    size_t n = strlen(s);
+    for (size_t i = 0; i < n; i++) {
+        char c = s[i];
+        if (sq) { if (c == '\'') sq = 0; continue; }
+        if (dq) {
+            if (c == '\\' && i + 1 < n) i++;
+            else if (c == '"') dq = 0;
+            continue;
+        }
+        if (c == '\\') { if (i + 1 >= n) return 1; i++; continue; }
+        if (c == '\'') { sq = 1; continue; }
+        if (c == '"')  { dq = 1; continue; }
+        if (c == '`')  { backtick ^= 1; continue; }
+        if (c == '#') {                 /* comment: skip to end of line */
+            while (i + 1 < n && s[i + 1] != '\n') i++;
+            continue;
+        }
+        if (c == '(') { paren++; continue; }
+        if (c == ')') { if (paren > 0) paren--; continue; }
+        /* Reserved words at a word boundary. */
+        if ((isalpha((unsigned char)c) || c == '{' || c == '}') &&
+            (i == 0 || isspace((unsigned char)s[i-1]) ||
+             s[i-1] == ';' || s[i-1] == '&' || s[i-1] == '|')) {
+            size_t j = i;
+            if (c == '{' || c == '}') j = i + 1;
+            else while (j < n && (isalnum((unsigned char)s[j]) || s[j] == '_')) j++;
+            size_t len = j - i;
+            /* the word must end at a boundary too */
+            int boundary = (j >= n || isspace((unsigned char)s[j]) ||
+                            s[j] == ';' || s[j] == '&' || s[j] == '|');
+            if (boundary) {
+                #define KW(w) (len == strlen(w) && strncmp(s + i, w, len) == 0)
+                if (KW("if") || KW("for") || KW("while") || KW("until") || KW("case"))
+                    compound++;
+                else if (KW("fi") || KW("done") || KW("esac"))
+                    compound--;
+                else if (KW("{")) brace++;
+                else if (KW("}")) brace--;
+                #undef KW
+            }
+            if (len > 0) i = j - 1;
+        }
+    }
+    return sq || dq || backtick || paren > 0 || brace > 0 || compound > 0;
+}
+
+/* Interactive REPL: read a whole command (with PS2 continuation) into a buffer
+ * and parse it from a string, so a command runs on its own Enter. Reading via
+ * the fp lexer instead made parse_list peek past the newline for the next
+ * command, blocking on the next line -- so each command ran one line late. */
+static int shell_run_interactive(shell_ctx_t *sh)
+{
+    char   *buf = NULL;
+    size_t  bufcap = 0, buflen = 0;
+    char   *line = NULL;
+    size_t  linecap = 0;
+    int     rc = 0;
+
+    for (;;) {
+        const char *prompt;
+        if (buflen == 0) {
+            prompt = vars_get(&sh->vars, "PS1");
+            if (!prompt) prompt = "$ ";
+        } else {
+            prompt = vars_get(&sh->vars, "PS2");
+            if (!prompt) prompt = "> ";
+        }
+        fputs(prompt, stdout);
+        fflush(stdout);
+
+        interactive_sigint = 0;
+        ssize_t r = getline(&line, &linecap, stdin);
+        if (r < 0) {
+            if (errno == EINTR && interactive_sigint) {
+                /* ^C at the prompt: drop the pending line, redraw PS1. */
+                interactive_sigint = 0;
+                clearerr(stdin);
+                buflen = 0;
+                putchar('\n');
+                continue;
+            }
+            if (buflen > 0) putchar('\n');
+            break;                      /* EOF (^D) */
+        }
+
+        /* Append the line to the pending command buffer. */
+        if (buflen + (size_t)r + 1 > bufcap) {
+            size_t ncap = (buflen + (size_t)r + 1) * 2;
+            char *nb = realloc(buf, ncap);
+            if (!nb) { free(buf); free(line); return 1; }
+            buf = nb; bufcap = ncap;
+        }
+        memcpy(buf + buflen, line, (size_t)r);
+        buflen += (size_t)r;
+        buf[buflen] = '\0';
+
+        if (input_incomplete(buf))
+            continue;                   /* read another line under PS2 */
+
+        /* Parse and run the accumulated command from a string. */
+        lexer_t  lex;
+        parser_t par;
+        lexer_init_str(&lex, buf, &sh->parse_arena);
+        parser_init(&par, &lex, &sh->parse_arena);
+        for (;;) {
+            node_t *node = parser_parse(&par);
+            if (par.error) { sh->last_exit = 2; par.error = 0; break; }
+            if (!node) break;
+            if (!sh->opt_n) {
+                rc = exec_node(sh, node);
+                sh->last_exit = rc;
+                arena_reset(&sh->scratch_arena);
+            }
+        }
+        lexer_free(&lex);
+        buflen = 0;
+    }
+
+    free(buf);
+    free(line);
+    return sh->last_exit;
+}
+
 int shell_run_stdin(shell_ctx_t *sh)
 {
     int interactive = isatty(STDIN_FILENO);
     sh->interactive = interactive;
     shell_init_job_control(sh);
+
+    if (interactive)
+        return shell_run_interactive(sh);
 
     lexer_t  lex;
     parser_t par;
@@ -380,22 +531,11 @@ int shell_run_stdin(shell_ctx_t *sh)
 
     int rc = 0;
     for (;;) {
-        if (interactive) {
-            const char *ps1 = vars_get(&sh->vars, "PS1");
-            if (!ps1) ps1 = "$ ";
-            fputs(ps1, stdout);
-            fflush(stdout);
-        }
-
         node_t *node = parser_parse(&par);
         if (!node) break;
         if (par.error) {
-            if (!interactive) {
-                sh->last_exit = 2;  /* Parse error in non-interactive mode */
-                break;
-            }
-            par.error = 0;  /* In interactive mode, reset and continue */
-            continue;
+            sh->last_exit = 2;  /* Parse error in non-interactive mode */
+            break;
         }
 
         if (!sh->opt_n) {
@@ -404,11 +544,6 @@ int shell_run_stdin(shell_ctx_t *sh)
             arena_reset(&sh->scratch_arena);
             if (errexit_should_stop(sh, rc))
                 break;
-        }
-
-        /* Non-interactive: stop on EOF */
-        if (!interactive) {
-            /* parser_parse returns NULL on EOF; loop will break naturally */
         }
     }
 
