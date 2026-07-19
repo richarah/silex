@@ -37,6 +37,7 @@ typedef struct shell_ctx {
     int         opt_f;       /* set -f: no glob */
     int         opt_pipefail;
     int         opt_n;       /* set -n: no execute */
+    int         opt_m;       /* set -m: monitor mode (job control) */
     int         in_cond;     /* set -e exempt: inside if/while/until condition, ! operand */
     int         and_or_exempt; /* set -e exempt: && left-side failure caused short-circuit */
     char       *script_name; /* $0 */
@@ -65,6 +66,9 @@ typedef struct shell_ctx {
     /* Alias definitions: name -> value string */
     void       *aliases[256]; /* alias_entry_t* array for alias lookup */
     pid_t       last_bg_pid; /* $! */
+    pid_t       shell_pgid;  /* the shell's own process group, for job control */
+    int         tty_fd;      /* controlling terminal fd (-1 if none), for tcsetpgrp */
+    int         job_control; /* 1 once job control is fully set up (interactive+tty) */
     pid_t       shell_pid;   /* $$: PID of the main shell, captured once at init.
                               * POSIX requires $$ to stay constant in subshells,
                               * so it must NOT be re-read with getpid() -- a fork

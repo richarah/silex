@@ -917,6 +917,20 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
         /* Child: restore SIGPIPE to default (shell set it to SIG_IGN) */
         signal(SIGPIPE, SIG_DFL);
 
+        /* Under job control, become a new foreground process group with the
+         * job-control signals back at their default, so ^Z/^C reach the command
+         * rather than the shell (which ignores them). */
+        if (sh->job_control) {
+            setpgid(0, 0);
+            if (sh->tty_fd >= 0)
+                tcsetpgrp(sh->tty_fd, getpid());
+            signal(SIGINT,  SIG_DFL);
+            signal(SIGQUIT, SIG_DFL);
+            signal(SIGTSTP, SIG_DFL);
+            signal(SIGTTIN, SIG_DFL);
+            signal(SIGTTOU, SIG_DFL);
+        }
+
         redirect_ctx_t rctx;
         rctx.saved = NULL;
         rctx.error = 0;
@@ -939,11 +953,41 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
     /* Parent */
     {
     int status;
-    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+    int jc = sh->job_control;
+    if (jc) {
+        setpgid(pid, pid);                       /* mirror the child's setpgid */
+        if (sh->tty_fd >= 0)
+            tcsetpgrp(sh->tty_fd, pid);          /* hand the terminal to the job */
+    }
+    while (waitpid(pid, &status, jc ? WUNTRACED : 0) < 0 && errno == EINTR) {}
+    if (jc && sh->tty_fd >= 0)
+        tcsetpgrp(sh->tty_fd, sh->shell_pgid);   /* take the terminal back */
     if (WIFEXITED(status))
         cmd_rc = WEXITSTATUS(status);
     else if (WIFSIGNALED(status))
         cmd_rc = 128 + WTERMSIG(status);
+    else if (WIFSTOPPED(status)) {
+        /* ^Z: the foreground command stopped. Record it as a stopped job so it
+         * can be resumed with fg/bg, and report it like `[1]+ Stopped cmd`. */
+        char *lbl = NULL;
+        size_t len = 0;
+        for (int a = 0; a < argc && expanded[a]; a++) len += strlen(expanded[a]) + 1;
+        if (len && (lbl = malloc(len + 1))) {
+            lbl[0] = '\0';
+            for (int a = 0; a < argc && expanded[a]; a++) {
+                if (a) strcat(lbl, " ");
+                strcat(lbl, expanded[a]);
+            }
+        }
+        job_t *j = job_register(&sh->jobs, pid, pid, lbl);
+        free(lbl);
+        if (j) {
+            j->state  = JOB_STOPPED;
+            j->status = status;
+            fprintf(stderr, "\n[%d]+ Stopped  %s\n", j->id, j->command ? j->command : "");
+        }
+        cmd_rc = 128 + WSTOPSIG(status);
+    }
     else
         cmd_rc = 1;
     sh->last_exit = cmd_rc;
@@ -1776,6 +1820,7 @@ static int set_option_byname(shell_ctx_t *sh, const char *name, int value)
     else if (strcmp(name, "xtrace")   == 0) sh->opt_x = value;
     else if (strcmp(name, "noglob")   == 0) sh->opt_f = value;
     else if (strcmp(name, "noexec")   == 0) sh->opt_n = value;
+    else if (strcmp(name, "monitor")  == 0) sh->opt_m = value;
     else if (strcmp(name, "pipefail") == 0) sh->opt_pipefail = value;
     else return -1;
     return 0;
@@ -1795,6 +1840,7 @@ static int exec_builtin_set(shell_ctx_t *sh, int argc, char **argv)
                 case 'x': sh->opt_x = 1; break;
                 case 'f': sh->opt_f = 1; break;
                 case 'n': sh->opt_n = 1; break;
+                case 'm': sh->opt_m = 1; break;
                 case 'o':
                     if (i + 1 < argc) {
                         const char *opt = argv[i+1];
@@ -1820,6 +1866,7 @@ static int exec_builtin_set(shell_ctx_t *sh, int argc, char **argv)
                 case 'x': sh->opt_x = 0; break;
                 case 'f': sh->opt_f = 0; break;
                 case 'n': sh->opt_n = 0; break;
+                case 'm': sh->opt_m = 0; break;
                 case 'o':
                     if (i + 1 < argc) {
                         const char *opt = argv[i+1];
@@ -2636,6 +2683,9 @@ static int exec_builtin_fgbg(shell_ctx_t *sh, int argc, char **argv, int foregro
     if (j->command)
         fprintf(stderr, "%s\n", j->command);
 
+    if (foreground && sh->job_control && sh->tty_fd >= 0)
+        tcsetpgrp(sh->tty_fd, j->pgid);   /* hand the terminal to the job first */
+
     if (j->state == JOB_STOPPED) {
         if (kill(-j->pgid, SIGCONT) != 0 && kill(j->pid, SIGCONT) != 0)
             perror("silex: kill (SIGCONT)");
@@ -2643,10 +2693,24 @@ static int exec_builtin_fgbg(shell_ctx_t *sh, int argc, char **argv, int foregro
     }
 
     if (foreground) {
-        int rc = job_wait(&sh->jobs, j->pid);
-        job_t *k = job_find_by_pid(&sh->jobs, j->pid);
-        if (k && k->state == JOB_DONE) job_remove(&sh->jobs, k);
-        return rc;
+        /* Wait with WUNTRACED under job control so the job can be stopped again
+         * (^Z), then reclaim the terminal for the shell. */
+        pid_t pid = j->pid;
+        int status = 0;
+        while (waitpid(pid, &status, sh->job_control ? WUNTRACED : 0) < 0 && errno == EINTR) {}
+        if (sh->job_control && sh->tty_fd >= 0)
+            tcsetpgrp(sh->tty_fd, sh->shell_pgid);
+        job_t *k = job_find_by_pid(&sh->jobs, pid);
+        if (WIFSTOPPED(status)) {
+            if (k) { k->state = JOB_STOPPED; k->status = status; }
+            fprintf(stderr, "\n[%d]+ Stopped  %s\n", k ? k->id : 0,
+                    (k && k->command) ? k->command : "");
+            return 128 + WSTOPSIG(status);
+        }
+        if (k) { k->status = status; k->state = JOB_DONE; job_remove(&sh->jobs, k); }
+        if (WIFEXITED(status))   return WEXITSTATUS(status);
+        if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
+        return 1;
     }
     return 0;
 }

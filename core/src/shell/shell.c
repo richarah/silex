@@ -64,7 +64,10 @@ int shell_init(shell_ctx_t *sh, int argc, char **argv)
 {
     memset(sh, 0, sizeof(*sh));
 
-    sh->shell_pid = getpid();  /* $$: captured once; stable across subshells */
+    sh->shell_pid   = getpid();  /* $$: captured once; stable across subshells */
+    sh->shell_pgid  = getpgrp();
+    sh->tty_fd      = -1;
+    sh->job_control = 0;
     arena_init(&sh->parse_arena, "parse");
     arena_init(&sh->scratch_arena, "scratch");
     sh->scratch = &sh->scratch_arena;
@@ -329,10 +332,45 @@ int shell_run_file(shell_ctx_t *sh, const char *path)
  * shell_run_stdin
  * ------------------------------------------------------------------------- */
 
+/* Set up job control for an interactive shell with a controlling terminal:
+ * take our own process group, own the terminal, and ignore the job-control
+ * signals so a foreground child's SIGTSTP stops the child, not us. Silently
+ * does nothing (job_control stays 0) if there is no tty or setup is not allowed
+ * -- a non-interactive or piped shell then behaves exactly as before. */
+static void shell_init_job_control(shell_ctx_t *sh)
+{
+    if (!sh->interactive || !isatty(STDIN_FILENO))
+        return;
+    int tty = STDIN_FILENO;
+
+    /* If launched in the background, stop until we are in the foreground. */
+    pid_t pgrp;
+    while ((pgrp = tcgetpgrp(tty)) != -1 && pgrp != getpgrp()) {
+        if (kill(-getpgrp(), SIGTTIN) != 0)
+            break;
+    }
+
+    signal(SIGTSTP, SIG_IGN);
+    signal(SIGTTIN, SIG_IGN);
+    signal(SIGTTOU, SIG_IGN);
+    signal(SIGQUIT, SIG_IGN);
+
+    sh->shell_pgid = getpid();
+    if (setpgid(sh->shell_pgid, sh->shell_pgid) < 0 && errno != EPERM)
+        return;                       /* cannot form our own group; skip */
+    if (tcsetpgrp(tty, sh->shell_pgid) < 0)
+        return;                       /* cannot own the terminal; skip */
+
+    sh->tty_fd      = tty;
+    sh->job_control = 1;
+    sh->opt_m       = 1;              /* monitor mode on by default when interactive */
+}
+
 int shell_run_stdin(shell_ctx_t *sh)
 {
     int interactive = isatty(STDIN_FILENO);
     sh->interactive = interactive;
+    shell_init_job_control(sh);
 
     lexer_t  lex;
     parser_t par;
