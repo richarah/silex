@@ -18,7 +18,7 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Generate benchmark HTML
         run: bash docs/benchmarks/generate.sh
       - name: Deploy to GitHub Pages
