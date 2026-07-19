@@ -173,6 +173,35 @@ static int signal_from_name(const char *name)
     return -1;
 }
 
+/* Reverse of signal_from_name: signal number -> bare name, or NULL if unknown. */
+static const char *signal_number_to_name(int sig)
+{
+    switch (sig) {
+    case SIGHUP:  return "HUP";
+    case SIGINT:  return "INT";
+    case SIGQUIT: return "QUIT";
+    case SIGILL:  return "ILL";
+    case SIGTRAP: return "TRAP";
+    case SIGABRT: return "ABRT";
+    case SIGBUS:  return "BUS";
+    case SIGFPE:  return "FPE";
+    case SIGKILL: return "KILL";
+    case SIGUSR1: return "USR1";
+    case SIGSEGV: return "SEGV";
+    case SIGUSR2: return "USR2";
+    case SIGPIPE: return "PIPE";
+    case SIGALRM: return "ALRM";
+    case SIGTERM: return "TERM";
+    case SIGCHLD: return "CHLD";
+    case SIGCONT: return "CONT";
+    case SIGSTOP: return "STOP";
+    case SIGTSTP: return "TSTP";
+    case SIGTTIN: return "TTIN";
+    case SIGTTOU: return "TTOU";
+    default:      return NULL;
+    }
+}
+
 /* Check if a command name is a POSIX special builtin.
  * Special builtins: break, :, continue, ., eval, exec, exit, export,
  * readonly, return, set, shift, times, trap, unset.
@@ -1659,20 +1688,16 @@ static int exec_builtin_kill(shell_ctx_t *sh, int argc, char **argv)
     int i = 1;
 
     if (i < argc && strcmp(argv[i], "-l") == 0) {
-        /* -l [n]: list signal names, or name the signal a status came from. */
+        /* -l [n]: with a number, print that signal's name (a status 128+sig from
+         * a killed process is accepted too); with none, list all names. */
         if (i + 1 < argc) {
             int n = 0;
             if (sh_parse_int(argv[i + 1], 0, 255, &n) == 0) {
-                if (n > 128) n -= 128;          /* exit status of a killed proc */
-                /* Print the bare name for a number. */
-                const char *names[NSIG];
-                for (int s = 0; s < NSIG; s++) names[s] = NULL;
-                static const char *known[] = {
-                    "HUP","INT","QUIT","ILL","TRAP","ABRT","BUS","FPE","KILL",
-                    "USR1","SEGV","USR2","PIPE","ALRM","TERM", NULL };
-                (void)names; (void)known;
-                printf("%d\n", n);              /* minimal: echo the number */
-                return 0;
+                if (n > 128) n -= 128;   /* exit status of a signal-killed process */
+                const char *nm = signal_number_to_name(n);
+                if (nm) { printf("%s\n", nm); return 0; }
+                fprintf(stderr, "silex: kill: %d: invalid signal number\n", n);
+                return 1;
             }
         }
         printf("HUP INT QUIT ILL TRAP ABRT BUS FPE KILL USR1 SEGV USR2 "
