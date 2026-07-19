@@ -1375,12 +1375,20 @@ int exec_node(shell_ctx_t *sh, node_t *node)
             sh->in_cond = 1;
             int cond = exec_node(sh, node->u.loop.cond);
             sh->in_cond = save_cond;
-            /* If condition returns flow control (return/break/continue), propagate immediately.
-             * Breaking rather than returning so the loop arena is released; rc >= FLOW_BREAK
-             * here, so the `rc < FLOW_BREAK` tail check below is a no-op either way. */
-            if (cond >= FLOW_BREAK) {
-                rc = cond;
-                break;
+            /* Flow control from the CONDITION acts on THIS loop, exactly as it
+             * does from the body: a single-level break/continue is absorbed here
+             * (it must not leak past the loop), only a multi-level one or a
+             * return propagates. `while case $# in (0) break;; esac; do ...` is
+             * the standard "loop while args remain" idiom; propagating that
+             * break raw broke the enclosing construct and hung modernish. */
+            if (cond == FLOW_RETURN) { rc = cond; break; }
+            if (cond == FLOW_BREAK) {
+                if (sh->break_level > 0) { sh->break_level--; rc = cond; break; }
+                rc = 0; break;
+            }
+            if (cond == FLOW_CONTINUE) {
+                if (sh->break_level > 0) { sh->break_level--; rc = cond; break; }
+                continue;   /* re-evaluate the condition */
             }
             if (cond != 0) break;
             rc = exec_node(sh, node->u.loop.body);
@@ -1410,10 +1418,16 @@ int exec_node(shell_ctx_t *sh, node_t *node)
             sh->in_cond = 1;
             int cond = exec_node(sh, node->u.loop.cond);
             sh->in_cond = save_cond;
-            /* See N_WHILE: break rather than return so the loop arena is released. */
-            if (cond >= FLOW_BREAK) {
-                rc = cond;
-                break;
+            /* Flow control from the condition acts on THIS loop; a single-level
+             * break/continue is absorbed, not propagated. See N_WHILE. */
+            if (cond == FLOW_RETURN) { rc = cond; break; }
+            if (cond == FLOW_BREAK) {
+                if (sh->break_level > 0) { sh->break_level--; rc = cond; break; }
+                rc = 0; break;
+            }
+            if (cond == FLOW_CONTINUE) {
+                if (sh->break_level > 0) { sh->break_level--; rc = cond; break; }
+                continue;   /* re-evaluate the condition */
             }
             if (cond == 0) break;
             rc = exec_node(sh, node->u.loop.body);

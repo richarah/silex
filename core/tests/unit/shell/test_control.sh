@@ -409,6 +409,20 @@ check "sigpipe: broken pipe from a pipeline stage does not kill the shell" \
     "$("$MB" -c 'yes 2>/dev/null | head -2 | tr "\n" " "; echo survived')" "y y survived"
 
 
+# --- break/continue in a loop CONDITION acts on that loop (POSIX) -------------
+# `while case $# in (0) break;; esac; do ... done` is the standard "loop while
+# args remain" idiom. A single-level break in the condition was propagated raw
+# instead of being absorbed, so it leaked past the loop (and hung modernish).
+check "condbreak: break in while-condition exits that loop only" \
+    "$("$MB" -c 'i=3; while case $i in (0) break;; esac; do i=$((i-1)); done; echo "done i=$i"')" "done i=0"
+check "condbreak: the shift-until-empty idiom terminates" \
+    "$("$MB" -c 'set -- a b c; while case $# in (0) break;; esac; do shift; done; echo "n=$#"')" "n=0"
+check "condbreak: multi-level break in a condition still propagates" \
+    "$("$MB" -c 'for a in 1 2; do i=0; while case $i in (2) break;; esac; do i=$((i+1)); done; echo "$a:$i"; done')" "$(printf '1:2\n2:2')"
+check "condbreak: break in until-condition" \
+    "$("$MB" -c 'i=0; until case $i in (3) break;; esac; [ 1 -eq 0 ]; do i=$((i+1)); done; echo "i=$i"')" "i=3"
+
+
 echo ""
 echo "control structure tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
