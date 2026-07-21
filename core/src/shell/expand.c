@@ -1819,7 +1819,11 @@ expand_result_t expand_word_full(shell_ctx_t *sh, const char *word)
     if (sh->at_quote_guard) {
         size_t elen = strlen(expanded);
         char *plain = arena_alloc(sh->scratch, elen + 1);
-        prot = malloc(elen + 1);
+        /* calloc, not malloc: `plain` (and so the split loop's reads of prot)
+         * is shorter than elen when guards were stripped, leaving a tail of prot
+         * unwritten. The loop never reads it, but zero-initialising keeps that
+         * provable (no uninitialised-read path) at negligible cost. */
+        prot = calloc(elen + 1, 1);
         size_t w = 0;
         int depth = 0;
         for (size_t r = 0; r < elen; r++) {
