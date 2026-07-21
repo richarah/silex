@@ -423,6 +423,21 @@ check "condbreak: break in until-condition" \
     "$("$MB" -c 'i=0; until case $i in (3) break;; esac; [ 1 -eq 0 ]; do i=$((i+1)); done; echo "i=$i"')" "i=3"
 
 
+# --- return from inside a loop terminates the loop AND the function -----------
+# `return` in a while/until/for body must break out and propagate; silex used to
+# re-run the body (an infinite loop for `while true`, which hung modernish's
+# thisshellhas). These would hang or over-run on the pre-fix binary.
+check "return from while-body exits the loop" \
+    "$("$MB" -c 'f() { while true; do return 7; done; echo no; }; f; echo rc=$?')" "rc=7"
+check "return from while+case-body exits" \
+    "$("$MB" -c 'f() { while true; do case x in (x) return 4;; esac; done; }; f; echo rc=$?')" "rc=4"
+check "return from until-body exits the loop" \
+    "$("$MB" -c 'f() { until false; do return 5; done; echo no; }; f; echo rc=$?')" "rc=5"
+check "return from for-body stops remaining iterations" \
+    "$("$MB" -c 'f() { for i in a b c; do echo $i; return 1; done; }; f >/dev/null; echo rc=$?; f | tr "\n" ,')" "$(printf 'rc=1\na,')"
+check "return mid-while stops further iterations" \
+    "$("$MB" -c 'f() { i=0; while [ $i -lt 5 ]; do i=$((i+1)); [ $i = 2 ] && return 9; echo n$i; done; }; out=$(f); rc=$?; echo "$out rc=$rc"')" "n1 rc=9"
+
 echo ""
 echo "control structure tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

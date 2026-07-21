@@ -1522,6 +1522,12 @@ int exec_node(shell_ctx_t *sh, node_t *node)
             }
             if (cond != 0) break;
             rc = exec_node(sh, node->u.loop.body);
+            /* `return` from the body must terminate the loop AND propagate up so
+             * the enclosing function returns; without this the condition is just
+             * re-evaluated and the body runs forever (an infinite loop for
+             * `while true`, e.g. modernish's thisshellhas: return from a nested
+             * case inside its arg-loop). break/continue are handled below. */
+            if (rc == FLOW_RETURN) break;
             if (rc == FLOW_BREAK) {
                 if (sh->break_level > 0) { sh->break_level--; break; }
                 rc = 0; break;
@@ -1561,6 +1567,12 @@ int exec_node(shell_ctx_t *sh, node_t *node)
             }
             if (cond == 0) break;
             rc = exec_node(sh, node->u.loop.body);
+            /* `return` from the body must terminate the loop AND propagate up so
+             * the enclosing function returns; without this the condition is just
+             * re-evaluated and the body runs forever (an infinite loop for
+             * `while true`, e.g. modernish's thisshellhas: return from a nested
+             * case inside its arg-loop). break/continue are handled below. */
+            if (rc == FLOW_RETURN) break;
             if (rc == FLOW_BREAK) {
                 if (sh->break_level > 0) { sh->break_level--; break; }
                 rc = 0; break;
@@ -1611,6 +1623,10 @@ int exec_node(shell_ctx_t *sh, node_t *node)
                 break;
             }
             rc = exec_node(sh, node->u.for_node.body);
+            /* `return` terminates the loop and propagates (see N_WHILE). Without
+             * this a `for` ran its remaining iterations after a return -- masked
+             * as a wrong result rather than a hang because the list is finite. */
+            if (rc == FLOW_RETURN) break;
             if (rc == FLOW_BREAK) {
                 if (sh->break_level > 0) { sh->break_level--; break; }
                 rc = 0; break;
