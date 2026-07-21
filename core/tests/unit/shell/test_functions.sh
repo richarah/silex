@@ -302,6 +302,13 @@ check "command -V reports a function" \
     "$("$MB" -c 'myfn() { :; }; command -V myfn')" "myfn is a function"
 check "command -v on a function succeeds (exit 0)" \
     "$("$MB" -c 'myfn() { :; }; command -v myfn >/dev/null; echo $?')" "0"
+# command must not double-expand its arguments (they are already expanded):
+check "command does not re-interpret a printf backslash" \
+    "$("$MB" -c 'command printf "%s\n" a b')" "$(printf 'a\nb')"
+check "command does not re-expand a literal dollar" \
+    "$("$MB" -c 'command printf "%s" "\$HOME lit"')" '$HOME lit'
+check "command preserves an embedded single quote" \
+    "$("$MB" -c "command printf '%s' \"it's ok\"")" "it's ok"
 
 echo ""
 echo "function tests: $PASS passed, $FAIL failed"

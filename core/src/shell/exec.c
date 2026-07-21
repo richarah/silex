@@ -3051,10 +3051,34 @@ static int exec_builtin_command(shell_ctx_t *sh, int argc, char **argv)
         return 1;
     }
 
+    /* argv[i..] are already expanded, but exec_simple_cmd() re-expands the words
+     * it is given. Passing them raw double-expands: `command printf '%s\n'` had
+     * its `\n` eaten to `n`, `command echo '$x'` would expand $x, etc. Single-
+     * quote each argument so the re-expansion reproduces it verbatim (single
+     * quotes are literal, and an embedded ' becomes '\''). */
+    int nargs = argc - i;
+    char **requoted = arena_alloc(sh->scratch, (size_t)(nargs + 1) * sizeof(char *));
+    for (int k = 0; k < nargs; k++) {
+        const char *s = argv[i + k];
+        size_t extra = 2;                       /* surrounding quotes */
+        for (const char *c = s; *c; c++) extra += (*c == '\'') ? 4 : 1;
+        char *q = arena_alloc(sh->scratch, extra + 1);
+        char *w = q;
+        *w++ = '\'';
+        for (const char *c = s; *c; c++) {
+            if (*c == '\'') { *w++ = '\''; *w++ = '\\'; *w++ = '\''; *w++ = '\''; }
+            else            { *w++ = *c; }
+        }
+        *w++ = '\'';
+        *w   = '\0';
+        requoted[k] = q;
+    }
+    requoted[nargs] = NULL;
+
     /* Execute name bypassing shell functions (builtins still apply, but without special builtin semantics) */
     int old_in_command = sh->in_command_builtin;
     sh->in_command_builtin = 1;
-    int rc = exec_simple_cmd(sh, argv + i, NULL, NULL);
+    int rc = exec_simple_cmd(sh, requoted, NULL, NULL);
     sh->in_command_builtin = old_in_command;
     return rc;
 }
