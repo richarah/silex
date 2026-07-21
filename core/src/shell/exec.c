@@ -625,6 +625,7 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
     /* 2. Expand all words */
     char **expanded = expand_words(sh, words);
     int cmd_rc = 0;
+    int alias_negate = 0;   /* set if an alias expanded to a leading `!` */
     if (unlikely(!expanded || !expanded[0]))
         goto cmd_done;
 
@@ -679,6 +680,18 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
             expanded = new_expanded;
             cmd = expanded[0];
         }
+    }
+
+    /* An alias can expand to a leading `!` -- modernish's `alias not='! '`, used
+     * pervasively as `not somecmd`. The pre-split alias argv is not re-parsed, so
+     * `!` would run as a command ("!: command not found"). Recognise it here:
+     * strip the `!` and negate the final status. A real `! cmd` is parsed as
+     * N_NOT and never arrives with argv[0]=="!". Require a following word so a
+     * lone `!` is left alone. */
+    while (expanded[0] && expanded[1] && strcmp(expanded[0], "!") == 0) {
+        alias_negate = !alias_negate;
+        expanded++;
+        cmd = expanded[0];
     }
 
     /* Count argc */
@@ -1002,6 +1015,12 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
     } /* end command dispatch block */
 
 cmd_done:
+    /* Negate the status for an alias-supplied leading `!` (see above), but never
+     * a break/continue/return sentinel -- those must propagate unchanged. */
+    if (alias_negate && cmd_rc != FLOW_BREAK && cmd_rc != FLOW_CONTINUE &&
+        cmd_rc != FLOW_RETURN)
+        cmd_rc = (cmd_rc == 0) ? 1 : 0;
+
     /* Free env-prefix assign storage (env was only modified in child processes) */
     for (int i = 0; i < nassigns; i++) {
         if (anames[i])

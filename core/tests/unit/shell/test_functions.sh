@@ -309,6 +309,15 @@ check "command does not re-expand a literal dollar" \
     "$("$MB" -c 'command printf "%s" "\$HOME lit"')" '$HOME lit'
 check "command preserves an embedded single quote" \
     "$("$MB" -c "command printf '%s' \"it's ok\"")" "it's ok"
+# An alias expanding to a leading `!` negates (modernish's `alias not='! '`):
+check "alias to '! ' negates a false command" \
+    "$("$MB" -c 'alias not="! "; not false; echo $?')" "0"
+check "alias to '! ' negates a true command" \
+    "$("$MB" -c 'alias not="! "; not true; echo $?')" "1"
+check "alias-! negates a function result" \
+    "$("$MB" -c 'alias not="! "; f() { return 3; }; not f; echo $?')" "0"
+check "real ! negation is unaffected" \
+    "$("$MB" -c '! false; echo $?')" "0"
 
 echo ""
 echo "function tests: $PASS passed, $FAIL failed"
