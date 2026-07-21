@@ -280,6 +280,22 @@ check "scope: function modifies an existing global" \
 check "scope: nested function assignment reaches the top" \
     "$("$MB" -c 'o() { i() { DEEP=x; }; i; }; o; echo "[$DEEP]"')" "[x]"
 
+# --- `command NAME` bypasses aliases and functions of NAME -------------------
+# POSIX: command runs the builtin/external, not a function or alias of the same
+# name. `alias exit=fn; fn() { command exit; }` (modernish's pattern) must reach
+# the real exit, not recurse -- silex used to loop into a stack-overflow crash.
+check "command bypasses an alias" \
+    "$("$MB" -c 'alias echo="echo ALIASED"; command echo hi')" "hi"
+check "command bypasses a function" \
+    "$("$MB" -c 'echo() { printf FUNC; }; command echo real')" "real"
+check "command exit through an exit-alias does not recurse" \
+    "$("$MB" -c 'alias exit=myf; myf() { echo once; command exit 3; }; exit'; echo "rc=$?")" "$(printf 'once\nrc=3')"
+# ...but the flag must NOT leak into code that command runs:
+check "command eval still resolves functions in its code" \
+    "$("$MB" -c 'f() { echo infunc; }; command eval f')" "infunc"
+check "command eval runs multiple statements with normal lookup" \
+    "$("$MB" -c 'g() { printf G; }; command eval "g; echo X"')" "$(printf 'GX')"
+
 echo ""
 echo "function tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

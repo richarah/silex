@@ -631,8 +631,12 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
     {
     const char *cmd = expanded[0];
 
-    /* Alias expansion: check if first word is an alias */
-    const char *alias_value = alias_lookup(sh, cmd);
+    /* Alias expansion: check if first word is an alias.
+     * Skipped under `command`, which must reach the real builtin/external and
+     * bypass aliases and functions. `alias exit=_Msh_doExit` with _Msh_doExit
+     * calling `command exit` (modernish) would otherwise re-expand the alias and
+     * recurse into a stack-overflow crash. */
+    const char *alias_value = sh->in_command_builtin ? NULL : alias_lookup(sh, cmd);
     if (alias_value) {
         /* If alias expands to empty string, treat as no-op */
         if (alias_value[0] == '\0') {
@@ -747,8 +751,9 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
         goto cmd_done;
     }
 
-    /* 4. Check for shell function (user-defined functions override applets) */
-    node_t *fnbody = func_lookup(sh, cmd);
+    /* 4. Check for shell function (user-defined functions override applets).
+     * `command NAME` bypasses functions (POSIX), so skip the lookup then. */
+    node_t *fnbody = sh->in_command_builtin ? NULL : func_lookup(sh, cmd);
     if (fnbody) {
         if (sh->call_depth >= SHELL_MAX_CALL_DEPTH) {
             fprintf(stderr, "silex: sh: %s: maximum call depth (%d) exceeded\n",
@@ -2143,7 +2148,12 @@ static int exec_builtin_eval(shell_ctx_t *sh, int argc, char **argv)
         if (i > 1) sb_appendc(&sb, ' ');
         sb_append(&sb, argv[i]);
     }
+    /* `command eval CODE` bypasses functions/aliases only for resolving `eval`
+     * itself; CODE runs with normal lookup. Clear the flag for the nested run. */
+    int saved_icb = sh->in_command_builtin;
+    sh->in_command_builtin = 0;
     int rc = shell_run_string(sh, sb_str(&sb));
+    sh->in_command_builtin = saved_icb;
     sb_free(&sb);
     return rc;
 }
@@ -2880,7 +2890,13 @@ static int exec_builtin_source(shell_ctx_t *sh, int argc, char **argv)
     }
     fclose(fp);
 
-    return shell_run_file(sh, actual_path);
+    /* `command . FILE` bypasses functions only for resolving the dot builtin;
+     * the sourced file runs with normal lookup. Clear the flag for the run. */
+    int saved_icb = sh->in_command_builtin;
+    sh->in_command_builtin = 0;
+    int rc = shell_run_file(sh, actual_path);
+    sh->in_command_builtin = saved_icb;
+    return rc;
 }
 
 static int exec_builtin_break(shell_ctx_t *sh, int argc, char **argv)
