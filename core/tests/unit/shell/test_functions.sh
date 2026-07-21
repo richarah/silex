@@ -295,6 +295,13 @@ check "command eval still resolves functions in its code" \
     "$("$MB" -c 'f() { echo infunc; }; command eval f')" "infunc"
 check "command eval runs multiple statements with normal lookup" \
     "$("$MB" -c 'g() { printf G; }; command eval "g; echo X"')" "$(printf 'GX')"
+# command -v/-V report user-defined functions (POSIX; modernish's _Msh_fnOutput):
+check "command -v reports a function" \
+    "$("$MB" -c 'myfn() { :; }; command -v myfn')" "myfn"
+check "command -V reports a function" \
+    "$("$MB" -c 'myfn() { :; }; command -V myfn')" "myfn is a function"
+check "command -v on a function succeeds (exit 0)" \
+    "$("$MB" -c 'myfn() { :; }; command -v myfn >/dev/null; echo $?')" "0"
 
 echo ""
 echo "function tests: $PASS passed, $FAIL failed"

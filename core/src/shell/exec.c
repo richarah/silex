@@ -3005,6 +3005,15 @@ static int exec_builtin_command(shell_ctx_t *sh, int argc, char **argv)
                 return 0;
             }
         }
+        /* User-defined function: a function shadows a regular builtin at
+         * execution, and POSIX `command -v`/`-V` report it. Without this,
+         * `command -V isset` failed for modernish's function-detection probe
+         * (_Msh_fnOutput), aborting its initialisation. */
+        if (func_lookup(sh, name)) {
+            if (verbose) printf("%s is a function\n", name);
+            else         printf("%s\n", name);
+            return 0;
+        }
         /* Check shell builtin */
         if (find_shell_builtin(name)) {
             if (verbose) printf("%s is a shell builtin\n", name);
