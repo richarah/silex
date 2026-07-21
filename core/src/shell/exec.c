@@ -1722,9 +1722,9 @@ static int exec_builtin_exit(shell_ctx_t *sh, int argc, char **argv)
 
 /* kill [-s signal | -signal | -signum] pid...   /   kill -l [status]
  *
- * Sends a signal (default TERM) to each process. PIDs are numeric or a process
- * group (a negative number). Job specs (%n) are not handled yet -- that is part
- * of full job control -- but this covers what scripts and modernish need
+ * Sends a signal (default TERM) to each target. Targets are numeric PIDs, a
+ * process group (a negative number), or a job spec (%n/%+/%-/%string), which
+ * signals the whole process group. Also covers what scripts and modernish need
  * (e.g. `kill -s PIPE "$$"` to probe SIGPIPE behaviour). */
 static int exec_builtin_kill(shell_ctx_t *sh, int argc, char **argv)
 {
@@ -1783,19 +1783,22 @@ static int exec_builtin_kill(shell_ctx_t *sh, int argc, char **argv)
     int rc = 0;
     for (; i < argc; i++) {
         pid_t target;
-        if (argv[i][0] == '%') {
+        const char *arg = argv[i];
+        if (!arg)
+            break;                    /* argv is NULL-terminated at argc */
+        if (arg[0] == '%') {
             /* Job spec: signal the whole process group (negative pgid). */
-            job_t *j = parse_jobspec(sh, argv[i]);
+            job_t *j = parse_jobspec(sh, arg);
             if (!j) {
-                fprintf(stderr, "silex: kill: %s: no such job\n", argv[i]);
+                fprintf(stderr, "silex: kill: %s: no such job\n", arg);
                 rc = 1;
                 continue;
             }
             target = -j->pgid;
         } else {
             int pid;
-            if (sh_parse_int(argv[i], INT_MIN, INT_MAX, &pid) != 0) {
-                fprintf(stderr, "silex: kill: %s: arguments must be process IDs or job specs\n", argv[i]);
+            if (sh_parse_int(arg, INT_MIN, INT_MAX, &pid) != 0) {
+                fprintf(stderr, "silex: kill: %s: arguments must be process IDs or job specs\n", arg);
                 rc = 1;
                 continue;
             }
