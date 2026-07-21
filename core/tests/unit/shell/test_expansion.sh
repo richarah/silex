@@ -285,6 +285,27 @@ check "ifs: whitespace run collapses"                    "$(ifsflds 'a  b' ' ')"
 check "ifs: leading/trailing whitespace trimmed"         "$(ifsflds '  a  b  ' ' ')" "<a><b>"
 check "ifs: leading non-ws keeps empty first field"      "$(ifsflds '::b' ': ')" "<><><b>"
 
+# --- quote-aware field splitting inside ${x+word}/${x-word} -------------------
+# A word that WILL be IFS-split (unquoted ${...}) can still hold quoted regions
+# whose bytes must not split. Values checked against dash. These all produced
+# split fields (e.g. [a][b]) before the quote-guard fix.
+MB="$SILEX"
+qflds() { "$MB" -c "$1"; }
+check "brace-alt: quoted literal is one field"        "$(qflds 'x=1; printf "[%s]" ${x+"a b"}')"        "[a b]"
+check "brace-alt: quoted \$v is one field"             "$(qflds 'x=1; v="a b"; printf "[%s]" ${x+"$v"}')" "[a b]"
+check "brace-alt: :+ quoted literal one field"        "$(qflds 'x=1; printf "[%s]" ${x:+"a b"}')"       "[a b]"
+check "brace-alt: quoted double space preserved"      "$(qflds 'x=1; v="a  b"; printf "[%s]" ${x+"$v"}')" "[a  b]"
+check "brace-alt: :- default quoted, x unset"         "$(qflds 'unset x; v="a b"; printf "[%s]" ${x-"$v"}')" "[a b]"
+check "brace-alt: mixed a \"b c\" d -> three fields"  "$(qflds 'x=1; printf "[%s]" ${x+a "b c" d}')"    "[a][b c][d]"
+check "brace-alt: leading quoted then bare"           "$(qflds 'x=1; printf "[%s]" ${x+"a b" c}')"      "[a b][c]"
+check "brace-alt: adjacent quote concatenates"        "$(qflds 'x=1; v="p q"; printf "[%s]" ${x+A"$v"B}')" "[Ap qB]"
+check "brace-alt: quoted IFS char not split"          "$(qflds 'x=1; IFS=:; printf "[%s]" ${x+"a:b"}')" "[a:b]"
+check "brace-alt: quoted \$v with IFS char"            "$(qflds 'x=1; IFS=:; v=p:q; printf "[%s]" ${x+"$v"}')" "[p:q]"
+check "brace-alt: unquoted \$v still splits"           "$(qflds 'x=1; v="p q"; printf "[%s]" ${x+A$v B}')" "[Ap][q][B]"
+# Guards must not disturb the established cases:
+check "guard-neutral: \"\$@\" separate fields"         "$(qflds 'set -- "a b" c; printf "[%s]" "$@"')"   "[a b][c]"
+check "guard-neutral: unquoted \$v splits"             "$(qflds 'v="a b c"; printf "[%s]" $v')"          "[a][b][c]"
+
 echo ""
 echo "expansion tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

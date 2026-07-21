@@ -94,6 +94,23 @@ typedef struct shell_ctx {
      * failing modernish's FTL_ROASSIGN/FTL_CASECC init checks. The splitter now
      * runs only when this flag confirms the \x01 came from "$@", not from data. */
     int         at_field_boundary;
+    /* Quote-aware field splitting. A word that WILL be IFS-split (an unquoted
+     * expansion somewhere in it) may still contain quoted sub-regions whose
+     * bytes must not be split -- e.g. `${x+"a b"}` is one field `a b`, and
+     * `${x+A"$v"B}` with v="p q" is the single field `Ap qB`. A coarse
+     * whole-word "does it split" flag cannot express that; dash tracks quoting
+     * per character. expand_into() brackets each quoted region of such a word
+     * with in-band QG_OPEN/QG_CLOSE bytes (\x02/\x03); the field splitter then
+     * protects the bytes between them and strips the markers.
+     *
+     * emit_guards is set ONLY for words that will be split, so a fully-quoted
+     * word (`"$v"`, `"$@"`) emits no markers and control-byte data in it is
+     * never touched. quote_guard_depth coalesces nested quotes to a single
+     * region (so a literal marker in data cannot unbalance the emitter), and
+     * at_quote_guard tells the splitter markers are present to honor and strip. */
+    int         emit_guards;       /* 1 while expanding a word that will IFS-split */
+    int         quote_guard_depth; /* nesting depth of open quoted regions */
+    int         at_quote_guard;    /* set once a QG_OPEN was actually emitted */
     /* Exit status of the most recent command substitution performed during word
      * expansion. POSIX 2.9.1: a command with no command name but containing a
      * command substitution completes with the status of the LAST command

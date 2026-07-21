@@ -1225,6 +1225,29 @@ static const char *skip_dquote_end(const char *p)
  * in_dquote: 1 when inside "..."
  * ------------------------------------------------------------------------- */
 
+/* In-band markers bracketing a quoted (non-splittable) region of a word that
+ * will otherwise undergo IFS field splitting. See shell.h (emit_guards). */
+#define QG_OPEN  '\x02'
+#define QG_CLOSE '\x03'
+
+/* Open/close a quoted region. Only the outermost open/close emit a marker
+ * (depth coalesces nested quotes), and only when this word will be split. */
+static void guard_open(shell_ctx_t *sh, strbuf_t *out)
+{
+    if (!sh->emit_guards) return;
+    if (sh->quote_guard_depth++ == 0) {
+        sb_appendc(out, QG_OPEN);
+        sh->at_quote_guard = 1;
+    }
+}
+
+static void guard_close(shell_ctx_t *sh, strbuf_t *out)
+{
+    if (!sh->emit_guards) return;
+    if (sh->quote_guard_depth > 0 && --sh->quote_guard_depth == 0)
+        sb_appendc(out, QG_CLOSE);
+}
+
 static void expand_into(shell_ctx_t *sh, const char *word, strbuf_t *out,
                         int in_dquote)
 {
@@ -1234,8 +1257,10 @@ static void expand_into(shell_ctx_t *sh, const char *word, strbuf_t *out,
         /* Single quotes: literal (only outside double-quotes) */
         if (*p == '\'' && !in_dquote) {
             p++; /* skip opening ' */
+            guard_open(sh, out);
             while (*p && *p != '\'')
                 sb_appendc(out, *p++);
+            guard_close(sh, out);
             if (*p == '\'') p++;
             continue;
         }
@@ -1243,7 +1268,9 @@ static void expand_into(shell_ctx_t *sh, const char *word, strbuf_t *out,
         /* Double quotes */
         if (*p == '"' && !in_dquote) {
             p++; /* skip opening " */
+            guard_open(sh, out);
             expand_into(sh, p, out, 1);
+            guard_close(sh, out);
             /* Advance p past the double-quoted content (skip_dquote_end handles
              * nested $(...), ${...}, $((...)). expand_into already output the
              * content; we just need to advance the outer pointer. */
@@ -1762,12 +1789,49 @@ expand_result_t expand_word_full(shell_ctx_t *sh, const char *word)
     int do_ifs_split = has_unquoted_expansion(word);
     int do_glob      = !sh->opt_f && has_unquoted_glob(word);
 
+    /* Only a word that will be IFS-split needs its quoted sub-regions marked;
+     * emitting guards only here means fully-quoted words are byte-for-byte
+     * untouched (no marker stripping over their data). Reset per word. */
+    sh->emit_guards       = do_ifs_split;
+    sh->quote_guard_depth = 0;
+    sh->at_quote_guard    = 0;
+
     char *expanded = expand_word(sh, word);
+    sh->emit_guards = 0;
     if (!expanded) {
         char **arr = arena_alloc(sh->scratch, sizeof(char *));
         arr[0] = NULL;
         res.words = arr;
         return res;
+    }
+
+    /* If quoted regions were marked, split `expanded` into the guard-free text
+     * `plain` plus a parallel `prot` array (prot[i]=1 => byte i was inside a
+     * quoted region and must not act as an IFS delimiter). Everything below
+     * works on `plain`; only the IFS loop consults `prot`. When no guards were
+     * emitted, plain == expanded and prot stays NULL (unchanged behaviour). */
+    /* Residual limit: a literal QG_OPEN/QG_CLOSE byte (0x02/0x03) that is itself
+     * data inside a quoted region of a splitting word is stripped here, like a
+     * literal 0x01 in a "$@" word. Both are control bytes almost never present
+     * in real field-split data; the common paths (fully-quoted words, "$@")
+     * never reach this code, so their data is untouched. */
+    char *prot = NULL;
+    if (sh->at_quote_guard) {
+        size_t elen = strlen(expanded);
+        char *plain = arena_alloc(sh->scratch, elen + 1);
+        prot = malloc(elen + 1);
+        size_t w = 0;
+        int depth = 0;
+        for (size_t r = 0; r < elen; r++) {
+            char c = expanded[r];
+            if (c == QG_OPEN)  { depth++; continue; }
+            if (c == QG_CLOSE) { if (depth > 0) depth--; continue; }
+            plain[w] = c;
+            if (prot) prot[w] = depth > 0 ? 1 : 0;
+            w++;
+        }
+        plain[w] = '\0';
+        expanded = plain;
     }
 
     /* "$@" word-boundary split: \x01 markers inserted by expand_into for "$@".
@@ -1811,7 +1875,7 @@ expand_result_t expand_word_full(shell_ctx_t *sh, const char *word)
                 free(f2);
             }
             free(copy2);
-            if (res.words) return res;
+            if (res.words) { free(prot); return res; }
         }
     }
 
@@ -1854,6 +1918,7 @@ expand_result_t expand_word_full(shell_ctx_t *sh, const char *word)
         arr[1] = NULL;
         res.words = arr;
         res.count = 1;
+        free(prot);
         return res;
     }
 
@@ -1876,9 +1941,15 @@ expand_result_t expand_word_full(shell_ctx_t *sh, const char *word)
     {
     int cap   = 0;
     char *cp  = copy;
-#define IFS_IS(c)    ((c) != '\0' && strchr(ifs, (unsigned char)(c)) != NULL)
-#define IFS_WS(c)    (IFS_IS(c) && isspace((unsigned char)(c)))
-#define IFS_NWS(c)   (IFS_IS(c) && !isspace((unsigned char)(c)))
+    /* Pointer-based so a byte inside a quoted region (prot[] set) is never a
+     * delimiter, even when it is an IFS character -- `${x+"a:b"}` with IFS=:
+     * stays one field. prot is indexed by position in `copy` (== position in
+     * the guard-free `expanded`). */
+#define PROT_AT(ptr) (prot != NULL && prot[(size_t)((ptr) - copy)])
+#define IFS_IS(ptr)  (*(ptr) != '\0' && !PROT_AT(ptr) && \
+                      strchr(ifs, (unsigned char)*(ptr)) != NULL)
+#define IFS_WS(ptr)  (IFS_IS(ptr) && isspace((unsigned char)*(ptr)))
+#define IFS_NWS(ptr) (IFS_IS(ptr) && !isspace((unsigned char)*(ptr)))
 #define EMIT(s) do {                                                          \
         if (nfields >= cap) {                                                 \
             int ncap_ = cap ? cap * 2 : 8;                                    \
@@ -1890,11 +1961,11 @@ expand_result_t expand_word_full(shell_ctx_t *sh, const char *word)
     } while (0)
 
     /* Ignore leading IFS whitespace. */
-    while (IFS_WS(*cp)) cp++;
+    while (IFS_WS(cp)) cp++;
 
     while (*cp) {
         char *fstart = cp;
-        while (*cp && !IFS_IS(*cp)) cp++;
+        while (*cp && !IFS_IS(cp)) cp++;
         char *fend = cp;                 /* field is [fstart, fend) */
 
         if (*cp == '\0') {
@@ -1906,13 +1977,14 @@ expand_result_t expand_word_full(shell_ctx_t *sh, const char *word)
         /* Consume one delimiter: IFS whitespace, then at most one IFS
          * non-whitespace, then trailing IFS whitespace. */
         int saw_nws = 0;
-        while (IFS_WS(*cp)) cp++;
-        if (IFS_NWS(*cp)) { saw_nws = 1; cp++; while (IFS_WS(*cp)) cp++; }
+        while (IFS_WS(cp)) cp++;
+        if (IFS_NWS(cp)) { saw_nws = 1; cp++; while (IFS_WS(cp)) cp++; }
 
         /* A whitespace-only delimiter collapses empty fields; a non-whitespace
          * delimiter preserves the (possibly empty) field before it. */
         if (saw_nws || fend > fstart) { *fend = '\0'; EMIT(fstart); }
     }
+#undef PROT_AT
 #undef IFS_IS
 #undef IFS_WS
 #undef IFS_NWS
@@ -2005,6 +2077,7 @@ no_fields:
 
 done:
     free(fields);
+    free(prot);
 
     /* NULL-terminate */
     if (nfinal >= fcap) {
