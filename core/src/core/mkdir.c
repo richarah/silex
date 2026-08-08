@@ -141,6 +141,7 @@ int applet_mkdir(int argc, char **argv)
     int opt_p = 0;
     int opt_v = 0;
     mode_t opt_m = 0777;
+    int opt_m_set = 0;   /* -m/--mode was given: set that mode EXACTLY (no umask) */
     int ret = 0;
     int i;
 
@@ -162,6 +163,7 @@ int applet_mkdir(int argc, char **argv)
                 return 1;
             }
             opt_m = m;
+            opt_m_set = 1;
             continue;
         }
         if (strcmp(arg, "--parents") == 0) { opt_p = 1; continue; }
@@ -193,6 +195,7 @@ int applet_mkdir(int argc, char **argv)
                     return 1;
                 }
                 opt_m = m;
+                opt_m_set = 1;
                 break;
             }
             default:
@@ -211,16 +214,34 @@ int applet_mkdir(int argc, char **argv)
 
     for (; i < argc; i++) {
         const char *dir = argv[i];
+        int created = 0;
 
         if (opt_p) {
             if (mkdir_p(dir, opt_m, opt_v) != 0)
                 ret = 1;
+            else
+                created = 1;
         } else {
             if (mkdir(dir, opt_m) != 0) {
                 err_sys("mkdir", "%s", dir);
                 ret = 1;
-            } else if (opt_v) {
-                printf("mkdir: created directory '%s'\n", dir);
+            } else {
+                created = 1;
+                if (opt_v)
+                    printf("mkdir: created directory '%s'\n", dir);
+            }
+        }
+
+        /* POSIX: `-m MODE` sets the target's permission bits EXACTLY -- they are
+         * not further reduced by the umask (unlike the default mode). mkdir(2)
+         * DOES apply the umask, so a `mkdir -m700` under `umask 0777` produced a
+         * mode-000 directory the owner could not even cd into (modernish's
+         * `mkcd -p -m700 .../globtest` in io.t). chmod(2) is not umask-filtered,
+         * so force the requested mode on the target afterwards. */
+        if (created && opt_m_set) {
+            if (chmod(dir, opt_m) != 0) {
+                err_sys("mkdir", "%s", dir);
+                ret = 1;
             }
         }
     }

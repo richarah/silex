@@ -2477,128 +2477,19 @@ static int exec_builtin_read(shell_ctx_t *sh, int argc, char **argv)
 static int exec_builtin_printf_sh(shell_ctx_t *sh, int argc, char **argv)
 {
     (void)sh;
-    if (argc < 2) return 0;
-
-    const char *fmt = argv[1];
-    int argi = 2;
-
-    /* POSIX: repeat format until all arguments consumed */
-    do {
-        int consumed_arg = 0;
-        const char *p = fmt;
-
-        while (*p) {
-            if (*p == '\\') {
-                p++;
-                switch (*p) {
-                case 'n':  putchar('\n'); break;
-                case 't':  putchar('\t'); break;
-                case 'r':  putchar('\r'); break;
-                case '\\': putchar('\\'); break;
-                case '0': {
-                    /* Octal escape */
-                    unsigned char oc = 0;
-                    int nd = 0;
-                    while (nd < 3 && p[1] >= '0' && p[1] <= '7') {
-                        oc = (unsigned char)(oc * 8 + (p[1] - '0'));
-                        p++; nd++;
-                    }
-                    putchar((int)oc);
-                    break;
-                }
-                default: putchar('\\'); putchar(*p); break;
-                }
-                p++;
-            } else if (*p == '%' && p[1] != '\0') {
-                p++;
-                switch (*p) {
-                case 's':
-                    if (argi < argc) {
-                        fputs(argv[argi++], stdout);
-                        consumed_arg = 1;
-                    }
-                    break;
-                case 'b': {
-                    /* %b - interpret backslash escapes */
-                    if (argi < argc) {
-                        const char *s = argv[argi++];
-                        consumed_arg = 1;
-                        while (*s) {
-                            if (*s == '\\' && s[1]) {
-                                s++;
-                                switch (*s) {
-                                case 'n':  putchar('\n'); break;
-                                case 't':  putchar('\t'); break;
-                                case 'r':  putchar('\r'); break;
-                                case 'b':  putchar('\b'); break;
-                                case 'f':  putchar('\f'); break;
-                                case 'v':  putchar('\v'); break;
-                                case '\\': putchar('\\'); break;
-                                case '0': case '1': case '2': case '3':
-                                case '4': case '5': case '6': case '7': {
-                                    unsigned char oc = *s - '0';
-                                    if (s[1] >= '0' && s[1] <= '7') {
-                                        oc = (unsigned char)(oc * 8 + (s[1] - '0'));
-                                        s++;
-                                        if (s[1] >= '0' && s[1] <= '7') {
-                                            oc = (unsigned char)(oc * 8 + (s[1] - '0'));
-                                            s++;
-                                        }
-                                    }
-                                    putchar((int)oc);
-                                    break;
-                                }
-                                case 'c':
-                                    /* %b \c - terminate output */
-                                    return 0;
-                                default:
-                                    putchar('\\');
-                                    putchar(*s);
-                                    break;
-                                }
-                                s++;
-                            } else {
-                                putchar(*s++);
-                            }
-                        }
-                    }
-                    break;
-                }
-                case 'd': {
-                    long v = argi < argc ? atol(argv[argi++]) : 0;
-                    if (argi > 2) consumed_arg = 1;
-                    printf("%ld", v);
-                    break;
-                }
-                case 'f': {
-                    double v = argi < argc ? atof(argv[argi++]) : 0.0;
-                    if (argi > 2) consumed_arg = 1;
-                    printf("%f", v);
-                    break;
-                }
-                case '%':
-                    putchar('%');
-                    break;
-                default:
-                    putchar('%');
-                    putchar(*p);
-                    break;
-                }
-                p++;
-            } else {
-                putchar(*p++);
-            }
-        }
-
-        /* Repeat if there are more arguments and we consumed at least one this pass */
-        if (!consumed_arg) break;
-    } while (argi < argc);
-
-    /* Check for write errors */
-    if (fflush(stdout) != 0 || ferror(stdout))
+    /* Delegate to the full printf applet, which handles flag characters, field
+     * width, precision, and the %o/%u/%x/%X/%c/%q/%e/%g conversions. The former
+     * in-shell version understood only %s/%b/%d/%f/%% and printed everything
+     * else -- e.g. `%03d`, `%-40s` -- literally, so modernish's test runner
+     * (`printf '  %03d: %-40s - %s\\n' ...`) showed its format string instead of
+     * the formatted results. */
+    const applet_t *ap = find_applet_by_name("printf");
+    int rc = ap ? ap->fn(argc, argv) : 1;
+    if (fflush(stdout) != 0 || ferror(stdout)) {
+        clearerr(stdout);
         return 1;
-
-    return 0;
+    }
+    return rc;
 }
 
 /* Minimal test / [ implementation */
