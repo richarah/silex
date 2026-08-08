@@ -88,6 +88,17 @@ CFLAGS_DEBUG   = $(CFLAGS_COMMON) \
 
 CFLAGS ?= $(CFLAGS_RELEASE)
 
+# --- Optional: link with mold (opt-in: `make MOLD=1`, needs mold in PATH) ------
+# Measured (2026-08, glibc LTO release link, 54 objects): mold 2.32 cut the final
+# link ~23% (~2.93s -> ~2.25s vs GNU ld) and produced an identical, passing
+# binary. Build-time only (no runtime effect), so opt-in rather than default.
+# mimalloc was measured too and DROPPED: no gain (the arena absorbs the hot
+# allocations) and ~2x SLOWER on fork-heavy shell workloads, which pay its
+# per-process init on every child (e.g. 5k `$(...)`: 1.33s -> 2.47s).
+ifdef MOLD
+    EXTRA_LDFLAGS += -fuse-ld=mold
+endif
+
 # Append-only hooks, so a caller (e.g. the PGO targets) can add flags without
 # clobbering the feature-test macros the sources need. Overriding CFLAGS wholesale
 # is how path.c loses its realpath() declaration.
