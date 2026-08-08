@@ -672,9 +672,11 @@ static node_t *parse_for_cmd(parser_t *p)
  * ------------------------------------------------------------------------- */
 static node_t *parse_case_cmd(parser_t *p)
 {
-    /* CASE already consumed */
+    /* CASE already consumed. The subject word may lex as a reserved word
+     * (`case in in ...`, `case do in ...`): reserved words are only special in
+     * command position, so accept any token that carries text. */
     token_t word_tok = consume(p);
-    if (word_tok.type != TOK_WORD && word_tok.type != TOK_ASSIGN) {
+    if (word_tok.text == NULL) {
         parser_error(p, "expected word in case");
         return NULL;
     }
@@ -697,14 +699,16 @@ static node_t *parse_case_cmd(parser_t *p)
         if (peek(p).type == TOK_LPAREN)
             consume(p);
 
-        /* At least one pattern word */
-        if (peek(p).type != TOK_WORD && peek(p).type != TOK_ASSIGN) {
-            parser_error(p, "expected pattern in case item");
-            wl_free(&pats);
-            return NULL;
-        }
-
+        /* One or more '|'-separated patterns. A pattern alternative may lex as a
+         * reserved word or operator token -- `( in )`, `( ! )`, `( { )`,
+         * `( -* | \( | ! )` (modernish find.mm) -- so accept any token that
+         * carries text; only structural tokens ')' '|' ';;' etc. have none. */
         for (;;) {
+            if (peek(p).text == NULL) {
+                parser_error(p, "expected pattern in case item");
+                wl_free(&pats);
+                return NULL;
+            }
             token_t pat = consume(p);
             wl_push(&pats, pat.text);
             if (peek(p).type == TOK_PIPE) {

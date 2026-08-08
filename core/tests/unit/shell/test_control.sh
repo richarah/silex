@@ -174,6 +174,22 @@ case "$V" in
 esac')
 check "case: wildcard * matched" "$got" "matched_default"
 
+# case with reserved words / operators as patterns (they are only special in
+# command position; POSIX allows them literally as case patterns -- modernish's
+# var/loop/find.mm uses `( in )`, `( -* | \( | ! )`).
+check "case: reserved word 'in' as a pattern" \
+    "$("$MB" -c 'case in in ( in ) echo m;; ( * ) echo o;; esac')" "m"
+check "case: keyword subject and pattern" \
+    "$("$MB" -c 'case do in ( do ) echo d;; esac')" "d"
+check "case: '!' as a lone pattern" \
+    "$("$MB" -c 'case "!" in ( ! ) echo bang;; esac')" "bang"
+check "case: '{' as a lone pattern" \
+    "$("$MB" -c 'case "{" in ( { ) echo brace;; esac')" "brace"
+check "case: mixed operator/glob alternation ( -* | \\( | ! )" \
+    "$("$MB" -c 'case "!" in ( -* | \( | ! ) echo m;; ( * ) echo o;; esac')" "m"
+check "case: keyword in a |-alternation" \
+    "$("$MB" -c 'case then in ( if | then | fi ) echo kw;; ( * ) echo o;; esac')" "kw"
+
 # case with | alternation
 got=$("$MB" -c '
 V=yes
