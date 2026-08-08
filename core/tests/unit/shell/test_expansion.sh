@@ -158,6 +158,27 @@ check "nested command substitution" "$got" "deep"
 got=$("$MB" -c 'echo `echo backtick`')
 check "backtick command substitution" "$got" "backtick"
 
+# --- Arithmetic: parameter expansion happens BEFORE evaluation (POSIX 2.6.4) ---
+# ${V} yields the referenced variable, and an expansion can build/join a name.
+# Checked against dash; all fail (give 0) on the pre-fix binary.
+check "arith \${V} is the referenced variable" \
+    "$("$MB" -c 'V=foo; foo=3; echo $(( ${V} ))')" "3"
+check "arith expansion joins into a name (\${n}y)" \
+    "$("$MB" -c 'n=x; xy=5; echo $(( ${n}y ))')" "5"
+check "arith \$x uses x's value as the operand" \
+    "$("$MB" -c 'x=5; echo $(( $x + 1 ))')" "6"
+check "arith built name is an lvalue (\${V}_SP += 1)" \
+    "$("$MB" -c 'V=foo; foo_SP=3; echo $(( ${V}_SP += 1 )); echo $foo_SP')" "$(printf '4\n4')"
+check "arith name built from a literal prefix + expansion" \
+    "$("$MB" -c 'V=q; pre_q_x=9; echo $(( pre_${V}_x ))')" "9"
+check "arith numeric \${v} stays a number, not a var name" \
+    "$("$MB" -c 'v=5; echo $(( ${v} * 2 ))')" "10"
+# Regression guards for the paths that already worked:
+check "arith \$# still resolves in arithmetic" \
+    "$("$MB" -c 'set -- a b c d; echo $(( $# - 1 ))')" "3"
+check "arith command substitution still works" \
+    "$("$MB" -c 'echo $(( $(echo 6) + 1 ))')" "7"
+
 # --- Arithmetic $((expr)) ---
 got=$("$MB" -c 'echo $((2 + 3))')
 check "arithmetic \$((2 + 3))" "$got" "5"

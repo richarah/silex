@@ -714,6 +714,58 @@ static void arith_skip_ws(arith_ctx_t *ac)
 static long arith_expr(arith_ctx_t *ac);
 static long arith_ternary(arith_ctx_t *ac);
 
+/* Read one variable operand into `buf`, substituting any embedded ${...} or
+ * $name parameter expansion by its VALUE (POSIX 2.6.4: the arithmetic
+ * expression is parameter-expanded first, then evaluated). A run of literal
+ * name characters is copied as-is; a $-reference is replaced by its value. So:
+ *   ${V}   (V=foo)                 -> operand "foo"   (then evaluated as var foo)
+ *   $x     (x=5)                   -> operand "5"     (numeric literal)
+ *   _Msh__V${_Msh_push_V}__SP      -> one built name  (modernish push/pop)
+ * Without this, arith resolved `${V}` by atol(V's value), so `${V}` with a
+ * non-numeric value was 0 and a name could not be built from an expansion. */
+static void arith_read_operand(arith_ctx_t *ac, char *buf, size_t bufsz)
+{
+    size_t ni = 0;
+    for (;;) {
+        char c = ac->src[ac->pos];
+        if (c == '$') {
+            ac->pos++;
+            char inner[256];
+            size_t ii = 0;
+            if (ac->src[ac->pos] == '{') {
+                ac->pos++;
+                while (ac->src[ac->pos] && ac->src[ac->pos] != '}' &&
+                       ii < sizeof(inner) - 1)
+                    inner[ii++] = ac->src[ac->pos++];
+                if (ac->src[ac->pos] == '}') ac->pos++;
+            } else if (is_special_var(ac->src[ac->pos]) ||
+                       (ac->src[ac->pos] >= '1' && ac->src[ac->pos] <= '9')) {
+                inner[ii++] = ac->src[ac->pos++];
+            } else {
+                while (is_name_char((unsigned char)ac->src[ac->pos]) &&
+                       ii < sizeof(inner) - 1)
+                    inner[ii++] = ac->src[ac->pos++];
+            }
+            inner[ii] = '\0';
+            const char *v = sh_getvar(ac->sh, inner);
+            if (!v && ac->sh->opt_u) {
+                fprintf(stderr, "silex: %s: unbound variable\n", inner);
+                exit(1);
+            }
+            if (v)
+                while (*v && ni < bufsz - 1)
+                    buf[ni++] = *v++;
+        } else if (is_name_char((unsigned char)c)) {
+            if (ni < bufsz - 1)
+                buf[ni++] = c;
+            ac->pos++;
+        } else {
+            break;
+        }
+    }
+    buf[ni] = '\0';
+}
+
 static long arith_primary(arith_ctx_t *ac)
 {
     arith_skip_ws(ac);
@@ -782,90 +834,57 @@ static long arith_primary(arith_ctx_t *ac)
         return ~arith_primary(ac);
     }
 
-    /* $ variable reference or command substitution */
-    if (c == '$') {
-        ac->pos++;
-        /* $(cmd) command substitution inside arithmetic */
-        if (ac->src[ac->pos] == '(') {
-            ac->pos++;  /* skip '(' */
-            const char *start = ac->src + ac->pos;
-            int d = 1;
-            while (ac->src[ac->pos] && d > 0) {
-                if (ac->src[ac->pos] == '(') d++;
-                else if (ac->src[ac->pos] == ')') d--;
-                if (d > 0) ac->pos++;
-                else ac->pos++;
-            }
-            size_t clen = (size_t)(ac->src + ac->pos - 1 - start);
-            char *cmd = strndup(start, clen);
-            char *result = cmd_subst(ac->sh, cmd ? cmd : "");
-            free(cmd);
-            return result ? strtol(result, NULL, 10) : 0L;
+    /* $(cmd) command substitution inside arithmetic */
+    if (c == '$' && ac->src[ac->pos + 1] == '(') {
+        ac->pos += 2;  /* skip "$(" */
+        const char *start = ac->src + ac->pos;
+        int d = 1;
+        while (ac->src[ac->pos] && d > 0) {
+            if (ac->src[ac->pos] == '(') d++;
+            else if (ac->src[ac->pos] == ')') d--;
+            if (d > 0) ac->pos++;
+            else ac->pos++;
         }
-        /* Could be ${VAR} or $VAR */
-        char namebuf[256];
-        size_t ni = 0;
-        if (ac->src[ac->pos] == '{') {
-            ac->pos++;
-            while (ac->src[ac->pos] && ac->src[ac->pos] != '}' &&
-                   ni < sizeof(namebuf) - 1)
-                namebuf[ni++] = ac->src[ac->pos++];
-            if (ac->src[ac->pos] == '}') ac->pos++;
-        } else if (is_special_var(ac->src[ac->pos]) ||
-                   (ac->src[ac->pos] >= '1' && ac->src[ac->pos] <= '9')) {
-            /* A special parameter -- $#, $?, $$, $!, $@, $*, $0..$9 -- in
-             * arithmetic, e.g. $(($# - 1)). These are single characters that
-             * are not name chars, so the loop below read nothing and looked up
-             * the empty name, which errored under `set -u` ("unbound variable")
-             * instead of yielding the count/status. Read exactly the one char;
-             * sh_getvar resolves it. Fixes modernish FTL_HASHVAR. */
-            namebuf[ni++] = ac->src[ac->pos++];
-        } else {
-            while (is_name_char((unsigned char)ac->src[ac->pos]) &&
-                   ni < sizeof(namebuf) - 1)
-                namebuf[ni++] = ac->src[ac->pos++];
-        }
-        namebuf[ni] = '\0';
-        const char *v = sh_getvar(ac->sh, namebuf);
-        if (!v && ac->sh->opt_u) {
-            fprintf(stderr, "silex: %s: unbound variable\n", namebuf);
-            exit(1);
-        }
-        return v ? atol(v) : 0L;
+        size_t clen = (size_t)(ac->src + ac->pos - 1 - start);
+        char *cmd = strndup(start, clen);
+        char *result = cmd_subst(ac->sh, cmd ? cmd : "");
+        free(cmd);
+        return result ? strtol(result, NULL, 10) : 0L;
     }
 
-    /* Identifier without $ (direct variable name) — may have assignment op */
-    if (is_alpha_underscore((unsigned char)c)) {
+    /* A variable operand: name characters and/or ${...}/$name expansions
+     * (read_operand substitutes each expansion by its value). The built token
+     * is a numeric literal (e.g. `$x` with x=5 -> "5") or a variable that may
+     * be an lvalue for ++/--/assignment. Special parameters ($#, $?, ...) are
+     * handled inside read_operand. */
+    if (c == '$' || is_alpha_underscore((unsigned char)c)) {
         char namebuf[256];
-        size_t ni = 0;
-        while (is_name_char((unsigned char)ac->src[ac->pos]) &&
-               ni < sizeof(namebuf) - 1)
-            namebuf[ni++] = ac->src[ac->pos++];
-        namebuf[ni] = '\0';
+        arith_read_operand(ac, namebuf, sizeof namebuf);
+
+        /* A fully-numeric operand (from an expansion or a bare literal-looking
+         * name) is a constant, not a variable to look up or assign. */
+        char *endp;
+        long litval  = strtol(namebuf, &endp, 0);
+        int  is_num  = (namebuf[0] != '\0' && *endp == '\0');
+        const char *v = is_num ? NULL : sh_getvar(ac->sh, namebuf);
+        long cur_val = is_num ? litval : (v ? atol(v) : 0L);
 
         arith_skip_ws(ac);
         const char *p = ac->src + ac->pos;
 
-        /* Post-increment: var++ */
-        if (p[0] == '+' && p[1] == '+') {
+        if (!is_num && p[0] == '+' && p[1] == '+') {       /* post-increment */
             ac->pos += 2;
-            const char *postinc_v = sh_getvar(ac->sh, namebuf);
-            long postinc_old = postinc_v ? atol(postinc_v) : 0L;
-            char postinc_nb[32]; snprintf(postinc_nb, sizeof(postinc_nb), "%ld", postinc_old + 1);
-            vars_set(&ac->sh->vars, namebuf, postinc_nb);
-            return postinc_old;
+            char nb[32]; snprintf(nb, sizeof nb, "%ld", cur_val + 1);
+            vars_set(&ac->sh->vars, namebuf, nb);
+            return cur_val;
         }
-        /* Post-decrement: var-- */
-        if (p[0] == '-' && p[1] == '-') {
+        if (!is_num && p[0] == '-' && p[1] == '-') {       /* post-decrement */
             ac->pos += 2;
-            const char *postdec_v = sh_getvar(ac->sh, namebuf);
-            long postdec_old = postdec_v ? atol(postdec_v) : 0L;
-            char postdec_nb[32]; snprintf(postdec_nb, sizeof(postdec_nb), "%ld", postdec_old - 1);
-            vars_set(&ac->sh->vars, namebuf, postdec_nb);
-            return postdec_old;
+            char nb[32]; snprintf(nb, sizeof nb, "%ld", cur_val - 1);
+            vars_set(&ac->sh->vars, namebuf, nb);
+            return cur_val;
         }
 
-        /* Detect assignment operator */
         int assign_op = 0;
         size_t oplen  = 0;
         if      (p[0]=='<' && p[1]=='<' && p[2]=='=') { assign_op=6;  oplen=3; }
@@ -880,12 +899,9 @@ static long arith_primary(arith_ctx_t *ac)
         else if (p[0]=='^' && p[1]=='=')              { assign_op=10; oplen=2; }
         else if (p[0]=='=' && p[1]!='=')              { assign_op=11; oplen=1; }
 
-        const char *v = sh_getvar(ac->sh, namebuf);
-        long cur_val  = v ? atol(v) : 0L;
-
-        if (assign_op) {
+        if (assign_op && !is_num) {
             ac->pos += oplen;
-            long rhs = arith_ternary(ac);  /* comma has lower precedence than assignment */
+            long rhs = arith_ternary(ac);  /* comma is lower precedence than assign */
             long result;
             switch (assign_op) {
             case 1:  result = cur_val + rhs; break;
@@ -911,11 +927,6 @@ static long arith_primary(arith_ctx_t *ac)
             return result;
         }
 
-        /* No assignment operator: just read the value */
-        if (!v && ac->sh->opt_u) {
-            fprintf(stderr, "silex: %s: unbound variable\n", namebuf);
-            exit(1);
-        }
         return cur_val;
     }
 
