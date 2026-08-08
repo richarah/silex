@@ -10,4 +10,8 @@ int exec_node(shell_ctx_t *sh, node_t *node);
 int exec_simple_cmd(shell_ctx_t *sh, char **words, char **assigns, redir_t *redirs);
 int exec_pipeline(shell_ctx_t *sh, node_t *node);
 
+/* Alias lookup adapter for the parser's parse-time alias expansion (ctx is the
+ * shell_ctx_t*). Returns the alias value or NULL. */
+const char *shell_alias_lookup_cb(void *ctx, const char *name);
+
 #endif

@@ -284,12 +284,15 @@ check "scope: nested function assignment reaches the top" \
 # POSIX: command runs the builtin/external, not a function or alias of the same
 # name. `alias exit=fn; fn() { command exit; }` (modernish's pattern) must reach
 # the real exit, not recurse -- silex used to loop into a stack-overflow crash.
-check "command bypasses an alias" \
-    "$("$MB" -c 'alias echo="echo ALIASED"; command echo hi')" "hi"
+# Aliases are parse-time (POSIX 2.3.1), so the definition and use must be in
+# separate parse units -- here the use is inside `eval` (parsed when it runs,
+# after the alias is defined), exactly as modernish uses them across files.
+check "command bypasses an alias (arg not in command position)" \
+    "$("$MB" -c 'alias echo="echo ALIASED"; eval "command echo hi"')" "hi"
 check "command bypasses a function" \
     "$("$MB" -c 'echo() { printf FUNC; }; command echo real')" "real"
 check "command exit through an exit-alias does not recurse" \
-    "$("$MB" -c 'alias exit=myf; myf() { echo once; command exit 3; }; exit'; echo "rc=$?")" "$(printf 'once\nrc=3')"
+    "$("$MB" -c 'alias exit=myf; myf() { echo once; command exit 3; }; eval exit'; echo "rc=$?")" "$(printf 'once\nrc=3')"
 # ...but the flag must NOT leak into code that command runs:
 check "command eval still resolves functions in its code" \
     "$("$MB" -c 'f() { echo infunc; }; command eval f')" "infunc"
@@ -309,15 +312,22 @@ check "command does not re-expand a literal dollar" \
     "$("$MB" -c 'command printf "%s" "\$HOME lit"')" '$HOME lit'
 check "command preserves an embedded single quote" \
     "$("$MB" -c "command printf '%s' \"it's ok\"")" "it's ok"
-# An alias expanding to a leading `!` negates (modernish's `alias not='! '`):
+# An alias to a keyword/operator reshapes the parse (modernish's `alias not='! '`
+# used as `not { ...; }`). Parse-time, so exercised via a separate parse unit:
 check "alias to '! ' negates a false command" \
-    "$("$MB" -c 'alias not="! "; not false; echo $?')" "0"
+    "$("$MB" -c 'alias not="! "; eval "not false; echo \$?"')" "0"
 check "alias to '! ' negates a true command" \
-    "$("$MB" -c 'alias not="! "; not true; echo $?')" "1"
+    "$("$MB" -c 'alias not="! "; eval "not true; echo \$?"')" "1"
 check "alias-! negates a function result" \
-    "$("$MB" -c 'alias not="! "; f() { return 3; }; not f; echo $?')" "0"
+    "$("$MB" -c 'alias not="! "; f() { return 3; }; eval "not f; echo \$?"')" "0"
+check "alias to '! ' before a brace group (the modernish find.mm construct)" \
+    "$("$MB" -c 'alias not="! "; eval "if not { false; }; then echo T; else echo E; fi"')" "T"
 check "real ! negation is unaffected" \
     "$("$MB" -c '! false; echo $?')" "0"
+# Aliases do NOT expand within the same parse unit (matches bash: the alias
+# command has not run yet when the line is parsed):
+check "same-parse-unit alias is not expanded (like bash)" \
+    "$("$MB" -c 'alias zz="echo Z"; zz 2>/dev/null || echo notfound')" "notfound"
 
 echo ""
 echo "function tests: $PASS passed, $FAIL failed"

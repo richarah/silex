@@ -66,9 +66,25 @@ typedef struct {
     lexer_t *lexer;
     arena_t *arena;
     int      error;   /* set on parse error */
+
+    /* Parse-time alias expansion (POSIX 2.3.1): an alias is substituted when its
+     * name is used in command-word position, BEFORE parsing — so an alias whose
+     * value is a keyword/operator (e.g. modernish's `alias not='! '`) changes
+     * the grammar (`not { ...; }` parses as `! { ...; }`). Set by the shell via
+     * parser_set_aliases(); when alias_lookup is NULL no expansion is done.
+     * The re-lexed tokens are queued in `pend` and consumed before the lexer. */
+    const char *(*alias_lookup)(void *ctx, const char *name);
+    void       *alias_ctx;
+    token_t    *pend;
+    int         pend_head;
+    int         pend_count;
+    int         pend_cap;
 } parser_t;
 
 void    parser_init(parser_t *p, lexer_t *l, arena_t *a);
+void    parser_set_aliases(parser_t *p,
+                           const char *(*lookup)(void *ctx, const char *name),
+                           void *ctx);
 node_t *parser_parse(parser_t *p);            /* parse one complete command */
 node_t *parser_parse_list(parser_t *p);       /* parse until EOF */
 void    parser_error(parser_t *p, const char *msg);

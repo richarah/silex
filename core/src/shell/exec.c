@@ -334,6 +334,12 @@ static const char *alias_lookup(shell_ctx_t *sh, const char *name)
     return NULL;
 }
 
+/* Adapter so the parser can expand aliases at parse time (POSIX). */
+const char *shell_alias_lookup_cb(void *ctx, const char *name)
+{
+    return alias_lookup((shell_ctx_t *)ctx, name);
+}
+
 static void alias_unregister(shell_ctx_t *sh, const char *name)
 {
     unsigned int idx = func_hash(name);
@@ -625,74 +631,15 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
     /* 2. Expand all words */
     char **expanded = expand_words(sh, words);
     int cmd_rc = 0;
-    int alias_negate = 0;   /* set if an alias expanded to a leading `!` */
     if (unlikely(!expanded || !expanded[0]))
         goto cmd_done;
 
     {
     const char *cmd = expanded[0];
 
-    /* Alias expansion: check if first word is an alias.
-     * Skipped under `command`, which must reach the real builtin/external and
-     * bypass aliases and functions. `alias exit=_Msh_doExit` with _Msh_doExit
-     * calling `command exit` (modernish) would otherwise re-expand the alias and
-     * recurse into a stack-overflow crash. */
-    const char *alias_value = sh->in_command_builtin ? NULL : alias_lookup(sh, cmd);
-    if (alias_value) {
-        /* If alias expands to empty string, treat as no-op */
-        if (alias_value[0] == '\0') {
-            cmd_rc = 0;
-            goto cmd_done;
-        }
-        /* Simple word splitting on spaces (simplified - doesn't handle quotes properly)
-         * Full POSIX alias expansion would require re-lexing/parsing */
-        char *alias_copy = arena_strdup(sh->scratch, alias_value);
-        int alias_argc = 0;
-        char *alias_words[256];  /* Max 256 words in alias expansion */
-
-        /* Split on whitespace */
-        char *p = alias_copy;
-        while (*p) {
-            /* Skip whitespace */
-            while (*p == ' ' || *p == '\t' || *p == '\n') p++;
-            if (!*p) break;
-            /* Found start of word */
-            alias_words[alias_argc++] = p;
-            /* Find end of word */
-            while (*p && *p != ' ' && *p != '\t' && *p != '\n') p++;
-            if (*p) *p++ = '\0';
-        }
-
-        if (alias_argc > 0) {
-            /* Count original args (excluding first word which is being replaced) */
-            int orig_argc = 0;
-            while (expanded[orig_argc]) orig_argc++;
-
-            /* Build new expanded array: alias_words + original args[1..] */
-            int new_argc = alias_argc + (orig_argc - 1);
-            char **new_expanded = arena_alloc(sh->scratch, (size_t)(new_argc + 1) * sizeof(char *));
-            for (int i = 0; i < alias_argc; i++)
-                new_expanded[i] = alias_words[i];
-            for (int i = 1; i < orig_argc; i++)
-                new_expanded[alias_argc + i - 1] = expanded[i];
-            new_expanded[new_argc] = NULL;
-
-            expanded = new_expanded;
-            cmd = expanded[0];
-        }
-    }
-
-    /* An alias can expand to a leading `!` -- modernish's `alias not='! '`, used
-     * pervasively as `not somecmd`. The pre-split alias argv is not re-parsed, so
-     * `!` would run as a command ("!: command not found"). Recognise it here:
-     * strip the `!` and negate the final status. A real `! cmd` is parsed as
-     * N_NOT and never arrives with argv[0]=="!". Require a following word so a
-     * lone `!` is left alone. */
-    while (expanded[0] && expanded[1] && strcmp(expanded[0], "!") == 0) {
-        alias_negate = !alias_negate;
-        expanded++;
-        cmd = expanded[0];
-    }
+    /* Aliases are expanded by the PARSER at parse time (POSIX 2.3.1), so there is
+     * nothing to expand here -- and `not { ...; }`, an alias to a keyword, works
+     * because the parser saw the substituted tokens. See parser.c. */
 
     /* Count argc */
     int argc = 0;
@@ -1015,12 +962,6 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
     } /* end command dispatch block */
 
 cmd_done:
-    /* Negate the status for an alias-supplied leading `!` (see above), but never
-     * a break/continue/return sentinel -- those must propagate unchanged. */
-    if (alias_negate && cmd_rc != FLOW_BREAK && cmd_rc != FLOW_CONTINUE &&
-        cmd_rc != FLOW_RETURN)
-        cmd_rc = (cmd_rc == 0) ? 1 : 0;
-
     /* Free env-prefix assign storage (env was only modified in child processes) */
     for (int i = 0; i < nassigns; i++) {
         if (anames[i])

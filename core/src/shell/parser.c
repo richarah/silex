@@ -39,9 +39,23 @@ static void skip_newlines(parser_t *p);
 
 void parser_init(parser_t *p, lexer_t *l, arena_t *a)
 {
-    p->lexer = l;
-    p->arena = a;
-    p->error = 0;
+    p->lexer        = l;
+    p->arena        = a;
+    p->error        = 0;
+    p->alias_lookup = NULL;
+    p->alias_ctx    = NULL;
+    p->pend         = NULL;
+    p->pend_head    = 0;
+    p->pend_count   = 0;
+    p->pend_cap     = 0;
+}
+
+void parser_set_aliases(parser_t *p,
+                        const char *(*lookup)(void *ctx, const char *name),
+                        void *ctx)
+{
+    p->alias_lookup = lookup;
+    p->alias_ctx    = ctx;
 }
 
 /* -------------------------------------------------------------------------
@@ -126,16 +140,83 @@ static void wl_free(word_list_t *wl)
  * Token-peeking helpers
  * ------------------------------------------------------------------------- */
 
-/* Peek at next token (skips nothing) */
+/* Peek at next token (skips nothing). Tokens injected by alias expansion in
+ * `pend` are served before the lexer's. */
 static token_t peek(parser_t *p)
 {
+    if (p->pend_head < p->pend_count)
+        return p->pend[p->pend_head];
     return lexer_peek(p->lexer);
 }
 
 /* Consume next token */
 static token_t consume(parser_t *p)
 {
+    if (p->pend_head < p->pend_count)
+        return p->pend[p->pend_head++];
     return lexer_next(p->lexer);
+}
+
+/* Prepend `n` tokens ahead of the remaining pending/lexer input. */
+static void pend_prepend(parser_t *p, const token_t *toks, int n)
+{
+    int rem  = p->pend_count - p->pend_head;
+    int need = n + rem;
+    token_t *nt = arena_alloc(p->arena, (size_t)need * sizeof(token_t));
+    for (int i = 0; i < n; i++)   nt[i]     = toks[i];
+    for (int i = 0; i < rem; i++) nt[n + i] = p->pend[p->pend_head + i];
+    p->pend       = nt;
+    p->pend_count = need;
+    p->pend_head  = 0;
+    p->pend_cap   = need;
+}
+
+/* POSIX parse-time alias substitution at a command-word position. While the next
+ * token is a plain word that names an alias (and is not already being expanded,
+ * which stops `alias ls='ls -la'` and mutual loops), replace it with the tokens
+ * of its value. The first token of the value becomes the new command word, so an
+ * alias chain expands and an alias to a keyword/operator (`not='! '` -> TOK_BANG)
+ * reshapes the parse. Call only where a command word is expected. */
+static void expand_command_aliases(parser_t *p)
+{
+    if (!p->alias_lookup)
+        return;
+    const char *active[64];
+    int nactive = 0;
+    int guard   = 0;
+    while (guard++ < 1000) {
+        token_t t = peek(p);
+        if (t.type != TOK_WORD || !t.text)
+            break;
+        int seen = 0;
+        for (int i = 0; i < nactive; i++)
+            if (strcmp(active[i], t.text) == 0) { seen = 1; break; }
+        if (seen)
+            break;
+        const char *val = p->alias_lookup(p->alias_ctx, t.text);
+        if (!val)
+            break;
+        if (nactive < 64)
+            active[nactive++] = t.text;   /* arena-owned; outlives the parse */
+        consume(p);                       /* drop the alias name */
+        if (val[0] == '\0')
+            continue;                     /* alias to empty: vanishes */
+        /* Re-lex the alias value; its token text is arena-allocated (p->arena),
+         * so it survives lexer_free. */
+        lexer_t sub;
+        lexer_init_str(&sub, val, p->arena);
+        token_t buf[256];
+        int n = 0;
+        for (;;) {
+            token_t tk = lexer_next(&sub);
+            if (tk.type == TOK_EOF)
+                break;
+            if (n < 256)
+                buf[n++] = tk;
+        }
+        lexer_free(&sub);
+        pend_prepend(p, buf, n);
+    }
 }
 
 /* Consume token of expected type or set error and return it anyway */
@@ -972,9 +1053,13 @@ static node_t *parse_command(parser_t *p)
 static node_t *parse_pipeline(parser_t *p)
 {
     int negate = 0;
+    /* Command-word position: expand aliases first, so `not`->`! ` is seen as the
+     * TOK_BANG below rather than a command named "not". */
+    expand_command_aliases(p);
     if (peek(p).type == TOK_BANG) {
         consume(p);
         negate = 1;
+        expand_command_aliases(p);   /* the negated command's word */
     }
 
     node_t *left = parse_command(p);
@@ -983,6 +1068,7 @@ static node_t *parse_pipeline(parser_t *p)
     while (peek(p).type == TOK_PIPE) {
         consume(p); /* | */
         skip_newlines(p);
+        expand_command_aliases(p);   /* the next pipeline stage's word */
         node_t *right = parse_command(p);
         if (!right || p->error) {
             parser_error(p, "expected command after '|'");

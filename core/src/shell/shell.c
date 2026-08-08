@@ -182,6 +182,7 @@ int shell_run_string(shell_ctx_t *sh, const char *script)
 
     lexer_init_str(&lex, script, &sh->parse_arena);
     parser_init(&par, &lex, &sh->parse_arena);
+    parser_set_aliases(&par, shell_alias_lookup_cb, sh);
 
     /* Run in a private arena rather than reclaiming the caller's.
      *
@@ -276,6 +277,7 @@ int shell_run_file(shell_ctx_t *sh, const char *path)
 
     lexer_init_fp(&lex, fp, &sh->parse_arena);
     parser_init(&par, &lex, &sh->parse_arena);
+    parser_set_aliases(&par, shell_alias_lookup_cb, sh);
 
     /* Private arena, for the same reason as shell_run_string: `.` re-enters this
      * while the caller is mid-command, so reclaiming sh->scratch_arena here
@@ -495,6 +497,7 @@ static int shell_run_interactive(shell_ctx_t *sh)
         parser_t par;
         lexer_init_str(&lex, buf, &sh->parse_arena);
         parser_init(&par, &lex, &sh->parse_arena);
+        parser_set_aliases(&par, shell_alias_lookup_cb, sh);
         for (;;) {
             node_t *node = parser_parse(&par);
             if (par.error) { sh->last_exit = 2; par.error = 0; break; }
@@ -528,6 +531,7 @@ int shell_run_stdin(shell_ctx_t *sh)
 
     lexer_init_fp(&lex, stdin, &sh->parse_arena);
     parser_init(&par, &lex, &sh->parse_arena);
+    parser_set_aliases(&par, shell_alias_lookup_cb, sh);
 
     int rc = 0;
     for (;;) {
