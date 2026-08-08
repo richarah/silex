@@ -87,6 +87,10 @@ void    parser_set_aliases(parser_t *p,
                            void *ctx);
 node_t *parser_parse(parser_t *p);            /* parse one complete command */
 node_t *parser_parse_list(parser_t *p);       /* parse until EOF */
+
+/* Deep-copy a parse tree into `dst`. Used to lift a function body out of a
+ * transient (soon-to-be-freed) parse arena into a persistent one. */
+node_t *node_dup(arena_t *dst, const node_t *src);
 void    parser_error(parser_t *p, const char *msg);
 
 #endif /* SILEX_PARSER_H */

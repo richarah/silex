@@ -16,12 +16,21 @@ typedef struct var_entry {
     size_t            value_cap;  /* bytes allocated at value, including NUL */
     int               exported;
     int               readonly;
+    arena_t          *arena;      /* arena backing name/value (its scope's arena) */
     struct var_entry *next;
 } var_entry_t;
 
 typedef struct var_scope {
     var_entry_t      *buckets[VARS_HASH_SIZE];
     struct var_scope *parent;
+    /* Arena for entries created in THIS scope. A function-call scope owns a
+     * private arena (`own`) that vars_pop_scope frees, so per-call locals and
+     * the scope struct are reclaimed on return instead of piling up forever.
+     * The global scope points `arena` at the shell's persistent arena and sets
+     * has_own = 0 so its variables live for the life of the shell. */
+    arena_t          *arena;
+    arena_t           own;
+    int               has_own;
 } var_scope_t;
 
 typedef struct {

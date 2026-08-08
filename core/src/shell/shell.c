@@ -141,6 +141,15 @@ int shell_init(shell_ctx_t *sh, int argc, char **argv)
     snprintf(ppid_buf, sizeof(ppid_buf), "%d", (int)getppid());
     vars_set(&sh->vars, "PPID", ppid_buf);
 
+    /* POSIX shell variables with mandated default values. Setting these up front
+     * matters under `set -u`: a script that references $OPTIND (before any
+     * getopts) or $PS4 must see the default, not an "unbound variable" error.
+     * Only set each if the environment didn't already provide it. */
+    if (!vars_get(&sh->vars, "OPTIND")) vars_set(&sh->vars, "OPTIND", "1");
+    if (!vars_get(&sh->vars, "PS1"))    vars_set(&sh->vars, "PS1", "$ ");
+    if (!vars_get(&sh->vars, "PS2"))    vars_set(&sh->vars, "PS2", "> ");
+    if (!vars_get(&sh->vars, "PS4"))    vars_set(&sh->vars, "PS4", "+ ");
+
     /* Initialise all traps to default */
     for (int i = 0; i < NSIG; i++)
         sh->traps[i].action = SHELL_TRAP_DEFAULT;
@@ -180,30 +189,34 @@ int shell_run_string(shell_ctx_t *sh, const char *script)
     lexer_t  lex;
     parser_t par;
 
-    lexer_init_str(&lex, script, &sh->parse_arena);
-    parser_init(&par, &lex, &sh->parse_arena);
-    parser_set_aliases(&par, shell_alias_lookup_cb, sh);
-
-    /* Run in a private arena rather than reclaiming the caller's.
+    /* Two private arenas, both freed on the way out instead of piling into the
+     * shell's persistent parse_arena:
      *
-     * This is re-entrant: `eval`, traps and `.` all route back through here
-     * while an outer command is still executing. Resetting sh->scratch_arena
-     * here therefore freed memory the *caller* still owned, and
+     *   parse_local  backs the lexer/parser. `eval` re-runs this per command,
+     *                so `LOOP ...; DO eval "..."; DONE` (modernish) used to parse
+     *                a fresh tree into parse_arena every iteration and never
+     *                reclaim it -- a long loop walked parse_arena up to its 64 MB
+     *                cap and aborted. Freeing parse_local here bounds an eval to
+     *                O(one call). The one thing that must outlive it is a function
+     *                BODY defined by the eval; func_register() deep-copies that
+     *                into parse_arena (node_dup), so freeing parse_local is safe.
+     *                It is NOT reset mid-loop: the parser keeps live state
+     *                (lookahead, pending heredocs) in it between parser_parse()
+     *                calls.
      *
-     *     for x in alpha bravo charlie; do eval "true"; echo "$x"; done
+     *   local        is sh->scratch: expansions for the command currently
+     *                executing. Reset per parse unit, as before.
      *
-     * printed "alpha", then "pha", then stopped -- eval reset the arena holding
-     * the for loop's word list, and the loop walked freed memory. It corrupted
-     * silently instead of crashing only because a reset arena keeps its blocks
-     * mapped, so the stale read usually finds the old bytes still there.
-     *
-     * `script` itself is expanded from the caller's arena, which this leaves
-     * untouched, so it stays valid for the lexer. Nothing a command produces
-     * outlives the command in this arena: variables and positionals are copied
-     * into parse_arena.
+     * Both are private (vs reclaiming the caller's sh->scratch) because this is
+     * re-entrant: `eval`, traps and `.` route back here while an outer command
+     * still executes, and stomping the caller's scratch would free e.g. an
+     * enclosing for loop's word list mid-iteration. `script` is expanded from the
+     * caller's arena, which this leaves untouched, so it stays valid for the lexer.
      */
+    arena_t  parse_local;
     arena_t  local;
     arena_t *saved_scratch = sh->scratch;
+    arena_init(&parse_local, "run-string-parse");
     arena_init(&local, "run-string");
     /* Not a dangling pointer: saved_scratch is restored on every path out of
      * this function, including the parse-error and EOF breaks, so sh->scratch
@@ -211,6 +224,10 @@ int shell_run_string(shell_ctx_t *sh, const char *script)
      * cannot see the restore below. */
     /* cppcheck-suppress autoVariables */
     sh->scratch = &local;
+
+    lexer_init_str(&lex, script, &parse_local);
+    parser_init(&par, &lex, &parse_local);
+    parser_set_aliases(&par, shell_alias_lookup_cb, sh);
 
     int rc = 0;
     for (;;) {
@@ -234,6 +251,7 @@ int shell_run_string(shell_ctx_t *sh, const char *script)
             if (rc >= 200 && rc <= 202) {
                 sh->scratch = saved_scratch;
                 arena_free(&local);
+                arena_free(&parse_local);
                 lexer_free(&lex);
                 return rc;
             }
@@ -253,6 +271,7 @@ int shell_run_string(shell_ctx_t *sh, const char *script)
 
     sh->scratch = saved_scratch;
     arena_free(&local);
+    arena_free(&parse_local);
 
     lexer_free(&lex);
     return sh->last_exit;
@@ -323,17 +342,23 @@ int shell_run_file(shell_ctx_t *sh, const char *path)
     lexer_t  lex;
     parser_t par;
 
-    lexer_init_str(&lex, src, &sh->parse_arena);
-    parser_init(&par, &lex, &sh->parse_arena);
-    parser_set_aliases(&par, shell_alias_lookup_cb, sh);
-
-    /* Private arena, for the same reason as shell_run_string: `.` re-enters this
-     * while the caller is mid-command, so reclaiming sh->scratch_arena here
-     * would free memory the caller still owns (e.g. an enclosing for loop's
-     * word list). */
+    /* parse_local backs the parser and is freed when the file finishes, so a
+     * sourced module's parse tree does not stay pinned in the persistent
+     * parse_arena for the life of the shell. Any function it defines is
+     * deep-copied into parse_arena by func_register(), so freeing parse_local is
+     * safe. It is not reset mid-loop (the parser keeps live state in it). `local`
+     * is sh->scratch, reset per parse unit. Both private for the same reentrancy
+     * reason as shell_run_string: `.` runs while the caller is mid-command. */
+    arena_t  parse_local;
     arena_t  local;
     arena_t *saved_scratch = sh->scratch;
+    arena_init(&parse_local, "run-file-parse");
     arena_init(&local, "run-file");
+
+    lexer_init_str(&lex, src, &parse_local);
+    parser_init(&par, &lex, &parse_local);
+    parser_set_aliases(&par, shell_alias_lookup_cb, sh);
+
     /* Restored on every path out, including the FLOW_BREAK/FLOW_CONTINUE early
      * return below. See shell_run_string. */
     /* cppcheck-suppress autoVariables */
@@ -360,6 +385,7 @@ int shell_run_file(shell_ctx_t *sh, const char *path)
                 /* Don't update sh->last_exit; propagate flow control code */
                 sh->scratch = saved_scratch;
                 arena_free(&local);
+                arena_free(&parse_local);
                 lexer_free(&lex);
                 free(src);
                 return rc;
@@ -373,6 +399,7 @@ int shell_run_file(shell_ctx_t *sh, const char *path)
 
     sh->scratch = saved_scratch;
     arena_free(&local);
+    arena_free(&parse_local);
 
     lexer_free(&lex);
     free(src);

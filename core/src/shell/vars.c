@@ -24,23 +24,48 @@ static unsigned int fnv1a(const char *s)
 
 void vars_init(vars_t *v, arena_t *a)
 {
-    v->scope = NULL;
     v->arena = a;
-    vars_push_scope(v);
+    /* The global scope lives for the life of the shell; its variables stay in
+     * the persistent arena `a`. Allocate the scope struct there too (never
+     * freed) and mark has_own = 0 so vars_pop_scope leaves it alone. */
+    var_scope_t *g = arena_alloc(a, sizeof(var_scope_t));
+    memset(g->buckets, 0, sizeof(g->buckets));
+    g->parent  = NULL;
+    g->arena   = a;
+    g->has_own = 0;
+    v->scope   = g;
 }
 
 void vars_push_scope(vars_t *v)
 {
-    var_scope_t *s = arena_alloc(v->arena, sizeof(var_scope_t));
+    /* A function-call scope gets a PRIVATE arena that vars_pop_scope frees, so
+     * the scope struct, its locals, and their values are reclaimed on return.
+     * Without this, every call leaked a ~2 KB scope (plus locals) into the
+     * persistent arena, and a function-calling loop hit the 64 MB cap. The
+     * struct is malloc'd (not arena-allocated) so it too is freed on pop. */
+    var_scope_t *s = malloc(sizeof(var_scope_t));
+    if (!s) {
+        perror("silex: vars_push_scope");
+        abort();
+    }
     memset(s->buckets, 0, sizeof(s->buckets));
-    s->parent = v->scope;
-    v->scope  = s;
+    s->parent  = v->scope;
+    arena_init(&s->own, "scope");
+    s->arena   = &s->own;
+    s->has_own = 1;
+    v->scope   = s;
 }
 
 void vars_pop_scope(vars_t *v)
 {
-    if (v->scope->parent != NULL)
-        v->scope = v->scope->parent;
+    var_scope_t *s = v->scope;
+    if (s->parent == NULL)
+        return;                 /* never pop the global scope */
+    v->scope = s->parent;
+    if (s->has_own) {
+        arena_free(&s->own);    /* frees this scope's locals and their values */
+        free(s);
+    }
 }
 
 const char *vars_get(vars_t *v, const char *name)
@@ -100,13 +125,17 @@ static var_entry_t *vars_find(vars_t *v, const char *name)
  */
 static void var_store_value(vars_t *v, var_entry_t *e, const char *value)
 {
+    (void)v;   /* storage arena now comes from e->arena, not v->arena */
     size_t need = strlen(value) + 1;
     if (e->value != NULL && e->value_cap >= need) {
         memcpy(e->value, value, need);
     } else {
         size_t cap = need * 2;
         if (cap < need) cap = need;      /* overflow guard */
-        e->value     = arena_alloc(v->arena, cap);
+        /* Allocate from the entry's own scope arena (e->arena), not v->arena:
+         * a local's storage must be reclaimed when its scope is popped, and a
+         * global's must persist. */
+        e->value     = arena_alloc(e->arena, cap);
         e->value_cap = cap;
         memcpy(e->value, value, need);
     }
@@ -163,8 +192,9 @@ int vars_set_context(vars_t *v, const char *name, const char *value, const char 
         return 1;                       /* no scope to set in */
     while (global->parent != NULL)
         global = global->parent;
-    var_entry_t *e    = arena_alloc(v->arena, sizeof(var_entry_t));
-    e->name           = arena_strdup(v->arena, name);
+    var_entry_t *e    = arena_alloc(global->arena, sizeof(var_entry_t));
+    e->arena          = global->arena;
+    e->name           = arena_strdup(global->arena, name);
     /* arena_alloc does not zero. Every field var_store_value() reads --
      * value, value_cap, exported -- must be initialised BEFORE the store. */
     e->value          = NULL;
@@ -198,8 +228,9 @@ int vars_set_local(vars_t *v, const char *name, const char *value)
     }
 
     /* Create in current scope */
-    e               = arena_alloc(v->arena, sizeof(var_entry_t));
-    e->name         = arena_strdup(v->arena, name);
+    e               = arena_alloc(v->scope->arena, sizeof(var_entry_t));
+    e->arena        = v->scope->arena;
+    e->name         = arena_strdup(v->scope->arena, name);
     /* arena_alloc does not zero: init everything var_store_value reads first. */
     e->value        = NULL;
     e->value_cap    = 0;
@@ -312,9 +343,17 @@ void vars_import_env(vars_t *v)
             /* Only import if not already set (don't override IFS etc.) */
             if (!vars_get(v, name)) {
                 unsigned int idx = fnv1a(name);
-                var_entry_t *e = arena_alloc(v->arena, sizeof(var_entry_t));
-                e->name     = arena_strdup(v->arena, name);
-                e->value    = arena_strdup(v->arena, eq + 1);
+                arena_t *ar = v->scope->arena;
+                var_entry_t *e = arena_alloc(ar, sizeof(var_entry_t));
+                e->arena    = ar;
+                e->name     = arena_strdup(ar, name);
+                e->value    = arena_strdup(ar, eq + 1);
+                /* value_cap must reflect the real allocation: a later
+                 * reassignment checks it to decide whether the buffer can be
+                 * overwritten in place. Leaving it uninitialised risked an
+                 * out-of-bounds memcpy on the next assignment to an imported
+                 * env var. */
+                e->value_cap = strlen(eq + 1) + 1;
                 e->exported = 1;
                 e->readonly = 0;
                 e->next     = v->scope->buckets[idx];

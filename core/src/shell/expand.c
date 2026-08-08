@@ -63,11 +63,14 @@ static const char *sh_getvar(shell_ctx_t *sh, const char *name)
             /* Return current option flags */
             strbuf_t sb;
             sb_init(&sb, 8);
+            if (sh->opt_a) sb_appendc(&sb, 'a');
             if (sh->opt_e) sb_appendc(&sb, 'e');
             if (sh->opt_u) sb_appendc(&sb, 'u');
             if (sh->opt_x) sb_appendc(&sb, 'x');
             if (sh->opt_f) sb_appendc(&sb, 'f');
             if (sh->opt_n) sb_appendc(&sb, 'n');
+            if (sh->opt_m) sb_appendc(&sb, 'm');
+            if (sh->opt_C) sb_appendc(&sb, 'C');
             char *r = arena_strdup(sh->scratch, sb_str(&sb));
             sb_free(&sb);
             return r;
@@ -305,6 +308,26 @@ static int has_unquoted_glob(const char *word)
                     return 1;               /* a complete bracket expression */
             }
             /* No closing ']', so not a glob. Keep looking for a * or ?. */
+        }
+    }
+    return 0;
+}
+
+/* Returns 1 if the plain (already quote-removed) field contains an active glob
+ * metacharacter (* ? or a complete [...] bracket). Used for fields produced by
+ * an unquoted expansion whose word carried no quoted regions -- every byte is
+ * then unquoted, so any metacharacter here is a real wildcard. The '[' needs a
+ * closing ']' for the same reason as has_unquoted_glob (a bare '[' is `test`,
+ * not a glob, and globbing it would opendir the whole cwd per conditional). */
+static int field_has_glob_meta(const char *s)
+{
+    for (const char *p = s; *p; p++) {
+        if (*p == '*' || *p == '?')
+            return 1;
+        if (*p == '[') {
+            for (const char *q = p + 1; *q; q++)
+                if (*q == ']')
+                    return 1;
         }
     }
     return 0;
@@ -630,6 +653,20 @@ static char *cmd_subst(shell_ctx_t *sh, const char *cmd)
         sub.positional_n = sh->positional_n;
         sub.script_name  = sh->script_name;
         sub.last_exit    = sh->last_exit;  /* inherit $? */
+        /* Inherit shell options: a command substitution runs in a subshell of
+         * the current environment, so `set -f`, `set -u`, `set -C`, ... are in
+         * effect inside it. shell_init() cleared them; copy the parent's. Without
+         * this, `saved=$(set +o)` reported every option off regardless of the
+         * real state, breaking modernish's option save/restore (_IN/opt). */
+        sub.opt_a = sh->opt_a;
+        sub.opt_e = sh->opt_e;
+        sub.opt_u = sh->opt_u;
+        sub.opt_x = sh->opt_x;
+        sub.opt_f = sh->opt_f;
+        sub.opt_n = sh->opt_n;
+        sub.opt_m = sh->opt_m;
+        sub.opt_C = sh->opt_C;
+        sub.opt_pipefail = sh->opt_pipefail;
         sub.shell_pid    = sh->shell_pid;  /* $$ is the main shell's PID, not the
                                             * command-substitution child's */
         memcpy(sub.funcs, sh->funcs, sizeof(sh->funcs)); /* inherit functions */
@@ -729,17 +766,38 @@ static void arith_read_operand(arith_ctx_t *ac, char *buf, size_t bufsz)
     size_t ni = 0;
     for (;;) {
         char c = ac->src[ac->pos];
+        if (c == '$' && ac->src[ac->pos + 1] == '{') {
+            /* Full ${...} parameter expansion: `${x-default}`, `${x:-y}`,
+             * `${#x}`, ... all go through the normal machinery. A verbatim var
+             * lookup of the brace body treated `${2-1}` (positional 2, default
+             * 1) as a variable literally named "2-1" and, under `set -u`, aborted
+             * with "2-1: unbound variable" -- which broke modernish's inc/dec. */
+            char exptext[512];
+            size_t ei = 0;
+            exptext[ei++] = '$';
+            exptext[ei++] = '{';
+            ac->pos += 2;                 /* skip "${" */
+            int bd = 1;
+            while (ac->src[ac->pos] && bd > 0 && ei < sizeof(exptext) - 1) {
+                char cc = ac->src[ac->pos];
+                if (cc == '{') bd++;
+                else if (cc == '}') bd--;
+                exptext[ei++] = cc;
+                ac->pos++;
+                if (bd == 0) break;
+            }
+            exptext[ei] = '\0';
+            char *val = expand_word(ac->sh, exptext);
+            if (val)
+                while (*val && ni < bufsz - 1)
+                    buf[ni++] = *val++;
+            continue;
+        }
         if (c == '$') {
             ac->pos++;
             char inner[256];
             size_t ii = 0;
-            if (ac->src[ac->pos] == '{') {
-                ac->pos++;
-                while (ac->src[ac->pos] && ac->src[ac->pos] != '}' &&
-                       ii < sizeof(inner) - 1)
-                    inner[ii++] = ac->src[ac->pos++];
-                if (ac->src[ac->pos] == '}') ac->pos++;
-            } else if (is_special_var(ac->src[ac->pos]) ||
+            if (is_special_var(ac->src[ac->pos]) ||
                        (ac->src[ac->pos] >= '1' && ac->src[ac->pos] <= '9')) {
                 inner[ii++] = ac->src[ac->pos++];
             } else {
@@ -1192,6 +1250,54 @@ long expand_arith(shell_ctx_t *sh, const char *expr)
     return arith_expr(&ac);
 }
 
+/* Advance `p` (pointing at the first char after the '(' of a `$(`) to the
+ * matching ')', mirroring the lexer's scan_cmd_subst: single/double quotes,
+ * backslash escapes, `#` comments, and nested parens are all skipped so a stray
+ * `)` inside any of them does not end the substitution early. Returns a pointer
+ * to the closing ')' (or to the terminating NUL when unterminated). The word was
+ * tokenised with exactly these rules, so the body this delimits matches. */
+static const char *cmdsubst_body_end(const char *p)
+{
+    int depth = 1;
+    int prev  = '(';
+    while (*p && depth > 0) {
+        char c = *p;
+        if (c == '#' &&
+            (prev == ' ' || prev == '\t' || prev == '\n' || prev == '(' ||
+             prev == ';' || prev == '&'  || prev == '|')) {
+            p++;
+            while (*p && *p != '\n') p++;
+            prev = '#';
+            continue;
+        }
+        prev = c;
+        if (c == '\\') {
+            p++;
+            if (*p) p++;
+            continue;
+        }
+        if (c == '\'') {
+            p++;
+            while (*p && *p != '\'') p++;
+            if (*p) p++;
+            continue;
+        }
+        if (c == '"') {
+            p++;
+            while (*p && *p != '"') {
+                if (*p == '\\' && p[1]) p += 2;
+                else p++;
+            }
+            if (*p) p++;
+            continue;
+        }
+        if (c == '(') { depth++; p++; }
+        else if (c == ')') { depth--; if (depth == 0) break; p++; }
+        else p++;
+    }
+    return p;
+}
+
 /* -------------------------------------------------------------------------
  * skip_dquote_end: advance p from first char after opening '"' to just past
  * the matching '"'.  Properly handles $(...), ${...}, $((...)), backticks.
@@ -1217,22 +1323,9 @@ static const char *skip_dquote_end(const char *p)
                     p++;
                 }
             } else if (*p == '(') {
-                /* $( ) cmd substitution — may contain nested "..." */
-                p++;
-                int d = 1;
-                while (*p && d > 0) {
-                    if (*p == '\\') { if (p[1]) p += 2; else p++; continue; }
-                    if (*p == '\'') {
-                        p++;
-                        while (*p && *p != '\'') p++;
-                        if (*p) p++;
-                        continue;
-                    }
-                    if (*p == '"') { p = skip_dquote_end(p + 1); continue; }
-                    if (*p == '(') d++;
-                    else if (*p == ')') d--;
-                    p++;
-                }
+                /* $( ) cmd substitution — quote/comment/backslash-aware. */
+                p = cmdsubst_body_end(p + 1);
+                if (*p == ')') p++;
             } else if (*p == '{') {
                 p++;
                 int d = 1;
@@ -1380,14 +1473,13 @@ static void expand_into(shell_ctx_t *sh, const char *word, strbuf_t *out,
             if (*p == '(') {
                 p++;
                 const char *start = p;
-                int depth = 1;
-                while (*p && depth > 0) {
-                    if (*p == '(') depth++;
-                    else if (*p == ')') depth--;
-                    if (depth > 0) p++;
-                    else p++;
-                }
-                size_t clen = (size_t)((p - 1) - start);
+                /* Quote/comment/backslash-aware scan for the matching ')': a
+                 * naive paren count stopped at a ')' inside a comment or quote,
+                 * so `$( # ) )` or `x=$(case $y in *) ...) esac)` extracted the
+                 * wrong body and left stray text behind. */
+                p = cmdsubst_body_end(p);
+                size_t clen = (size_t)(p - start);
+                if (*p == ')') p++;   /* step past the closing ')' */
                 char *cmd = strndup(start, clen);
                 char *result = cmd_subst(sh, cmd ? cmd : "");
                 free(cmd);
@@ -2079,11 +2171,24 @@ no_fields:
     int nfinal = 0;
     int fcap   = 0;
 
+    /* Fields from an unquoted expansion (do_ifs_split) whose word had NO quoted
+     * regions (prot == NULL, so at_quote_guard never fired) are entirely
+     * unquoted; a glob metacharacter that appears in such a field -- typically
+     * because a variable's VALUE is a pattern, e.g. `p=*.t; echo $p` -- is a real
+     * wildcard and POSIX pathname expansion applies. do_glob alone missed this
+     * because it is computed from the pre-expansion token text, where `$p` has no
+     * metacharacter. (Words that mix quoted regions with an unquoted expansion
+     * keep prot != NULL and fall back to do_glob, unchanged, so a quoted "*"
+     * still never globs.) */
+    int glob_expanded_fields = do_ifs_split && prot == NULL && !sh->opt_f;
+
     for (int i = 0; i < nfields; i++) {
         const char *f = fields[i];
         /* Use pre-computed do_glob (based on original token text) to avoid
-         * globbing chars that came from quoted contexts like "*". */
-        if (do_glob) {
+         * globbing chars that came from quoted contexts like "*"; additionally
+         * glob wildcard-bearing fields that came from an all-unquoted expansion
+         * (see glob_expanded_fields above). */
+        if (do_glob || (glob_expanded_fields && field_has_glob_meta(f))) {
             glob_t g;
             /* NOT GLOB_NOSORT. POSIX requires pathname expansion results to be
              * sorted, and builds depend on it: a command like `gcc *.c` was

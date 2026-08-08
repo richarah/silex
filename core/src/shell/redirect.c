@@ -11,6 +11,7 @@
 #include <limits.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -65,7 +66,26 @@ int redirect_apply(struct shell_ctx *sh, redir_t *redirs, redirect_ctx_t *ctx)
             break;
 
         case TOK_GREAT:
-            new_fd = open(target, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+            if (sh->opt_C) {
+                /* noclobber: '>' must not overwrite an existing regular file.
+                 * O_EXCL rejects any existing file; POSIX only forbids
+                 * clobbering *regular* files, so on EEXIST fall back to a plain
+                 * open when the target is not a regular file (fifo, device,
+                 * /dev/null, symlink to such, ...). */
+                new_fd = open(target, O_WRONLY | O_CREAT | O_EXCL, 0666);
+                if (new_fd < 0 && errno == EEXIST) {
+                    struct stat st;
+                    if (stat(target, &st) == 0 && !S_ISREG(st.st_mode)) {
+                        new_fd = open(target, O_WRONLY, 0666);
+                    } else {
+                        fprintf(stderr, "silex: %s: cannot overwrite existing file\n", target);
+                        ctx->error = 1;
+                        return -1;
+                    }
+                }
+            } else {
+                new_fd = open(target, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+            }
             if (new_fd < 0) {
                 perror(target);
                 ctx->error = 1;

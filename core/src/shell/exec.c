@@ -90,6 +90,39 @@ static const applet_t *find_applet_by_name(const char *name)
     return find_applet(name);
 }
 
+/* Does this simple command reduce to a bare `exec` with no operands, possibly
+ * behind one or more `command` prefixes? `exec` with only redirections makes
+ * them permanent in the current shell; the generic executor applies a command's
+ * redirections around whatever builtin runs and restores them afterwards, and
+ * only spotted the bare `exec` case by name. So `command exec 8<file` -- how
+ * modernish's LOOP (loop.mm) opens its FIFO read fd -- applied the redirection
+ * around the `command` builtin and then tore it down, leaving fd 8 unopened and
+ * the loop's handshake reading EOF forever. Peel the `command` prefixes so the
+ * caller can commit (not restore) the redirections in this case too.
+ *
+ * `command -v`/`-V` only DESCRIBE and never persist redirections, so they stop
+ * the peel. Anything after `exec` is an operand (`exec ls`), which replaces the
+ * process instead, so that is not a bare exec either. */
+static int reduces_to_bare_exec(char **argv, int argc)
+{
+    int i = 0;
+    for (;;) {
+        if (i >= argc || !argv[i])
+            return 0;
+        if (strcmp(argv[i], "exec") == 0)
+            return (i + 1 >= argc || argv[i + 1] == NULL);
+        if (strcmp(argv[i], "command") != 0)
+            return 0;
+        i++;   /* skip `command`, then its options */
+        while (i < argc && argv[i] && argv[i][0] == '-') {
+            if (strcmp(argv[i], "--") == 0) { i++; break; }
+            if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "-V") == 0)
+                return 0;
+            i++;   /* -p or a combined option: skip it */
+        }
+    }
+}
+
 /* -------------------------------------------------------------------------
  * Shell-internal builtins table
  * ------------------------------------------------------------------------- */
@@ -250,11 +283,16 @@ static unsigned int func_hash(const char *s)
 
 static void func_register(shell_ctx_t *sh, const char *name, node_t *body)
 {
+    /* The body may have been parsed into a transient arena (an eval string, a
+     * sourced line) that its runner frees as soon as the definition finishes.
+     * Copy it into the persistent parse_arena so the function survives. */
+    node_t *persistent_body = node_dup(&sh->parse_arena, body);
+
     unsigned int idx = func_hash(name);
     func_entry_t *e  = sh->funcs[idx];
     while (e) {
         if (strcmp(e->name, name) == 0) {
-            e->body = body;
+            e->body = persistent_body;
             return;
         }
         e = e->next;
@@ -262,7 +300,7 @@ static void func_register(shell_ctx_t *sh, const char *name, node_t *body)
     /* Allocate new entry in arena */
     func_entry_t *ne = arena_alloc(&sh->parse_arena, sizeof(func_entry_t));
     ne->name  = arena_strdup(&sh->parse_arena, name);
-    ne->body  = body;
+    ne->body  = persistent_body;
     ne->next  = sh->funcs[idx];
     sh->funcs[idx] = ne;
 }
@@ -438,8 +476,8 @@ static void path_cache_put(shell_ctx_t *sh, const char *name,
 
 /* Search PATH dirs for an executable named `name`.
  * Writes the full path into buf[bufsz]. Returns buf on success, NULL if not found. */
-static char *path_resolve(shell_ctx_t *sh, const char *name,
-                          char *buf, size_t bufsz)
+static char *path_resolve_with(shell_ctx_t *sh, const char *name,
+                               char *buf, size_t bufsz, const char *path_override)
 {
     if (strchr(name, '/')) {
         /* Absolute or relative path: check directly */
@@ -454,7 +492,13 @@ static char *path_resolve(shell_ctx_t *sh, const char *name,
         return NULL;
     }
 
-    const char *pathval = vars_get(&sh->vars, "PATH");
+    /* A `PATH=... cmd` prefix must be honoured when resolving `cmd`: POSIX
+     * applies command-prefix assignments to the execution environment, and the
+     * search for `cmd` uses that PATH. Otherwise `PATH=$DEFPATH command awk ...`
+     * (modernish's `str ematch`) searched the wrong PATH and reported awk as
+     * not found. */
+    const char *pathval = path_override ? path_override
+                                        : vars_get(&sh->vars, "PATH");
     if (!pathval || !*pathval) return NULL;
 
     char *pathcopy = strdup(pathval);
@@ -477,6 +521,12 @@ static char *path_resolve(shell_ctx_t *sh, const char *name,
     }
     free(pathcopy);
     return result;
+}
+
+static char *path_resolve(shell_ctx_t *sh, const char *name,
+                          char *buf, size_t bufsz)
+{
+    return path_resolve_with(sh, name, buf, bufsz, NULL);
 }
 
 /* -------------------------------------------------------------------------
@@ -613,6 +663,8 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
             if (!anames[i]) continue;
             if (vars_set(&sh->vars, anames[i], avals[i] ? avals[i] : "") != 0)
                 assign_err = 1;
+            else if (sh->opt_a)
+                vars_export(&sh->vars, anames[i]);   /* allexport: auto-export */
             free(anames[i]);
         }
         free(anames); free(avals);
@@ -664,6 +716,29 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
     if (sfn) {
         if (sh->trace_level >= 2)
             fprintf(stderr, "+ [builtin] %s\n", cmd);
+
+        /* A `VAR=val builtin` prefix applies to the builtin's environment for its
+         * duration. This matters when the builtin resolves or execs another
+         * command: `PATH=$DEFPATH command awk ...` (modernish's `str ematch`)
+         * must find awk via that PATH. Apply the assignments to the shell vars
+         * (exported so a child exec inherits them) and restore afterwards. */
+        char **abuiltin_saved = NULL;
+        int   *abuiltin_had   = NULL;
+        if (nassigns > 0) {
+            abuiltin_saved = calloc((size_t)nassigns, sizeof(char *));
+            abuiltin_had   = calloc((size_t)nassigns, sizeof(int));
+            if (abuiltin_saved && abuiltin_had) {
+                for (int ai = 0; ai < nassigns; ai++) {
+                    if (!anames[ai]) continue;
+                    const char *ov = vars_get(&sh->vars, anames[ai]);
+                    abuiltin_had[ai]   = ov != NULL;
+                    abuiltin_saved[ai] = ov ? strdup(ov) : NULL;
+                    vars_set(&sh->vars, anames[ai], avals[ai] ? avals[ai] : "");
+                    vars_export(&sh->vars, anames[ai]);
+                }
+            }
+        }
+
         redirect_ctx_t rctx;
         rctx.saved = NULL;
         rctx.error = 0;
@@ -703,8 +778,29 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
                 clearerr(stdout);
             }
         }
-        /* 'exec' with no command: redirections are permanent (not restored) */
-        if (strcmp(cmd, "exec") == 0 && argc == 1)
+        /* Restore variables the env-prefix temporarily overrode. `exec` with no
+         * command keeps its assignments (they become permanent, like its
+         * redirections), so skip the restore in that case. */
+        int abuiltin_keep = (strcmp(cmd, "exec") == 0 && argc == 1) ||
+                            reduces_to_bare_exec(expanded, argc);
+        if (nassigns > 0 && abuiltin_saved && abuiltin_had && !abuiltin_keep) {
+            for (int ai = 0; ai < nassigns; ai++) {
+                if (!anames[ai]) continue;
+                if (abuiltin_had[ai])
+                    vars_set(&sh->vars, anames[ai],
+                             abuiltin_saved[ai] ? abuiltin_saved[ai] : "");
+                else
+                    vars_unset(&sh->vars, anames[ai]);
+            }
+        }
+        if (abuiltin_saved)
+            for (int ai = 0; ai < nassigns; ai++) free(abuiltin_saved[ai]);
+        free(abuiltin_saved);
+        free(abuiltin_had);
+
+        /* 'exec' with no command: redirections are permanent (not restored).
+         * Also when it is reached through `command` (`command exec 8<file`). */
+        if (abuiltin_keep)
             redirect_commit(&rctx);
         else if (redirs)
             redirect_restore(&rctx);
@@ -726,6 +822,13 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
         rctx.saved = NULL;
         rctx.error = 0;
         if (redirs) redirect_apply(sh, redirs, &rctx);
+        /* A failed redirection means the command (here, the function) does not
+         * run; report failure (POSIX). */
+        if (rctx.error) {
+            cmd_rc = 1;
+            if (redirs) redirect_restore(&rctx);
+            goto cmd_done;
+        }
 
         /* Set positional parameters for function */
         char **old_pos   = sh->positional;
@@ -839,6 +942,12 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
         rctx.saved = NULL;
         rctx.error = 0;
         if (redirs) redirect_apply(sh, redirs, &rctx);
+        if (rctx.error) {
+            /* Failed redirection: don't run the applet (POSIX). */
+            cmd_rc = 1;
+            if (redirs) redirect_restore(&rctx);
+            goto cmd_done;
+        }
         cmd_rc = ap->fn(argc, expanded);
         if (redirs) redirect_restore(&rctx);
         goto cmd_done;
@@ -851,8 +960,18 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
     const char *exec_path;
     char path_buf[PATH_MAX];
 
+    /* A `PATH=...` command-prefix assignment overrides the PATH used to find the
+     * command. Resolve against it directly and DON'T touch the path cache, which
+     * is keyed on the shell's normal PATH. */
+    const char *path_prefix = NULL;
+    for (int ai = 0; ai < nassigns; ai++)
+        if (anames[ai] && strcmp(anames[ai], "PATH") == 0)
+            path_prefix = avals[ai] ? avals[ai] : "";
+
     if (strchr(cmd, '/')) {
         exec_path = cmd;
+    } else if (path_prefix) {
+        exec_path = path_resolve_with(sh, cmd, path_buf, sizeof(path_buf), path_prefix);
     } else {
         path_cache_entry_t *ce = path_cache_get(sh, cmd);
         if (ce) {
@@ -865,7 +984,15 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
     }
 
     if (!exec_path) {
+        /* Report "command not found" through any redirections on this command:
+         * `nosuchcmd 2>/dev/null` must swallow the message. We resolve the
+         * command in the parent (before the fork that would apply redirects),
+         * so apply them here around the message and restore afterwards. */
+        redirect_ctx_t rctx = {NULL, 0};
+        if (redirs) redirect_apply(sh, redirs, &rctx);
         fprintf(stderr, "silex: %s: command not found\n", cmd);
+        fflush(stderr);
+        if (redirs) redirect_restore(&rctx);
         sh->last_exit = 127;
         cmd_rc = 127;
         goto cmd_done;
@@ -900,6 +1027,10 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
         rctx.saved = NULL;
         rctx.error = 0;
         if (redirs) redirect_apply(sh, redirs, &rctx);
+        /* A failed redirection means the command is not run; exit the child
+         * with a nonzero status instead of exec'ing (POSIX). */
+        if (rctx.error)
+            _exit(1);
 
         /* Export all exported vars */
         vars_export_env(&sh->vars);
@@ -1344,6 +1475,15 @@ int exec_node(shell_ctx_t *sh, node_t *node)
 
     case N_ASYNC: {
         fflush(NULL);  /* Flush all stdio buffers before fork to avoid duplicate output */
+        /* Before adding another background job, reap and drop any that have
+         * already finished. In a non-interactive shell that spawns a background
+         * job every iteration (modernish's LOOP generator) this keeps both the
+         * process table and the job list from growing without bound -- otherwise
+         * fork() eventually fails with EAGAIN. Safe here: no foreground child is
+         * pending at an `&` point, so waitpid(-1, WNOHANG) can only see the
+         * shell's own finished background jobs. */
+        if (!sh->interactive)
+            job_reap_and_prune(&sh->jobs);
         char *jobcmd = describe_node(node->u.binary.left);
         pid_t pid = fork();
         if (pid < 0) {
@@ -1805,26 +1945,63 @@ static int set_option_byname(shell_ctx_t *sh, const char *name, int value)
     else if (strcmp(name, "noglob")   == 0) sh->opt_f = value;
     else if (strcmp(name, "noexec")   == 0) sh->opt_n = value;
     else if (strcmp(name, "monitor")  == 0) sh->opt_m = value;
+    else if (strcmp(name, "noclobber")== 0) sh->opt_C = value;
+    else if (strcmp(name, "allexport")== 0) sh->opt_a = value;
     else if (strcmp(name, "pipefail") == 0) sh->opt_pipefail = value;
     else return -1;
     return 0;
 }
 
+/* `set -o` / `set +o` with no option name lists the current settings. `-o`
+ * (reusable == 0) prints a human-readable table; `+o` (reusable == 1) prints
+ * `set +o NAME` / `set -o NAME` lines that re-create the current state when fed
+ * back to the shell -- modernish's option stack (push/pop via _IN/opt) saves and
+ * restores options exactly this way, and errored out when the listing was
+ * missing. */
+static void set_print_options(shell_ctx_t *sh, int reusable)
+{
+    static const char *const opts[] = {
+        "allexport", "errexit", "nounset", "xtrace", "noglob",
+        "noexec", "monitor", "noclobber", "pipefail",
+    };
+    for (size_t i = 0; i < sizeof(opts) / sizeof(opts[0]); i++) {
+        int on;
+        const char *n = opts[i];
+        if      (strcmp(n, "allexport")== 0) on = sh->opt_a;
+        else if (strcmp(n, "errexit")  == 0) on = sh->opt_e;
+        else if (strcmp(n, "nounset")  == 0) on = sh->opt_u;
+        else if (strcmp(n, "xtrace")   == 0) on = sh->opt_x;
+        else if (strcmp(n, "noglob")   == 0) on = sh->opt_f;
+        else if (strcmp(n, "noexec")   == 0) on = sh->opt_n;
+        else if (strcmp(n, "monitor")  == 0) on = sh->opt_m;
+        else if (strcmp(n, "noclobber")== 0) on = sh->opt_C;
+        else                                 on = sh->opt_pipefail;
+
+        if (reusable)
+            printf("set %co %s\n", on ? '-' : '+', n);
+        else
+            printf("%-16s%s\n", n, on ? "on" : "off");
+    }
+}
+
 static int exec_builtin_set(shell_ctx_t *sh, int argc, char **argv)
 {
     int i;
+    int had_dashdash = 0;   /* explicit `--`: assign positionals even if none follow */
     for (i = 1; i < argc; i++) {
         const char *arg = argv[i];
         if (arg[0] == '-' && arg[1] != '\0') {
-            if (arg[1] == '-' && arg[2] == '\0') { i++; break; } /* -- */
+            if (arg[1] == '-' && arg[2] == '\0') { had_dashdash = 1; i++; break; } /* -- */
             for (int k = 1; arg[k]; k++) {
                 switch (arg[k]) {
+                case 'a': sh->opt_a = 1; break;
                 case 'e': sh->opt_e = 1; break;
                 case 'u': sh->opt_u = 1; break;
                 case 'x': sh->opt_x = 1; break;
                 case 'f': sh->opt_f = 1; break;
                 case 'n': sh->opt_n = 1; break;
                 case 'm': sh->opt_m = 1; break;
+                case 'C': sh->opt_C = 1; break;
                 case 'o':
                     if (i + 1 < argc) {
                         const char *opt = argv[i+1];
@@ -1835,8 +2012,8 @@ static int exec_builtin_set(shell_ctx_t *sh, int argc, char **argv)
                             return 1;
                         }
                     } else {
-                        fprintf(stderr, "silex: set: -o: option name required\n");
-                        return 1;
+                        /* `set -o` with no name: list options (POSIX). */
+                        set_print_options(sh, 0);
                     }
                     break;
                 default: break;
@@ -1845,12 +2022,14 @@ static int exec_builtin_set(shell_ctx_t *sh, int argc, char **argv)
         } else if (arg[0] == '+' && arg[1] != '\0') {
             for (int k = 1; arg[k]; k++) {
                 switch (arg[k]) {
+                case 'a': sh->opt_a = 0; break;
                 case 'e': sh->opt_e = 0; break;
                 case 'u': sh->opt_u = 0; break;
                 case 'x': sh->opt_x = 0; break;
                 case 'f': sh->opt_f = 0; break;
                 case 'n': sh->opt_n = 0; break;
                 case 'm': sh->opt_m = 0; break;
+                case 'C': sh->opt_C = 0; break;
                 case 'o':
                     if (i + 1 < argc) {
                         const char *opt = argv[i+1];
@@ -1861,8 +2040,9 @@ static int exec_builtin_set(shell_ctx_t *sh, int argc, char **argv)
                             return 1;
                         }
                     } else {
-                        fprintf(stderr, "silex: set: +o: option name required\n");
-                        return 1;
+                        /* `set +o` with no name: list options as reusable
+                         * `set +o NAME` / `set -o NAME` commands (POSIX). */
+                        set_print_options(sh, 1);
                     }
                     break;
                 default: break;
@@ -1872,8 +2052,12 @@ static int exec_builtin_set(shell_ctx_t *sh, int argc, char **argv)
             break; /* first non-flag arg: positionals start here */
         }
     }
-    /* i now points to first positional arg (or argc if none given) */
-    if (i < argc) {
+    /* i now points to first positional arg (or argc if none given).
+     *
+     * Assign the positionals when operands were given, OR when `--` was present
+     * with nothing after it -- `set --` clears $@ (POSIX). `set` alone and
+     * `set -e` (options only, no `--`) must leave the positionals untouched. */
+    if (i < argc || had_dashdash) {
         int n = argc - i;
 
         /* Copy the strings rather than aliasing argv: argv points into the

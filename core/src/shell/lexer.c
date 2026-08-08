@@ -262,10 +262,43 @@ static void scan_cmd_subst(lexer_t *l)
 {
     int depth = 1;
     wordbuf_append(l, '(');
+    /* Char before the current one, to spot a `#` in command position. Seeded
+     * with '(' (the just-consumed `$(`), itself a command-word delimiter. */
+    int prev = '(';
     while (depth > 0) {
         int c = lexer_getc(l);
         if (c == EOF) break;
-        if (c == '(') {
+        if (c == '#' &&
+            (prev == ' ' || prev == '\t' || prev == '\n' || prev == '(' ||
+             prev == ';' || prev == '&'  || prev == '|')) {
+            /* Comment: everything to end of line is literal, so a stray ' " ( )
+             * in it must not affect quote/paren tracking. `$( # subshell's PID
+             * )` -- an apostrophe in a comment -- otherwise opened a runaway
+             * single-quote scan that swallowed the closing ')'. Append the text
+             * verbatim (it is re-lexed, and skipped again, when the substitution
+             * runs); stop at the newline and let the loop handle it. */
+            wordbuf_append(l, '#');
+            for (;;) {
+                int q = lexer_getc(l);
+                if (q == EOF) break;
+                if (q == '\n') { lexer_ungetc(l, q); break; }
+                wordbuf_append(l, (char)q);
+            }
+            prev = '#';
+            continue;
+        }
+        prev = c;
+        if (c == '\\') {
+            /* Backslash escapes the next character outside quotes: \( \) \' \"
+             * are literals and must NOT affect paren depth or start a quoted
+             * block. Pass both bytes through verbatim. */
+            int e = lexer_getc(l);
+            wordbuf_append(l, '\\');
+            if (e != EOF) {
+                if (e == '\n') l->lineno++;
+                wordbuf_append(l, (char)e);
+            }
+        } else if (c == '(') {
             depth++;
             wordbuf_append(l, (char)c);
         } else if (c == ')') {
@@ -705,6 +738,18 @@ restart:
             } else if (next == '{') {
                 wordbuf_append(l, '$');
                 scan_param_expand(l);
+            } else if (next == '\'' || next == '"') {
+                /* `$'...'` / `$"..."` are not POSIX (they are bash/ksh ANSI-C and
+                 * locale quoting). POSIX treats the `$` as a literal dollar and
+                 * the quote as opening an ordinary quoted string, so `$'a\40b'`
+                 * is the word `$a\40b` -- which is exactly what lets modernish's
+                 * CESCQUOT capability probe fail gracefully instead of parse-
+                 * erroring. Push the quote back so the main loop pairs it: the
+                 * old code appended the OPENING quote as a literal, leaving the
+                 * CLOSING quote to start a runaway quote scan that swallowed the
+                 * following tokens (e.g. the `in` of a `case`). */
+                wordbuf_append(l, '$');
+                lexer_ungetc(l, next);
             } else {
                 wordbuf_append(l, '$');
                 if (next != EOF) {

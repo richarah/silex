@@ -197,6 +197,29 @@ void job_reap(job_list_t *jl)
     }
 }
 
+/* Reap finished background children and drop them from the table.
+ *
+ * job_reap() alone leaves DONE jobs on the list forever, so a script that spawns
+ * background jobs and never runs `wait`/`jobs` (modernish's LOOP kills a per-loop
+ * generator with `kill` and moves on) accumulated one un-reaped zombie AND one
+ * job struct per loop -- tens of thousands of them, until fork() returned EAGAIN.
+ *
+ * Removing DONE jobs here means a later `wait $pid` on such a job no longer finds
+ * it; that is why the caller restricts this to non-interactive shells, where jobs
+ * are not reported and prompt reaping matters more than remembering exit codes.
+ * Stopped jobs are kept (they can still be resumed). */
+void job_reap_and_prune(job_list_t *jl)
+{
+    job_reap(jl);
+    job_t *j = jl->head;
+    while (j) {
+        job_t *next = j->next;
+        if (j->state == JOB_DONE)
+            job_remove(jl, j);
+        j = next;
+    }
+}
+
 pid_t job_last_bg(job_list_t *jl)
 {
     /* Most recently registered job = the one with the highest id. */

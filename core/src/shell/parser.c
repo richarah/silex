@@ -83,6 +83,109 @@ static node_t *alloc_node(parser_t *p, node_type_t type)
 }
 
 /* -------------------------------------------------------------------------
+ * Deep node copy
+ *
+ * Transient input (an `eval` string, a trap action, a sourced line) is parsed
+ * into a scratch arena that the runner frees as soon as the command finishes,
+ * so its parse tree does not pile up in the shell's persistent parse_arena.
+ * The one thing that must outlive that scratch arena is a function BODY: `f() {
+ * ...; }` defined inside an eval has to keep working after the eval returns.
+ * add_function() therefore deep-copies the body into the persistent arena via
+ * node_dup(), severing every pointer back into the soon-to-be-freed scratch.
+ *
+ * node->arena is set to dst for tidiness; nothing in exec reads it.
+ * ------------------------------------------------------------------------- */
+
+static char **strv_dup(arena_t *dst, char *const *v)
+{
+    if (!v) return NULL;
+    size_t n = 0;
+    while (v[n]) n++;
+    char **out = arena_alloc(dst, (n + 1) * sizeof(char *));
+    for (size_t i = 0; i < n; i++)
+        out[i] = arena_strdup(dst, v[i]);
+    out[n] = NULL;
+    return out;
+}
+
+static redir_t *redirs_dup(arena_t *dst, const redir_t *r)
+{
+    redir_t *head = NULL, *tail = NULL;
+    for (; r; r = r->next) {
+        redir_t *nr = arena_alloc(dst, sizeof(redir_t));
+        nr->fd                = r->fd;
+        nr->op                = r->op;
+        nr->target            = r->target  ? arena_strdup(dst, r->target)  : NULL;
+        nr->heredoc           = r->heredoc ? arena_strdup(dst, r->heredoc) : NULL;
+        nr->heredoc_no_expand = r->heredoc_no_expand;
+        nr->next              = NULL;
+        if (tail) tail->next = nr; else head = nr;
+        tail = nr;
+    }
+    return head;
+}
+
+node_t *node_dup(arena_t *dst, const node_t *src)
+{
+    if (!src) return NULL;
+    node_t *n = arena_alloc(dst, sizeof(node_t));
+    memset(n, 0, sizeof(*n));
+    n->type  = src->type;
+    n->arena = dst;
+
+    switch (src->type) {
+    case N_CMD:
+        n->u.cmd.words   = strv_dup(dst, src->u.cmd.words);
+        n->u.cmd.assigns = strv_dup(dst, src->u.cmd.assigns);
+        n->u.cmd.redirs  = redirs_dup(dst, src->u.cmd.redirs);
+        break;
+    case N_PIPE: case N_AND: case N_OR: case N_SEQ:
+    case N_NOT:  case N_ASYNC:
+        n->u.binary.left  = node_dup(dst, src->u.binary.left);
+        n->u.binary.right = node_dup(dst, src->u.binary.right);
+        break;
+    case N_SUBSHELL: case N_BRACE: case N_REDIR:
+        n->u.redir_node.body   = node_dup(dst, src->u.redir_node.body);
+        n->u.redir_node.redirs = redirs_dup(dst, src->u.redir_node.redirs);
+        break;
+    case N_IF:
+        n->u.if_node.cond       = node_dup(dst, src->u.if_node.cond);
+        n->u.if_node.then_b     = node_dup(dst, src->u.if_node.then_b);
+        n->u.if_node.elif_chain = node_dup(dst, src->u.if_node.elif_chain);
+        n->u.if_node.else_b     = node_dup(dst, src->u.if_node.else_b);
+        break;
+    case N_WHILE: case N_UNTIL:
+        n->u.loop.cond = node_dup(dst, src->u.loop.cond);
+        n->u.loop.body = node_dup(dst, src->u.loop.body);
+        break;
+    case N_FOR:
+        n->u.for_node.var   = src->u.for_node.var ? arena_strdup(dst, src->u.for_node.var) : NULL;
+        n->u.for_node.words = strv_dup(dst, src->u.for_node.words);
+        n->u.for_node.body  = node_dup(dst, src->u.for_node.body);
+        break;
+    case N_CASE: {
+        n->u.case_node.word = src->u.case_node.word ? arena_strdup(dst, src->u.case_node.word) : NULL;
+        case_item_t *head = NULL, *tail = NULL;
+        for (const case_item_t *it = src->u.case_node.items; it; it = it->next) {
+            case_item_t *ni = arena_alloc(dst, sizeof(case_item_t));
+            ni->patterns = strv_dup(dst, it->patterns);
+            ni->body     = node_dup(dst, it->body);
+            ni->next     = NULL;
+            if (tail) tail->next = ni; else head = ni;
+            tail = ni;
+        }
+        n->u.case_node.items = head;
+        break;
+    }
+    case N_FUNC:
+        n->u.func.name = src->u.func.name ? arena_strdup(dst, src->u.func.name) : NULL;
+        n->u.func.body = node_dup(dst, src->u.func.body);
+        break;
+    }
+    return n;
+}
+
+/* -------------------------------------------------------------------------
  * Word-array building helpers
  *
  * We maintain a dynamically-sized list of char* while parsing, then
@@ -638,8 +741,21 @@ static node_t *parse_for_cmd(parser_t *p)
     if (peek(p).type == TOK_IN) {
         saw_in = 1;
         consume(p); /* IN */
-        while (peek(p).type == TOK_WORD) {
+        /* The word list may hold tokens that lex as reserved words or `{`/`}`/`!`
+         * -- `for v in ! { } case do done ... while; do` (modernish builtin.t)
+         * lists every reserved word as data. Reserved words are only special in
+         * command position, so accept any text-carrying token here and stop only
+         * at a real list terminator. The `;`/newline that precedes the loop's
+         * `do` is such a terminator, so the body's `do` is never swallowed. */
+        for (;;) {
+            tok_type_t t = peek(p).type;
+            if (t == TOK_SEMI  || t == TOK_NEWLINE || t == TOK_DSEMI ||
+                t == TOK_AMP   || t == TOK_PIPE    || t == TOK_AND_AND ||
+                t == TOK_OR_OR || t == TOK_LPAREN  || t == TOK_RPAREN ||
+                t == TOK_EOF)
+                break;
             token_t w = consume(p);
+            if (w.text == NULL) break;
             wl_push(&words, w.text);
         }
     }

@@ -50,6 +50,7 @@ void   job_remove(job_list_t *jl, job_t *j);
 
 int    job_wait(job_list_t *jl, pid_t pid);   /* wait for a pid, return exit code */
 void   job_reap(job_list_t *jl);              /* non-blocking: update states (WUNTRACED) */
+void   job_reap_and_prune(job_list_t *jl);    /* reap + drop DONE jobs (non-interactive) */
 pid_t  job_last_bg(job_list_t *jl);           /* most recently added background pid */
 
 #endif

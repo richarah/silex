@@ -38,6 +38,8 @@ typedef struct shell_ctx {
     int         opt_pipefail;
     int         opt_n;       /* set -n: no execute */
     int         opt_m;       /* set -m: monitor mode (job control) */
+    int         opt_C;       /* set -C / -o noclobber: '>' won't overwrite existing regular file */
+    int         opt_a;       /* set -a / -o allexport: auto-export assigned variables */
     int         in_cond;     /* set -e exempt: inside if/while/until condition, ! operand */
     int         and_or_exempt; /* set -e exempt: && left-side failure caused short-circuit */
     char       *script_name; /* $0 */
