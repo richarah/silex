@@ -2449,11 +2449,22 @@ static int exec_builtin_test(shell_ctx_t *sh, int argc, char **argv)
         if (strcmp(op, "-e") == 0) { struct stat st; return (stat(a, &st) == 0) ? 0 : 1; }
         if (strcmp(op, "-f") == 0) { struct stat st; return (stat(a, &st) == 0 && S_ISREG(st.st_mode)) ? 0 : 1; }
         if (strcmp(op, "-d") == 0) { struct stat st; return (stat(a, &st) == 0 && S_ISDIR(st.st_mode)) ? 0 : 1; }
-        if (strcmp(op, "-L") == 0) { struct stat st; return (lstat(a, &st) == 0 && S_ISLNK(st.st_mode)) ? 0 : 1; }
+        if (strcmp(op, "-L") == 0 || strcmp(op, "-h") == 0)
+            { struct stat st; return (lstat(a, &st) == 0 && S_ISLNK(st.st_mode)) ? 0 : 1; }
+        if (strcmp(op, "-p") == 0) { struct stat st; return (stat(a, &st) == 0 && S_ISFIFO(st.st_mode)) ? 0 : 1; }
+        if (strcmp(op, "-b") == 0) { struct stat st; return (stat(a, &st) == 0 && S_ISBLK(st.st_mode))  ? 0 : 1; }
+        if (strcmp(op, "-c") == 0) { struct stat st; return (stat(a, &st) == 0 && S_ISCHR(st.st_mode))  ? 0 : 1; }
+        if (strcmp(op, "-S") == 0) { struct stat st; return (stat(a, &st) == 0 && S_ISSOCK(st.st_mode)) ? 0 : 1; }
+        if (strcmp(op, "-g") == 0) { struct stat st; return (stat(a, &st) == 0 && (st.st_mode & S_ISGID)) ? 0 : 1; }
+        if (strcmp(op, "-u") == 0) { struct stat st; return (stat(a, &st) == 0 && (st.st_mode & S_ISUID)) ? 0 : 1; }
+        if (strcmp(op, "-k") == 0) { struct stat st; return (stat(a, &st) == 0 && (st.st_mode & S_ISVTX)) ? 0 : 1; }
+        if (strcmp(op, "-O") == 0) { struct stat st; return (stat(a, &st) == 0 && st.st_uid == geteuid()) ? 0 : 1; }
+        if (strcmp(op, "-G") == 0) { struct stat st; return (stat(a, &st) == 0 && st.st_gid == getegid()) ? 0 : 1; }
         if (strcmp(op, "-r") == 0) return (access(a, R_OK) == 0) ? 0 : 1;
         if (strcmp(op, "-w") == 0) return (access(a, W_OK) == 0) ? 0 : 1;
         if (strcmp(op, "-x") == 0) return (access(a, X_OK) == 0) ? 0 : 1;
         if (strcmp(op, "-s") == 0) { struct stat st; return (stat(a, &st) == 0 && st.st_size > 0) ? 0 : 1; }
+        if (strcmp(op, "-t") == 0) { int fd; return (sh_parse_int(a, 0, INT_MAX, &fd) == 0 && isatty(fd)) ? 0 : 1; }
         if (strcmp(op, "!") == 0)  return (a[0] == '\0') ? 0 : 1; /* ! "" */
         return 1;
     }

@@ -1201,7 +1201,89 @@ static node_t *parse_list(parser_t *p)
  * Public API
  * ------------------------------------------------------------------------- */
 
-/* Parse a single complete command (one and_or with optional separator) */
+/* Parse one logical input line: a `;`/`&`-separated list of and_ors, ending at
+ * an unquoted top-level NEWLINE (or EOF).
+ *
+ * This is like parse_list EXCEPT a newline TERMINATES the list instead of being
+ * a separator that continues it. That distinction is what lets the shell driver
+ * execute a line before the NEXT line is parsed — POSIX alias semantics. An
+ * alias, `use`, or function DEFINED on one line must be visible on the next
+ * (modernish's `use var/loop` then a later `LOOP ...; DONE` block, or its
+ * per-line `alias not='! '`). Batch-parsing the whole file up front defined
+ * those too late. Matching dash, a `;`-separated alias on the SAME line is still
+ * not yet in effect (`alias z=cmd; z` — z is parsed before the alias runs).
+ *
+ * A line still spans multiple PHYSICAL lines whenever a construct is
+ * unterminated: a compound command (if/for/while/case/{...}/subshell) consumes
+ * newlines through its own parse_compound_list, and an alias like LOOP that
+ * opens a brace group a later line's DONE closes keeps parse_and_or reading
+ * across newlines until the braces balance. Only a newline reached at the TOP
+ * level ends the line. */
+static node_t *parse_line(parser_t *p)
+{
+    node_t *unit = parse_and_or(p);
+    if (!unit || p->error) return NULL;
+
+    node_t *result = NULL;   /* accumulated sequence; NULL until we have >1 unit */
+
+    for (;;) {
+        tok_type_t t = peek(p).type;
+
+        if (t == TOK_AMP) {
+            consume(p);
+            node_t *a         = alloc_node(p, N_ASYNC);
+            a->u.binary.left  = unit;
+            a->u.binary.right = NULL;
+            unit = a;
+        } else if (t == TOK_SEMI) {
+            consume(p);
+        } else {
+            break;   /* NEWLINE / EOF / stray terminator: the line ends here */
+        }
+
+        /* Fold this (possibly async-wrapped) unit into the sequence. */
+        if (!result) {
+            result = unit;
+        } else {
+            node_t *seq         = alloc_node(p, N_SEQ);
+            seq->u.binary.left  = result;
+            seq->u.binary.right = unit;
+            result = seq;
+        }
+        unit = NULL;
+
+        /* A separator followed by a line/scope terminator ends the line. We do
+         * NOT skip_newlines here: a bare newline must stop the line (that is the
+         * whole point), and the leftover terminators below can only legally
+         * follow when this list is the body of a compound command — in which
+         * case that caller, not this top-level driver, is what parses us. */
+        tok_type_t nxt = peek(p).type;
+        if (nxt == TOK_NEWLINE || nxt == TOK_EOF   || nxt == TOK_FI    ||
+            nxt == TOK_DONE    || nxt == TOK_ESAC  || nxt == TOK_THEN  ||
+            nxt == TOK_ELSE    || nxt == TOK_ELIF  || nxt == TOK_DO    ||
+            nxt == TOK_RPAREN  || nxt == TOK_RBRACE || nxt == TOK_DSEMI)
+            break;
+
+        unit = parse_and_or(p);
+        if (!unit || p->error) break;
+    }
+
+    /* A trailing unit with no separator after it. */
+    if (unit) {
+        if (!result) {
+            result = unit;
+        } else {
+            node_t *seq         = alloc_node(p, N_SEQ);
+            seq->u.binary.left  = result;
+            seq->u.binary.right = unit;
+            result = seq;
+        }
+    }
+
+    return result;
+}
+
+/* Parse one logical line (see parse_line). Returns NULL at EOF. */
 node_t *parser_parse(parser_t *p)
 {
     /* Skip leading newlines and semicolons between top-level commands.
@@ -1219,9 +1301,9 @@ node_t *parser_parse(parser_t *p)
     if (t.type == TOK_EOF)
         return NULL;
 
-    node_t *result = parse_list(p);
+    node_t *result = parse_line(p);
 
-    /* If parse_list returned NULL but we're not at EOF, it's a parse error */
+    /* If parse_line returned NULL but we're not at EOF, it's a parse error */
     if (!result && !p->error && peek(p).type != TOK_EOF) {
         parser_error(p, "unexpected token");
     }

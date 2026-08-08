@@ -703,6 +703,7 @@ typedef struct {
     const char    *src;
     size_t         pos;
     shell_ctx_t   *sh;
+    int            depth;   /* recursion guard for operands expanded from params */
 } arith_ctx_t;
 
 static void arith_skip_ws(arith_ctx_t *ac)
@@ -866,6 +867,32 @@ static long arith_primary(arith_ctx_t *ac)
         char *endp;
         long litval  = strtol(namebuf, &endp, 0);
         int  is_num  = (namebuf[0] != '\0' && *endp == '\0');
+
+        /* If the operand is neither a number nor a plain variable name, it was
+         * produced by expanding a parameter whose VALUE is itself an arithmetic
+         * expression — e.g. a positional `$1` holding "i = (1)", or `v="2 + 3"`
+         * used as `($v)`. POSIX 2.6.4 says the expression is parameter-expanded
+         * and THEN evaluated, so the substituted text must be parsed as a
+         * sub-expression (arith_read_operand only substituted the value; it did
+         * not evaluate it). Recurse, with a depth guard against self-referential
+         * values like v='$v'. Assignments inside it take effect (needed so a
+         * later operand in the same expression can read the assigned var). */
+        if (!is_num && namebuf[0]) {
+            int is_name = is_alpha_underscore((unsigned char)namebuf[0]);
+            for (const char *q = namebuf + 1; is_name && *q; q++)
+                if (!is_name_char((unsigned char)*q)) is_name = 0;
+            if (!is_name) {
+                if (ac->depth >= 64)
+                    return 0;   /* runaway expansion: give up rather than loop */
+                arith_ctx_t sub;
+                sub.src   = namebuf;
+                sub.pos   = 0;
+                sub.sh    = ac->sh;
+                sub.depth = ac->depth + 1;
+                return arith_expr(&sub);
+            }
+        }
+
         const char *v = is_num ? NULL : sh_getvar(ac->sh, namebuf);
         long cur_val = is_num ? litval : (v ? atol(v) : 0L);
 
@@ -1158,9 +1185,10 @@ static long arith_expr(arith_ctx_t *ac)
 long expand_arith(shell_ctx_t *sh, const char *expr)
 {
     arith_ctx_t ac;
-    ac.src = expr;
-    ac.pos = 0;
-    ac.sh  = sh;
+    ac.src   = expr;
+    ac.pos   = 0;
+    ac.sh    = sh;
+    ac.depth = 0;
     return arith_expr(&ac);
 }
 

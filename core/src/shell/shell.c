@@ -272,10 +272,58 @@ int shell_run_file(shell_ctx_t *sh, const char *path)
         return 1;
     }
 
+    /* Slurp the whole script into memory and lex from that string, rather than
+     * streaming the FILE* with the lexer.
+     *
+     * WHY: the parser now runs one command at a time (parser_parse returns a
+     * single command so an alias/`use`/function it defines is visible to the
+     * NEXT command — POSIX interleaving). That means we EXECUTE commands while
+     * the script is still being read. A command that forks — a subshell, a
+     * command substitution, or the module loads modernish does at the top of a
+     * file (`use var/shellquote` in readlink.mm) — hands the child a copy of
+     * this FILE*. With buffered stdio the parent has read ahead, so the child
+     * shares an fd whose offset is past the parse point; when the child exits,
+     * glibc's stdio cleanup lseek()s that shared fd BACK by the amount still
+     * sitting unconsumed in the buffer. The parent then re-reads bytes it
+     * already buffered, so the tokenizer sees the file's earlier content spliced
+     * into a later line (a single-quoted glob pattern swallowing the file
+     * header, etc.). Batch parsing never hit this because it read the entire
+     * file before any command — hence any fork — ran.
+     *
+     * Reading it all up front removes the shared, mid-file fd entirely: the fp
+     * is closed before we execute anything, and token text is copied into the
+     * arena, so the buffer only needs to outlive parsing. (setvbuf(_IONBF) also
+     * fixes the corruption but costs a syscall per byte across every sourced
+     * module; slurping is both correct and fast.) */
+    size_t  cap = 0, len = 0;
+    char   *src = NULL;
+    for (;;) {
+        if (len + 65536 + 1 > cap) {
+            size_t ncap = cap ? cap * 2 : 65536 + 1;
+            char  *nb   = realloc(src, ncap);
+            if (!nb) { free(src); fclose(fp); sh->last_exit = 1; return 1; }
+            src = nb; cap = ncap;
+        }
+        size_t got = fread(src + len, 1, 65536, fp);
+        len += got;
+        if (got < 65536) {
+            if (ferror(fp)) { free(src); fclose(fp); perror(path); sh->last_exit = 1; return 1; }
+            break;  /* EOF */
+        }
+    }
+    fclose(fp);
+    fp = NULL;
+    if (!src) {                     /* empty file */
+        src = malloc(1);
+        if (!src) { sh->last_exit = 1; return 1; }
+        len = 0;
+    }
+    src[len] = '\0';
+
     lexer_t  lex;
     parser_t par;
 
-    lexer_init_fp(&lex, fp, &sh->parse_arena);
+    lexer_init_str(&lex, src, &sh->parse_arena);
     parser_init(&par, &lex, &sh->parse_arena);
     parser_set_aliases(&par, shell_alias_lookup_cb, sh);
 
@@ -313,7 +361,7 @@ int shell_run_file(shell_ctx_t *sh, const char *path)
                 sh->scratch = saved_scratch;
                 arena_free(&local);
                 lexer_free(&lex);
-                fclose(fp);
+                free(src);
                 return rc;
             }
             sh->last_exit = rc;
@@ -327,7 +375,7 @@ int shell_run_file(shell_ctx_t *sh, const char *path)
     arena_free(&local);
 
     lexer_free(&lex);
-    fclose(fp);
+    free(src);
     return sh->last_exit;
 }
 
@@ -525,6 +573,16 @@ int shell_run_stdin(shell_ctx_t *sh)
 
     if (interactive)
         return shell_run_interactive(sh);
+
+    /* Unbuffered so the fd offset always matches exactly what the parser has
+     * consumed. A non-interactive stdin script is read command-by-command and
+     * executed as we go; a forked child (subshell/command substitution) shares
+     * this fd, and buffered read-ahead would let the child's exit-time stdio
+     * cleanup lseek it back over the unconsumed buffer, corrupting the parse.
+     * See the detailed note in shell_run_file. stdin can't be slurped up front
+     * (it may stream), so keep the fd position honest instead. It also means a
+     * `read` in the script consumes exactly its bytes and no more. */
+    setvbuf(stdin, NULL, _IONBF, 0);
 
     lexer_t  lex;
     parser_t par;
