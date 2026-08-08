@@ -670,7 +670,11 @@ static char *cmd_subst(shell_ctx_t *sh, const char *cmd)
         sub.shell_pid    = sh->shell_pid;  /* $$ is the main shell's PID, not the
                                             * command-substitution child's */
         memcpy(sub.funcs, sh->funcs, sizeof(sh->funcs)); /* inherit functions */
-        /* Clear set_in_this_shell for inherited traps */
+        /* Clear set_in_this_shell for inherited traps. NOTE: a command
+         * substitution does NOT inherit the parent's signal trap actions -- dash
+         * resets them to default in the `$(...)` subshell, and matching that is
+         * what modernish expects (a PIPE trap does not fire for a SIGPIPE taken
+         * by a pipeline stage inside a command substitution). */
         for (int i = 0; i < NSIG; i++)
             sub.traps[i].set_in_this_shell = 0;
         shell_run_string(&sub, cmd);
