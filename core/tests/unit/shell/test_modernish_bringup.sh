@@ -543,6 +543,16 @@ check "a lone ' inside a double-quoted \${...} is literal (no runaway)" \
 # A `}` inside an inner "..." is literal; the expansion closes at the outer one.
 check "a brace inside an inner double-quoted default is literal" \
     "$("$MB" -c 'unset v; printf "%s" ${v-"a}b"c}')" 'a}bc'
+# ${v=WORD} assignment must store the LITERAL value even when WORD contains a
+# byte silex uses internally as an escape (0x04). The quoted form runs with
+# emit_guards OFF, so the expansion is not encoded and must NOT be pp_decode()d
+# -- doing so ate the literal 0x04. (modernish string.t BUG_PSUBASNCC, all ASCII)
+check "quoted \${v=WORD} stores a literal 0x04 (no decode of unencoded data)" \
+    "$("$MB" -c 'unset v; a=$(printf "X\004Y"); : "${v=$a}"; printf "%s" "$v" | od -An -tx1 | tr -dc "0-9a-f"')" \
+    '580459'
+check "unquoted \${v=WORD} also stores a literal 0x04" \
+    "$("$MB" -c 'unset v; a=$(printf "X\004Y"); : ${v=$a}; printf "%s" "$v" | od -An -tx1 | tr -dc "0-9a-f"')" \
+    '580459'
 
 # -----------------------------------------------------------------------
 echo

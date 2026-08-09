@@ -570,16 +570,25 @@ static char *expand_braced_body(shell_ctx_t *sh, const char *body, int in_dquote
             if (condition) {
                 strbuf_t sb;
                 sb_init(&sb, 64);
+                /* emit_data() only encodes reserved bytes when emit_guards is on
+                 * (a field-splitting context). Capture that: the returned text
+                 * carries escapes only in that case, and the stored value must be
+                 * decoded ONLY then. */
+                int guards = sh->emit_guards;
                 { int sj_ = sh->pp_join_unquoted; int wd_ = sh->pp_word_dq;
                   sh->pp_join_unquoted = !in_dquote; sh->pp_word_dq = in_dquote;
                   expand_into(sh, word_part, &sb, in_dquote);
                   sh->pp_join_unquoted = sj_; sh->pp_word_dq = wd_; }
                 const char *newval = sb_str(&sb);
-                /* The expansion may carry reserved-byte escapes (e.g. `$*` with
-                 * a control byte in a splitting word). The VARIABLE must receive
-                 * the decoded, literal value; the RETURNED text keeps the escapes
-                 * so the caller's field splitting/decoding sees them. */
-                vars_set(&sh->vars, varname, pp_decode(sh->scratch, newval));
+                /* The VARIABLE must receive the decoded, literal value; the
+                 * RETURNED text keeps any escapes so the caller's field splitting
+                 * sees them. When emit_guards was OFF (e.g. quoted "${v=$x}") the
+                 * expansion is already literal -- decoding it then would EAT a
+                 * genuine reserved byte in the data (`"${v=$ALL_ASCII}"` dropped
+                 * a literal 0x04), so decode only when it was actually encoded. */
+                vars_set(&sh->vars, varname,
+                         guards ? pp_decode(sh->scratch, newval)
+                                : arena_strdup(sh->scratch, newval));
                 char *r = arena_strdup(sh->scratch, newval);
                 sb_free(&sb);
                 return r;
