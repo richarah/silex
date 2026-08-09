@@ -345,11 +345,36 @@ static int field_has_unprotected_glob(const char *s, const char *prot,
  * Returns arena-allocated expanded string
  * ------------------------------------------------------------------------- */
 
-/* Decode the internal reserved-byte escaping (see PP_ESC / pp_escape_append,
- * defined below). Forward-declared here because ${var=word} must store the
- * DECODED assigned value while still returning the (possibly escaped) text for
- * the caller's field splitting. */
+/* Decode/encode the internal reserved-byte escaping (see PP_ESC /
+ * pp_escape_append, defined below). Forward-declared here because ${var=word}
+ * must store the DECODED assigned value, and expand_braced()'s data-return paths
+ * must ENCODE the value they hand back so a literal reserved byte in it is not
+ * re-consumed by the caller's field-split decode. */
 static char *pp_decode(arena_t *a, const char *s);
+static void  pp_escape_append(strbuf_t *out, const char *s);
+
+/* Return a ${...}-expansion DATA result (a variable's value, a trimmed value, a
+ * substring -- NOT a word-part that already went through emit_data). When the
+ * enclosing word will be field-split (emit_guards), reserved bytes are encoded
+ * so the caller's decode restores them; otherwise the value is returned raw. */
+static char *braced_ret(shell_ctx_t *sh, const char *s)
+{
+    if (!s) s = "";
+    if (!sh->emit_guards)
+        return arena_strdup(sh->scratch, s);
+    strbuf_t sb;
+    sb_init(&sb, strlen(s) + 8);
+    pp_escape_append(&sb, s);
+    char *r = arena_strdup(sh->scratch, sb_str(&sb));
+    sb_free(&sb);
+    return r;
+}
+
+static char *braced_ret_n(shell_ctx_t *sh, const char *s, size_t n)
+{
+    char *tmp = arena_strndup(sh->scratch, s, n);
+    return braced_ret(sh, tmp);
+}
 
 /*
  * expand_braced: parse and expand ${...} body.
@@ -423,7 +448,7 @@ static char *expand_braced(shell_ctx_t *sh, const char *body, int in_dquote)
 
     /* No operator: plain ${VAR} */
     if (*p == '\0') {
-        return arena_strdup(sh->scratch, val ? val : "");
+        return braced_ret(sh, val);
     }
 
     /* ${VAR:-word}, ${VAR:+word}, ${VAR:=word}, ${VAR:?word} */
@@ -467,7 +492,7 @@ static char *expand_braced(shell_ctx_t *sh, const char *body, int in_dquote)
                 else if (sub_len < 0) avail += sub_len;  /* trim from end */
             }
             if (avail <= 0) return arena_strdup(sh->scratch, "");
-            return arena_strndup(sh->scratch, s + off, (size_t)avail);
+            return braced_ret_n(sh, s + off, (size_t)avail);
         }
     }
 
@@ -493,7 +518,7 @@ static char *expand_braced(shell_ctx_t *sh, const char *body, int in_dquote)
                 sb_free(&sb);
                 return r;
             }
-            return arena_strdup(sh->scratch, val ? val : "");
+            return braced_ret(sh, val);
 
         case '+':
             if (!condition) {
@@ -526,7 +551,7 @@ static char *expand_braced(shell_ctx_t *sh, const char *body, int in_dquote)
                 sb_free(&sb);
                 return r;
             }
-            return arena_strdup(sh->scratch, val ? val : "");
+            return braced_ret(sh, val);
 
         case '?':
             if (condition) {
@@ -540,7 +565,7 @@ static char *expand_braced(shell_ctx_t *sh, const char *body, int in_dquote)
                 sb_free(&sb);
                 exit(1);
             }
-            return arena_strdup(sh->scratch, val ? val : "");
+            return braced_ret(sh, val);
 
         default:
             break;
@@ -563,8 +588,8 @@ static char *expand_braced(shell_ctx_t *sh, const char *body, int in_dquote)
         const char *s   = val ? val : "";
         int off = greedy ? match_prefix(s, pat) : match_prefix_shortest(s, pat);
         if (off < 0)
-            return arena_strdup(sh->scratch, s);
-        return arena_strdup(sh->scratch, s + off);
+            return braced_ret(sh, s);
+        return braced_ret(sh, s + off);
     }
 
     if (op == '%') {
@@ -576,9 +601,9 @@ static char *expand_braced(shell_ctx_t *sh, const char *body, int in_dquote)
         const char *s   = val ? val : "";
         int off = greedy ? match_suffix(s, pat) : match_suffix_shortest(s, pat);
         if (off < 0)
-            return arena_strdup(sh->scratch, s);
+            return braced_ret(sh, s);
         /* Remove suffix starting at off */
-        return arena_strndup(sh->scratch, s, (size_t)off);
+        return braced_ret_n(sh, s, (size_t)off);
     }
 
     /* ${VAR/pat/repl}, ${VAR//pat/repl} */
@@ -617,7 +642,7 @@ static char *expand_braced(shell_ctx_t *sh, const char *body, int in_dquote)
         char *tmp = malloc(slen + 1);
         if (!tmp) {
             sb_free(&sb);
-            return arena_strdup(sh->scratch, s);
+            return braced_ret(sh, s);
         }
 
         size_t i = 0;
@@ -655,7 +680,7 @@ static char *expand_braced(shell_ctx_t *sh, const char *body, int in_dquote)
     }
 
     /* Fallback: return raw value */
-    return arena_strdup(sh->scratch, val ? val : "");
+    return braced_ret(sh, val);
 }
 
 /* -------------------------------------------------------------------------

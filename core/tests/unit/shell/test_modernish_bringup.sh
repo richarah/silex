@@ -468,6 +468,20 @@ check "EXIT trap \$? via exit in a command substitution" \
     "$("$MB" -c 'v=$(trap "printf %s \$?" 0; exit 42); echo "[$v]"')" "[42]"
 
 # -----------------------------------------------------------------------
+# A ${...} expansion whose DATA value contains a literal reserved byte (0x01 the
+# field-boundary marker, or 0x04 the escape byte) must survive an outer field
+# split: expand_braced encodes its data result so the split's decode restores it,
+# not consumes it. modernish's shellquote -P roundtrip of every ASCII byte (which
+# includes 0x04) exercised this.
+# -----------------------------------------------------------------------
+check "\${x} value with literal 0x04/0x01 survives field splitting" \
+    "$("$MB" -c 'x=$(printf "a\004b\001c"); set -- ${x}; printf "%s" "$1" | od -An -tx1 | tr -dc "0-9a-f"')" \
+    "6104620163"
+check "\${x#p} value with a literal 0x04 survives field splitting" \
+    "$("$MB" -c 'x=$(printf "Za\004b"); set -- ${x#Z}; printf "%s" "$1" | od -An -tx1 | tr -dc "0-9a-f"')" \
+    "610462"
+
+# -----------------------------------------------------------------------
 echo
 echo "modernish-bringup tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
