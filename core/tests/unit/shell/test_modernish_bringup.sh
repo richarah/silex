@@ -335,6 +335,31 @@ check "\${var=\$*} assigns the DECODED value, no internal escape bytes" \
     "6162633a643a0102037f"
 
 # -----------------------------------------------------------------------
+# `read` must consume no more than one line from its fd (POSIX). silex used
+# buffered fgetc(), which slurped the whole block, so a later reader of the same
+# fd saw nothing and re-exec'ing a fd kept reading the old one. This is also
+# what wedged modernish's nested LOOP (its generators pipe over fd 8).
+# -----------------------------------------------------------------------
+printf 'l1\nl2\nl3\n' > "$TMPD/rd"
+check "read leaves the rest of the fd for the next reader" \
+    "$("$MB" -c "exec 8<$TMPD/rd; read a<&8; printf '%s,' \"\$a\"; cat <&8 | tr '\\n' '/'")" \
+    "l1,l2/l3/"
+printf 'o1\no2\n' > "$TMPD/o"; printf 'i1\ni2\n' > "$TMPD/i"
+check "re-exec of a fd is honoured by the next read" \
+    "$("$MB" -c "exec 8<$TMPD/o; read a<&8; exec 8<$TMPD/i; read b<&8; echo \"\$a \$b\"")" \
+    "o1 i1"
+
+# -----------------------------------------------------------------------
+# Command substitution must expand aliases (POSIX; dash does). silex ran the
+# $(...) body in a fresh subshell without inheriting the parent's aliases, so
+# modernish's alias-based DSL (LOOP/DO/DONE, not, ...) was "command not found"
+# inside $(...) -- which broke nested LOOP (its body runs in a command sub).
+# -----------------------------------------------------------------------
+check "an alias expands inside a command substitution" \
+    "$(printf 'alias GREET=%s\nv=$(GREET)\nprintf "[%%s]" "$v"\n' "'echo hi'" | "$MB")" \
+    "[hi]"
+
+# -----------------------------------------------------------------------
 echo
 echo "modernish-bringup tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

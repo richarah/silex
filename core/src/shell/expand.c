@@ -694,6 +694,12 @@ static char *cmd_subst(shell_ctx_t *sh, const char *cmd)
         sub.shell_pid    = sh->shell_pid;  /* $$ is the main shell's PID, not the
                                             * command-substitution child's */
         memcpy(sub.funcs, sh->funcs, sizeof(sh->funcs)); /* inherit functions */
+        /* Inherit aliases too: POSIX expands aliases inside `$(...)` (dash does),
+         * and modernish's whole DSL is alias-based -- without this, a nested
+         * `LOOP`/`DO`/`DONE` (or any alias) used inside a command substitution
+         * was "command not found". Safe across fork: the child only reads these
+         * pointers and _exit()s. */
+        memcpy(sub.aliases, sh->aliases, sizeof(sh->aliases));
         /* Clear set_in_this_shell for inherited traps. NOTE: a command
          * substitution does NOT inherit the parent's signal trap actions -- dash
          * resets them to default in the `$(...)` subshell, and matching that is

@@ -2566,18 +2566,31 @@ static int exec_builtin_read(shell_ctx_t *sh, int argc, char **argv)
     strbuf_t line;
     sb_init(&line, 256);
 
+    /* Read one byte at a time with read(2), NOT buffered fgetc(stdin): stdio
+     * would slurp a whole block from the underlying fd, consuming past the
+     * newline. That left nothing for a subsequent reader of the same fd -- so
+     * `read a <&8; cat <&8` lost everything after line 1, and re-`exec`ing a fd
+     * (`exec 8<f1; read; exec 8<f2; read`) kept reading f1. POSIX requires read
+     * to consume no more than the line; byte-at-a-time is how dash does it and is
+     * mandatory for pipes/FIFOs (e.g. modernish's nested LOOP generators on
+     * fd 8), which cannot be rewound. `read` reads from fd 0, which `<&fd`
+     * redirects for the duration of the builtin. */
     int c;
     /* EOF is signalled to the post-loop code via `c` (see the returns below),
      * not a flag; the loop just reads until newline or EOF. */
     while (1) {
-        c = fgetc(stdin);
-        if (c == EOF) break;
+        unsigned char ch;
+        ssize_t n = read(STDIN_FILENO, &ch, 1);
+        if (n <= 0) { c = EOF; break; }
+        c = ch;
         if (c == '\n') break;
         if (!raw && c == '\\') {
-            int nc = fgetc(stdin);
-            if (nc == '\n') continue;  /* line continuation */
-            sb_appendc(&line, (char)c);
-            if (nc != EOF) sb_appendc(&line, (char)nc);
+            unsigned char nch;
+            ssize_t n2 = read(STDIN_FILENO, &nch, 1);
+            if (n2 <= 0) { sb_appendc(&line, '\\'); c = EOF; break; }
+            if (nch == '\n') continue;  /* line continuation */
+            sb_appendc(&line, '\\');
+            sb_appendc(&line, (char)nch);
         } else {
             sb_appendc(&line, (char)c);
         }
