@@ -347,23 +347,61 @@ static void scan_cmd_subst(lexer_t *l)
  * Called after the opening '{' has been consumed.
  * Appends everything including the final '}' to wordbuf.
  */
-static void scan_param_expand(lexer_t *l)
+static void scan_param_expand(lexer_t *l, int outer_dq)
 {
+    /* Find the matching '}' that closes this ${...}. The scan must be QUOTE-
+     * and BACKSLASH-aware, not a naive brace count:
+     *   - a `{`/`}` inside a "..." region is literal data, not a nesting brace;
+     *   - a `'` is a quoting character ONLY when not within double quotes -- the
+     *     enclosing "..." (outer_dq) counts, so `"${x-'}"` has a literal `'`;
+     *   - a backslash-escaped `\}` is a literal brace.
+     * modernish relies on exactly this: it writes `${x:+'...{...'\}}` where the
+     * `{` sits inside single quotes and one brace is `\}`-escaped -- a naive
+     * counter only balanced it by luck (the miscounted quoted `{` and the `\}`
+     * cancelled out), which breaks the moment either is handled correctly in
+     * isolation. Everything is kept verbatim in the token; expand.c does the
+     * actual quote/backslash removal (with the same rule). Note: the outer "..."
+     * does NOT suppress the closing '}', only an INNER "..." opened here does. */
     int depth = 1;
+    int in_squote = 0, inner_dq = 0;
     wordbuf_append(l, '{');
     while (depth > 0) {
         int c = lexer_getc(l);
         if (c == EOF) break;
-        if (c == '{') {
-            depth++;
+        if (in_squote) {
+            /* Single quotes: everything literal (backslash included) until '. */
             wordbuf_append(l, (char)c);
-        } else if (c == '}') {
+            if (c == '\n') l->lineno++;
+            else if (c == '\'') in_squote = 0;
+            continue;
+        }
+        if (c == '\\') {
+            /* Escapes the next byte; the `}` in `\}` does not close the word. */
+            int n = lexer_getc(l);
+            wordbuf_append(l, '\\');
+            if (n == EOF) break;
+            if (n == '\n') l->lineno++;
+            wordbuf_append(l, (char)n);
+            continue;
+        }
+        if (c == '\'' && !outer_dq && !inner_dq) {
+            in_squote = 1;
+            wordbuf_append(l, '\'');
+            continue;
+        }
+        if (c == '"') {
+            inner_dq = !inner_dq;
+            wordbuf_append(l, '"');
+            continue;
+        }
+        if (c == '{' && !inner_dq) {
+            depth++;
+            wordbuf_append(l, '{');
+        } else if (c == '}' && !inner_dq) {
             depth--;
             wordbuf_append(l, '}');
-        } else if (c == '\n') {
-            l->lineno++;
-            wordbuf_append(l, '\n');
         } else {
+            if (c == '\n') l->lineno++;
             wordbuf_append(l, (char)c);
         }
     }
@@ -456,7 +494,7 @@ static void scan_double_quote(lexer_t *l)
                 }
             } else if (next == '{') {
                 wordbuf_append(l, '$');
-                scan_param_expand(l);
+                scan_param_expand(l, 1);
             } else {
                 wordbuf_append(l, '$');
                 if (next != EOF) {
@@ -737,7 +775,7 @@ restart:
                 }
             } else if (next == '{') {
                 wordbuf_append(l, '$');
-                scan_param_expand(l);
+                scan_param_expand(l, 0);
             } else if (next == '\'' || next == '"') {
                 /* `$'...'` / `$"..."` are not POSIX (they are bash/ksh ANSI-C and
                  * locale quoting). POSIX treats the `$` as a literal dollar and

@@ -1665,15 +1665,34 @@ static void expand_into(shell_ctx_t *sh, const char *word, strbuf_t *out,
             if (*p == '{') {
                 p++;
                 const char *start = p;
+                /* Find the matching '}' with the same quote/backslash awareness
+                 * as the lexer's scan_param_expand: a `{`/`}` inside '...'/"..."
+                 * is literal, and a `\}` is an escaped (literal) brace -- so
+                 * `${v-ab\}cd}` closes at the LAST '}', not the escaped one, and
+                 * `${x:+'{'\}}` (modernish) balances correctly. The backslash and
+                 * quotes are kept in the body for expand_braced to remove. */
                 int depth = 1;
+                int sq = 0, inner_dq = 0;
                 while (*p && depth > 0) {
-                    if (*p == '{') depth++;
-                    else if (*p == '}') depth--;
-                    if (depth > 0) p++;
-                    else p++;
+                    if (sq) {
+                        if (*p == '\'') sq = 0;
+                        p++;
+                        continue;
+                    }
+                    if (*p == '\\' && p[1]) { p += 2; continue; }
+                    /* `'` quotes only outside double quotes -- the enclosing
+                     * "..." (in_dquote) counts, matching the lexer scan. */
+                    if (*p == '\'' && !in_dquote && !inner_dq) { sq = 1; p++; continue; }
+                    if (*p == '"') { inner_dq = !inner_dq; p++; continue; }
+                    /* Only an INNER "..." opened here suppresses the closing '}';
+                     * the outer in_dquote does not. */
+                    if (*p == '{' && !inner_dq) { depth++; p++; continue; }
+                    if (*p == '}' && !inner_dq) { depth--; if (depth == 0) break; p++; continue; }
+                    p++;
                 }
-                size_t blen = (size_t)((p - 1) - start);
+                size_t blen = (size_t)(p - start);
                 char *body = strndup(start, blen);
+                if (*p == '}') p++;   /* step past the closing brace */
                 char *val  = expand_braced(sh, body ? body : "", in_dquote);
                 free(body);
                 /* expand_braced() already ran expand_into() on any quoted word

@@ -527,6 +527,24 @@ check "unquoted \${v-\"a b\"c} treats inner quotes as a real quoted region" \
     "$("$MB" -c 'unset v; set -- ${v-"a b"c}; echo "$#|$1"')" "1|a bc"
 
 # -----------------------------------------------------------------------
+# The ${...} brace scanner (both lexer and expander) is quote- and backslash-
+# aware: a `{`/`}` inside '...' or an inner "..." is literal, and `\}` is an
+# escaped brace. A naive counter closed at the first `\}`; modernish's
+# metaprogramming (`eval 'can() { ... '${x:+' ... '\}}'`, bin/modernish:2014)
+# balances a single-quoted `{` against a `\}` and broke a naive fix -- so this
+# is what makes `can()` (and thus init) parse at all.
+# -----------------------------------------------------------------------
+check "\${v-ab\\}cd\\}} closes at the last brace (escaped \\} is literal)" \
+    "$("$MB" -c 'unset v; printf "%s" ${v-ab\}cd\}ef}')" 'ab}cd}ef'
+check "a single-quoted brace inside \${...} does not close it" \
+    "$("$MB" -c "unset v; printf '%s' \${v-'a}b'c}")" 'a}bc'
+check "a lone ' inside a double-quoted \${...} is literal (no runaway)" \
+    "$("$MB" -c 'x=foo; printf "[%s]" "${x-'\''a}"')" '[foo]'
+# A `}` inside an inner "..." is literal; the expansion closes at the outer one.
+check "a brace inside an inner double-quoted default is literal" \
+    "$("$MB" -c 'unset v; printf "%s" ${v-"a}b"c}')" 'a}bc'
+
+# -----------------------------------------------------------------------
 echo
 echo "modernish-bringup tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
