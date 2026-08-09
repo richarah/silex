@@ -395,6 +395,23 @@ check "eval return is transparent to the enclosing function" \
     "$("$MB" -c 'f() { eval "return 7"; echo NOPE; }; f; echo "g=$?"')" "g=7"
 
 # -----------------------------------------------------------------------
+# Pathname expansion of a word that MIXES a quoted region with an unquoted
+# glob-bearing expansion: `"$dir"/$pat` (pat='*.x') must glob the unquoted `*`.
+# silex used to disable globbing for the whole word once any part was quoted, so
+# modernish's countfiles() (`set -- "$dir"/$pat`) counted zero -> builtin.t 029.
+# -----------------------------------------------------------------------
+GT=$(mktemp -d); : > "$GT/one.x"; : > "$GT/two.x"; : > "$GT/skip.y"
+check '"$dir"/$pat globs the unquoted pattern from a variable' \
+    "$("$MB" -c 'd=$1; p="*.x"; set -- "$d"/$p; echo $#' _ "$GT")" "2"
+check 'a fully-quoted "$dir/$pat" does NOT glob' \
+    "$("$MB" -c 'd=$1; p="*.x"; set -- "$d/$p"; echo $#' _ "$GT")" "1"
+check 'a quoted literal "*" still never globs' \
+    "$("$MB" -c 'cd "$1"; set -- "*.x"; echo "$#:$1"' _ "$GT")" '1:*.x'
+check 'unquoted $dir/$pat still globs' \
+    "$("$MB" -c 'd=$1; p="*.x"; set -- $d/$p; echo $#' _ "$GT")" "2"
+rm -rf "$GT"
+
+# -----------------------------------------------------------------------
 echo
 echo "modernish-bringup tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

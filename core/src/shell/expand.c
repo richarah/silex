@@ -313,15 +313,21 @@ static int has_unquoted_glob(const char *word)
     return 0;
 }
 
-/* Returns 1 if the plain (already quote-removed) field contains an active glob
- * metacharacter (* ? or a complete [...] bracket). Used for fields produced by
- * an unquoted expansion whose word carried no quoted regions -- every byte is
- * then unquoted, so any metacharacter here is a real wildcard. The '[' needs a
+/* Returns 1 if a field lying within a guard-stripped word (with `prot` map)
+ * contains an active glob metacharacter (* ? or a complete [...]) that is
+ * UNPROTECTED -- i.e. came from unquoted text/expansion. `s` points into
+ * `base`; prot[i] marks byte i of base as protected (was inside quotes), and
+ * may be NULL (nothing protected). This lets a word that MIXES a quoted region
+ * with an unquoted pattern -- e.g. `"$dir"/$pat` with pat='*.mm' -- still glob
+ * the unquoted `*`, while a quoted "*" (prot set) never globs. The '[' needs a
  * closing ']' for the same reason as has_unquoted_glob (a bare '[' is `test`,
  * not a glob, and globbing it would opendir the whole cwd per conditional). */
-static int field_has_glob_meta(const char *s)
+static int field_has_unprotected_glob(const char *s, const char *prot,
+                                      const char *base)
 {
     for (const char *p = s; *p; p++) {
+        int protd = prot && prot[(size_t)(p - base)];
+        if (protd) continue;
         if (*p == '*' || *p == '?')
             return 1;
         if (*p == '[') {
@@ -2159,6 +2165,11 @@ expand_result_t expand_word_full(shell_ctx_t *sh, const char *word)
 
     char **fields = NULL;
     int nfields   = 0;
+    /* Parallel to fields[]: 1 if field i carries an UNPROTECTED glob
+     * metacharacter (so it should undergo pathname expansion even though the
+     * word also had a quoted region). Computed during the IFS split where the
+     * `prot` map is still aligned to the field bytes. */
+    unsigned char *fglob = NULL;
 
     if (!do_ifs_split) {
         /* "$@" with no positional parameters generates ZERO fields (POSIX
@@ -2227,8 +2238,13 @@ expand_result_t expand_word_full(shell_ctx_t *sh, const char *word)
             int ncap_ = cap ? cap * 2 : 8;                                    \
             char **tmp_ = realloc(fields, (size_t)ncap_ * sizeof(char *));    \
             if (!tmp_) { free(copy); goto glob_phase; }                       \
-            fields = tmp_; cap = ncap_;                                       \
+            fields = tmp_;                                                    \
+            unsigned char *tg_ = realloc(fglob, (size_t)ncap_ * sizeof(*fglob)); \
+            if (!tg_) { free(copy); goto glob_phase; }                        \
+            fglob = tg_; cap = ncap_;                                         \
         }                                                                     \
+        fglob[nfields] = (unsigned char)                                      \
+            field_has_unprotected_glob((s), prot, copy);                      \
         fields[nfields++] = pp_decode(sh->scratch, (s));                     \
     } while (0)
 
@@ -2308,24 +2324,18 @@ no_fields:
     int nfinal = 0;
     int fcap   = 0;
 
-    /* Fields from an unquoted expansion (do_ifs_split) whose word had NO quoted
-     * regions (prot == NULL, so at_quote_guard never fired) are entirely
-     * unquoted; a glob metacharacter that appears in such a field -- typically
-     * because a variable's VALUE is a pattern, e.g. `p=*.t; echo $p` -- is a real
-     * wildcard and POSIX pathname expansion applies. do_glob alone missed this
-     * because it is computed from the pre-expansion token text, where `$p` has no
-     * metacharacter. (Words that mix quoted regions with an unquoted expansion
-     * keep prot != NULL and fall back to do_glob, unchanged, so a quoted "*"
-     * still never globs.) */
-    int glob_expanded_fields = do_ifs_split && prot == NULL && !sh->opt_f;
-
+    /* A field undergoes pathname expansion when the pre-expansion word carried a
+     * literal unquoted metacharacter (do_glob), OR the field carries an
+     * UNPROTECTED metacharacter recorded during the split (fglob[i]) -- typically
+     * a variable's VALUE that is a pattern, e.g. `p=*.t; echo $p`, or a mixed
+     * word like `"$dir"/$pat`. fglob[i] is set from the `prot` map, so a quoted
+     * "*" (protected) still never globs even when the word also has an unquoted
+     * expansion. do_glob alone missed value-borne wildcards (the token text has
+     * no metacharacter); the old prot==NULL gate missed mixed quoted/unquoted
+     * words entirely. */
     for (int i = 0; i < nfields; i++) {
         const char *f = fields[i];
-        /* Use pre-computed do_glob (based on original token text) to avoid
-         * globbing chars that came from quoted contexts like "*"; additionally
-         * glob wildcard-bearing fields that came from an all-unquoted expansion
-         * (see glob_expanded_fields above). */
-        if (do_glob || (glob_expanded_fields && field_has_glob_meta(f))) {
+        if (do_glob || (!sh->opt_f && fglob && fglob[i])) {
             glob_t g;
             /* NOT GLOB_NOSORT. POSIX requires pathname expansion results to be
              * sorted, and builds depend on it: a command like `gcc *.c` was
@@ -2362,6 +2372,7 @@ no_fields:
 
 done:
     free(fields);
+    free(fglob);
     free(prot);
 
     /* NULL-terminate */
