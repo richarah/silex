@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/times.h>
 #include <sys/types.h>
@@ -60,6 +61,7 @@ static int exec_builtin_source(shell_ctx_t *sh, int argc, char **argv);
 static int exec_builtin_break(shell_ctx_t *sh, int argc, char **argv);
 static int exec_builtin_continue(shell_ctx_t *sh, int argc, char **argv);
 static int exec_builtin_umask(shell_ctx_t *sh, int argc, char **argv);
+static int exec_builtin_ulimit(shell_ctx_t *sh, int argc, char **argv);
 static int exec_builtin_command(shell_ctx_t *sh, int argc, char **argv);
 static int exec_builtin_type(shell_ctx_t *sh, int argc, char **argv);
 static int exec_builtin_getopts(shell_ctx_t *sh, int argc, char **argv);
@@ -197,6 +199,7 @@ static const shell_builtin_t shell_builtins[] = {
     { "break",    exec_builtin_break     },
     { "continue", exec_builtin_continue  },
     { "umask",    exec_builtin_umask     },
+    { "ulimit",   exec_builtin_ulimit    },
     { "command",  exec_builtin_command   },
     { "type",     exec_builtin_type      },
     { "getopts",  exec_builtin_getopts   },
@@ -3062,6 +3065,145 @@ static int exec_builtin_umask(shell_ctx_t *sh, int argc, char **argv)
         return 1;
     }
     umask((mode_t)val);
+    return 0;
+}
+
+/*
+ * ulimit [-HS] [-a | -tfdscmlpnvwr] [limit]
+ *
+ * Get or set process resource limits (getrlimit/setrlimit). A resource that
+ * changes the state of the shell process must be a builtin, so modernish probes
+ * for it with `thisshellhas --bi=ulimit`; it also uses `ulimit` as a portable
+ * way to force a subshell fork. Option letters and reported units match dash
+ * (the shell whose feature-detection path silex follows), e.g. -f is 512-byte
+ * blocks, -d/-s/-m/-l/-v are kbytes, -t is seconds, and -f is the default.
+ */
+static int exec_builtin_ulimit(shell_ctx_t *sh, int argc, char **argv)
+{
+    (void)sh;
+    struct limit_desc {
+        const char *name;
+        int         resource;
+        rlim_t      factor;   /* reported/accepted value == raw limit / factor */
+        char        opt;
+    };
+    static const struct limit_desc limits[] = {
+        { "time(seconds)",         RLIMIT_CPU,     1,    't' },
+        { "file(blocks)",          RLIMIT_FSIZE,   512,  'f' },
+        { "data(kbytes)",          RLIMIT_DATA,    1024, 'd' },
+        { "stack(kbytes)",         RLIMIT_STACK,   1024, 's' },
+        { "coredump(blocks)",      RLIMIT_CORE,    512,  'c' },
+#ifdef RLIMIT_RSS
+        { "memory(kbytes)",        RLIMIT_RSS,     1024, 'm' },
+#endif
+#ifdef RLIMIT_MEMLOCK
+        { "locked memory(kbytes)", RLIMIT_MEMLOCK, 1024, 'l' },
+#endif
+#ifdef RLIMIT_NPROC
+        { "process",               RLIMIT_NPROC,   1,    'p' },
+#endif
+        { "nofiles",               RLIMIT_NOFILE,  1,    'n' },
+#ifdef RLIMIT_AS
+        { "vmemory(kbytes)",       RLIMIT_AS,      1024, 'v' },
+#endif
+#ifdef RLIMIT_LOCKS
+        { "locks",                 RLIMIT_LOCKS,   1,    'w' },
+#endif
+#ifdef RLIMIT_RTPRIO
+        { "rtprio",                RLIMIT_RTPRIO,  1,    'r' },
+#endif
+    };
+    const size_t nlimits = sizeof(limits) / sizeof(limits[0]);
+
+    int  hard = 0, soft = 0, show_all = 0;
+    char which = 'f';          /* POSIX default resource is -f */
+    int  i = 1;
+
+    for (; i < argc; i++) {
+        const char *a = argv[i];
+        if (a[0] != '-' || a[1] == '\0')
+            break;             /* a limit value (a number or "unlimited") */
+        if (strcmp(a, "--") == 0) { i++; break; }
+        for (const char *p = a + 1; *p; p++) {
+            if (*p == 'H') { hard = 1; continue; }
+            if (*p == 'S') { soft = 1; continue; }
+            if (*p == 'a') { show_all = 1; continue; }
+            size_t k;
+            for (k = 0; k < nlimits; k++)
+                if (limits[k].opt == *p) { which = *p; break; }
+            if (k == nlimits) {
+                fprintf(stderr, "silex: ulimit: -%c: invalid option\n", *p);
+                return 2;
+            }
+        }
+    }
+
+    const char *newval = (i < argc) ? argv[i] : NULL;
+
+    /* A bare print (and -a) shows the hard limit under -H, else the soft one;
+     * setting with neither -H nor -S changes both (dash/bash convention). */
+    int use_hard = (hard && !soft);
+
+    if (show_all) {
+        for (size_t k = 0; k < nlimits; k++) {
+            struct rlimit rl;
+            if (getrlimit(limits[k].resource, &rl) != 0)
+                continue;
+            rlim_t v = use_hard ? rl.rlim_max : rl.rlim_cur;
+            if (v == RLIM_INFINITY)
+                printf("%-20s unlimited\n", limits[k].name);
+            else
+                printf("%-20s %llu\n", limits[k].name,
+                       (unsigned long long)(v / limits[k].factor));
+        }
+        return 0;
+    }
+
+    const struct limit_desc *L = NULL;
+    for (size_t k = 0; k < nlimits; k++)
+        if (limits[k].opt == which) { L = &limits[k]; break; }
+    if (!L) {
+        fprintf(stderr, "silex: ulimit: -%c: unsupported limit\n", which);
+        return 2;
+    }
+
+    struct rlimit rl;
+    if (getrlimit(L->resource, &rl) != 0) {
+        fprintf(stderr, "silex: ulimit: %s\n", strerror(errno));
+        return 1;
+    }
+
+    if (newval == NULL) {
+        rlim_t v = use_hard ? rl.rlim_max : rl.rlim_cur;
+        if (v == RLIM_INFINITY)
+            puts("unlimited");
+        else
+            printf("%llu\n", (unsigned long long)(v / L->factor));
+        return 0;
+    }
+
+    rlim_t nv;
+    if (strcmp(newval, "unlimited") == 0) {
+        nv = RLIM_INFINITY;
+    } else {
+        char *end;
+        errno = 0;
+        unsigned long long raw = strtoull(newval, &end, 10);
+        if (end == newval || *end != '\0' || errno != 0) {
+            fprintf(stderr, "silex: ulimit: %s: invalid number\n", newval);
+            return 1;
+        }
+        nv = (rlim_t)raw * L->factor;
+    }
+
+    if (hard) rl.rlim_max = nv;
+    if (soft) rl.rlim_cur = nv;
+    if (!hard && !soft) { rl.rlim_cur = nv; rl.rlim_max = nv; }
+
+    if (setrlimit(L->resource, &rl) != 0) {
+        fprintf(stderr, "silex: ulimit: %s\n", strerror(errno));
+        return 1;
+    }
     return 0;
 }
 

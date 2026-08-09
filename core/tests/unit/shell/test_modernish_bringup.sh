@@ -193,6 +193,23 @@ check "a readonly declared-but-unset var still cannot be assigned" \
     "$("$MB" -c 'unset q; readonly q; q=val; echo "[${q-UNSET}]"' 2>/dev/null)" "[UNSET]"
 
 # -----------------------------------------------------------------------
+# ulimit builtin: modernish probes it with `thisshellhas --bi=ulimit` (a POSIX
+# regular builtin that must be built in to alter the shell's own limits) and
+# uses it to force a subshell fork. It must resolve as a builtin (found even
+# with PATH=/dev/null) and get/set resource limits like dash.
+# -----------------------------------------------------------------------
+check "ulimit resolves as a builtin (PATH=/dev/null command -v)" \
+    "$("$MB" -c 'PATH=/dev/null command -v ulimit')" "ulimit"
+check "ulimit -n prints a soft file-descriptor limit" \
+    "$("$MB" -c 'case $(ulimit -n) in ([0-9]*|unlimited) echo ok;; (*) echo no;; esac')" "ok"
+check "ulimit -t set in a subshell reads back the same value" \
+    "$("$MB" -c '(ulimit -t 3600; ulimit -t)')" "3600"
+check "ulimit -f (default resource) matches an explicit -f" \
+    "$("$MB" -c 'test "$(ulimit)" = "$(ulimit -f)" && echo same')" "same"
+check "ulimit rejects an unknown option with status 2" \
+    "$("$MB" -c 'ulimit -Z 2>/dev/null; echo $?')" "2"
+
+# -----------------------------------------------------------------------
 echo
 echo "modernish-bringup tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
