@@ -313,6 +313,28 @@ check "\${!} is still the last-background-PID special parameter" \
     "$("$MB" -c 'sleep 0 & p=${!}; case $p in ([0-9]*) echo numeric;; (*) echo no;; esac')" "numeric"
 
 # -----------------------------------------------------------------------
+# Positional-parameter expansion must survive LITERAL control bytes that
+# collide with silex's internal markers: 0x01 ("$@"/"$*" field boundary) and
+# 0x02/0x03 (quote guards). silex escapes reserved bytes in expanded data and
+# decodes each field afterwards. modernish's posparam.t injects exactly these.
+# CB = 0x01 0x02 0x03 0x7f; hexdump of "abc:d:<CB>" is 6162633a643a0102037f.
+# -----------------------------------------------------------------------
+CB=$(printf '\001\002\003\177')
+check "\$@ field count is right despite a literal 0x01 in a parameter, IFS empty" \
+    "$("$MB" -c 'set -- a "$1" b; IFS=; set -- $@; echo "$#"' _ "$CB")" "3"
+check "quoted \"\$@\" preserves a parameter containing control bytes" \
+    "$("$MB" -c 'set -- a "$1" b; set -- "$@"; printf "%s" "$2" | od -An -tx1 | tr -d " \n"' _ "$CB")" \
+    "0102037f"
+check "\${var-\"\$*\"} keeps control bytes and stays one field (IFS=:)" \
+    "$("$MB" -c 'set -- abc "d" "$1"; unset var; IFS=:; set -- ${var-"$*"}; echo "$#"' _ "$CB")" "1"
+check "\${var-\"\$*\"} value has the control bytes intact (IFS=:)" \
+    "$("$MB" -c 'set -- abc "d" "$1"; unset var; IFS=:; set -- ${var-"$*"}; printf "%s" "$1" | od -An -tx1 | tr -d " \n"' _ "$CB")" \
+    "6162633a643a0102037f"
+check "\${var=\$*} assigns the DECODED value, no internal escape bytes" \
+    "$("$MB" -c 'set -- abc "d" "$1"; unset var; IFS=:; : ${var=$*}; printf "%s" "$var" | od -An -tx1 | tr -d " \n"' _ "$CB")" \
+    "6162633a643a0102037f"
+
+# -----------------------------------------------------------------------
 echo
 echo "modernish-bringup tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

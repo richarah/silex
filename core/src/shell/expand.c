@@ -339,6 +339,12 @@ static int field_has_glob_meta(const char *s)
  * Returns arena-allocated expanded string
  * ------------------------------------------------------------------------- */
 
+/* Decode the internal reserved-byte escaping (see PP_ESC / pp_escape_append,
+ * defined below). Forward-declared here because ${var=word} must store the
+ * DECODED assigned value while still returning the (possibly escaped) text for
+ * the caller's field splitting. */
+static char *pp_decode(arena_t *a, const char *s);
+
 /*
  * expand_braced: parse and expand ${...} body.
  * 'body' is the content between { and }, e.g. "VAR:-default" or "#VAR".
@@ -496,7 +502,11 @@ static char *expand_braced(shell_ctx_t *sh, const char *body)
                 sb_init(&sb, 64);
                 expand_into(sh, word_part, &sb, 0);
                 const char *newval = sb_str(&sb);
-                vars_set(&sh->vars, varname, newval);
+                /* The expansion may carry reserved-byte escapes (e.g. `$*` with
+                 * a control byte in a splitting word). The VARIABLE must receive
+                 * the decoded, literal value; the RETURNED text keeps the escapes
+                 * so the caller's field splitting/decoding sees them. */
+                vars_set(&sh->vars, varname, pp_decode(sh->scratch, newval));
                 char *r = arena_strdup(sh->scratch, newval);
                 sb_free(&sb);
                 return r;
@@ -1380,6 +1390,57 @@ static const char *skip_dquote_end(const char *p)
 #define QG_OPEN  '\x02'
 #define QG_CLOSE '\x03'
 
+/* "$@"/"$*" is flattened into one string with 0x01 field-boundary markers that a
+ * later pass splits on. A LITERAL 0x01 (or a quote-guard 0x02/0x03) inside a
+ * positional parameter would be mistaken for a marker -- modernish injects such
+ * control bytes on purpose. So when a word emits real boundaries, each
+ * parameter's data is appended through pp_escape_append(), which encodes every
+ * reserved byte (0x01-0x04) as PP_ESC followed by the byte with bit 6 set;
+ * pp_decode() reverses it after splitting, restoring the literal byte. PP_ESC
+ * (0x04) itself is escaped so decoding is unambiguous. */
+#define PP_ESC 0x04
+static void pp_escape_append(strbuf_t *out, const char *s)
+{
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+        unsigned char c = *p;
+        if (c == 0x01 || c == 0x02 || c == 0x03 || c == PP_ESC) {
+            sb_appendc(out, (char)PP_ESC);
+            sb_appendc(out, (char)(c | 0x40u));
+        } else {
+            sb_appendc(out, (char)c);
+        }
+    }
+}
+
+static char *pp_decode(arena_t *a, const char *s)
+{
+    size_t n = strlen(s);
+    char *out = arena_alloc(a, n + 1);
+    size_t w = 0;
+    for (size_t i = 0; i < n; i++) {
+        if ((unsigned char)s[i] == PP_ESC && i + 1 < n) {
+            out[w++] = (char)((unsigned char)s[i + 1] & ~0x40u);
+            i++;
+        } else {
+            out[w++] = s[i];
+        }
+    }
+    out[w] = '\0';
+    return out;
+}
+
+/* Append DATA (a variable/command-substitution/positional value, or a literal
+ * word character) to a word being built for field splitting. When this word
+ * will be post-processed (emit_guards -> it carries 0x01 boundaries and/or
+ * 0x02/0x03 quote guards), reserved bytes in the data are encoded so a literal
+ * copy is not mistaken for a marker and stripped; the caller decodes each field
+ * afterwards. When the word is not post-processed, data passes through verbatim. */
+static void emit_data(shell_ctx_t *sh, strbuf_t *out, const char *s)
+{
+    if (sh->emit_guards) pp_escape_append(out, s);
+    else                 sb_append(out, s);
+}
+
 /* Open/close a quoted region. Only the outermost open/close emit a marker
  * (depth coalesces nested quotes), and only when this word will be split. */
 static void guard_open(shell_ctx_t *sh, strbuf_t *out)
@@ -1485,7 +1546,7 @@ static void expand_into(shell_ctx_t *sh, const char *word, strbuf_t *out,
                 free(arith_src);
                 char abuf[32];
                 snprintf(abuf, sizeof(abuf), "%ld", arith_val);
-                sb_append(out, abuf);
+                emit_data(sh, out, abuf);
                 continue;
             }
 
@@ -1503,7 +1564,7 @@ static void expand_into(shell_ctx_t *sh, const char *word, strbuf_t *out,
                 char *cmd = strndup(start, clen);
                 char *result = cmd_subst(sh, cmd ? cmd : "");
                 free(cmd);
-                sb_append(out, result);
+                emit_data(sh, out, result);
                 continue;
             }
 
@@ -1522,6 +1583,10 @@ static void expand_into(shell_ctx_t *sh, const char *word, strbuf_t *out,
                 char *body = strndup(start, blen);
                 char *val  = expand_braced(sh, body ? body : "");
                 free(body);
+                /* expand_braced() already ran expand_into() on any quoted word
+                 * part, so `val` may itself contain guard/boundary markers with
+                 * its data already escaped -- append it RAW, never through
+                 * emit_data(), which would escape those markers and break them. */
                 sb_append(out, val);
                 continue;
             }
@@ -1559,9 +1624,15 @@ static void expand_into(shell_ctx_t *sh, const char *word, strbuf_t *out,
                          * phase can drop the word entirely. */
                         sh->at_expanded_empty = 1;
                     }
+                    /* Escape reserved bytes in the data only when real
+                     * boundaries are emitted (>=2 params); the boundary splitter
+                     * then decodes each field. With a single param no boundary is
+                     * emitted and the value must pass through verbatim. */
+                    int esc = (sh->positional_n >= 2) || sh->emit_guards;
                     for (int pi = 0; pi < sh->positional_n; pi++) {
                         if (pi > 0) { sb_appendc(out, '\x01'); sh->at_field_boundary = 1; }
-                        sb_append(out, sh->positional[pi]);
+                        if (esc) pp_escape_append(out, sh->positional[pi]);
+                        else     sb_append(out, sh->positional[pi]);
                     }
                 } else if (*p == '*' && in_dquote) {
                     /* "$*": POSIX 2.5.2 -- join the positionals with the FIRST
@@ -1574,22 +1645,24 @@ static void expand_into(shell_ctx_t *sh, const char *word, strbuf_t *out,
                     char sep      = (ifs == NULL) ? ' ' : ifs[0];
                     for (int pi = 0; pi < sh->positional_n; pi++) {
                         if (pi > 0 && have_sep) sb_appendc(out, sep);
-                        sb_append(out, sh->positional[pi]);
+                        emit_data(sh, out, sh->positional[pi]);
                     }
                 } else {
                     /* Unquoted $* or $@: when IFS is empty, still split on \x01 */
                     const char *ifs = sh_getvar(sh, "IFS");
                     if (ifs && ifs[0] == '\0') {
                         /* Empty IFS: use \x01 to separate positionals */
+                        int esc = (sh->positional_n >= 2) || sh->emit_guards;
                         for (int pi = 0; pi < sh->positional_n; pi++) {
                             if (pi > 0) { sb_appendc(out, '\x01'); sh->at_field_boundary = 1; }
-                            sb_append(out, sh->positional[pi]);
+                            if (esc) pp_escape_append(out, sh->positional[pi]);
+                            else     sb_append(out, sh->positional[pi]);
                         }
                     } else {
                         /* Non-empty or unset IFS: join with space (default behavior) */
                         char spec[2] = { *p, '\0' };
                         const char *v = sh_getvar(sh, spec);
-                        if (v) sb_append(out, v);
+                        if (v) emit_data(sh, out, v);
                     }
                 }
                 p++;
@@ -1600,7 +1673,7 @@ static void expand_into(shell_ctx_t *sh, const char *word, strbuf_t *out,
             if (is_special_var(*p)) {
                 char spec[2] = { *p, '\0' };
                 const char *v = sh_getvar(sh, spec);
-                if (v) sb_append(out, v);
+                if (v) emit_data(sh, out, v);
                 p++;
                 continue;
             }
@@ -1613,7 +1686,7 @@ static void expand_into(shell_ctx_t *sh, const char *word, strbuf_t *out,
                 size_t nlen = (size_t)(p - start);
                 const char *name = intern_cstrn(start, nlen);
                 const char *v = sh_getvar(sh, name);
-                if (v) sb_append(out, v);
+                if (v) emit_data(sh, out, v);
                 else if (sh->opt_u) {
                     /* set -u: error on unset var. `name` is already the
                      * interned, NUL-terminated name -- the VLA copy that used
@@ -1628,7 +1701,7 @@ static void expand_into(shell_ctx_t *sh, const char *word, strbuf_t *out,
             if (is_digit((unsigned char)*p)) {
                 char spec[2] = { *p, '\0' };
                 const char *v = sh_getvar(sh, spec);
-                if (v) sb_append(out, v);
+                if (v) emit_data(sh, out, v);
                 else if (sh->opt_u) {
                     fprintf(stderr, "silex: $%c: unbound variable\n", *p);
                     exit(1);
@@ -1654,7 +1727,7 @@ static void expand_into(shell_ctx_t *sh, const char *word, strbuf_t *out,
             char *cmd = strndup(start, clen);
             char *result = cmd_subst(sh, cmd ? cmd : "");
             free(cmd);
-            sb_append(out, result);
+            emit_data(sh, out, result);
             if (*p == '`') p++;
             continue;
         }
@@ -2047,7 +2120,7 @@ expand_result_t expand_word_full(shell_ctx_t *sh, const char *word)
                         cap2 *= 2;
                         f2 = g2;
                     }
-                    if (f2) f2[n2++] = arena_strdup(sh->scratch, tok2);
+                    if (f2) f2[n2++] = pp_decode(sh->scratch, tok2);
                     tok2 = cp2 + 1;
                 }
                 cp2++;
@@ -2059,7 +2132,7 @@ expand_result_t expand_word_full(shell_ctx_t *sh, const char *word)
                     if (!g2) { free(f2); f2 = NULL; }
                     else { f2 = g2; }  /* cap2 not read again on this tail path */
                 }
-                if (f2) f2[n2++] = arena_strdup(sh->scratch, tok2);
+                if (f2) f2[n2++] = pp_decode(sh->scratch, tok2);
                 char **arr = arena_alloc(sh->scratch, (size_t)(n2 + 1) * sizeof(char *));
                 for (int i = 0; i < n2; i++) arr[i] = f2[i];
                 arr[n2] = NULL;
@@ -2150,7 +2223,7 @@ expand_result_t expand_word_full(shell_ctx_t *sh, const char *word)
             if (!tmp_) { free(copy); goto glob_phase; }                       \
             fields = tmp_; cap = ncap_;                                       \
         }                                                                     \
-        fields[nfields++] = arena_strdup(sh->scratch, (s));                   \
+        fields[nfields++] = pp_decode(sh->scratch, (s));                     \
     } while (0)
 
     /* Ignore leading IFS whitespace. */
