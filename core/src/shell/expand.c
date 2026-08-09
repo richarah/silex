@@ -541,9 +541,10 @@ static char *expand_braced_body(shell_ctx_t *sh, const char *body, int in_dquote
                 /* Expand and return word_part */
                 strbuf_t sb;
                 sb_init(&sb, 64);
-                { int sj_ = sh->pp_join_unquoted; sh->pp_join_unquoted = !in_dquote;
+                { int sj_ = sh->pp_join_unquoted; int wd_ = sh->pp_word_dq;
+                  sh->pp_join_unquoted = !in_dquote; sh->pp_word_dq = in_dquote;
                   expand_into(sh, word_part, &sb, in_dquote);
-                  sh->pp_join_unquoted = sj_; }
+                  sh->pp_join_unquoted = sj_; sh->pp_word_dq = wd_; }
                 char *r = arena_strdup(sh->scratch, sb_str(&sb));
                 sb_free(&sb);
                 return r;
@@ -555,9 +556,10 @@ static char *expand_braced_body(shell_ctx_t *sh, const char *body, int in_dquote
                 /* Variable is set (and non-empty if colon) — expand word */
                 strbuf_t sb;
                 sb_init(&sb, 64);
-                { int sj_ = sh->pp_join_unquoted; sh->pp_join_unquoted = !in_dquote;
+                { int sj_ = sh->pp_join_unquoted; int wd_ = sh->pp_word_dq;
+                  sh->pp_join_unquoted = !in_dquote; sh->pp_word_dq = in_dquote;
                   expand_into(sh, word_part, &sb, in_dquote);
-                  sh->pp_join_unquoted = sj_; }
+                  sh->pp_join_unquoted = sj_; sh->pp_word_dq = wd_; }
                 char *r = arena_strdup(sh->scratch, sb_str(&sb));
                 sb_free(&sb);
                 return r;
@@ -568,9 +570,10 @@ static char *expand_braced_body(shell_ctx_t *sh, const char *body, int in_dquote
             if (condition) {
                 strbuf_t sb;
                 sb_init(&sb, 64);
-                { int sj_ = sh->pp_join_unquoted; sh->pp_join_unquoted = !in_dquote;
+                { int sj_ = sh->pp_join_unquoted; int wd_ = sh->pp_word_dq;
+                  sh->pp_join_unquoted = !in_dquote; sh->pp_word_dq = in_dquote;
                   expand_into(sh, word_part, &sb, in_dquote);
-                  sh->pp_join_unquoted = sj_; }
+                  sh->pp_join_unquoted = sj_; sh->pp_word_dq = wd_; }
                 const char *newval = sb_str(&sb);
                 /* The expansion may carry reserved-byte escapes (e.g. `$*` with
                  * a control byte in a splitting word). The VARIABLE must receive
@@ -587,9 +590,10 @@ static char *expand_braced_body(shell_ctx_t *sh, const char *body, int in_dquote
             if (condition) {
                 strbuf_t sb;
                 sb_init(&sb, 64);
-                { int sj_ = sh->pp_join_unquoted; sh->pp_join_unquoted = !in_dquote;
+                { int sj_ = sh->pp_join_unquoted; int wd_ = sh->pp_word_dq;
+                  sh->pp_join_unquoted = !in_dquote; sh->pp_word_dq = in_dquote;
                   expand_into(sh, word_part, &sb, in_dquote);
-                  sh->pp_join_unquoted = sj_; }
+                  sh->pp_join_unquoted = sj_; sh->pp_word_dq = wd_; }
                 fprintf(stderr, "%s: %s\n", varname,
                         sb_len(&sb) > 0 ? sb_str(&sb) : "parameter null or not set");
                 sb_free(&sb);
@@ -1564,6 +1568,17 @@ static void expand_into(shell_ctx_t *sh, const char *word, strbuf_t *out,
              * nested $(...), ${...}, $((...)). expand_into already output the
              * content; we just need to advance the outer pointer. */
             p = skip_dquote_end(p);
+            continue;
+        }
+
+        /* A `"` inside the WORD of a double-quoted `"${v-WORD}"` is redundant:
+         * the WORD already sits in the double-quoted context, so the quote is
+         * removed and the scan continues (staying quoted) rather than closing a
+         * section. This keeps `"${v-"a${nl}b"}"` from truncating at the inner
+         * quote. (Escaped `\"` is handled by the backslash branch above, so a
+         * literal `"` in the value is unaffected.) */
+        if (*p == '"' && in_dquote && sh->pp_word_dq) {
+            p++;
             continue;
         }
 

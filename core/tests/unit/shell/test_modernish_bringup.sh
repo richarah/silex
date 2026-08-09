@@ -505,6 +505,28 @@ check "here-doc \${S#\"se\"} trims by the unquoted pattern" \
 	EOF')" "[t]"
 
 # -----------------------------------------------------------------------
+# An embedded " inside the WORD of a double-quoted "${v-WORD}" is redundant
+# (the word already sits in the double-quoted context): it is removed, does not
+# terminate the word, and keeps expansions non-split. Previously silex treated
+# it as a closing quote and truncated the word, dropping the rest. modernish
+# string.t "newlines from expansion in param subst" exercised every nesting.
+# -----------------------------------------------------------------------
+NL='
+'
+check "\"\${v-\"a\${x}b\"}\" keeps a nested-quoted newline (no truncation)" \
+    "$("$MB" -c 'x=$(printf "m\nn"); unset v; printf "[%s]" "${v-"a${x}b"}"')" \
+    "[am${NL}nb]"
+check "\"\${v-a\"\${x}\"b}\" keeps the value across inner quotes" \
+    "$("$MB" -c 'x=$(printf "m\nn"); unset v; printf "[%s]" "${v-a"${x}"b}"')" \
+    "[am${NL}nb]"
+check "\"\${v-\"a\"\${x}\"b\"}\" stays quoted between inner-quoted runs" \
+    "$("$MB" -c 'x=$(printf "m\nn"); unset v; printf "[%s]" "${v-"a"${x}"b"}"')" \
+    "[am${NL}nb]"
+# An UNQUOTED ${v-WORD} still opens real quoted regions on embedded " (unchanged).
+check "unquoted \${v-\"a b\"c} treats inner quotes as a real quoted region" \
+    "$("$MB" -c 'unset v; set -- ${v-"a b"c}; echo "$#|$1"')" "1|a bc"
+
+# -----------------------------------------------------------------------
 echo
 echo "modernish-bringup tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

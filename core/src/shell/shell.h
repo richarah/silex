@@ -111,6 +111,15 @@ typedef struct shell_ctx {
      * markers) -- but a QUOTED "$@" still yields separate fields, so unlike
      * in_assign this does NOT affect the quoted-"$@" branch. */
     int         pp_join_unquoted;
+    /* Set while expanding the WORD of a ${var-WORD} etc. that is itself inside
+     * double quotes (`"${v-...}"`). POSIX 2.6.2: the whole WORD stays in the
+     * double-quoted context, so an embedded literal `"` is REDUNDANT and simply
+     * removed -- it neither terminates the word nor toggles to a splitting
+     * context (`"${v-"a${nl}b"}"` keeps the newline). Without this, expand_into
+     * treats that `"` as the close of a double-quoted section and truncates the
+     * word. Only consulted on the in_dquote=1 `"` path, so it is a no-op when the
+     * enclosing ${...} is unquoted (there embedded `"` open real quoted regions). */
+    int         pp_word_dq;
     /* Set while expanding a word that contained a quoted "$@" with no positional
      * parameters. POSIX 2.5.2: "$@" with zero positionals generates ZERO fields,
      * even though it is double-quoted -- unlike "$*", which generates one empty
