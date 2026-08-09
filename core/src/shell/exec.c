@@ -3317,18 +3317,37 @@ static int exec_builtin_ulimit(shell_ctx_t *sh, int argc, char **argv)
 
 static int exec_builtin_command(shell_ctx_t *sh, int argc, char **argv)
 {
-    /* command [-v|-V|-p] [--] name [arg...] */
-    int describe = 0, verbose = 0;
+    /* command [-p] [-v|-V] [--] name [arg...]
+     * Options may be combined (-pv, -vp): parse letter by letter, so modernish's
+     * `command -pv NAME` probe is honoured rather than treated as a command
+     * named "-pv". -p uses the system default PATH instead of $PATH. */
+    int describe = 0, verbose = 0, use_defpath = 0;
     int i = 1;
-    while (i < argc && argv[i][0] == '-') {
-        if (strcmp(argv[i], "-v") == 0)      { describe = 1; i++; }
-        else if (strcmp(argv[i], "-V") == 0) { verbose  = 1; i++; }
-        else if (strcmp(argv[i], "-p") == 0) { i++; } /* ignore -p */
-        else if (strcmp(argv[i], "--") == 0) { i++; break; }
-        else break;
+    while (i < argc && argv[i][0] == '-' && argv[i][1] != '\0') {
+        if (strcmp(argv[i], "--") == 0) { i++; break; }
+        const char *o = argv[i] + 1;
+        int good = 1;
+        for (; *o; o++) {
+            if      (*o == 'v') describe = 1;
+            else if (*o == 'V') verbose  = 1;
+            else if (*o == 'p') use_defpath = 1;
+            else { good = 0; break; }   /* unknown letter: not an option word */
+        }
+        if (!good) break;
+        i++;
     }
     if (i >= argc) return 0;
     const char *name = argv[i];
+
+    /* The PATH to search: the system default under -p, else the environment's. */
+    char defpath[PATH_MAX];
+    const char *search_path;
+    if (use_defpath) {
+        size_t n = confstr(_CS_PATH, defpath, sizeof(defpath));
+        search_path = (n > 0 && n <= sizeof(defpath)) ? defpath : "/usr/bin:/bin";
+    } else {
+        search_path = getenv("PATH");
+    }
 
     if (describe || verbose) {
         /* A name containing a slash is a pathname, not a command to look up:
@@ -3379,8 +3398,8 @@ static int exec_builtin_command(shell_ctx_t *sh, int argc, char **argv)
             else         printf("%s\n", name);
             return 0;
         }
-        /* Search PATH */
-        const char *path_env = getenv("PATH");
+        /* Search PATH (default PATH under -p) */
+        const char *path_env = search_path;
         if (path_env) {
             char *path_copy = strdup(path_env);
             if (path_copy) {

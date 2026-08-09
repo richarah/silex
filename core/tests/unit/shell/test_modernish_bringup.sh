@@ -432,6 +432,18 @@ check "\$(cmd) in a redirect target runs exactly once" \
     "1"
 
 # -----------------------------------------------------------------------
+# `command` options may be COMBINED (-pv) and -p searches the system default
+# PATH. silex only accepted them separately (so `command -pv X` was "command
+# not found") and ignored -p, which made modernish detect BUG_CMDPV.
+# -----------------------------------------------------------------------
+check "command -pv finds a builtin (combined options)" \
+    "$("$MB" -c 'command -pv :')" ":"
+check "command -pv finds an external via the DEFAULT path (empty PATH)" \
+    "$("$MB" -c 'PATH=/dev/null; command -pv ls >/dev/null; echo $?')" "0"
+check "command -vp order also works" \
+    "$("$MB" -c 'PATH=/dev/null; command -vp ls >/dev/null; echo $?')" "0"
+
+# -----------------------------------------------------------------------
 echo
 echo "modernish-bringup tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
