@@ -1446,11 +1446,21 @@ static const char *skip_dquote_end(const char *p)
                 p = cmdsubst_body_end(p + 1);
                 if (*p == ')') p++;
             } else if (*p == '{') {
+                /* ${...}: find the matching '}' with the same quote/backslash
+                 * awareness as the lexer and expander scanners, so a `}` inside
+                 * an inner "..." (e.g. `"${x-"q}r"}"`) does not end the scan
+                 * early -- which left the tail (`}"`) to be re-processed, adding
+                 * a stray '}'. This runs in a double-quoted context, so `'` is
+                 * literal (no single-quote regions); only an inner "..." opened
+                 * here suppresses the closing brace, and `\}` is escaped. */
                 p++;
                 int d = 1;
+                int inner_dq = 0;
                 while (*p && d > 0) {
-                    if (*p == '{') d++;
-                    else if (*p == '}') d--;
+                    if (*p == '\\' && p[1]) { p += 2; continue; }
+                    if (*p == '"') { inner_dq = !inner_dq; p++; continue; }
+                    if (*p == '{' && !inner_dq) { d++; p++; continue; }
+                    if (*p == '}' && !inner_dq) { d--; p++; continue; }
                     p++;
                 }
             }
