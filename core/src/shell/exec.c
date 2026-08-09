@@ -2027,6 +2027,12 @@ static void set_print_options(shell_ctx_t *sh, int reusable)
 
 static int exec_builtin_set(shell_ctx_t *sh, int argc, char **argv)
 {
+    /* `set` with no operands: list all shell variables as NAME='value' (POSIX).
+     * modernish probes this to read a function's global variables. */
+    if (argc == 1) {
+        vars_print_all(&sh->vars);
+        return 0;
+    }
     int i;
     int had_dashdash = 0;   /* explicit `--`: assign positionals even if none follow */
     for (i = 1; i < argc; i++) {
@@ -2219,8 +2225,16 @@ static int exec_builtin_unset(shell_ctx_t *sh, int argc, char **argv)
 
 static int exec_builtin_readonly(shell_ctx_t *sh, int argc, char **argv)
 {
+    /* `readonly` with no operands, or `readonly -p`, lists the read-only
+     * variables in a re-inputtable form (POSIX). */
+    if (argc == 1 || (argc == 2 && strcmp(argv[1], "-p") == 0)) {
+        vars_print_readonly(&sh->vars);
+        return 0;
+    }
     int rc = 0;
     for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-p") == 0)
+            continue;   /* already handled above; ignore a stray -p among names */
         const char *eq = strchr(argv[i], '=');
         if (eq) {
             size_t nlen = (size_t)(eq - argv[i]);

@@ -364,6 +364,100 @@ void vars_import_env(vars_t *v)
     }
 }
 
+/* Print NAME='value' with the value single-quoted for safe re-input: a literal
+ * single quote becomes '\'' (close, escaped quote, reopen). */
+static void print_squoted_assignment(const char *name, const char *value)
+{
+    fputs(name, stdout);
+    fputs("='", stdout);
+    for (const char *p = value; p && *p; p++) {
+        if (*p == '\'')
+            fputs("'\\''", stdout);
+        else
+            putchar((unsigned char)*p);
+    }
+    fputs("'\n", stdout);
+}
+
+static int name_cmp(const void *a, const void *b)
+{
+    const var_entry_t *ea = *(const var_entry_t *const *)a;
+    const var_entry_t *eb = *(const var_entry_t *const *)b;
+    return strcmp(ea->name, eb->name);
+}
+
+/* POSIX `set` with no operands: write every shell variable as NAME='value',
+ * sorted by name, in a form suitable for re-input. */
+void vars_print_all(vars_t *v)
+{
+    /* Count, then collect the visible entries (an inner scope shadows outer). */
+    size_t cap = 64, n = 0;
+    var_entry_t **arr = malloc(cap * sizeof(*arr));
+    if (!arr) return;
+
+    for (int i = 0; i < VARS_HASH_SIZE; i++) {
+        for (var_scope_t *s = v->scope; s != NULL; s = s->parent) {
+            for (var_entry_t *e = s->buckets[i]; e != NULL; e = e->next) {
+                int shadowed = 0;
+                for (var_scope_t *inner = v->scope; inner != s; inner = inner->parent) {
+                    if (scope_find(inner, e->name, (unsigned int)i)) { shadowed = 1; break; }
+                }
+                if (shadowed) continue;
+                if (n == cap) {
+                    size_t ncap = cap * 2;
+                    var_entry_t **na = realloc(arr, ncap * sizeof(*arr));
+                    if (!na) { free(arr); return; }
+                    arr = na; cap = ncap;
+                }
+                arr[n++] = e;
+            }
+        }
+    }
+
+    qsort(arr, n, sizeof(*arr), name_cmp);
+    for (size_t i = 0; i < n; i++)
+        print_squoted_assignment(arr[i]->name, arr[i]->value ? arr[i]->value : "");
+    free(arr);
+}
+
+/* POSIX `readonly -p`: list read-only variables as `readonly NAME='value'`
+ * (or `readonly NAME` when it has no value), sorted by name. modernish's
+ * `isset -r` parses this. */
+void vars_print_readonly(vars_t *v)
+{
+    size_t cap = 32, n = 0;
+    var_entry_t **arr = malloc(cap * sizeof(*arr));
+    if (!arr) return;
+    for (int i = 0; i < VARS_HASH_SIZE; i++) {
+        for (var_scope_t *s = v->scope; s != NULL; s = s->parent) {
+            for (var_entry_t *e = s->buckets[i]; e != NULL; e = e->next) {
+                if (!e->readonly) continue;
+                int shadowed = 0;
+                for (var_scope_t *inner = v->scope; inner != s; inner = inner->parent)
+                    if (scope_find(inner, e->name, (unsigned int)i)) { shadowed = 1; break; }
+                if (shadowed) continue;
+                if (n == cap) {
+                    size_t ncap = cap * 2;
+                    var_entry_t **na = realloc(arr, ncap * sizeof(*arr));
+                    if (!na) { free(arr); return; }
+                    arr = na; cap = ncap;
+                }
+                arr[n++] = e;
+            }
+        }
+    }
+    qsort(arr, n, sizeof(*arr), name_cmp);
+    for (size_t i = 0; i < n; i++) {
+        if (arr[i]->value && arr[i]->value[0] != '\0') {
+            fputs("readonly ", stdout);
+            print_squoted_assignment(arr[i]->name, arr[i]->value);
+        } else {
+            printf("readonly %s\n", arr[i]->name);
+        }
+    }
+    free(arr);
+}
+
 void vars_print_exports(vars_t *v)
 {
     /* Collect all exported variables from all scopes (current scope shadows parent) */
