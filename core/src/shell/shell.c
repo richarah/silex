@@ -225,6 +225,16 @@ int shell_run_string(shell_ctx_t *sh, const char *script)
     /* cppcheck-suppress autoVariables */
     sh->scratch = &local;
 
+    /* Code run here -- an eval argument, a trap action, a command substitution --
+     * is its own command context and must see normal function lookup, even when
+     * this call is reached while a `command` prefix is active. Without clearing
+     * the flag, `command exit` firing the EXIT trap ran the trap's commands with
+     * functions bypassed (`_Msh_doTraps: command not found`), and a signal trap
+     * arriving during `command foo` did the same. Restored on exit so an
+     * interrupted `command foo` resumes correctly. */
+    int saved_icb = sh->in_command_builtin;
+    sh->in_command_builtin = 0;
+
     lexer_init_str(&lex, script, &parse_local);
     parser_init(&par, &lex, &parse_local);
     parser_set_aliases(&par, shell_alias_lookup_cb, sh);
@@ -250,6 +260,7 @@ int shell_run_string(shell_ctx_t *sh, const char *script)
              * FTL_EVALCOBR checks exercise exactly this. */
             if (rc >= 200 && rc <= 202) {
                 sh->scratch = saved_scratch;
+                sh->in_command_builtin = saved_icb;
                 arena_free(&local);
                 arena_free(&parse_local);
                 lexer_free(&lex);
@@ -270,6 +281,7 @@ int shell_run_string(shell_ctx_t *sh, const char *script)
     }
 
     sh->scratch = saved_scratch;
+    sh->in_command_builtin = saved_icb;
     arena_free(&local);
     arena_free(&parse_local);
 

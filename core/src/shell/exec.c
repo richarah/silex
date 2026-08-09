@@ -90,6 +90,42 @@ static const applet_t *find_applet_by_name(const char *name)
     return find_applet(name);
 }
 
+/* Reset traps when entering a subshell (a forked `( )`, `&`, or non-last
+ * pipeline stage). POSIX -- and both dash and bash -- reset every non-ignored
+ * signal trap to its DEFAULT action in a subshell: a signal delivered there
+ * takes the default action, not the parent's trap. (SIGPIPE to a pipeline stage
+ * must kill it, so `cmd | reader-that-quits` reports 128+13; silex was instead
+ * running the parent's PIPE trap in the stage, which is how modernish's
+ * `_Msh_doTraps PIPE ...` fired -- and failed -- in the middle of a pipeline.)
+ * Ignored signals (trap '' SIG) stay ignored. A trap the subshell sets for
+ * itself still works: it starts from this clean slate. The EXIT trap (slot 0)
+ * is also reset: a subshell must NOT run the parent's EXIT trap when it exits
+ * (dash/bash only run it when the PARENT exits). The `exit` builtin fires
+ * traps[0] unconditionally, so clearing the action -- not just set_in_this_shell
+ * -- is what stops an inherited EXIT trap from firing on `( ...; exit )`. This
+ * mattered a lot: modernish runs each test in a subshell that `command exit`s,
+ * and the inherited `_Msh_doTraps EXIT` ran the whole session's die-cleanup
+ * (rm -rf of the test tempdir) on every test. */
+static void subshell_reset_traps(shell_ctx_t *sh)
+{
+    for (int i = 0; i < NSIG; i++)
+        sh->traps[i].set_in_this_shell = 0;
+    sh->traps[0].action = SHELL_TRAP_DEFAULT;   /* EXIT: not inherited by subshell */
+    for (int i = 1; i < NSIG; i++) {
+        const char *act = sh->traps[i].action;
+        if (act == SHELL_TRAP_DEFAULT)   /* NULL: already default */
+            continue;
+        if (act[0] == '\0')              /* "": ignored, stays ignored */
+            continue;
+        sh->traps[i].action = SHELL_TRAP_DEFAULT;
+        struct sigaction sa;
+        memset(&sa, 0, sizeof(sa));
+        sigemptyset(&sa.sa_mask);
+        sa.sa_handler = SIG_DFL;
+        sigaction(i, &sa, NULL);
+    }
+}
+
 /* Does this simple command reduce to a bare `exec` with no operands, possibly
  * behind one or more `command` prefixes? `exec` with only redirections makes
  * them permanent in the current shell; the generic executor applies a command's
@@ -1239,6 +1275,10 @@ int exec_pipeline(shell_ctx_t *sh, node_t *node)
         }
 
         if (pid == 0) {
+            /* Pipeline stage subshell: reset inherited signal traps to default,
+             * so a SIGPIPE here takes the default action (kills the stage) rather
+             * than running the parent's PIPE trap. */
+            subshell_reset_traps(sh);
             /* Child: wire up stdin from previous pipe */
             if (i > 0) {
                 dup2(pipes[i - 1][0], STDIN_FILENO);
@@ -1500,6 +1540,8 @@ int exec_node(shell_ctx_t *sh, node_t *node)
             char ppid_buf[32];
             snprintf(ppid_buf, sizeof(ppid_buf), "%d", (int)getppid());
             vars_set(&sh->vars, "PPID", ppid_buf);
+            /* Background subshell: reset inherited signal traps to default. */
+            subshell_reset_traps(sh);
             int r = exec_node(sh, node->u.binary.left);
             fflush(NULL);
             _exit(r);
@@ -1529,9 +1571,8 @@ int exec_node(shell_ctx_t *sh, node_t *node)
             snprintf(ppid_buf, sizeof(ppid_buf), "%d", (int)getppid());
             vars_set(&sh->vars, "PPID", ppid_buf);
 
-            /* Subshell: clear inherited traps (keep only traps set in this subshell) */
-            for (int i = 0; i < NSIG; i++)
-                sh->traps[i].set_in_this_shell = 0;
+            /* Subshell: reset inherited signal traps to default (POSIX). */
+            subshell_reset_traps(sh);
 
             /* Apply any redirections on the subshell node */
             redirect_ctx_t rctx;
