@@ -3465,10 +3465,18 @@ static int exec_builtin_getopts(shell_ctx_t *sh, int argc, char **argv)
     /* Find opt in optstring */
     const char *p = strchr(optstring, opt);
     if (!p) {
-        /* Unknown option */
-        if (!silent) fprintf(stderr, "silex: getopts: illegal option -- %c\n", opt);
+        /* Unknown option. POSIX: name is set to '?'; in silent mode (leading
+         * ':') OPTARG holds the offending option character and no message is
+         * printed, otherwise OPTARG is UNSET and a diagnostic is written.
+         * Setting OPTARG in errmsg mode made `${OPTARG:-x}` see the option
+         * letter where dash/bash leave it unset. */
         vars_set(&sh->vars, varname, "?");
-        vars_set(&sh->vars, "OPTARG", opt_str);
+        if (silent) {
+            vars_set(&sh->vars, "OPTARG", opt_str);
+        } else {
+            fprintf(stderr, "silex: getopts: illegal option -- %c\n", opt);
+            vars_unset(&sh->vars, "OPTARG");
+        }
     } else {
         vars_set(&sh->vars, varname, opt_str);
         if (p[1] == ':') {
@@ -3481,9 +3489,17 @@ static int exec_builtin_getopts(shell_ctx_t *sh, int argc, char **argv)
                 opt_i++;
                 optpos = 1;
                 if (opt_i > nargs) {
-                    if (!silent) fprintf(stderr, "silex: getopts: option requires an argument -- %c\n", opt);
-                    vars_set(&sh->vars, varname, silent ? ":" : "?");
-                    vars_set(&sh->vars, "OPTARG", opt_str);
+                    /* Required argument missing. POSIX: silent mode sets name
+                     * to ':' and OPTARG to the option char; errmsg mode sets
+                     * name to '?', UNSETS OPTARG, and writes a diagnostic. */
+                    if (silent) {
+                        vars_set(&sh->vars, varname, ":");
+                        vars_set(&sh->vars, "OPTARG", opt_str);
+                    } else {
+                        fprintf(stderr, "silex: getopts: option requires an argument -- %c\n", opt);
+                        vars_set(&sh->vars, varname, "?");
+                        vars_unset(&sh->vars, "OPTARG");
+                    }
                 } else {
                     vars_set(&sh->vars, "OPTARG", args[opt_i - 1]);
                     opt_i++;

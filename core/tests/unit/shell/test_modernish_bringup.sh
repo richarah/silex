@@ -210,6 +210,25 @@ check "ulimit rejects an unknown option with status 2" \
     "$("$MB" -c 'ulimit -Z 2>/dev/null; echo $?')" "2"
 
 # -----------------------------------------------------------------------
+# getopts: on a missing required argument or an unknown option, POSIX unsets
+# OPTARG in errmsg mode (optstring not starting with ':') and sets it to the
+# option character only in silent mode. silex used to set OPTARG in both modes,
+# so modernish's "getopts val for no opt-arg (errmsg mode)" saw the option
+# letter where dash/bash leave OPTARG unset.
+# -----------------------------------------------------------------------
+check "getopts missing arg, errmsg mode: name=? and OPTARG unset" \
+    "$("$MB" -c 'OPTIND=1; set -- -x; getopts x: o 2>/dev/null; echo "$o,${OPTARG-UNSET}"')" "?,UNSET"
+check "getopts missing arg, silent mode: name=: and OPTARG is the option char" \
+    "$("$MB" -c 'OPTIND=1; set -- -x; getopts :x: o 2>/dev/null; echo "$o,${OPTARG-UNSET}"')" ":,x"
+check "getopts unknown option, errmsg mode: name=? and OPTARG unset" \
+    "$("$MB" -c 'OPTIND=1; set -- -q; getopts x: o 2>/dev/null; echo "$o,${OPTARG-UNSET}"')" "?,UNSET"
+check "getopts unknown option, silent mode: OPTARG is the option char" \
+    "$("$MB" -c 'OPTIND=1; set -- -q; getopts :x: o 2>/dev/null; echo "$o,${OPTARG-UNSET}"')" "?,q"
+check "modernish getopts errmsg loop yields ?,Empty for the trailing missing arg" \
+    "$("$MB" -c 'OPTIND=1 v=; set -- -xfoo -yz; while getopts x:yz: opt >/dev/null 2>&1; do v="${v:+$v/}$opt,${OPTARG:-Empty}"; done; echo "$v"')" \
+    "x,foo/y,Empty/?,Empty"
+
+# -----------------------------------------------------------------------
 echo
 echo "modernish-bringup tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
