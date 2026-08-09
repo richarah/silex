@@ -16,10 +16,22 @@
 #include <string.h>
 #include <unistd.h>
 
+/* Lowest fd number a saved copy may occupy. POSIX reserves fds 0-9 for the
+ * script's own redirections, so a saved fd must be parked at 10 or above:
+ * starting at 3 let it collide with a user-referenced fd. For example, in
+ *
+ *     { true >&4; } 2>/dev/null
+ *
+ * the block's save of fd 2 took fd 3, so the inner command's save of fd 1
+ * landed on fd 4 -- and `>&4` then spuriously duplicated that live saved copy
+ * instead of failing with EBADF on the genuinely-closed fd 4. bash and dash
+ * park their saved fds high for exactly this reason. */
+#define FD_SAVE_BASE 10
+
 /* Save fd orig_fd into a new fd (CLOEXEC), record in ctx */
 static int save_fd(redirect_ctx_t *ctx, int orig_fd, arena_t *arena)
 {
-    int saved = fcntl(orig_fd, F_DUPFD_CLOEXEC, 3);
+    int saved = fcntl(orig_fd, F_DUPFD_CLOEXEC, FD_SAVE_BASE);
     if (saved < 0) {
         /* fd may not be open; that is acceptable — record -1 so restore skips */
         saved = -1;
@@ -262,8 +274,13 @@ int redirect_apply(struct shell_ctx *sh, redir_t *redirs, redirect_ctx_t *ctx)
             continue;
         }
 
-        /* dup2 new_fd onto the target fd */
-        if (new_fd >= 0) {
+        /* Move new_fd onto the target fd. When open() handed back the target fd
+         * itself -- which happens whenever the target is the lowest free fd,
+         * e.g. `exec 3>file` with fds 0-2 open -- the file is already in place;
+         * dup2 would be a no-op and the following close() would then close the
+         * very fd we just opened, silently discarding the redirection. Skip both
+         * in that case. */
+        if (new_fd >= 0 && new_fd != fd) {
             if (dup2(new_fd, fd) < 0) {
                 perror("dup2");
                 close(new_fd);

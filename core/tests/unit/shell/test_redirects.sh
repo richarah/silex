@@ -183,6 +183,33 @@ else
     FAIL=$((FAIL + 1))
 fi
 
+# -----------------------------------------------------------------------
+# fd management must not intrude on the user's fd range (0-9).
+# -----------------------------------------------------------------------
+# `exec 3>file` must write to the FILE. open() returns fd 3 (the lowest free
+# fd once 0-2 are open), i.e. the target itself; the code used to dup2(3,3)
+# then close(3), silently discarding the redirection so the later write went
+# to stdout instead of the file.
+check "exec 3>file writes to the file, not stdout" \
+    "$("$SILEX" -c "exec 3>$TMPDIR_REDIR/e3.txt; echo VVV >&3; exec 3>&-; cat $TMPDIR_REDIR/e3.txt")" \
+    "VVV"
+check "exec 3>file leaves nothing on stdout" \
+    "$("$SILEX" -c "exec 3>$TMPDIR_REDIR/e3b.txt; echo VVV >&3; exec 3>&-" 2>/dev/null)" \
+    ""
+# A saved fd must be parked high (>=10), or the block's save of fd 2 lands on a
+# user fd (3, 4, ...) and makes a `>&N` to a genuinely-closed N spuriously
+# succeed. dash/bash close fd 4 for the block, so `true >&4` fails (rc!=0).
+check_exit "\`{ true >&4; } 2>/dev/null\` fails: fd 4 really is closed" \
+    "$("$SILEX" -c '{ true >&4; } 2>/dev/null; echo $?')" \
+    "1"
+check "exec 4>/dev/null inside a { } 4>&- block does not leak out" \
+    "$("$SILEX" -c '{ exec 4>/dev/null; } 4>&-; { true >&4; } 2>/dev/null && echo OPEN || echo closed')" \
+    "closed"
+# A block that redirects a live user fd must save and restore it correctly.
+check "block redirect of a live fd 3 is saved and restored" \
+    "$("$SILEX" -c "exec 3>$TMPDIR_REDIR/a.txt; { echo B >&3; } 3>$TMPDIR_REDIR/b.txt; echo C >&3; exec 3>&-; echo \"a=[\$(cat $TMPDIR_REDIR/a.txt)] b=[\$(cat $TMPDIR_REDIR/b.txt)]\"")" \
+    "a=[C] b=[B]"
+
 echo ""
 echo "redirect tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
