@@ -82,6 +82,14 @@ typedef struct shell_ctx {
     int         loop_depth;  /* current loop nesting depth; 0 = not in loop */
     int         interactive; /* 1 if shell is interactive (stdin is tty), 0 otherwise */
     int         in_command_builtin; /* 1 if executing via 'command' prefix (disables special builtin semantics) */
+    /* Set while expanding a here-document body. The body expands like a
+     * double-quoted string (parameter/command/arithmetic expansion happens) but
+     * with two differences: `"` (and `'`) are literal, not quote delimiters, and
+     * `$@`/`$*` are joined with IFS's first byte -- a here-doc is text, never
+     * field-split, so no \x01 boundary is emitted. Without this, `<<EOF` bodies
+     * had their quotes stripped (and a lone `'` swallowed the rest, so `$HOME`
+     * went unexpanded), and `$*`/`$@` leaked internal 0x01 bytes. */
+    int         in_heredoc;
     /* Set while expanding a word that contained a quoted "$@" with no positional
      * parameters. POSIX 2.5.2: "$@" with zero positionals generates ZERO fields,
      * even though it is double-quoted -- unlike "$*", which generates one empty

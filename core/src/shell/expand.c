@@ -1414,8 +1414,10 @@ static void expand_into(shell_ctx_t *sh, const char *word, strbuf_t *out,
             continue;
         }
 
-        /* End of double-quoted section */
-        if (*p == '"' && in_dquote) {
+        /* End of double-quoted section. In a here-document body (expanded with
+         * in_dquote=1 so expansions run and `'` stays literal) a `"` is ordinary
+         * text, not a closing delimiter, so fall through to emit it literally. */
+        if (*p == '"' && in_dquote && !sh->in_heredoc) {
             p++;
             return;
         }
@@ -1512,6 +1514,21 @@ static void expand_into(shell_ctx_t *sh, const char *word, strbuf_t *out,
 
             /* $@ and $* — positional list */
             if (*p == '@' || *p == '*') {
+                if (sh->in_heredoc) {
+                    /* Here-doc text is never field-split, so both $@ and $* join
+                     * with IFS's first byte (unset => space, empty => nothing).
+                     * Emitting \x01 boundaries here would leak them into the
+                     * document. */
+                    const char *ifs = sh_getvar(sh, "IFS");
+                    int  have_sep = (ifs == NULL) || (ifs[0] != '\0');
+                    char sep      = (ifs == NULL) ? ' ' : ifs[0];
+                    for (int pi = 0; pi < sh->positional_n; pi++) {
+                        if (pi > 0 && have_sep) sb_appendc(out, sep);
+                        sb_append(out, sh->positional[pi]);
+                    }
+                    p++;
+                    continue;
+                }
                 if (*p == '@' && in_dquote) {
                     /* "$@": each positional as a separate word; use \x01 boundary */
                     if (sh->positional_n == 0) {
@@ -1533,11 +1550,16 @@ static void expand_into(shell_ctx_t *sh, const char *word, strbuf_t *out,
                         sb_append(out, sh->positional[pi]);
                     }
                 } else if (*p == '*' && in_dquote) {
-                    /* "$*": join with first char of IFS */
+                    /* "$*": POSIX 2.5.2 -- join the positionals with the FIRST
+                     * byte of IFS. An UNSET IFS joins with a space; an IFS that
+                     * is set but EMPTY joins with nothing (not a space);
+                     * otherwise the first byte of IFS. Conflating unset and
+                     * empty produced "a b c" where empty IFS must yield "abc". */
                     const char *ifs = sh_getvar(sh, "IFS");
-                    char sep = (ifs && ifs[0]) ? ifs[0] : ' ';
+                    int  have_sep = (ifs == NULL) || (ifs[0] != '\0');
+                    char sep      = (ifs == NULL) ? ' ' : ifs[0];
                     for (int pi = 0; pi < sh->positional_n; pi++) {
-                        if (pi > 0) sb_appendc(out, sep);
+                        if (pi > 0 && have_sep) sb_appendc(out, sep);
                         sb_append(out, sh->positional[pi]);
                     }
                 } else {
@@ -1644,6 +1666,24 @@ char *expand_word(shell_ctx_t *sh, const char *word)
     expand_into(sh, src, &sb, 0);
     free(tilded);
 
+    char *result = arena_strdup(sh->scratch, sb_str(&sb));
+    sb_free(&sb);
+    return result;
+}
+
+/* Expand a here-document body. Parameter, command, and arithmetic expansion
+ * happen (as in a double-quoted string), but `'` and `"` are literal and there
+ * is no tilde expansion or field splitting. Driven by sh->in_heredoc; see the
+ * flag's definition in shell.h. */
+char *expand_word_heredoc(shell_ctx_t *sh, const char *word)
+{
+    if (!word) return arena_strdup(sh->scratch, "");
+    strbuf_t sb;
+    sb_init(&sb, 128);
+    int saved = sh->in_heredoc;
+    sh->in_heredoc = 1;
+    expand_into(sh, word, &sb, 1);   /* in_dquote=1: expand, but quotes literal */
+    sh->in_heredoc = saved;
     char *result = arena_strdup(sh->scratch, sb_str(&sb));
     sb_free(&sb);
     return result;

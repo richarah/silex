@@ -254,6 +254,37 @@ check "binary -o (a -o b) still works" \
     "$("$MB" -c 'test "" -o x && echo yes || echo no')" "yes"
 
 # -----------------------------------------------------------------------
+# "$*" joins positionals with the FIRST byte of IFS: a space when IFS is
+# unset, but NOTHING when IFS is set to empty. silex used a space in both cases.
+# -----------------------------------------------------------------------
+check '"$*" with empty IFS joins with no separator' \
+    "$("$MB" -c 'set -- ab c def; IFS=; echo "[$*]"')" "[abcdef]"
+check '"$*" with unset IFS joins with a space' \
+    "$("$MB" -c 'set -- ab c def; unset IFS; echo "[$*]"')" "[ab c def]"
+check '"$*" with IFS=: joins with a colon' \
+    "$("$MB" -c 'set -- ab c def; IFS=:; echo "[$*]"')" "[ab:c:def]"
+
+# -----------------------------------------------------------------------
+# Here-document bodies: expansions run but `'` and `"` are literal, and $*/$@
+# are joined (a here-doc is text, never field-split). silex used to process the
+# quotes -- a stray `'` swallowed the rest of the line, leaving $HOME unexpanded
+# -- and leaked internal 0x01 bytes for $*/$@.
+# -----------------------------------------------------------------------
+check "here-doc keeps quotes literal and still expands \$VAR" \
+    "$(HOME=/h "$MB" -c 'cat <<EOF
+it'\''s "x" $HOME
+EOF')" 'it'\''s "x" /h'
+check "here-doc \$* with empty IFS joins with no separator" \
+    "$("$MB" -c 'set -- a "b c" d; v=$(IFS=; cat <<-EOF
+	$*
+	EOF
+); printf "[%s]" "$v"')" "[ab cd]"
+check "here-doc with quoted delimiter does not expand" \
+    "$("$MB" -c 'cat <<'\''EOF'\''
+$HOME x
+EOF')" '$HOME x'
+
+# -----------------------------------------------------------------------
 echo
 echo "modernish-bringup tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

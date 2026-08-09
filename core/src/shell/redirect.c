@@ -222,7 +222,7 @@ int redirect_apply(struct shell_ctx *sh, redir_t *redirs, redirect_ctx_t *ctx)
             const char *body;
             char *expanded = NULL;
             if (!r->heredoc_no_expand) {
-                expanded = expand_word(sh, body_raw);
+                expanded = expand_word_heredoc(sh, body_raw);
                 body = expanded ? expanded : body_raw;
             } else {
                 body = body_raw;
