@@ -17,6 +17,14 @@
 #define SHELL_TRAP_DEFAULT NULL
 #define SHELL_TRAP_IGNORE  ""
 
+/* Internal flow-control sentinels returned through exec_node's `int` result.
+ * They MUST stay above the valid exit-status range (0-255) so a command's real
+ * status (e.g. `return 255`, or 128+signal) is never mistaken for flow control.
+ * Shared by exec.c and shell.c (which routes eval/`.`/top-level flow). */
+#define FLOW_BREAK    1000
+#define FLOW_CONTINUE 1001
+#define FLOW_RETURN   1002
+
 typedef struct shell_ctx {
     vars_t      vars;
     arena_t     parse_arena;   /* persistent: AST, tokens, func defs, traps */

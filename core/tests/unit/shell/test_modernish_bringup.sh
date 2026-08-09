@@ -375,6 +375,26 @@ check "trap on a valid signal still succeeds" \
     "$("$MB" -c "trap 'echo i' INT; echo \$?")" "0"
 
 # -----------------------------------------------------------------------
+# A function's exit status shares no channel with flow control: `return N` for
+# N in 200-255 used to collide with the break/continue/return sentinels, so the
+# function (or whole shell) misbehaved. `return 255` in particular exited the
+# shell -- which silently swallowed modernish's mapr callback aborting with 255.
+# -----------------------------------------------------------------------
+check "return 255 sets the status and does NOT exit the shell" \
+    "$("$MB" -c 'f() { return 255; }; f; echo "A=$?"')" "A=255"
+check "return 200 (was the break sentinel) is a real status" \
+    "$("$MB" -c 'f() { return 200; }; f; echo "A=$?"')" "A=200"
+check "return 202 (was the return sentinel) is a real status" \
+    "$("$MB" -c 'f() { return 202; }; f; echo "A=$?"')" "A=202"
+check "return 255 propagates through || like any failure" \
+    "$("$MB" -c 'f() { return 255; }; f || echo "caught=$?"')" "caught=255"
+check "break still breaks a loop" \
+    "$("$MB" -c 'for i in 1 2 3; do [ "$i" = 2 ] && break; echo "$i"; done; echo end')" \
+    "$(printf '1\nend')"
+check "eval return is transparent to the enclosing function" \
+    "$("$MB" -c 'f() { eval "return 7"; echo NOPE; }; f; echo "g=$?"')" "g=7"
+
+# -----------------------------------------------------------------------
 echo
 echo "modernish-bringup tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

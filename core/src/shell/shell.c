@@ -250,15 +250,14 @@ int shell_run_string(shell_ctx_t *sh, const char *script)
 
         if (!sh->opt_n) {
             rc = exec_node(sh, node);
-            /* Flow control (FLOW_BREAK 200 / FLOW_CONTINUE 201 / FLOW_RETURN
-             * 202) must propagate to the CALLER, because this runs the argument
-             * of `eval`, which is transparent to return/break/continue -- they
-             * act on the function or loop that encloses the eval. Storing the
-             * 202 sentinel in last_exit and continuing (as before) meant
-             * `f() { eval "return 3"; }` never returned from f; the sentinel
-             * leaked upward and exited the shell. modernish's FTL_EVALRET /
-             * FTL_EVALCOBR checks exercise exactly this. */
-            if (rc >= 200 && rc <= 202) {
+            /* Flow control (FLOW_BREAK / FLOW_CONTINUE / FLOW_RETURN) must
+             * propagate to the CALLER, because this runs the argument of `eval`,
+             * which is transparent to return/break/continue -- they act on the
+             * function or loop that encloses the eval. Storing the sentinel in
+             * last_exit and continuing (as before) meant `f() { eval "return 3"; }`
+             * never returned from f; the sentinel leaked upward and exited the
+             * shell. modernish's FTL_EVALRET / FTL_EVALCOBR checks exercise this. */
+            if (rc >= FLOW_BREAK && rc <= FLOW_RETURN) {
                 sh->scratch = saved_scratch;
                 sh->in_command_builtin = saved_icb;
                 arena_free(&local);
@@ -387,13 +386,13 @@ int shell_run_file(shell_ctx_t *sh, const char *path)
 
         if (!sh->opt_n) {
             rc = exec_node(sh, node);
-            /* FLOW_RETURN (202) inside sourced script acts like exit from the script */
-            if (rc == 202) {  /* FLOW_RETURN */
+            /* FLOW_RETURN inside a sourced script acts like exit from the script */
+            if (rc == FLOW_RETURN) {
                 /* return builtin already set sh->last_exit; just break out */
                 break;
             }
-            /* FLOW_BREAK (200) and FLOW_CONTINUE (201) must propagate to caller's loop */
-            if (rc == 200 || rc == 201) {  /* FLOW_BREAK or FLOW_CONTINUE */
+            /* FLOW_BREAK / FLOW_CONTINUE must propagate to the caller's loop */
+            if (rc == FLOW_BREAK || rc == FLOW_CONTINUE) {
                 /* Don't update sh->last_exit; propagate flow control code */
                 sh->scratch = saved_scratch;
                 arena_free(&local);

@@ -74,13 +74,11 @@ static int exec_builtin_bg(shell_ctx_t *sh, int argc, char **argv);
 static job_t *parse_jobspec(shell_ctx_t *sh, const char *spec);
 
 /* -------------------------------------------------------------------------
- * Special exit codes for break/continue/return flow control
- * These are interpreted only within exec_node, not propagated to caller.
+ * Flow-control sentinels for break/continue/return are defined in shell.h
+ * (FLOW_BREAK / FLOW_CONTINUE / FLOW_RETURN), above the 0-255 exit-status range
+ * so a real status never collides with them. Interpreted within exec_node and,
+ * for eval/`.`/top-level, propagated by shell.c.
  * ------------------------------------------------------------------------- */
-
-#define FLOW_BREAK    200
-#define FLOW_CONTINUE 201
-#define FLOW_RETURN   202
 
 /* -------------------------------------------------------------------------
  * Applet lookup (delegates to global find_applet() from main.c / applets.h)
