@@ -360,6 +360,21 @@ check "an alias expands inside a command substitution" \
     "[hi]"
 
 # -----------------------------------------------------------------------
+# `trap` must reject an unknown condition ("bad trap", non-zero) like dash, and
+# must arm/list ALL real signals -- not the handful it used to. silex accepted
+# any name (ERR/ZERR/BOGUS) and silently dropped real ones (ALRM/CONT), so
+# modernish detected nonexistent signals like ZERR.
+# -----------------------------------------------------------------------
+check "trap rejects an unknown condition with non-zero status" \
+    "$("$MB" -c "trap 'x' ZERR 2>/dev/null; echo \$?")" "1"
+check "trap rejects a bogus signal name" \
+    "$("$MB" -c "trap 'x' BOGUS 2>/dev/null; echo \$?")" "1"
+check "trap arms and lists a real signal (ALRM) that was previously dropped" \
+    "$("$MB" -c "trap 'echo a' ALRM; trap")" "trap -- 'echo a' ALRM"
+check "trap on a valid signal still succeeds" \
+    "$("$MB" -c "trap 'echo i' INT; echo \$?")" "0"
+
+# -----------------------------------------------------------------------
 echo
 echo "modernish-bringup tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

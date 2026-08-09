@@ -2472,17 +2472,11 @@ static int exec_builtin_trap(shell_ctx_t *sh, int argc, char **argv)
             const char *act = sh->traps[sig].action;
             if (act == SHELL_TRAP_DEFAULT) continue;
 
-            const char *signame = NULL;
-            if (sig == 0) signame = "EXIT";
-            else if (sig == SIGINT) signame = "INT";
-            else if (sig == SIGTERM) signame = "TERM";
-            else if (sig == SIGHUP) signame = "HUP";
-            else if (sig == SIGQUIT) signame = "QUIT";
-            else if (sig == SIGPIPE) signame = "PIPE";
-            else if (sig == SIGCHLD) signame = "CHLD";
-            else if (sig == SIGUSR1) signame = "USR1";
-            else if (sig == SIGUSR2) signame = "USR2";
-            else continue;
+            /* Name every signal that can carry a trap, not just a handful --
+             * ALRM, CONT, TSTP, ... are now settable, and `trap` must list them
+             * (modernish parses this output to reconstruct its trap stack). */
+            const char *signame = (sig == 0) ? "EXIT" : signal_number_to_name(sig);
+            if (!signame) continue;
 
             if (act[0] == '\0') {
                 /* SHELL_TRAP_IGNORE: empty string means ignore */
@@ -2499,27 +2493,26 @@ static int exec_builtin_trap(shell_ctx_t *sh, int argc, char **argv)
     /* POSIX: trap action is stored as-is and expanded when trap fires */
     const char *trap_action = action;
 
+    int rc = 0;
     for (int i = 2; i < argc; i++) {
-        /* A signal number must be a valid signal, not whatever atoi() made of
-         * the string. Fall through to the name lookup when it is not numeric. */
+        /* Resolve the condition to a signal number. A numeric operand must be a
+         * valid signal, not whatever atoi() made of the string; otherwise look
+         * the name up in the shared table (EXIT, INT, SIGALRM, CONT, ...). */
         int sig = 0;
-        if (sh_parse_int(argv[i], 0, 64, &sig) != 0)
-            sig = -1;
-        if (sig < 0) {
-            /* Try signal name */
-            if (strcmp(argv[i], "EXIT") == 0) sig = 0;
-            else if (strcmp(argv[i], "INT") == 0)  sig = SIGINT;
-            else if (strcmp(argv[i], "TERM") == 0) sig = SIGTERM;
-            else if (strcmp(argv[i], "HUP") == 0)  sig = SIGHUP;
-            else if (strcmp(argv[i], "QUIT") == 0) sig = SIGQUIT;
-            else if (strcmp(argv[i], "PIPE") == 0) sig = SIGPIPE;
-            else if (strcmp(argv[i], "CHLD") == 0) sig = SIGCHLD;
-            else if (strcmp(argv[i], "USR1") == 0) sig = SIGUSR1;
-            else if (strcmp(argv[i], "USR2") == 0) sig = SIGUSR2;
-            else continue;
-        }
+        if (sh_parse_int(argv[i], 0, NSIG - 1, &sig) != 0)
+            sig = signal_from_name(argv[i]);
 
-        if (sig < 0 || sig >= NSIG) continue;
+        if (sig < 0 || sig >= NSIG) {
+            /* POSIX: an unknown condition is an error. dash prints "bad trap"
+             * and returns non-zero; silex used to silently ignore it, so
+             * `trap CMD ERR` / `ZERR` / `BOGUS` succeeded -- which made modernish
+             * detect signals (ZERR) the shell does not have. The old inline list
+             * also dropped real signals like ALRM and CONT, so those traps never
+             * armed; signal_from_name() now handles the full set. */
+            fprintf(stderr, "silex: trap: %s: bad trap\n", argv[i]);
+            rc = 1;
+            continue;
+        }
 
         if (strcmp(action, "-") == 0) {
             sh->traps[sig].action = SHELL_TRAP_DEFAULT;
@@ -2547,7 +2540,7 @@ static int exec_builtin_trap(shell_ctx_t *sh, int argc, char **argv)
         }
         sigaction(sig, &sa, NULL);
     }
-    return 0;
+    return rc;
 }
 
 static int exec_builtin_read(shell_ctx_t *sh, int argc, char **argv)
