@@ -1879,12 +1879,16 @@ static int exec_builtin_exit(shell_ctx_t *sh, int argc, char **argv)
         }
         code &= 0xff;
     }
-    /* Fire EXIT trap (traps[0]) before exiting; clear first to prevent re-entry */
+    /* Fire EXIT trap (traps[0]) before exiting; clear first to prevent re-entry.
+     * POSIX: $? inside the EXIT trap is the status exit was called with, so
+     * publish `code` before running the action (`trap 'echo $?' 0; exit 42`
+     * must print 42, not the previous command's status). The trap may then
+     * change $?, but the shell still exits with the original `code`. */
     const char *exit_action = sh->traps[0].action;
     if (exit_action != SHELL_TRAP_DEFAULT && exit_action[0] != '\0') {
         sh->traps[0].action = SHELL_TRAP_DEFAULT;
+        sh->last_exit = code;
         shell_run_string(sh, exit_action);
-        /* Trap can modify $?, but we exit with original code */
     }
     exit(code);
     return code; /* unreachable */

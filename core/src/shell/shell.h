@@ -98,6 +98,19 @@ typedef struct shell_ctx {
      * had their quotes stripped (and a lone `'` swallowed the rest, so `$HOME`
      * went unexpanded), and `$*`/`$@` leaked internal 0x01 bytes. */
     int         in_heredoc;
+    /* Set while expanding an assignment's right-hand side (var=WORD). Like a
+     * here-doc, this is a NON-split context, so unquoted `$*`/`$@` join with
+     * IFS's first byte instead of emitting \x01 field boundaries -- `var=$*`
+     * must yield the concatenation, not leak internal markers. Unlike in_heredoc
+     * it does NOT change quote handling (assignment RHS processes quotes). */
+    int         in_assign;
+    /* Set while expanding the WORD of a ${var-WORD} / ${var=WORD} / ${var+WORD}
+     * / ${var?WORD} parameter expansion. That word forms a single value that the
+     * surrounding context then field-splits, so an UNQUOTED $* or $@ inside it
+     * joins with IFS's first byte (`${var=$*}` yields one joined field, not the
+     * markers) -- but a QUOTED "$@" still yields separate fields, so unlike
+     * in_assign this does NOT affect the quoted-"$@" branch. */
+    int         pp_join_unquoted;
     /* Set while expanding a word that contained a quoted "$@" with no positional
      * parameters. POSIX 2.5.2: "$@" with zero positionals generates ZERO fields,
      * even though it is double-quoted -- unlike "$*", which generates one empty

@@ -444,6 +444,30 @@ check "command -vp order also works" \
     "$("$MB" -c 'PATH=/dev/null; command -vp ls >/dev/null; echo $?')" "0"
 
 # -----------------------------------------------------------------------
+# $*/$@ in NON-split contexts (assignment RHS, ${var-WORD} word) join with
+# IFS[0] and must not leak silex's internal field-boundary markers; a quoted
+# "$@" inside a quoted ${...} still yields separate fields.
+# -----------------------------------------------------------------------
+check "var=\$* joins (no internal markers), IFS empty" \
+    "$("$MB" -c 'set -- a "b c" d; IFS=; var=$*; echo "[$var]"')" "[ab cd]"
+check "\${var=\$*} joins to one field, IFS empty" \
+    "$("$MB" -c 'set -- a "b c" d; unset var; IFS=; set -- ${var=$*}; echo "$#|$1"')" "1|ab cd"
+check "\${var=\$*} also assigns the joined value" \
+    "$("$MB" -c 'set -- a "b c" d; unset var; IFS=; : ${var=$*}; echo "[$var]"')" "[ab cd]"
+check "quoted \"\${1+\$@}\" still yields separate fields" \
+    "$("$MB" -c 'set -- abc "d e" f; IFS=; set -- "${1+$@}"; echo "$#|$1|$2|$3"')" "3|abc|d e|f"
+check "\${novar-\"\$@\"} yields separate fields" \
+    "$("$MB" -c 'set -- abc "d e" f; unset novar; IFS=; set -- ${novar-"$@"}; echo "$#"')" "3"
+
+# -----------------------------------------------------------------------
+# The EXIT trap sees $? equal to the status `exit` was called with (POSIX).
+# -----------------------------------------------------------------------
+check "EXIT trap sees the exit N status in \$?" \
+    "$("$MB" -c 'trap "echo st=\$?" 0; exit 42')" "st=42"
+check "EXIT trap \$? via exit in a command substitution" \
+    "$("$MB" -c 'v=$(trap "printf %s \$?" 0; exit 42); echo "[$v]"')" "[42]"
+
+# -----------------------------------------------------------------------
 echo
 echo "modernish-bringup tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

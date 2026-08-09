@@ -354,8 +354,11 @@ static char *pp_decode(arena_t *a, const char *s);
 /*
  * expand_braced: parse and expand ${...} body.
  * 'body' is the content between { and }, e.g. "VAR:-default" or "#VAR".
+ * in_dquote is the quoting of the surrounding context: it carries into the
+ * word part of ${var-WORD} etc., so `"${1+$@}"` treats $@ as a quoted "$@"
+ * (separate fields) while `${var=$*}` treats $* as unquoted (joined).
  */
-static char *expand_braced(shell_ctx_t *sh, const char *body)
+static char *expand_braced(shell_ctx_t *sh, const char *body, int in_dquote)
 {
     /* Empty expansion ${} is an error */
     if (body[0] == '\0') {
@@ -483,7 +486,9 @@ static char *expand_braced(shell_ctx_t *sh, const char *body)
                 /* Expand and return word_part */
                 strbuf_t sb;
                 sb_init(&sb, 64);
-                expand_into(sh, word_part, &sb, 0);
+                { int sj_ = sh->pp_join_unquoted; sh->pp_join_unquoted = !in_dquote;
+                  expand_into(sh, word_part, &sb, in_dquote);
+                  sh->pp_join_unquoted = sj_; }
                 char *r = arena_strdup(sh->scratch, sb_str(&sb));
                 sb_free(&sb);
                 return r;
@@ -495,7 +500,9 @@ static char *expand_braced(shell_ctx_t *sh, const char *body)
                 /* Variable is set (and non-empty if colon) — expand word */
                 strbuf_t sb;
                 sb_init(&sb, 64);
-                expand_into(sh, word_part, &sb, 0);
+                { int sj_ = sh->pp_join_unquoted; sh->pp_join_unquoted = !in_dquote;
+                  expand_into(sh, word_part, &sb, in_dquote);
+                  sh->pp_join_unquoted = sj_; }
                 char *r = arena_strdup(sh->scratch, sb_str(&sb));
                 sb_free(&sb);
                 return r;
@@ -506,7 +513,9 @@ static char *expand_braced(shell_ctx_t *sh, const char *body)
             if (condition) {
                 strbuf_t sb;
                 sb_init(&sb, 64);
-                expand_into(sh, word_part, &sb, 0);
+                { int sj_ = sh->pp_join_unquoted; sh->pp_join_unquoted = !in_dquote;
+                  expand_into(sh, word_part, &sb, in_dquote);
+                  sh->pp_join_unquoted = sj_; }
                 const char *newval = sb_str(&sb);
                 /* The expansion may carry reserved-byte escapes (e.g. `$*` with
                  * a control byte in a splitting word). The VARIABLE must receive
@@ -523,7 +532,9 @@ static char *expand_braced(shell_ctx_t *sh, const char *body)
             if (condition) {
                 strbuf_t sb;
                 sb_init(&sb, 64);
-                expand_into(sh, word_part, &sb, 0);
+                { int sj_ = sh->pp_join_unquoted; sh->pp_join_unquoted = !in_dquote;
+                  expand_into(sh, word_part, &sb, in_dquote);
+                  sh->pp_join_unquoted = sj_; }
                 fprintf(stderr, "%s: %s\n", varname,
                         sb_len(&sb) > 0 ? sb_str(&sb) : "parameter null or not set");
                 sb_free(&sb);
@@ -1593,7 +1604,7 @@ static void expand_into(shell_ctx_t *sh, const char *word, strbuf_t *out,
                 }
                 size_t blen = (size_t)((p - 1) - start);
                 char *body = strndup(start, blen);
-                char *val  = expand_braced(sh, body ? body : "");
+                char *val  = expand_braced(sh, body ? body : "", in_dquote);
                 free(body);
                 /* expand_braced() already ran expand_into() on any quoted word
                  * part, so `val` may itself contain guard/boundary markers with
@@ -1605,11 +1616,12 @@ static void expand_into(shell_ctx_t *sh, const char *word, strbuf_t *out,
 
             /* $@ and $* — positional list */
             if (*p == '@' || *p == '*') {
-                if (sh->in_heredoc) {
-                    /* Here-doc text is never field-split, so both $@ and $* join
-                     * with IFS's first byte (unset => space, empty => nothing).
-                     * Emitting \x01 boundaries here would leak them into the
-                     * document. */
+                if (sh->in_heredoc || sh->in_assign) {
+                    /* A here-doc body and an assignment RHS are both NON-split
+                     * contexts, so $@ and $* join with IFS's first byte
+                     * (unset => space, empty => nothing) instead of emitting
+                     * \x01 field boundaries -- otherwise `var=$*` would leak the
+                     * internal markers into the variable's value. */
                     const char *ifs = sh_getvar(sh, "IFS");
                     int  have_sep = (ifs == NULL) || (ifs[0] != '\0');
                     char sep      = (ifs == NULL) ? ' ' : ifs[0];
@@ -1652,6 +1664,18 @@ static void expand_into(shell_ctx_t *sh, const char *word, strbuf_t *out,
                      * is set but EMPTY joins with nothing (not a space);
                      * otherwise the first byte of IFS. Conflating unset and
                      * empty produced "a b c" where empty IFS must yield "abc". */
+                    const char *ifs = sh_getvar(sh, "IFS");
+                    int  have_sep = (ifs == NULL) || (ifs[0] != '\0');
+                    char sep      = (ifs == NULL) ? ' ' : ifs[0];
+                    for (int pi = 0; pi < sh->positional_n; pi++) {
+                        if (pi > 0 && have_sep) sb_appendc(out, sep);
+                        emit_data(sh, out, sh->positional[pi]);
+                    }
+                } else if (sh->pp_join_unquoted) {
+                    /* Unquoted $* or $@ inside a ${var-WORD}/${var=WORD} word:
+                     * the word forms one value that the caller field-splits, so
+                     * join with IFS's first byte here (unset => space, empty =>
+                     * nothing) rather than emitting \x01 boundaries. */
                     const char *ifs = sh_getvar(sh, "IFS");
                     int  have_sep = (ifs == NULL) || (ifs[0] != '\0');
                     char sep      = (ifs == NULL) ? ' ' : ifs[0];
@@ -2001,6 +2025,11 @@ char *expand_word_assign(shell_ctx_t *sh, const char *word)
     strbuf_t result_sb;
     sb_init(&result_sb, 128);
 
+    /* Assignment RHS is a single (non-field-split) word: unquoted $* and $@ join
+     * with IFS[0] rather than emitting internal field boundaries. */
+    int saved_in_assign = sh->in_assign;
+    sh->in_assign = 1;
+
     const char *p = word;
     const char *seg_start = p;
 
@@ -2037,6 +2066,7 @@ char *expand_word_assign(shell_ctx_t *sh, const char *word)
         p++;
     }
 
+    sh->in_assign = saved_in_assign;
     char *result = arena_strdup(sh->scratch, sb_str(&result_sb));
     sb_free(&result_sb);
     return result;
