@@ -54,12 +54,21 @@ int redirect_apply(struct shell_ctx *sh, redir_t *redirs, redirect_ctx_t *ctx)
     for (redir_t *r = redirs; r != NULL; r = r->next) {
         int fd = r->fd;   /* target fd; caller sets sensible default */
 
-        /* Expand the target word (except for heredocs which are literal) */
+        /* Expand the target word (except for heredocs which are literal). When
+         * exec_simple_cmd already pre-expanded it (r->pre_expanded), use it
+         * verbatim -- expanding again would re-process the value's own bytes
+         * (e.g. strip a literal backslash from a filename) and re-run any $(...).
+         * Other callers (compound-command redirects, the exec builtin, ...) leave
+         * the flag clear, so their raw targets are still expanded here. */
         char *target = NULL;
         if (r->op != TOK_DLESS && r->op != TOK_DLESSDASH) {
-            target = expand_word(sh, r->target);
-            if (!target)
+            if (r->pre_expanded) {
                 target = r->target;
+            } else {
+                target = expand_word(sh, r->target);
+                if (!target)
+                    target = r->target;
+            }
         }
 
         /* Save the original fd before we touch it */

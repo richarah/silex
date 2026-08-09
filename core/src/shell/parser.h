@@ -33,6 +33,12 @@ typedef struct redir {
     char         *target;
     char         *heredoc;
     int           heredoc_no_expand; /* 1 if delimiter was quoted — no variable expansion */
+    /* 1 when `target` already holds the fully-expanded value (exec_simple_cmd
+     * pre-expands it to honour POSIX ordering and trigger assignment side
+     * effects). redirect_apply then uses it verbatim instead of expanding again;
+     * a second expansion would re-process the VALUE's own characters -- e.g. a
+     * literal backslash in a filename would be taken as an escape and removed. */
+    int           pre_expanded;
     struct redir *next;
 } redir_t;
 

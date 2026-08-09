@@ -625,8 +625,10 @@ int exec_simple_cmd(shell_ctx_t *sh, char **words, char **assigns, redir_t *redi
 
     int rc = exec_simple_cmd_inner(sh, words, assigns, redirs);
 
-    for (int i = 0; i < n; i++)
+    for (int i = 0; i < n; i++) {
         who[i]->target = saved[i];
+        who[i]->pre_expanded = 0;   /* saved[i] is the raw token again */
+    }
     /* Not freeing the inline arrays: `heap` is set only where saved/who were
      * reassigned to malloc'd buffers above, so this is unreachable while they
      * still point at inline_slots/inline_who. cppcheck reports the auto-variable
@@ -644,12 +646,17 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
      * (like 2>${x=redir}) happen before argument expansions (like ${x=assign}) */
     for (redir_t *r = redirs; r != NULL; r = r->next) {
         if (r->op != TOK_DLESS && r->op != TOK_DLESSDASH) {
-            /* Pre-expand redirect target to trigger any variable assignments */
+            /* Pre-expand redirect target to trigger any variable assignments and
+             * honour POSIX ordering. Store the RESULT back and mark it
+             * pre_expanded so redirect_apply uses it verbatim: expanding the
+             * already-expanded value a second time would re-process the value's
+             * own characters (a literal backslash in a filename, say) and also
+             * re-run any $(...) in it. exec_simple_cmd() restores r->target and
+             * clears the flag once the command is done. */
             char *target = expand_word(sh, r->target);
-            /* Store expanded target back (will be used by redirect_apply later).
-             * exec_simple_cmd() restores the AST pointer afterwards. */
-            if (target && target != r->target) {
+            if (target) {
                 r->target = arena_strdup(sh->scratch, target);
+                r->pre_expanded = 1;
             }
         }
     }

@@ -412,6 +412,26 @@ check 'unquoted $dir/$pat still globs' \
 rm -rf "$GT"
 
 # -----------------------------------------------------------------------
+# A redirect target that comes from a variable must not be expanded twice.
+# silex pre-expanded the target (for POSIX ordering) AND expanded it again in
+# redirect_apply, so the VALUE's own characters were re-processed: a literal
+# backslash in a filename was taken as an escape and dropped. This broke
+# modernish's loop_cond.t 'LOOP find' with adversarial (backslash) file names.
+# -----------------------------------------------------------------------
+RB=$(mktemp -d)
+check "redirect target from a variable keeps a literal backslash" \
+    "$("$MB" -c "d=\"$RB\"; name='a\\b'; v=\$d/\$name; : > \"\$v\"; ls \"\$d\"")" \
+    'a\b'
+rm -rf "$RB"; RB=$(mktemp -d)
+check "a loop still redirects to a fresh target each iteration" \
+    "$("$MB" -c "for f in a b c; do echo hi > $RB/t_\$f; done; ls $RB | tr '\n' ' '")" \
+    "t_a t_b t_c "
+rm -rf "$RB"
+check "\$(cmd) in a redirect target runs exactly once" \
+    "$("$MB" -c 'c=/tmp/silex_rt_cnt.$$; rm -f "$c"; echo hi > /tmp/silex_rt.$$.$(printf x >>"$c"; echo t); wc -c <"$c"; rm -f "$c" /tmp/silex_rt.$$.t' | tr -d ' ')" \
+    "1"
+
+# -----------------------------------------------------------------------
 echo
 echo "modernish-bringup tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

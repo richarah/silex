@@ -118,6 +118,7 @@ static redir_t *redirs_dup(arena_t *dst, const redir_t *r)
         nr->target            = r->target  ? arena_strdup(dst, r->target)  : NULL;
         nr->heredoc           = r->heredoc ? arena_strdup(dst, r->heredoc) : NULL;
         nr->heredoc_no_expand = r->heredoc_no_expand;
+        nr->pre_expanded      = 0;   /* a fresh copy holds the raw, unexpanded target */
         nr->next              = NULL;
         if (tail) tail->next = nr; else head = nr;
         tail = nr;
@@ -404,6 +405,7 @@ static redir_t *parse_redirect(parser_t *p, int io_fd)
     r->target   = tgt.text;
     r->heredoc  = NULL;
     r->heredoc_no_expand = 0;
+    r->pre_expanded = 0;
     r->next     = NULL;
 
     /* For heredocs, register the pending heredoc in the lexer.
