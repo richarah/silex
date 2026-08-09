@@ -300,6 +300,19 @@ check "cd -P .. follows the symlink physically" \
 rm -rf "$CDT"
 
 # -----------------------------------------------------------------------
+# Bash indirect/prefix expansion (${!name}, ${!name@}, ${!name*}) is not POSIX;
+# silex rejects it as a bad substitution like dash, rather than silently
+# mis-parsing it (which made modernish's var.t wrongly detect VARPREFIX). The
+# `${!}` last-background-PID special parameter stays valid.
+# -----------------------------------------------------------------------
+check "\${!name} indirect expansion is a bad substitution" \
+    "$("$MB" -c 'foo=x; echo "${!foo}"' 2>&1 >/dev/null | grep -c 'bad substitution')" "1"
+check "\${!name@} prefix expansion is a bad substitution" \
+    "$("$MB" -c 'foo=x; echo "${!foo@}"' 2>&1 >/dev/null | grep -c 'bad substitution')" "1"
+check "\${!} is still the last-background-PID special parameter" \
+    "$("$MB" -c 'sleep 0 & p=${!}; case $p in ([0-9]*) echo numeric;; (*) echo no;; esac')" "numeric"
+
+# -----------------------------------------------------------------------
 echo
 echo "modernish-bringup tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

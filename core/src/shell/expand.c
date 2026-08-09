@@ -351,6 +351,20 @@ static char *expand_braced(shell_ctx_t *sh, const char *body)
         exit(2);
     }
 
+    /* Bash indirect (${!name}) and prefix (${!name@}, ${!name*}) expansion are
+     * not POSIX and silex does not implement them. Reject them as a bad
+     * substitution, exactly as dash does, instead of silently mis-parsing
+     * `!name` as the `!` special parameter followed by leftover text (which
+     * produced a stray last-background-PID and made modernish wrongly detect the
+     * VARPREFIX capability). `${!}` (the last-bg-PID special parameter) and
+     * `${!:-x}` stay valid: only `!` directly followed by a name char, @, or *
+     * is rejected. */
+    if (body[0] == '!' &&
+        (is_name_char((unsigned char)body[1]) || body[1] == '@' || body[1] == '*')) {
+        fprintf(stderr, "silex: bad substitution\n");
+        exit(2);
+    }
+
     /* ${#VAR} — length */
     if (body[0] == '#' && body[1] != '\0' && body[1] != '}') {
         const char *varname = body + 1;
