@@ -285,6 +285,21 @@ $HOME x
 EOF')" '$HOME x'
 
 # -----------------------------------------------------------------------
+# cd -L (default) traverses logically: $PWD keeps the symlink name used to
+# arrive, and "dir/.." cancels textually. cd -P resolves symlinks physically.
+# silex used to resolve physically either way (modernish's BUG_CDNOLOGIC).
+# -----------------------------------------------------------------------
+CDT=$(mktemp -d)
+mkdir -p "$CDT/a/b"; ln -sfn "$CDT/a/b" "$CDT/link"
+check "cd into a symlink keeps the logical PWD" \
+    "$("$MB" -c "cd $CDT/link; echo \$PWD")" "$CDT/link"
+check "cd -L .. cancels the symlink component textually" \
+    "$("$MB" -c "cd $CDT/link; cd -L ..; echo \$PWD")" "$CDT"
+check "cd -P .. follows the symlink physically" \
+    "$("$MB" -c "cd $CDT/link; cd -P ..; echo \$PWD")" "$CDT/a"
+rm -rf "$CDT"
+
+# -----------------------------------------------------------------------
 echo
 echo "modernish-bringup tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

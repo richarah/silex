@@ -2272,21 +2272,75 @@ static int exec_builtin_readonly(shell_ctx_t *sh, int argc, char **argv)
     return rc;
 }
 
+/*
+ * Lexically canonicalize a logical path for `cd -L`: resolve "." and ".."
+ * textually against the base $PWD WITHOUT dereferencing symlinks (POSIX 8-step
+ * algorithm, logical form). `dir` may be absolute or relative to `pwd`. Writes
+ * the canonical absolute path to `out`; returns 0, or -1 on overflow / no usable
+ * absolute base.
+ */
+static int cd_logical_path(const char *pwd, const char *dir,
+                           char *out, size_t outsz)
+{
+    char buf[PATH_MAX * 2];
+    if (dir[0] == '/') {
+        if (strlen(dir) >= sizeof(buf)) return -1;
+        strcpy(buf, dir);
+    } else {
+        if (!pwd || pwd[0] != '/') return -1;   /* need an absolute base */
+        if (snprintf(buf, sizeof(buf), "%s/%s", pwd, dir) >= (int)sizeof(buf))
+            return -1;
+    }
+
+    /* Build a stack of path components, applying "." (drop) and ".." (pop the
+     * previous component -- logically, never touching the filesystem). */
+    char *comps[PATH_MAX / 2];
+    int   n = 0;
+    for (char *tok = strtok(buf, "/"); tok; tok = strtok(NULL, "/")) {
+        if (strcmp(tok, ".") == 0)
+            continue;
+        if (strcmp(tok, "..") == 0) {
+            if (n > 0) n--;          /* pop; at root, ".." stays root */
+            continue;
+        }
+        if (n < (int)(sizeof(comps) / sizeof(comps[0])))
+            comps[n++] = tok;
+    }
+
+    if (n == 0) {                    /* everything collapsed to "/" */
+        if (outsz < 2) return -1;
+        out[0] = '/'; out[1] = '\0';
+        return 0;
+    }
+    size_t w = 0;
+    for (int k = 0; k < n; k++) {
+        size_t len = strlen(comps[k]);
+        if (w + 1 + len + 1 > outsz) return -1;
+        out[w++] = '/';
+        memcpy(out + w, comps[k], len);
+        w += len;
+    }
+    out[w] = '\0';
+    return 0;
+}
+
 static int exec_builtin_cd(shell_ctx_t *sh, int argc, char **argv)
 {
     /* POSIX: cd [-L|-P] [directory | -]
      *
-     * `--` (end of options) was not handled at all, so `cd -- "$dir"` tried to
-     * chdir("--") and failed with "--: No such file or directory". That is the
-     * idiom for a directory that might begin with a dash, and modernish's
-     * bootstrap uses it -- so modernish could not start.
+     * `--` (end of options) is handled so `cd -- "$dir"` works (the idiom for a
+     * directory that might begin with a dash; modernish's bootstrap uses it).
      *
-     * -L/-P are accepted; silex resolves physically either way (see below).
+     * -L (default) traverses LOGICALLY: symlinks in $PWD are preserved and
+     * "path/.." cancels "path" textually, so $PWD keeps the name used to arrive.
+     * -P traverses PHYSICALLY (resolves symlinks). The last of -L/-P wins.
      */
+    int physical = 0;
     int i = 1;
     for (; i < argc; i++) {
         if (strcmp(argv[i], "--") == 0) { i++; break; }
-        if (strcmp(argv[i], "-L") == 0 || strcmp(argv[i], "-P") == 0) continue;
+        if (strcmp(argv[i], "-L") == 0) { physical = 0; continue; }
+        if (strcmp(argv[i], "-P") == 0) { physical = 1; continue; }
         break;                                  /* not an option */
     }
 
@@ -2311,25 +2365,56 @@ static int exec_builtin_cd(shell_ctx_t *sh, int argc, char **argv)
         dir = argv[i];
     }
 
-    /* Remember where we were before moving, so `cd -` works next time. */
-    char oldpwd[PATH_MAX];
-    const char *prev = getcwd(oldpwd, sizeof(oldpwd)) ? oldpwd : NULL;
+    /* The base for a relative path and the value stored as OLDPWD is the current
+     * logical $PWD (falling back to getcwd() when PWD is unset or not absolute). */
+    char cwdbuf[PATH_MAX];
+    const char *cur_pwd = vars_get(&sh->vars, "PWD");
+    if (!cur_pwd || cur_pwd[0] != '/')
+        cur_pwd = getcwd(cwdbuf, sizeof(cwdbuf)) ? cwdbuf : NULL;
 
+    if (physical) {
+        /* Physical: let the kernel resolve, then read back the real path. */
+        char oldpwd[PATH_MAX];
+        const char *prev = getcwd(oldpwd, sizeof(oldpwd)) ? oldpwd : cur_pwd;
+        if (chdir(dir) != 0) {
+            fprintf(stderr, "silex: cd: %s: %s\n", dir, strerror(errno));
+            return 1;
+        }
+        if (prev) vars_set(&sh->vars, "OLDPWD", prev);
+        char pwd[PATH_MAX];
+        if (getcwd(pwd, sizeof(pwd))) {
+            vars_set(&sh->vars, "PWD", pwd);
+            if (print_dir) printf("%s\n", pwd);
+        }
+        return 0;
+    }
+
+    /* Logical (-L, default): canonicalize the path textually and chdir to it,
+     * so $PWD keeps symlink names. Fall back to a physical chdir if the logical
+     * path cannot be formed (e.g. no absolute base). */
+    char canon[PATH_MAX];
+    if (cd_logical_path(cur_pwd, dir, canon, sizeof(canon)) == 0) {
+        if (chdir(canon) != 0) {
+            fprintf(stderr, "silex: cd: %s: %s\n", dir, strerror(errno));
+            return 1;
+        }
+        if (cur_pwd) vars_set(&sh->vars, "OLDPWD", cur_pwd);
+        vars_set(&sh->vars, "PWD", canon);
+        if (print_dir) printf("%s\n", canon);
+        return 0;
+    }
+
+    /* Fallback: physical chdir, PWD from getcwd(). */
     if (chdir(dir) != 0) {
         fprintf(stderr, "silex: cd: %s: %s\n", dir, strerror(errno));
         return 1;
     }
-
-    if (prev)
-        vars_set(&sh->vars, "OLDPWD", prev);
-
+    if (cur_pwd) vars_set(&sh->vars, "OLDPWD", cur_pwd);
     char pwd[PATH_MAX];
     if (getcwd(pwd, sizeof(pwd))) {
         vars_set(&sh->vars, "PWD", pwd);
-        if (print_dir)
-            printf("%s\n", pwd);
+        if (print_dir) printf("%s\n", pwd);
     }
-
     return 0;
 }
 
