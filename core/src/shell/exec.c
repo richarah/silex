@@ -15,6 +15,7 @@
 #include "../util/strbuf.h"
 
 #include <errno.h>
+#include <ctype.h>
 #include <fnmatch.h>
 #include <limits.h>
 #include <stdint.h>
@@ -2620,10 +2621,17 @@ static int exec_builtin_read(shell_ctx_t *sh, int argc, char **argv)
             while (*p && strchr(ifs, (unsigned char)*p)) p++;
         }
         if (vi == argc - 1) {
-            /* Last var gets rest of line (stripped of leading IFS if >1 var) */
-            if (argc - opt_i > 1) {
-                while (*p && strchr(ifs, (unsigned char)*p)) p++;
-            }
+            /* Last var gets the rest of the line. POSIX: read discards leading
+             * AND trailing IFS WHITESPACE (space/tab/newline that are in IFS),
+             * but keeps internal whitespace -- `IFS=' ' read x` on "  ab  cd  "
+             * yields "ab  cd". (Only whitespace is trimmed; an IFS non-whitespace
+             * delimiter is significant.) */
+            while (*p && strchr(ifs, (unsigned char)*p) &&
+                   isspace((unsigned char)*p)) p++;
+            char *e = p + strlen(p);
+            while (e > p && strchr(ifs, (unsigned char)e[-1]) &&
+                   isspace((unsigned char)e[-1])) e--;
+            *e = '\0';
             vars_set(&sh->vars, argv[vi], p);
             break;
         }

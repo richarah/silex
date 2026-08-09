@@ -376,14 +376,44 @@ static char *braced_ret_n(shell_ctx_t *sh, const char *s, size_t n)
     return braced_ret(sh, tmp);
 }
 
+static char *expand_braced_body(shell_ctx_t *sh, const char *body, int in_dquote);
+
 /*
- * expand_braced: parse and expand ${...} body.
+ * expand_braced: parse and expand a ${...} body.
+ *
+ * Inside a ${...}, quoting is processed normally EVEN within a here-document
+ * body -- only the surrounding here-doc TEXT treats quotes literally. So a
+ * here-doc's `${U-"1"}` yields `1` (the default's quotes are removed) and
+ * `${S#"se"}` trims by the unquoted pattern, matching dash. The here-doc is
+ * still a NON-split context, though, so $@/$* must join: we set in_assign for
+ * the duration, which the $@/$* branch treats as "join".
+ */
+static char *expand_braced(shell_ctx_t *sh, const char *body, int in_dquote)
+{
+    int save_h = sh->in_heredoc, save_a = sh->in_assign;
+    if (save_h) {
+        /* A here-doc body carries no real double quotes (they are literal text),
+         * so its ${...} interior is an UNQUOTED context: `"1"` in ${U-"1"} opens
+         * and closes normally. Pass in_dquote=0, join $@/$* (non-split), and let
+         * quotes be processed (in_heredoc off). */
+        sh->in_assign = 1;
+        sh->in_heredoc = 0;
+        in_dquote = 0;
+    }
+    char *r = expand_braced_body(sh, body, in_dquote);
+    sh->in_heredoc = save_h;
+    sh->in_assign  = save_a;
+    return r;
+}
+
+/*
+ * expand_braced_body: the actual ${...} parser/expander.
  * 'body' is the content between { and }, e.g. "VAR:-default" or "#VAR".
  * in_dquote is the quoting of the surrounding context: it carries into the
  * word part of ${var-WORD} etc., so `"${1+$@}"` treats $@ as a quoted "$@"
  * (separate fields) while `${var=$*}` treats $* as unquoted (joined).
  */
-static char *expand_braced(shell_ctx_t *sh, const char *body, int in_dquote)
+static char *expand_braced_body(shell_ctx_t *sh, const char *body, int in_dquote)
 {
     /* Empty expansion ${} is an error */
     if (body[0] == '\0') {

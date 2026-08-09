@@ -482,6 +482,29 @@ check "\${x#p} value with a literal 0x04 survives field splitting" \
     "610462"
 
 # -----------------------------------------------------------------------
+# `read` discards leading AND trailing IFS whitespace even for a single var,
+# but keeps internal whitespace (POSIX). silex trimmed neither for one var.
+# -----------------------------------------------------------------------
+check "read trims leading/trailing IFS whitespace, keeps internal" \
+    "$("$MB" -c 'IFS=" " read x <<-EOF
+	  ab  cd
+	EOF
+printf "[%s]" "$x"')" "[ab  cd]"
+
+# -----------------------------------------------------------------------
+# Inside a ${...} in a here-doc, quotes ARE processed (only the surrounding
+# here-doc text treats them literally): ${U-"1"} -> 1, ${S#"se"} trims.
+# -----------------------------------------------------------------------
+check "here-doc \${U-\"1\"} removes the default's quotes" \
+    "$("$MB" -c 'unset U; cat <<-EOF
+	[${U-"1"}]
+	EOF')" "[1]"
+check "here-doc \${S#\"se\"} trims by the unquoted pattern" \
+    "$("$MB" -c 'S=set; cat <<-EOF
+	[${S#"se"}]
+	EOF')" "[t]"
+
+# -----------------------------------------------------------------------
 echo
 echo "modernish-bringup tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
