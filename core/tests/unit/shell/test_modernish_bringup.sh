@@ -555,6 +555,18 @@ check "unquoted \${v=WORD} also stores a literal 0x04" \
     '580459'
 
 # -----------------------------------------------------------------------
+# In an EXPANDING here-doc, a line ending in `\` continues onto the next line,
+# so that next line is NOT the terminator: `jkl\<nl>DELIM` keeps DELIM in the
+# body. silex ended the here-doc at the first (continued) delimiter line.
+# modernish string.t "line continuation in expanding here-doc".
+# -----------------------------------------------------------------------
+check "expanding here-doc: \\<newline> before delimiter continues the line" \
+    "$(printf 'cat <<-END\n\tjkl\\\n\tEND\n\tEND\n' | "$MB" 2>&1)" "jkl	END"
+# A quoted delimiter makes backslash literal: no continuation, first END ends it.
+check "quoted-delimiter here-doc: trailing backslash is literal, not continuation" \
+    "$(printf 'cat <<-'\''END'\''\n\tjkl\\\n\tEND\n' | "$MB" 2>&1)" 'jkl\'
+
+# -----------------------------------------------------------------------
 echo
 echo "modernish-bringup tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

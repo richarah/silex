@@ -207,9 +207,19 @@ static tok_type_t check_reserved(const char *word)
  * that matches delim (with optional leading tabs stripped for strip_tabs).
  * Appends the body to the wordbuf, then returns an arena-duplicated string.
  */
-static char *read_heredoc_body(lexer_t *l, const char *delim, int strip_tabs)
+static char *read_heredoc_body(lexer_t *l, const char *delim, int strip_tabs,
+                               int no_expand)
 {
     wordbuf_reset(l);
+
+    /* In an EXPANDING here-doc a physical line ending in an unescaped backslash
+     * is a line continuation: the next physical line is part of the same logical
+     * line, so it must NOT be tested as the delimiter. (`jkl\<newline>FIN` keeps
+     * FIN as body, not the terminator.) The `\<newline>` join and <<- tab strip
+     * are done later at redirect time; here we only gate the delimiter test.
+     * A quoted delimiter (no_expand) disables continuation -- backslash is then
+     * literal. */
+    int prev_continued = 0;
 
     for (;;) {
         /* Read one line into a temporary strbuf */
@@ -231,18 +241,31 @@ static char *read_heredoc_body(lexer_t *l, const char *delim, int strip_tabs)
         }
         linebuf[linelen] = '\0';
 
-        /* Check for delimiter (strip leading tabs if requested) */
-        const char *check = linebuf;
-        if (strip_tabs) {
-            while (*check == '\t')
-                check++;
+        /* Check for delimiter (strip leading tabs if requested) -- but not when
+         * this line is the continuation of the previous one. */
+        if (!prev_continued) {
+            const char *check = linebuf;
+            if (strip_tabs) {
+                while (*check == '\t')
+                    check++;
+            }
+            if (strcmp(check, delim) == 0)
+                goto done;
         }
-        if (strcmp(check, delim) == 0)
-            goto done;
 
         /* Append line + newline to wordbuf */
         wordbuf_appends(l, linebuf);
         wordbuf_append(l, '\n');
+
+        /* Does THIS line continue into the next? (odd trailing backslashes) */
+        prev_continued = 0;
+        if (!no_expand) {
+            size_t bs = 0;
+            while (bs < linelen && linebuf[linelen - 1 - bs] == '\\')
+                bs++;
+            if (bs & 1)
+                prev_continued = 1;
+        }
     }
 
 done:
@@ -623,7 +646,8 @@ restart:
                 heredoc_pending_t *next = hp->next;
                 /* Read the heredoc body and store it in the redir_t via
                  * the body_out back-pointer set by the parser. */
-                char *body = read_heredoc_body(l, hp->delim, hp->strip_tabs);
+                char *body = read_heredoc_body(l, hp->delim, hp->strip_tabs,
+                                               hp->no_expand);
                 if (hp->body_out)
                     *hp->body_out = body;
                 hp = next;
