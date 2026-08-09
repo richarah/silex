@@ -109,6 +109,36 @@ static var_entry_t *vars_find(vars_t *v, const char *name)
 }
 
 /*
+ * Create a "declared but unset" entry (value == NULL) in the GLOBAL scope and
+ * return it. `readonly NAME` and `export NAME` on an as-yet-unset name must
+ * record the attribute against a variable that stays UNSET -- distinct from an
+ * empty value -- so that `${NAME+x}` still reports it unset while `readonly -p`
+ * / `export -p` list it. Placing it in the global scope matches plain
+ * assignment (vars_set_context): attributes set inside a function apply to the
+ * global variable unless `local` was used. Callers must have confirmed the name
+ * is not already present in any scope (via vars_find) before calling.
+ */
+static var_entry_t *declare_global_unset(vars_t *v, const char *name)
+{
+    unsigned int idx = fnv1a(name);
+    var_scope_t *global = v->scope;
+    if (!global)
+        return NULL;
+    while (global->parent != NULL)
+        global = global->parent;
+    var_entry_t *e   = arena_alloc(global->arena, sizeof(var_entry_t));
+    e->arena         = global->arena;
+    e->name          = arena_strdup(global->arena, name);
+    e->value         = NULL;   /* declared but unset */
+    e->value_cap     = 0;
+    e->exported      = 0;
+    e->readonly      = 0;
+    e->next          = global->buckets[idx];
+    global->buckets[idx] = e;
+    return e;
+}
+
+/*
  * Store value in e, reusing e's existing buffer whenever the new value fits.
  *
  * Values live in an arena, and an arena has no per-allocation free. Every
@@ -245,14 +275,24 @@ int vars_set_local(vars_t *v, const char *name, const char *value)
 int vars_export_context(vars_t *v, const char *name, const char *ctx)
 {
     var_entry_t *e = vars_find(v, name);
-    if (!e)
-        return 1;
+    if (!e) {
+        /* POSIX: `export NAME` on an unset name marks it for export without
+         * setting it. It enters the environment only once it is assigned a
+         * value (var_store_value re-syncs then). modernish's `isset -x` on an
+         * unset name depends on this staying UNSET, not becoming empty. */
+        e = declare_global_unset(v, name);
+        if (!e)
+            return 1;
+        e->exported = 1;
+        return 0;
+    }
     if (e->readonly && ctx) {
         fprintf(stderr, "%s: %s: is read only\n", ctx, name);
         return 1;
     }
     e->exported = 1;
-    setenv(name, e->value, 1);
+    if (e->value)                 /* keep a declared-but-unset var out of environ */
+        setenv(name, e->value, 1);
     return 0;
 }
 
@@ -264,8 +304,15 @@ int vars_export(vars_t *v, const char *name)
 int vars_readonly(vars_t *v, const char *name)
 {
     var_entry_t *e = vars_find(v, name);
-    if (!e)
-        return 1;
+    if (!e) {
+        /* POSIX: `readonly NAME` on an unset name creates a declared-but-unset
+         * read-only variable. It stays unset (distinct from empty) until, and
+         * unless, it is later assigned -- modernish's `isset -r` on an unset
+         * name relies on this and on `readonly -p` listing it. */
+        e = declare_global_unset(v, name);
+        if (!e)
+            return 1;
+    }
     e->readonly = 1;
     return 0;
 }
@@ -305,7 +352,7 @@ void vars_export_env(vars_t *v)
     for (var_scope_t *s = v->scope; s != NULL; s = s->parent) {
         for (int i = 0; i < VARS_HASH_SIZE; i++) {
             for (var_entry_t *e = s->buckets[i]; e != NULL; e = e->next) {
-                if (e->exported)
+                if (e->exported && e->value)  /* skip declared-but-unset exports */
                     setenv(e->name, e->value, 1);
             }
         }
@@ -398,6 +445,10 @@ void vars_print_all(vars_t *v)
     for (int i = 0; i < VARS_HASH_SIZE; i++) {
         for (var_scope_t *s = v->scope; s != NULL; s = s->parent) {
             for (var_entry_t *e = s->buckets[i]; e != NULL; e = e->next) {
+                /* A declared-but-unset variable (value == NULL) is not a set
+                 * variable; POSIX `set` lists only set ones, and printing it as
+                 * NAME='' would wrongly claim it holds the empty string. */
+                if (!e->value) continue;
                 int shadowed = 0;
                 for (var_scope_t *inner = v->scope; inner != s; inner = inner->parent) {
                     if (scope_find(inner, e->name, (unsigned int)i)) { shadowed = 1; break; }

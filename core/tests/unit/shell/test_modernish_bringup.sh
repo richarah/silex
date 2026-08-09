@@ -168,6 +168,31 @@ check "60k eval iterations do not exhaust the parse arena" \
     "59999"
 
 # -----------------------------------------------------------------------
+# Declared-but-unset variables: `export NAME` / `readonly NAME` on an unset
+# name record the attribute WITHOUT setting the variable, so it stays unset
+# (distinct from empty). modernish's `isset -x` / `isset -r` on an unset name
+# rely on this and on `export -p` / `readonly -p` listing the bare name.
+# -----------------------------------------------------------------------
+check "export NAME on an unset var keeps it unset (\${x+SET} empty)" \
+    "$("$MB" -c 'unset foo; export foo; echo "[${foo+SET}]"')" "[]"
+check "export NAME on an unset var: \${x-DEF} defaults" \
+    "$("$MB" -c 'unset foo; export foo; echo "[${foo-DEF}]"')" "[DEF]"
+check "export -p lists a declared-but-unset exported var as a bare name" \
+    "$("$MB" -c 'unset foo; export foo; export -p | grep "foo"')" "export foo"
+check "readonly NAME on an unset var keeps it unset (\${x+SET} empty)" \
+    "$("$MB" -c 'unset bar; readonly bar; echo "[${bar+SET}]"')" "[]"
+check "readonly -p lists a declared-but-unset readonly var as a bare name" \
+    "$("$MB" -c 'unset bar; readonly bar; readonly -p | grep bar')" "readonly bar"
+check "a declared-but-unset exported var is not in the environment yet" \
+    "$("$MB" -c 'unset onlydecl; export onlydecl; env | grep "^onlydecl=" || echo none')" "none"
+check "assigning a declared-but-unset exported var enters the environment" \
+    "$("$MB" -c 'unset baz; export baz; baz=hi; env | grep "^baz="')" "baz=hi"
+check "set (no args) does not list a declared-but-unset var" \
+    "$("$MB" -c 'unset onlydecl; export onlydecl; set | grep "^onlydecl" || echo absent')" "absent"
+check "a readonly declared-but-unset var still cannot be assigned" \
+    "$("$MB" -c 'unset q; readonly q; q=val; echo "[${q-UNSET}]"' 2>/dev/null)" "[UNSET]"
+
+# -----------------------------------------------------------------------
 echo
 echo "modernish-bringup tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

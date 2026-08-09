@@ -2177,9 +2177,11 @@ static int exec_builtin_export(shell_ctx_t *sh, int argc, char **argv)
                 free(name);
             }
         } else {
-            /* export NAME — mark existing variable for export */
-            if (vars_get(&sh->vars, argv[i]) == NULL)
-                vars_set(&sh->vars, argv[i], "");
+            /* export NAME — mark the variable for export. If NAME is unset,
+             * vars_export now records a declared-but-unset exported variable
+             * (POSIX): it stays unset (not empty) and enters the environment
+             * only once assigned. Previously this seeded it with "", which made
+             * `${NAME+x}` / modernish's `isset` wrongly report it as set. */
             vars_export(&sh->vars, argv[i]);
         }
     }
