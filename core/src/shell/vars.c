@@ -334,11 +334,22 @@ int vars_unset_context(vars_t *v, const char *name, const char *ctx)
                     return 1;
                 }
                 *pp = e->next;
+                /* Also drop it from the process environment. An exported var
+                 * lives in `environ` (via setenv); removing only the shell-table
+                 * entry left the stale value visible to children, so
+                 * `export V=x; unset V; child` still saw V=x. POSIX unset
+                 * removes the variable entirely. This also made modernish
+                 * falsely detect BUG_EXPORTUNS, because it reuses `_Msh_test`
+                 * (exported with a value, later unset) as a scratch name. */
+                unsetenv(name);
                 return 0;
             }
             pp = &e->next;
         }
     }
+    /* Not in the shell table, but a bare `environ` entry may still linger
+     * (e.g. inherited but never imported): clear it too so unset is complete. */
+    unsetenv(name);
     return 0;
 }
 

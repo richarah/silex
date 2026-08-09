@@ -229,6 +229,31 @@ check "modernish getopts errmsg loop yields ?,Empty for the trailing missing arg
     "x,foo/y,Empty/?,Empty"
 
 # -----------------------------------------------------------------------
+# unset must remove a variable from the process environment, not just the
+# shell table. Otherwise `export V=x; unset V` leaves V=x visible to children,
+# which made modernish falsely detect BUG_EXPORTUNS (it reuses _Msh_test as a
+# scratch var: exported with a value, then unset).
+# -----------------------------------------------------------------------
+check "unset removes an exported var from a child's environment" \
+    "$("$MB" -c 'export V=leftover; unset V; '"$MB"' -c '\''echo "${V+SET}${V-NO}"'\''')" \
+    "NO"
+check "export of a still-unset name after unset does not leak an empty var" \
+    "$("$MB" -c 'export _Msh_test=x; unset -v _Msh_test; export _Msh_test; '"$MB"' -c '\''echo "[${_Msh_test+SET}]"'\''')" \
+    "[]"
+
+# -----------------------------------------------------------------------
+# `test -o OPTION` (ksh/bash extension) reports shell option state; modernish
+# detects it as TESTO and uses it for `isset -o`. It used to fall through to
+# false even when the option was on.
+# -----------------------------------------------------------------------
+check "test -o nounset is true under set -u" \
+    "$("$MB" -c 'set -u; test -o nounset && echo on || echo off')" "on"
+check "test -o nounset is false without set -u" \
+    "$("$MB" -c 'test -o nounset && echo on || echo off')" "off"
+check "binary -o (a -o b) still works" \
+    "$("$MB" -c 'test "" -o x && echo yes || echo no')" "yes"
+
+# -----------------------------------------------------------------------
 echo
 echo "modernish-bringup tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

@@ -2002,6 +2002,22 @@ static int set_option_byname(shell_ctx_t *sh, const char *name, int value)
  * back to the shell -- modernish's option stack (push/pop via _IN/opt) saves and
  * restores options exactly this way, and errored out when the listing was
  * missing. */
+/* Current state of a long shell option: 1 = on, 0 = off, -1 = unknown name.
+ * Shared by `set -o` listing, `set -o name`, and `test -o name`. */
+static int shell_option_on(shell_ctx_t *sh, const char *n)
+{
+    if      (strcmp(n, "allexport")== 0) return sh->opt_a;
+    else if (strcmp(n, "errexit")  == 0) return sh->opt_e;
+    else if (strcmp(n, "nounset")  == 0) return sh->opt_u;
+    else if (strcmp(n, "xtrace")   == 0) return sh->opt_x;
+    else if (strcmp(n, "noglob")   == 0) return sh->opt_f;
+    else if (strcmp(n, "noexec")   == 0) return sh->opt_n;
+    else if (strcmp(n, "monitor")  == 0) return sh->opt_m;
+    else if (strcmp(n, "noclobber")== 0) return sh->opt_C;
+    else if (strcmp(n, "pipefail") == 0) return sh->opt_pipefail;
+    return -1;
+}
+
 static void set_print_options(shell_ctx_t *sh, int reusable)
 {
     static const char *const opts[] = {
@@ -2009,17 +2025,8 @@ static void set_print_options(shell_ctx_t *sh, int reusable)
         "noexec", "monitor", "noclobber", "pipefail",
     };
     for (size_t i = 0; i < sizeof(opts) / sizeof(opts[0]); i++) {
-        int on;
         const char *n = opts[i];
-        if      (strcmp(n, "allexport")== 0) on = sh->opt_a;
-        else if (strcmp(n, "errexit")  == 0) on = sh->opt_e;
-        else if (strcmp(n, "nounset")  == 0) on = sh->opt_u;
-        else if (strcmp(n, "xtrace")   == 0) on = sh->opt_x;
-        else if (strcmp(n, "noglob")   == 0) on = sh->opt_f;
-        else if (strcmp(n, "noexec")   == 0) on = sh->opt_n;
-        else if (strcmp(n, "monitor")  == 0) on = sh->opt_m;
-        else if (strcmp(n, "noclobber")== 0) on = sh->opt_C;
-        else                                 on = sh->opt_pipefail;
+        int on = shell_option_on(sh, n) == 1;
 
         if (reusable)
             printf("set %co %s\n", on ? '-' : '+', n);
@@ -2555,7 +2562,6 @@ static int exec_builtin_printf_sh(shell_ctx_t *sh, int argc, char **argv)
 /* Minimal test / [ implementation */
 static int exec_builtin_test(shell_ctx_t *sh, int argc, char **argv)
 {
-    (void)sh;
     int bracket = (strcmp(argv[0], "[") == 0);
 
     /* Strip trailing ] for [ invocation */
@@ -2600,6 +2606,12 @@ static int exec_builtin_test(shell_ctx_t *sh, int argc, char **argv)
         if (strcmp(op, "-x") == 0) return (access(a, X_OK) == 0) ? 0 : 1;
         if (strcmp(op, "-s") == 0) { struct stat st; return (stat(a, &st) == 0 && st.st_size > 0) ? 0 : 1; }
         if (strcmp(op, "-t") == 0) { int fd; return (sh_parse_int(a, 0, INT_MAX, &fd) == 0 && isatty(fd)) ? 0 : 1; }
+        /* `test -o OPTION` (ksh/bash extension): true if the long shell option
+         * is on. modernish detects this as the TESTO capability and uses it for
+         * `isset -o`; an unknown option name is false, as in bash. Without this
+         * `-o` fell through to false even when the option was set, so
+         * `isset -o nounset` failed under `set -u`. */
+        if (strcmp(op, "-o") == 0)  return (shell_option_on(sh, a) == 1) ? 0 : 1;
         if (strcmp(op, "!") == 0)  return (a[0] == '\0') ? 0 : 1; /* ! "" */
         return 1;
     }
