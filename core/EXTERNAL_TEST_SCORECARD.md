@@ -2,6 +2,9 @@
 
 **Measured:** 2026-08-10, monorepo `core/`, glibc x86_64 (silex run as the
 musl-static release binary). Supersedes the 2026-07-12 figures.
+ShellSpec row re-measured later the same day after the `test`/`[` rewrite
+and 7 further conformance fixes (commits 06b17b0..26fbbc2); smoosh and
+modernish re-verified unchanged after those fixes.
 
 Before trusting any number here, read why an earlier version of this file was
 meaningless.
@@ -42,7 +45,7 @@ failure, not a pass.
 | **modernish** | **all 18 files pass; 0 unexpected failures** | `bin/modernish --test`: 363 succeeded, 13 skipped, 10 tolerated `xfail`, **0 unexpected**. Was "blocked on a real silex bug" on 2026-07-12; the `V=${u:-$(echo A)}` bootstrap bug and ~30 further POSIX bugs are fixed. |
 | mksh | 169 / 583 (29%) | mksh's suite targets the **ksh superset** (arrays, `[[ ]]`, coprocesses, `${|...}`, etc.), not POSIX `sh`. The bulk of the 414 failures are ksh-only features silex does not implement by design. Not a POSIX-conformance figure. |
 | Oils / OSH | **not measurable (harness bug)** | `run-oils-spec.sh` invokes upstream `sh_spec.py --shell`, which errors `no such option: --shell`. 222 spec cases present, 0 executed. Needs a runner fix, not a silex fix. |
-| ShellSpec | **fails to launch (real silex gap)** | Aborts early with `silex: test: missing ]` — silex's `test`/`[` rejects an argument shape ShellSpec's bootstrap relies on. A concrete silex bug worth fixing; blocks the whole suite. |
+| **ShellSpec** | **1696 examples, 0 failures** (58 skips) | ShellSpec's own core suite, run with silex as both runner and target shell — **byte-identical to dash on the same runner**. Was "fails to launch" earlier on 2026-08-10; fixing it surfaced and fixed 8 real silex bugs: 3-arg-max `test`/`[` (now full POSIX + XSI grammar), mid-word `#` starting comments, quote-blind word classifiers eating empty quoted fields, `${@:-}` gluing positionals, builtins beating functions in command search, errexit killing loops on exempt AND-lists, FLOW sentinels leaking as exit 234 through pipes/`&`, and recursive functions reusing the outer call's expanded redirect target. |
 | GNU coreutils | not run | Needs `./configure` + build first (`make: GNUmakefile: No such file or directory`). The runner does not perform that build step. |
 | GNU sed | not run | Same as coreutils — no build step, no `test-suite.log`. |
 | Autoconf/configure | not re-measured | Previously reported 5/5; the real figure was **2/5** (only sqlite and zlib). |
