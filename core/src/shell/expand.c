@@ -26,6 +26,8 @@
 /* Forward declarations */
 static void expand_into(shell_ctx_t *sh, const char *word, strbuf_t *out,
                         int in_dquote);
+static const char *scan_braced_end(const char *p, int outer_dq);
+static const char *cmdsubst_body_end(const char *p);
 
 /* -------------------------------------------------------------------------
  * Helpers
@@ -255,6 +257,41 @@ static int match_suffix_shortest(const char *str, const char *pat)
  * Word analysis helpers: check original token text for unquoted chars
  * ------------------------------------------------------------------------- */
 
+/* p points at an unescaped '$' or '`' inside a double-quoted region. Return a
+ * pointer to the LAST character of the construct (so a for-loop's p++ resumes
+ * just past it), or p itself when the '$' introduces nothing compound. Used by
+ * the word classifiers below: a ${...} body may contain nested quotes
+ * (`"${2#*"$3"}"`), and a $(...) or `...` body may too; scanning those bytes
+ * with a flat quote toggle corrupts the in_dq state and misclassifies the
+ * rest of the word. */
+static const char *skip_dq_dollar(const char *p)
+{
+    if (*p == '`') {
+        const char *q = p + 1;
+        while (*q && *q != '`') q += (*q == '\\' && q[1]) ? 2 : 1;
+        return *q ? q : q - 1;
+    }
+    if (p[1] == '{') {
+        const char *e = scan_braced_end(p + 2, 1);
+        return *e ? e : e - 1;
+    }
+    if (p[1] == '(' && p[2] == '(') {
+        const char *q = p + 3;
+        int d = 2;
+        while (*q && d > 0) {
+            if (*q == '(') d++;
+            else if (*q == ')') d--;
+            q++;
+        }
+        return q - 1;
+    }
+    if (p[1] == '(') {
+        const char *e = cmdsubst_body_end(p + 2);
+        return *e ? e : e - 1;
+    }
+    return p;
+}
+
 /* Returns 1 if 'word' contains unquoted '$' or backtick (i.e., the result of
  * expand_word() may differ from the literal text and should be IFS-split). */
 static int has_unquoted_expansion(const char *word)
@@ -266,6 +303,10 @@ static int has_unquoted_expansion(const char *word)
         if (*p == '"'  && !in_sq) { in_dq = !in_dq; continue; }
         /* Expansion is "unquoted" (subject to IFS splitting) only outside all quotes */
         if (!in_sq && !in_dq && (*p == '$' || *p == '`')) return 1;
+        /* Quoted expansion: skip the construct whole so quotes nested in a
+         * ${...} / $(...) / `...` body don't flip in_dq for what follows. */
+        if (!in_sq && in_dq && (*p == '$' || *p == '`'))
+            p = skip_dq_dollar(p);
     }
     return 0;
 }
@@ -278,6 +319,11 @@ static int has_unquoted_glob(const char *word)
         if (*p == '\\' && !in_sq) { p++; if (!*p) break; continue; }
         if (*p == '\'' && !in_dq) { in_sq = !in_sq; continue; }
         if (*p == '"'  && !in_sq) { in_dq = !in_dq; continue; }
+        if (!in_sq && in_dq && (*p == '$' || *p == '`')) {
+            /* Same nested-quote hazard as in has_unquoted_expansion. */
+            p = skip_dq_dollar(p);
+            continue;
+        }
         if (in_sq || in_dq) continue;
 
         if (*p == '*' || *p == '?')
@@ -406,6 +452,26 @@ static char *expand_braced(shell_ctx_t *sh, const char *body, int in_dquote)
     return r;
 }
 
+/* ${@}, ${*} and their -/+/? forms: when the POSITIONALS are the result, they
+ * must keep "$@"/"$*" field semantics (separate fields when quoted, IFS rules
+ * when not), not the joined scalar sh_getvar returns. Route through
+ * expand_into on the bare expansion so the field machinery (quoted-field
+ * boundaries, heredoc/assign joining, control-byte escapes) is reused;
+ * ShellSpec's `for name in "${@:-}"` got one glued word otherwise. */
+static char *braced_positionals(shell_ctx_t *sh, char which, int in_dquote)
+{
+    strbuf_t sb;
+    sb_init(&sb, 64);
+    char w[3] = { '$', which, '\0' };
+    int sj_ = sh->pp_join_unquoted; int wd_ = sh->pp_word_dq;
+    sh->pp_join_unquoted = !in_dquote; sh->pp_word_dq = in_dquote;
+    expand_into(sh, w, &sb, in_dquote);
+    sh->pp_join_unquoted = sj_; sh->pp_word_dq = wd_;
+    char *r = arena_strdup(sh->scratch, sb_str(&sb));
+    sb_free(&sb);
+    return r;
+}
+
 /*
  * expand_braced_body: the actual ${...} parser/expander.
  * 'body' is the content between { and }, e.g. "VAR:-default" or "#VAR".
@@ -475,9 +541,15 @@ static char *expand_braced_body(shell_ctx_t *sh, const char *body, int in_dquote
     varname[namelen] = '\0';
 
     const char *val = sh_getvar(sh, varname);
+    /* ${@}/${*} (with or without an operator) keep positional-list field
+     * semantics whenever the positionals are what gets substituted. */
+    int pos_list = (namelen == 1 && (varname[0] == '@' || varname[0] == '*'));
 
-    /* No operator: plain ${VAR} */
+    /* No operator: plain ${VAR}. (braced_positionals -> expand_into handles
+     * the heredoc/assign non-split contexts itself, like bare $@/$*.) */
     if (*p == '\0') {
+        if (pos_list)
+            return braced_positionals(sh, varname[0], in_dquote);
         return braced_ret(sh, val);
     }
 
@@ -530,8 +602,11 @@ static char *expand_braced_body(shell_ctx_t *sh, const char *body, int in_dquote
     if (op == '-' || op == '+' || op == '=' || op == '?') {
         p++; /* skip operator char */
         const char *word_part = p;
-        int unset = (val == NULL);
-        int empty  = (val != NULL && val[0] == '\0');
+        /* The @ and * parameters are "unset" when there are no positional
+         * parameters (POSIX); sh_getvar's joined scalar is never NULL, so
+         * test the count. */
+        int unset = pos_list ? (sh->positional_n == 0) : (val == NULL);
+        int empty  = (!unset && val && val[0] == '\0');
 
         int condition = colon ? (unset || empty) : unset;
 
@@ -549,6 +624,8 @@ static char *expand_braced_body(shell_ctx_t *sh, const char *body, int in_dquote
                 sb_free(&sb);
                 return r;
             }
+            if (pos_list)
+                return braced_positionals(sh, varname[0], in_dquote);
             return braced_ret(sh, val);
 
         case '+':
@@ -608,6 +685,8 @@ static char *expand_braced_body(shell_ctx_t *sh, const char *body, int in_dquote
                 sb_free(&sb);
                 exit(1);
             }
+            if (pos_list)
+                return braced_positionals(sh, varname[0], in_dquote);
             return braced_ret(sh, val);
 
         default:
