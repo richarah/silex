@@ -1418,6 +1418,68 @@ static const char *cmdsubst_body_end(const char *p)
 }
 
 /* -------------------------------------------------------------------------
+ * scan_braced_end: p points just AFTER the "${" of a parameter expansion.
+ * Return a pointer to the matching '}' (or to the terminating NUL if the
+ * expansion is unbalanced). This is the single authority for where a ${...}
+ * ends, used by both the expander and skip_dquote_end.
+ *
+ * The scan is fully quote/backslash aware AND recursive, which a flat brace
+ * counter cannot be:
+ *   - a `\}` is an escaped literal brace;
+ *   - a `'...'` region is literal, but only when NOT inside double quotes --
+ *     the enclosing "..." (outer_dq) and any inner "..." both count;
+ *   - an inner "..." opened here makes literal `}`/`{`/`'` data;
+ *   - a NESTED ${...} is skipped as a unit by recursion, so its own inner
+ *     quotes don't corrupt this level's state (`"${x-"a${y-"b}c"}d"}"`);
+ *   - $(...), $((...)) and `...` are skipped whole;
+ *   - a BARE `{` is literal data (only `${` nests), matching POSIX.
+ * outer_dq is 1 when the ${...} itself sits in a double-quoted context.
+ * ------------------------------------------------------------------------- */
+static const char *scan_braced_end(const char *p, int outer_dq)
+{
+    int inner_dq = 0;
+    while (*p) {
+        if (*p == '\\') { p += p[1] ? 2 : 1; continue; }
+        if (*p == '\'' && !outer_dq && !inner_dq) {
+            p++;
+            while (*p && *p != '\'') p++;
+            if (*p == '\'') p++;
+            continue;
+        }
+        if (*p == '"') { inner_dq = !inner_dq; p++; continue; }
+        if (*p == '$' && p[1] == '{') {
+            const char *e = scan_braced_end(p + 2, outer_dq || inner_dq);
+            p = (*e == '}') ? e + 1 : e;
+            continue;
+        }
+        if (*p == '$' && p[1] == '(' && p[2] == '(') {
+            p += 3;
+            int d = 2;
+            while (*p && d > 0) {
+                if (*p == '(') d++;
+                else if (*p == ')') d--;
+                p++;
+            }
+            continue;
+        }
+        if (*p == '$' && p[1] == '(') {
+            p = cmdsubst_body_end(p + 2);
+            if (*p == ')') p++;
+            continue;
+        }
+        if (*p == '`') {
+            p++;
+            while (*p && *p != '`') { p += (*p == '\\' && p[1]) ? 2 : 1; }
+            if (*p == '`') p++;
+            continue;
+        }
+        if (*p == '}' && !inner_dq) return p;   /* matching close */
+        p++;
+    }
+    return p;
+}
+
+/* -------------------------------------------------------------------------
  * skip_dquote_end: advance p from first char after opening '"' to just past
  * the matching '"'.  Properly handles $(...), ${...}, $((...)), backticks.
  * ------------------------------------------------------------------------- */
@@ -1446,23 +1508,13 @@ static const char *skip_dquote_end(const char *p)
                 p = cmdsubst_body_end(p + 1);
                 if (*p == ')') p++;
             } else if (*p == '{') {
-                /* ${...}: find the matching '}' with the same quote/backslash
-                 * awareness as the lexer and expander scanners, so a `}` inside
-                 * an inner "..." (e.g. `"${x-"q}r"}"`) does not end the scan
-                 * early -- which left the tail (`}"`) to be re-processed, adding
-                 * a stray '}'. This runs in a double-quoted context, so `'` is
-                 * literal (no single-quote regions); only an inner "..." opened
-                 * here suppresses the closing brace, and `\}` is escaped. */
-                p++;
-                int d = 1;
-                int inner_dq = 0;
-                while (*p && d > 0) {
-                    if (*p == '\\' && p[1]) { p += 2; continue; }
-                    if (*p == '"') { inner_dq = !inner_dq; p++; continue; }
-                    if (*p == '{' && !inner_dq) { d++; p++; continue; }
-                    if (*p == '}' && !inner_dq) { d--; p++; continue; }
-                    p++;
-                }
+                /* ${...}: skip to the matching '}' via the shared recursive,
+                 * quote-aware scanner, so a `}` inside an inner "..." (e.g.
+                 * `"${x-"q}r"}"`) or a nested ${...} does not end the scan early
+                 * -- which left the tail (`}"`) to be re-processed, adding a
+                 * stray '}'. We are in a double-quoted context (outer_dq=1). */
+                const char *e = scan_braced_end(p + 1, 1);
+                p = (*e == '}') ? e + 1 : e;
             }
             continue;
         }
@@ -1684,34 +1736,17 @@ static void expand_into(shell_ctx_t *sh, const char *word, strbuf_t *out,
             if (*p == '{') {
                 p++;
                 const char *start = p;
-                /* Find the matching '}' with the same quote/backslash awareness
-                 * as the lexer's scan_param_expand: a `{`/`}` inside '...'/"..."
-                 * is literal, and a `\}` is an escaped (literal) brace -- so
-                 * `${v-ab\}cd}` closes at the LAST '}', not the escaped one, and
-                 * `${x:+'{'\}}` (modernish) balances correctly. The backslash and
-                 * quotes are kept in the body for expand_braced to remove. */
-                int depth = 1;
-                int sq = 0, inner_dq = 0;
-                while (*p && depth > 0) {
-                    if (sq) {
-                        if (*p == '\'') sq = 0;
-                        p++;
-                        continue;
-                    }
-                    if (*p == '\\' && p[1]) { p += 2; continue; }
-                    /* `'` quotes only outside double quotes -- the enclosing
-                     * "..." (in_dquote) counts, matching the lexer scan. */
-                    if (*p == '\'' && !in_dquote && !inner_dq) { sq = 1; p++; continue; }
-                    if (*p == '"') { inner_dq = !inner_dq; p++; continue; }
-                    /* Only an INNER "..." opened here suppresses the closing '}';
-                     * the outer in_dquote does not. */
-                    if (*p == '{' && !inner_dq) { depth++; p++; continue; }
-                    if (*p == '}' && !inner_dq) { depth--; if (depth == 0) break; p++; continue; }
-                    p++;
-                }
-                size_t blen = (size_t)(p - start);
+                /* Find the matching '}' via the shared recursive, quote-aware
+                 * scanner: a `\}` is escaped; a `}` inside '...'/"..." is literal;
+                 * a nested ${...} is skipped as a unit -- so `${v-ab\}cd}` closes
+                 * at the last '}', `${x:+'{'\}}` (modernish) balances, and
+                 * `"${x-"a${y-"b}c"}d"}"` nests correctly. Quotes/backslashes are
+                 * kept in the body for expand_braced to remove. */
+                const char *end = scan_braced_end(p, in_dquote);
+                size_t blen = (size_t)(end - start);
                 char *body = strndup(start, blen);
-                if (*p == '}') p++;   /* step past the closing brace */
+                if (*end == '}') p = end + 1;   /* step past the closing brace */
+                else            p = end;
                 char *val  = expand_braced(sh, body ? body : "", in_dquote);
                 free(body);
                 /* expand_braced() already ran expand_into() on any quoted word

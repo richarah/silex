@@ -567,6 +567,21 @@ check "quoted-delimiter here-doc: trailing backslash is literal, not continuatio
     "$(printf 'cat <<-'\''END'\''\n\tjkl\\\n\tEND\n' | "$MB" 2>&1)" 'jkl\'
 
 # -----------------------------------------------------------------------
+# A ${...} whose word contains an inner "..." with a `}` in it must close at
+# the OUTER brace, and a nested ${...} inside such quotes must be scanned as a
+# unit (recursively). A flat brace counter closed early -- adding a stray `}`
+# (via skip_dquote_end re-processing the tail) or mis-nesting the value.
+# -----------------------------------------------------------------------
+check "\"\${x-\"q}r\"}\" closes at the outer brace (no stray })" \
+    "$("$MB" -c 'unset x; printf "[%s]" "${x-"q}r"}"')" '[q}r]'
+check "text around a nested-brace expansion is not duplicated" \
+    "$("$MB" -c 'unset x; printf "[%s]" "before${x-"q}r"}after"')" '[beforeq}rafter]'
+check "triple-nested \${...} inside inner quotes nests correctly" \
+    "$("$MB" -c 'unset x y; printf "[%s]" "${x-"a${y-"b}c"}d"}"')" '[ab}cd]'
+check "a bare { in \${...} is literal; first } closes (matches dash)" \
+    "$("$MB" -c 'unset x; printf "[%s]" "${x-a{b}c}"')" '[a{bc}]'
+
+# -----------------------------------------------------------------------
 echo
 echo "modernish-bringup tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
