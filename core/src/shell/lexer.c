@@ -39,7 +39,9 @@ static const uint8_t word_stop[256] = {
     ['\n']  = 1, [' ']  = 1, ['\t'] = 1,
     [';']   = 1, ['&']  = 1, ['|']  = 1,
     ['<']   = 1, ['>']  = 1, ['(']  = 1,  [')'] = 1,
-    ['#']   = 1,
+    /* '#' is deliberately absent: a comment starts only where a new token
+     * starts (POSIX 2.3 rule 9, handled in lexer_read). Mid-word '#' as in
+     * `foo#bar` or `x=$a#$b` is a literal character. */
 };
 
 /* -------------------------------------------------------------------------
