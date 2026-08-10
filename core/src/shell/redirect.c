@@ -55,15 +55,15 @@ int redirect_apply(struct shell_ctx *sh, redir_t *redirs, redirect_ctx_t *ctx)
         int fd = r->fd;   /* target fd; caller sets sensible default */
 
         /* Expand the target word (except for heredocs which are literal). When
-         * exec_simple_cmd already pre-expanded it (r->pre_expanded), use it
+         * exec_simple_cmd already pre-expanded it (r->expanded_target), use it
          * verbatim -- expanding again would re-process the value's own bytes
          * (e.g. strip a literal backslash from a filename) and re-run any $(...).
          * Other callers (compound-command redirects, the exec builtin, ...) leave
-         * the flag clear, so their raw targets are still expanded here. */
+         * the field NULL, so their raw targets are still expanded here. */
         char *target = NULL;
         if (r->op != TOK_DLESS && r->op != TOK_DLESSDASH) {
-            if (r->pre_expanded) {
-                target = r->target;
+            if (r->expanded_target) {
+                target = r->expanded_target;
             } else {
                 target = expand_word(sh, r->target);
                 if (!target)
@@ -160,8 +160,12 @@ int redirect_apply(struct shell_ctx *sh, redir_t *redirs, redirect_ctx_t *ctx)
                     return -1;
                 }
                 if (dup2(src, fd) < 0) {
-                    /* Silently fail for EBADF (fd not open) - POSIX behavior */
-                    if (errno != EBADF)
+                    /* Every real shell reports this ("N: Bad file descriptor");
+                     * ShellSpec asserts stderr is non-empty when writing to a
+                     * closed fd. */
+                    if (errno == EBADF)
+                        fprintf(stderr, "silex: %s: Bad file descriptor\n", target);
+                    else
                         perror("redirect <&");
                     ctx->error = 1;
                     return -1;
@@ -196,8 +200,12 @@ int redirect_apply(struct shell_ctx *sh, redir_t *redirs, redirect_ctx_t *ctx)
                     return -1;
                 }
                 if (dup2(src, fd) < 0) {
-                    /* Silently fail for EBADF (fd not open) - POSIX behavior */
-                    if (errno != EBADF)
+                    /* Every real shell reports this ("N: Bad file descriptor");
+                     * ShellSpec asserts stderr is non-empty when writing to a
+                     * closed fd. */
+                    if (errno == EBADF)
+                        fprintf(stderr, "silex: %s: Bad file descriptor\n", target);
+                    else
                         perror("redirect >&");
                     ctx->error = 1;
                     return -1;

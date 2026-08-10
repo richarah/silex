@@ -33,12 +33,18 @@ typedef struct redir {
     char         *target;
     char         *heredoc;
     int           heredoc_no_expand; /* 1 if delimiter was quoted — no variable expansion */
-    /* 1 when `target` already holds the fully-expanded value (exec_simple_cmd
-     * pre-expands it to honour POSIX ordering and trigger assignment side
-     * effects). redirect_apply then uses it verbatim instead of expanding again;
-     * a second expansion would re-process the VALUE's own characters -- e.g. a
-     * literal backslash in a filename would be taken as an escape and removed. */
-    int           pre_expanded;
+    /* When non-NULL, holds the fully-expanded target for the CURRENT
+     * invocation (exec_simple_cmd pre-expands it to honour POSIX ordering and
+     * trigger assignment side effects). redirect_apply uses it verbatim
+     * instead of expanding `target` again -- a second expansion would
+     * re-process the VALUE's own characters (e.g. a literal backslash in a
+     * filename would be taken as an escape and removed). It lives in a
+     * SEPARATE field, saved and restored stack-style around each command,
+     * because the AST node is shared between invocations: a recursive
+     * function re-entering the same `cmd < "$V"` node must re-expand the raw
+     * token, not consume the outer call's expansion (ShellSpec's nested
+     * shellspec_evaluation_from_tty read the outer /dev/null this way). */
+    char         *expanded_target;
     struct redir *next;
 } redir_t;
 

@@ -621,14 +621,16 @@ int exec_simple_cmd(shell_ctx_t *sh, char **words, char **assigns, redir_t *redi
          * reordered, because working around a specific version's analysis by
          * shuffling statements is guesswork that the next release would undo. */
         /* cppcheck-suppress nullPointer */
-        who[n] = r; saved[n] = r->target; n++;
+        who[n] = r; saved[n] = r->expanded_target; n++;
     }
 
     int rc = exec_simple_cmd_inner(sh, words, assigns, redirs);
 
     for (int i = 0; i < n; i++) {
-        who[i]->target = saved[i];
-        who[i]->pre_expanded = 0;   /* saved[i] is the raw token again */
+        /* Restore the OUTER invocation's expansion (usually NULL). The raw
+         * token in r->target is never touched, so a recursive re-entry of the
+         * same node re-expands it correctly. */
+        who[i]->expanded_target = saved[i];
     }
     /* Not freeing the inline arrays: `heap` is set only where saved/who were
      * reassigned to malloc'd buffers above, so this is unreachable while they
@@ -647,18 +649,17 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
      * (like 2>${x=redir}) happen before argument expansions (like ${x=assign}) */
     for (redir_t *r = redirs; r != NULL; r = r->next) {
         if (r->op != TOK_DLESS && r->op != TOK_DLESSDASH) {
-            /* Pre-expand redirect target to trigger any variable assignments and
-             * honour POSIX ordering. Store the RESULT back and mark it
-             * pre_expanded so redirect_apply uses it verbatim: expanding the
-             * already-expanded value a second time would re-process the value's
-             * own characters (a literal backslash in a filename, say) and also
-             * re-run any $(...) in it. exec_simple_cmd() restores r->target and
-             * clears the flag once the command is done. */
+            /* Pre-expand redirect target to trigger any variable assignments
+             * and honour POSIX ordering. Store the result in expanded_target
+             * (NOT back into r->target -- the node is shared, see parser.h) so
+             * redirect_apply uses it verbatim: expanding the already-expanded
+             * value a second time would re-process the value's own characters
+             * (a literal backslash in a filename, say) and also re-run any
+             * $(...) in it. exec_simple_cmd() restores the outer invocation's
+             * expansion once the command is done. */
             char *target = expand_word(sh, r->target);
-            if (target) {
-                r->target = arena_strdup(sh->scratch, target);
-                r->pre_expanded = 1;
-            }
+            if (target)
+                r->expanded_target = arena_strdup(sh->scratch, target);
         }
     }
 
@@ -756,8 +757,16 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
         fputc('\n', stderr);
     }
 
-    /* 3. Check for shell-internal builtin (high priority — run in-process) */
+    /* 3. Check for shell-internal builtin (high priority — run in-process).
+     * POSIX command search order: special builtins are found before functions,
+     * but functions are found before REGULAR builtins, so a user-defined
+     * `false() { ...; }` overrides the builtin (`command false` still reaches
+     * it). ShellSpec probes exactly this and refused to run ("builtin commands
+     * can not redefine") when the builtin always won. */
     shell_builtin_fn sfn = find_shell_builtin(cmd);
+    if (sfn && !is_special_builtin(cmd) && !sh->in_command_builtin &&
+        func_lookup(sh, cmd))
+        sfn = NULL;
     if (sfn) {
         if (sh->trace_level >= 2)
             fprintf(stderr, "+ [builtin] %s\n", cmd);
@@ -1272,6 +1281,13 @@ int exec_pipeline(shell_ctx_t *sh, node_t *node)
                     last_rc = krc;
             }
 
+            /* Flow control (return/break/continue) from the in-process last
+             * stage: propagate the sentinel so the enclosing function/loop
+             * handles it, but do NOT store it in last_exit -- for `return N`
+             * the builtin already put N there, and 1002 leaking into $? (or
+             * through _exit as 234) broke ShellSpec's `... | { return 0; }`. */
+            if (rc >= FLOW_BREAK)
+                return rc;
             sh->last_exit = last_rc;
             return last_rc;
         }
@@ -1302,6 +1318,11 @@ int exec_pipeline(shell_ctx_t *sh, node_t *node)
             }
 
             int rc = exec_node(sh, stages[i]);
+            /* FLOW sentinels must not leak through _exit (1002 & 0xff = 234):
+             * `... | { return N; }` acts like exit N from the stage subshell,
+             * and break/continue escaping into a stage normalize to 0. */
+            if (rc == FLOW_RETURN) rc = sh->last_exit;
+            if (rc >= FLOW_BREAK) rc = 0;
             fflush(NULL);   /* flush all stdio buffers before _exit */
             _exit(rc);
         }
@@ -1552,6 +1573,9 @@ int exec_node(shell_ctx_t *sh, node_t *node)
             /* Background subshell: reset inherited signal traps to default. */
             subshell_reset_traps(sh);
             int r = exec_node(sh, node->u.binary.left);
+            /* Same FLOW-sentinel normalization as pipeline stages/subshells. */
+            if (r == FLOW_RETURN) r = sh->last_exit;
+            if (r >= FLOW_BREAK) r = 0;
             fflush(NULL);
             _exit(r);
         }
@@ -1691,7 +1715,17 @@ int exec_node(shell_ctx_t *sh, node_t *node)
                 if (sh->break_level > 0) { sh->break_level--; break; }
                 rc = 0; continue;
             }
-            if (sh->opt_e && rc != 0) break;
+            {
+                /* A failing body stops the loop under -e, but only when the
+                 * failure would really trigger errexit: a body that IS a
+                 * failing AND-OR list whose non-final command failed (the
+                 * `[ ... ] && shift && break` idiom) is exempt, as is a loop
+                 * in a condition context. */
+                int body_exempt = sh->and_or_exempt;
+                sh->and_or_exempt = 0;
+                if (sh->opt_e && rc != 0 && !sh->in_cond && !body_exempt)
+                    break;
+            }
         }
         sh->loop_depth--;
         loop_scratch_end(sh, &ls);
@@ -1736,7 +1770,17 @@ int exec_node(shell_ctx_t *sh, node_t *node)
                 if (sh->break_level > 0) { sh->break_level--; break; }
                 rc = 0; continue;
             }
-            if (sh->opt_e && rc != 0) break;
+            {
+                /* A failing body stops the loop under -e, but only when the
+                 * failure would really trigger errexit: a body that IS a
+                 * failing AND-OR list whose non-final command failed (the
+                 * `[ ... ] && shift && break` idiom) is exempt, as is a loop
+                 * in a condition context. */
+                int body_exempt = sh->and_or_exempt;
+                sh->and_or_exempt = 0;
+                if (sh->opt_e && rc != 0 && !sh->in_cond && !body_exempt)
+                    break;
+            }
         }
         sh->loop_depth--;
         loop_scratch_end(sh, &ls);
@@ -1790,7 +1834,17 @@ int exec_node(shell_ctx_t *sh, node_t *node)
                 if (sh->break_level > 0) { sh->break_level--; break; }
                 rc = 0; continue;
             }
-            if (sh->opt_e && rc != 0) break;
+            {
+                /* A failing body stops the loop under -e, but only when the
+                 * failure would really trigger errexit: a body that IS a
+                 * failing AND-OR list whose non-final command failed (the
+                 * `[ ... ] && shift && break` idiom) is exempt, as is a loop
+                 * in a condition context. */
+                int body_exempt = sh->and_or_exempt;
+                sh->and_or_exempt = 0;
+                if (sh->opt_e && rc != 0 && !sh->in_cond && !body_exempt)
+                    break;
+            }
         }
         sh->loop_depth--;
         loop_scratch_end(sh, &ls);
@@ -2168,6 +2222,18 @@ static int exec_builtin_set(shell_ctx_t *sh, int argc, char **argv)
     return 0;
 }
 
+/* POSIX variable-name check: [A-Za-z_][A-Za-z0-9_]*. export/readonly/unset
+ * must reject anything else with a non-zero status (ShellSpec's prechecker
+ * probes `( export "-@=" )` and keys its error handling off the failure). */
+static int valid_var_name(const char *s, size_t n)
+{
+    if (n == 0) return 0;
+    if (!(isalpha((unsigned char)s[0]) || s[0] == '_')) return 0;
+    for (size_t i = 1; i < n; i++)
+        if (!(isalnum((unsigned char)s[i]) || s[i] == '_')) return 0;
+    return 1;
+}
+
 static int exec_builtin_export(shell_ctx_t *sh, int argc, char **argv)
 {
     /* Handle export -p: print all exported variables */
@@ -2179,6 +2245,13 @@ static int exec_builtin_export(shell_ctx_t *sh, int argc, char **argv)
     int rc = 0;
     for (int i = 1; i < argc; i++) {
         const char *eq = strchr(argv[i], '=');
+        size_t vn = eq ? (size_t)(eq - argv[i]) : strlen(argv[i]);
+        if (!valid_var_name(argv[i], vn)) {
+            fprintf(stderr, "silex: export: %s: bad variable name\n", argv[i]);
+            rc = 1;
+            if (!sh->interactive && !sh->in_command_builtin) exit(1);
+            continue;
+        }
         if (eq) {
             size_t nlen = (size_t)(eq - argv[i]);
             char *name  = strndup(argv[i], nlen);
@@ -2214,10 +2287,15 @@ static int exec_builtin_unset(shell_ctx_t *sh, int argc, char **argv)
     int i;
     for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--") == 0) { i++; break; }
-        if (argv[i][0] == '-') {
+        if (argv[i][0] == '-' && argv[i][1] != '\0') {
             for (const char *p = argv[i] + 1; *p; p++) {
                 if (*p == 'f') func_mode = 1;
                 else if (*p == 'v') func_mode = 0;
+                else {
+                    fprintf(stderr, "silex: unset: -%c: bad option\n", *p);
+                    if (!sh->interactive && !sh->in_command_builtin) exit(1);
+                    return 1;
+                }
             }
         } else {
             break;
@@ -2228,6 +2306,12 @@ static int exec_builtin_unset(shell_ctx_t *sh, int argc, char **argv)
         if (func_mode) {
             func_unregister(sh, argv[i]);
         } else {
+            if (!valid_var_name(argv[i], strlen(argv[i]))) {
+                fprintf(stderr, "silex: unset: %s: bad variable name\n", argv[i]);
+                rc = 1;
+                if (!sh->interactive && !sh->in_command_builtin) exit(1);
+                continue;
+            }
             if (vars_unset_context(&sh->vars, argv[i], "unset") != 0) {
                 rc = 1;
                 /* POSIX: unset is a special builtin, so an error exits a
@@ -2258,6 +2342,13 @@ static int exec_builtin_readonly(shell_ctx_t *sh, int argc, char **argv)
         if (strcmp(argv[i], "-p") == 0)
             continue;   /* already handled above; ignore a stray -p among names */
         const char *eq = strchr(argv[i], '=');
+        size_t vn = eq ? (size_t)(eq - argv[i]) : strlen(argv[i]);
+        if (!valid_var_name(argv[i], vn)) {
+            fprintf(stderr, "silex: readonly: %s: bad variable name\n", argv[i]);
+            rc = 1;
+            if (!sh->interactive && !sh->in_command_builtin) exit(1);
+            continue;
+        }
         if (eq) {
             size_t nlen = (size_t)(eq - argv[i]);
             char *name  = strndup(argv[i], nlen);
@@ -2667,110 +2758,302 @@ static int exec_builtin_printf_sh(shell_ctx_t *sh, int argc, char **argv)
     return rc;
 }
 
-/* Minimal test / [ implementation */
+/* test / [ implementation.
+ *
+ * POSIX dispatches on argument count for 0-4 operands (so e.g. `test ! = !`
+ * is a string comparison, and `test -o word` checks a shell option rather
+ * than being an OR); anything longer goes through a recursive-descent parser
+ * over the obsolescent-XSI grammar:
+ *
+ *   or-expr  := and-expr ( -o and-expr )*
+ *   and-expr := not-expr ( -a not-expr )*
+ *   not-expr := ! not-expr | primary
+ *   primary  := ( or-expr ) | UNARY-OP arg | arg BINARY-OP arg | arg
+ *
+ * Exit status: 0 true, 1 false, 2 on syntax/operand errors. */
+
+typedef struct {
+    shell_ctx_t *sh;
+    char **av;      /* operands only: no command name, no trailing ] */
+    int ac;
+    int pos;
+    int err;        /* sticky: any syntax/operand error forces status 2 */
+} test_ctx_t;
+
+static int test_eval(shell_ctx_t *sh, char **av, int n);
+
+/* Parse a (possibly signed) decimal integer for -eq and friends. Real shells
+ * reject garbage with status 2 instead of silently reading it as 0. */
+static int test_int(test_ctx_t *t, const char *s, long long *out)
+{
+    const char *p = s;
+    while (*p == ' ' || *p == '\t') p++;
+    errno = 0;
+    char *end;
+    long long v = strtoll(p, &end, 10);
+    if (end != p && errno != ERANGE) {
+        while (*end == ' ' || *end == '\t') end++;
+        if (*end == '\0') {
+            *out = v;
+            return 0;
+        }
+    }
+    fprintf(stderr, "silex: test: %s: integer expression expected\n", s);
+    t->err = 1;
+    return -1;
+}
+
+/* Apply a unary primary. Returns 0/1, or -1 if op is not a unary primary.
+ * `with_o` selects whether `-o NAME` (the ksh/bash shell-option test that
+ * modernish detects as TESTO and uses for `isset -o`) is accepted here; in
+ * expression context -o must stay the OR operator. */
+static int test_unary(shell_ctx_t *sh, const char *op, const char *a, int with_o)
+{
+    struct stat st;
+    if (op[0] != '-' || op[1] == '\0' || op[2] != '\0') return -1;
+    switch (op[1]) {
+    case 'z': return (a[0] == '\0') ? 0 : 1;
+    case 'n': return (a[0] != '\0') ? 0 : 1;
+    case 'e': return (stat(a, &st) == 0) ? 0 : 1;
+    case 'f': return (stat(a, &st) == 0 && S_ISREG(st.st_mode)) ? 0 : 1;
+    case 'd': return (stat(a, &st) == 0 && S_ISDIR(st.st_mode)) ? 0 : 1;
+    case 'L':
+    case 'h': return (lstat(a, &st) == 0 && S_ISLNK(st.st_mode)) ? 0 : 1;
+    case 'p': return (stat(a, &st) == 0 && S_ISFIFO(st.st_mode)) ? 0 : 1;
+    case 'b': return (stat(a, &st) == 0 && S_ISBLK(st.st_mode))  ? 0 : 1;
+    case 'c': return (stat(a, &st) == 0 && S_ISCHR(st.st_mode))  ? 0 : 1;
+    case 'S': return (stat(a, &st) == 0 && S_ISSOCK(st.st_mode)) ? 0 : 1;
+    case 'g': return (stat(a, &st) == 0 && (st.st_mode & S_ISGID)) ? 0 : 1;
+    case 'u': return (stat(a, &st) == 0 && (st.st_mode & S_ISUID)) ? 0 : 1;
+    case 'k': return (stat(a, &st) == 0 && (st.st_mode & S_ISVTX)) ? 0 : 1;
+    case 'O': return (stat(a, &st) == 0 && st.st_uid == geteuid()) ? 0 : 1;
+    case 'G': return (stat(a, &st) == 0 && st.st_gid == getegid()) ? 0 : 1;
+    case 'r': return (access(a, R_OK) == 0) ? 0 : 1;
+    case 'w': return (access(a, W_OK) == 0) ? 0 : 1;
+    case 'x': return (access(a, X_OK) == 0) ? 0 : 1;
+    case 's': return (stat(a, &st) == 0 && st.st_size > 0) ? 0 : 1;
+    case 't': {
+        int fd;
+        return (sh_parse_int(a, 0, INT_MAX, &fd) == 0 && isatty(fd)) ? 0 : 1;
+    }
+    case 'o':
+        if (!with_o) return -1;
+        return (shell_option_on(sh, a) == 1) ? 0 : 1;
+    default:  return -1;
+    }
+}
+
+static int test_is_binary(const char *op)
+{
+    return strcmp(op, "=")   == 0 || strcmp(op, "!=")  == 0 ||
+           strcmp(op, "==")  == 0 ||
+           strcmp(op, "<")   == 0 || strcmp(op, ">")   == 0 ||
+           strcmp(op, "-eq") == 0 || strcmp(op, "-ne") == 0 ||
+           strcmp(op, "-lt") == 0 || strcmp(op, "-le") == 0 ||
+           strcmp(op, "-gt") == 0 || strcmp(op, "-ge") == 0 ||
+           strcmp(op, "-nt") == 0 || strcmp(op, "-ot") == 0 ||
+           strcmp(op, "-ef") == 0;
+}
+
+/* Apply a binary primary (op already validated by test_is_binary). Returns
+ * 0/1, or 2 with t->err set for bad integer operands. */
+static int test_binary(test_ctx_t *t, const char *a, const char *op, const char *b)
+{
+    if (strcmp(op, "=") == 0 || strcmp(op, "==") == 0)
+        return (strcmp(a, b) == 0) ? 0 : 1;
+    if (strcmp(op, "!=") == 0) return (strcmp(a, b) != 0) ? 0 : 1;
+    if (strcmp(op, "<")  == 0) return (strcmp(a, b) <  0) ? 0 : 1;
+    if (strcmp(op, ">")  == 0) return (strcmp(a, b) >  0) ? 0 : 1;
+
+    if (strcmp(op, "-nt") == 0) {
+        struct stat sa, sb;
+        int a_exists = (stat(a, &sa) == 0);
+        int b_exists = (stat(b, &sb) == 0);
+        if (!a_exists) return 1;
+        if (!b_exists) return 0;
+        return (sa.st_mtime > sb.st_mtime) ? 0 : 1;
+    }
+    if (strcmp(op, "-ot") == 0) {
+        struct stat sa, sb;
+        int a_exists = (stat(a, &sa) == 0);
+        int b_exists = (stat(b, &sb) == 0);
+        if (!b_exists) return 1;
+        if (!a_exists) return 0;
+        return (sa.st_mtime < sb.st_mtime) ? 0 : 1;
+    }
+    if (strcmp(op, "-ef") == 0) {
+        struct stat sa, sb;
+        if (stat(a, &sa) != 0 || stat(b, &sb) != 0) return 1;
+        return (sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino) ? 0 : 1;
+    }
+
+    long long la, lb;
+    if (test_int(t, a, &la) != 0 || test_int(t, b, &lb) != 0) return 2;
+    if (strcmp(op, "-eq") == 0) return (la == lb) ? 0 : 1;
+    if (strcmp(op, "-ne") == 0) return (la != lb) ? 0 : 1;
+    if (strcmp(op, "-lt") == 0) return (la <  lb) ? 0 : 1;
+    if (strcmp(op, "-le") == 0) return (la <= lb) ? 0 : 1;
+    if (strcmp(op, "-gt") == 0) return (la >  lb) ? 0 : 1;
+    return (la >= lb) ? 0 : 1; /* -ge */
+}
+
+static int t_or_expr(test_ctx_t *t);
+
+static const char *t_peek(test_ctx_t *t)
+{
+    return (t->pos < t->ac) ? t->av[t->pos] : NULL;
+}
+
+static int t_primary(test_ctx_t *t)
+{
+    if (t->pos >= t->ac) {
+        fprintf(stderr, "silex: test: argument expected\n");
+        t->err = 1;
+        return 2;
+    }
+    const char *tok = t->av[t->pos++];
+
+    if (strcmp(tok, "(") == 0) {
+        int r = t_or_expr(t);
+        const char *close = t_peek(t);
+        if (!close || strcmp(close, ")") != 0) {
+            fprintf(stderr, "silex: test: closing paren expected\n");
+            t->err = 1;
+            return 2;
+        }
+        t->pos++;
+        return r;
+    }
+
+    /* Unary primary with its operand available. -a/-o can't start a primary,
+     * so no ambiguity check is needed: test_unary(with_o=0) rejects -o and
+     * -a was never unary. */
+    if (t->pos < t->ac) {
+        int u = test_unary(t->sh, tok, t->av[t->pos], 0);
+        if (u >= 0) {
+            t->pos++;
+            return u;
+        }
+    }
+
+    /* Plain operand, possibly the left side of a binary primary. */
+    if (t->pos < t->ac && test_is_binary(t->av[t->pos])) {
+        const char *op = t->av[t->pos++];
+        if (t->pos >= t->ac) {
+            fprintf(stderr, "silex: test: argument expected\n");
+            t->err = 1;
+            return 2;
+        }
+        return test_binary(t, tok, op, t->av[t->pos++]);
+    }
+    return tok[0] ? 0 : 1;
+}
+
+static int t_not_expr(test_ctx_t *t)
+{
+    const char *tok = t_peek(t);
+    if (tok && strcmp(tok, "!") == 0) {
+        t->pos++;
+        int r = t_not_expr(t);
+        if (t->err) return 2;
+        return (r == 0) ? 1 : 0;
+    }
+    return t_primary(t);
+}
+
+static int t_and_expr(test_ctx_t *t)
+{
+    int r = t_not_expr(t);
+    const char *tok = t_peek(t);
+    if (!t->err && tok && strcmp(tok, "-a") == 0) {
+        t->pos++;
+        /* No short-circuit: the right side must still parse (and primaries
+         * have no side effects), matching other shells' error behavior. */
+        int r2 = t_and_expr(t);
+        if (t->err) return 2;
+        return (r == 0 && r2 == 0) ? 0 : 1;
+    }
+    return r;
+}
+
+static int t_or_expr(test_ctx_t *t)
+{
+    int r = t_and_expr(t);
+    const char *tok = t_peek(t);
+    if (!t->err && tok && strcmp(tok, "-o") == 0) {
+        t->pos++;
+        int r2 = t_or_expr(t);
+        if (t->err) return 2;
+        return (r == 0 || r2 == 0) ? 0 : 1;
+    }
+    return r;
+}
+
+/* Evaluate n operands per the POSIX argument-count rules, falling back to
+ * the expression grammar where POSIX leaves the form unspecified. */
+static int test_eval(shell_ctx_t *sh, char **av, int n)
+{
+    int r;
+    switch (n) {
+    case 0:
+        return 1;
+    case 1:
+        return av[0][0] ? 0 : 1;
+    case 2:
+        if (strcmp(av[0], "!") == 0) {
+            r = test_eval(sh, av + 1, 1);
+            return (r == 2) ? 2 : !r;
+        }
+        r = test_unary(sh, av[0], av[1], 1);
+        if (r >= 0) return r;
+        break;
+    case 3:
+        /* $2 being a binary primary wins, so `test ! = !` compares strings. */
+        if (test_is_binary(av[1])) {
+            test_ctx_t t = { sh, av, n, 0, 0 };
+            r = test_binary(&t, av[0], av[1], av[2]);
+            return t.err ? 2 : r;
+        }
+        if (strcmp(av[0], "!") == 0) {
+            r = test_eval(sh, av + 1, 2);
+            return (r == 2) ? 2 : !r;
+        }
+        if (strcmp(av[0], "(") == 0 && strcmp(av[2], ")") == 0)
+            return test_eval(sh, av + 1, 1);
+        break;
+    case 4:
+        if (strcmp(av[0], "!") == 0) {
+            r = test_eval(sh, av + 1, 3);
+            return (r == 2) ? 2 : !r;
+        }
+        if (strcmp(av[0], "(") == 0 && strcmp(av[3], ")") == 0)
+            return test_eval(sh, av + 1, 2);
+        break;
+    default:
+        break;
+    }
+
+    test_ctx_t t = { sh, av, n, 0, 0 };
+    r = t_or_expr(&t);
+    if (t.err) return 2;
+    if (t.pos != t.ac) {
+        fprintf(stderr, "silex: test: too many arguments\n");
+        return 2;
+    }
+    return r;
+}
+
 static int exec_builtin_test(shell_ctx_t *sh, int argc, char **argv)
 {
-    int bracket = (strcmp(argv[0], "[") == 0);
-
     /* Strip trailing ] for [ invocation */
-    if (bracket) {
+    if (strcmp(argv[0], "[") == 0) {
         if (argc < 2 || strcmp(argv[argc - 1], "]") != 0) {
             fprintf(stderr, "silex: test: missing ]\n");
             return 2;
         }
         argc--;
     }
-
-    int testargc = argc - 1;
-    char **testargs = argv + 1;
-
-    if (testargc == 0) return 1;
-
-    if (testargc == 1) {
-        return testargs[0][0] ? 0 : 1;
-    }
-
-    if (testargc == 2) {
-        const char *op = testargs[0];
-        const char *a  = testargs[1];
-        if (strcmp(op, "-z") == 0) return (a[0] == '\0') ? 0 : 1;
-        if (strcmp(op, "-n") == 0) return (a[0] != '\0') ? 0 : 1;
-        if (strcmp(op, "-e") == 0) { struct stat st; return (stat(a, &st) == 0) ? 0 : 1; }
-        if (strcmp(op, "-f") == 0) { struct stat st; return (stat(a, &st) == 0 && S_ISREG(st.st_mode)) ? 0 : 1; }
-        if (strcmp(op, "-d") == 0) { struct stat st; return (stat(a, &st) == 0 && S_ISDIR(st.st_mode)) ? 0 : 1; }
-        if (strcmp(op, "-L") == 0 || strcmp(op, "-h") == 0)
-            { struct stat st; return (lstat(a, &st) == 0 && S_ISLNK(st.st_mode)) ? 0 : 1; }
-        if (strcmp(op, "-p") == 0) { struct stat st; return (stat(a, &st) == 0 && S_ISFIFO(st.st_mode)) ? 0 : 1; }
-        if (strcmp(op, "-b") == 0) { struct stat st; return (stat(a, &st) == 0 && S_ISBLK(st.st_mode))  ? 0 : 1; }
-        if (strcmp(op, "-c") == 0) { struct stat st; return (stat(a, &st) == 0 && S_ISCHR(st.st_mode))  ? 0 : 1; }
-        if (strcmp(op, "-S") == 0) { struct stat st; return (stat(a, &st) == 0 && S_ISSOCK(st.st_mode)) ? 0 : 1; }
-        if (strcmp(op, "-g") == 0) { struct stat st; return (stat(a, &st) == 0 && (st.st_mode & S_ISGID)) ? 0 : 1; }
-        if (strcmp(op, "-u") == 0) { struct stat st; return (stat(a, &st) == 0 && (st.st_mode & S_ISUID)) ? 0 : 1; }
-        if (strcmp(op, "-k") == 0) { struct stat st; return (stat(a, &st) == 0 && (st.st_mode & S_ISVTX)) ? 0 : 1; }
-        if (strcmp(op, "-O") == 0) { struct stat st; return (stat(a, &st) == 0 && st.st_uid == geteuid()) ? 0 : 1; }
-        if (strcmp(op, "-G") == 0) { struct stat st; return (stat(a, &st) == 0 && st.st_gid == getegid()) ? 0 : 1; }
-        if (strcmp(op, "-r") == 0) return (access(a, R_OK) == 0) ? 0 : 1;
-        if (strcmp(op, "-w") == 0) return (access(a, W_OK) == 0) ? 0 : 1;
-        if (strcmp(op, "-x") == 0) return (access(a, X_OK) == 0) ? 0 : 1;
-        if (strcmp(op, "-s") == 0) { struct stat st; return (stat(a, &st) == 0 && st.st_size > 0) ? 0 : 1; }
-        if (strcmp(op, "-t") == 0) { int fd; return (sh_parse_int(a, 0, INT_MAX, &fd) == 0 && isatty(fd)) ? 0 : 1; }
-        /* `test -o OPTION` (ksh/bash extension): true if the long shell option
-         * is on. modernish detects this as the TESTO capability and uses it for
-         * `isset -o`; an unknown option name is false, as in bash. Without this
-         * `-o` fell through to false even when the option was set, so
-         * `isset -o nounset` failed under `set -u`. */
-        if (strcmp(op, "-o") == 0)  return (shell_option_on(sh, a) == 1) ? 0 : 1;
-        if (strcmp(op, "!") == 0)  return (a[0] == '\0') ? 0 : 1; /* ! "" */
-        return 1;
-    }
-
-    if (testargc == 3) {
-        const char *a  = testargs[0];
-        const char *op = testargs[1];
-        const char *b  = testargs[2];
-
-        if (strcmp(op, "=")  == 0) return (strcmp(a, b) == 0) ? 0 : 1;
-        if (strcmp(op, "!=") == 0) return (strcmp(a, b) != 0) ? 0 : 1;
-        if (strcmp(op, "-eq") == 0) return (atol(a) == atol(b)) ? 0 : 1;
-        if (strcmp(op, "-ne") == 0) return (atol(a) != atol(b)) ? 0 : 1;
-        if (strcmp(op, "-lt") == 0) return (atol(a) <  atol(b)) ? 0 : 1;
-        if (strcmp(op, "-le") == 0) return (atol(a) <= atol(b)) ? 0 : 1;
-        if (strcmp(op, "-gt") == 0) return (atol(a) >  atol(b)) ? 0 : 1;
-        if (strcmp(op, "-ge") == 0) return (atol(a) >= atol(b)) ? 0 : 1;
-        if (strcmp(op, "-a") == 0)  return (a[0] && b[0]) ? 0 : 1;
-        if (strcmp(op, "-o") == 0)  return (a[0] || b[0]) ? 0 : 1;
-        if (strcmp(op, "-nt") == 0) {
-            struct stat sa, sb2;
-            int a_exists = (stat(a, &sa) == 0);
-            int b_exists = (stat(b, &sb2) == 0);
-            if (!a_exists) return 1;
-            if (!b_exists) return 0;
-            return (sa.st_mtime > sb2.st_mtime) ? 0 : 1;
-        }
-        if (strcmp(op, "-ot") == 0) {
-            struct stat sa, sb2;
-            int a_exists = (stat(a, &sa) == 0);
-            int b_exists = (stat(b, &sb2) == 0);
-            if (!b_exists) return 1;
-            if (!a_exists) return 0;
-            return (sa.st_mtime < sb2.st_mtime) ? 0 : 1;
-        }
-        if (strcmp(op, "-ef") == 0) {
-            struct stat sa, sb2;
-            if (stat(a, &sa) != 0 || stat(b, &sb2) != 0) return 1;
-            return (sa.st_dev == sb2.st_dev && sa.st_ino == sb2.st_ino) ? 0 : 1;
-        }
-    }
-
-    /* Unary with 3 args: ! -z str */
-    if (testargc == 3 && strcmp(testargs[0], "!") == 0) {
-        /* Create sub-invocation */
-        char *subargs[3] = { argv[0], testargs[1], testargs[2] };
-        int sub = exec_builtin_test(sh, 3, subargs);
-        return sub ? 0 : 1;
-    }
-
-    return 1;
+    return test_eval(sh, argv + 1, argc - 1);
 }
 
 static int exec_builtin_local(shell_ctx_t *sh, int argc, char **argv)
