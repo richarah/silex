@@ -57,9 +57,31 @@ for cmd in gcc make; do
     fi
 done
 
-# Configure if needed
+# The vendored checkout was bootstrapped inside the Docker image at /silex:
+# symlinks like GNUmakefile point at absolute paths that don't exist here,
+# and GNU make prefers GNUmakefile over Makefile, so a dangling one breaks
+# every make invocation. Re-point them at the sibling gnulib checkout (or
+# drop them).
+for lnk in GNUmakefile maint.mk; do
+    if [ -L "$lnk" ] && [ ! -e "$lnk" ]; then
+        tgt=$(readlink "$lnk" | sed "s|.*/repos/gnulib/|$REPOS_DIR/gnulib/|")
+        if [ -e "$tgt" ]; then ln -sf "$tgt" "$lnk"; else rm -f "$lnk"; fi
+    fi
+done
+find . -maxdepth 2 -type l ! -exec test -e {} \; -delete 2>/dev/null
+
+# Configure if needed -- also RE-configure when the existing Makefile was
+# generated somewhere else (the vendored checkout was configured inside the
+# Docker image at /silex, leaving dangling absolute paths and symlinks).
+NEED_CONF=0
 if [ ! -f "Makefile" ]; then
-    echo "Configuring GNU sed..."
+    NEED_CONF=1
+else
+    conf_dir=$(sed -n 's/^abs_top_builddir = //p' Makefile | head -1)
+    [ "$conf_dir" = "$(pwd)" ] || NEED_CONF=1
+fi
+if [ "$NEED_CONF" -eq 1 ]; then
+    echo "Configuring GNU sed (stale or missing build config)..."
     ./configure --quiet 2>&1 | tail -5
 fi
 
@@ -84,18 +106,35 @@ trap 'rm -rf "$TOOL_DIR"' EXIT INT TERM
 ln -sf "$SILEX" "$TOOL_DIR/sed"
 export PATH="$TOOL_DIR:$PATH"
 
-# Run tests
-make check 2>&1 || true
+# Run tests. The tool overrides stop automake's maintainer-mode rules from
+# trying to regenerate aclocal.m4/configure with whatever (mismatched)
+# autotools this machine has -- we only want to BUILD and TEST. */
+# help2man runs through perl, so a `true` override breaks it -- build the
+# binary first, then satisfy the manpage rule with a stub before check.
+make sed/sed AUTOCONF=true AUTOMAKE=true ACLOCAL=true AUTOHEADER=true AUTOM4TE=true MAKEINFO=true 2>&1 | tail -5 || true
+mkdir -p doc && { [ -f doc/sed.1 ] || echo '.TH SED 1' > doc/sed.1; }
+touch doc/sed.1
+# The testsuite invokes the BUILT sed/sed binary, not PATH -- replace it with
+# a wrapper that execs silex's sed so the suite actually measures silex.
+if [ -f sed/sed ] && [ ! -f sed/sed.gnu ]; then
+    mv sed/sed sed/sed.gnu
+fi
+printf '#!/bin/sh\nexec "%s" sed "$@"\n' "$SILEX" > sed/sed
+chmod +x sed/sed
+touch sed/sed
+touch doc/sed.1   # keep the manpage newer than the wrapper binary
+make check AUTOCONF=true AUTOMAKE=true ACLOCAL=true AUTOHEADER=true AUTOM4TE=true MAKEINFO=true 2>&1 | tail -30 || true
 
 echo ""
 echo "=== GNU sed Test Results ==="
 echo ""
 
-if [ -f "tests/test-suite.log" ]; then
-    TOTAL=$(grep -E "^# TOTAL:" tests/test-suite.log | awk '{print $3}' || echo "?")
-    PASS=$(grep -E "^# PASS:" tests/test-suite.log | awk '{print $3}' || echo "?")
-    FAIL=$(grep -E "^# FAIL:" tests/test-suite.log | awk '{print $3}' || echo "?")
-    SKIP=$(grep -E "^# SKIP:" tests/test-suite.log | awk '{print $3}' || echo "?")
+if [ -f "test-suite.log" ] || [ -f "tests/test-suite.log" ]; then
+    [ -f "tests/test-suite.log" ] || ln -sf ../test-suite.log tests/test-suite.log 2>/dev/null || true
+    TOTAL=$(grep -hE "^# TOTAL:" test-suite.log tests/test-suite.log 2>/dev/null | head -1 | awk '{print $3}' || echo "?")
+    PASS=$(grep -hE "^# PASS:" test-suite.log tests/test-suite.log 2>/dev/null | head -1 | awk '{print $3}' || echo "?")
+    FAIL=$(grep -hE "^# FAIL:" test-suite.log tests/test-suite.log 2>/dev/null | head -1 | awk '{print $3}' || echo "?")
+    SKIP=$(grep -hE "^# SKIP:" test-suite.log tests/test-suite.log 2>/dev/null | head -1 | awk '{print $3}' || echo "?")
 
     echo "  TOTAL: $TOTAL"
     echo "  PASS:  $PASS"

@@ -512,6 +512,16 @@ int applet_tail(int argc, char **argv)
                 break;
             }
             default:
+                /* Historic syntax: `tail -30` / `tail +5` == -n 30 / -n +5.
+                 * Still emitted by real build systems (GNU coreutils' own
+                 * test harness does `| tail -30`). */
+                if (*p >= '0' && *p <= '9') {
+                    if (parse_count(p, &count, &plus_mode) == 0) {
+                        use_bytes = 0;
+                        stop = 1;
+                        break;
+                    }
+                }
                 err_msg("tail", "unrecognized option '-%c'", *p);
                 err_usage("tail", "[-n N] [-c N] [-fqv] [--pid PID] [FILE...]");
                 return 1;

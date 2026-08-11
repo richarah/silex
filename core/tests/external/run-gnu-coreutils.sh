@@ -68,9 +68,30 @@ for cmd in gcc make autoconf automake; do
     fi
 done
 
-# Configure coreutils (if not already configured)
+# The vendored checkout may have been configured at a different path (the
+# Docker image, or the pre-monorepo layout); a stale build config leaves
+# dangling GNUmakefile/maint.mk symlinks (which GNU make prefers over
+# Makefile) and wrong absolute paths. Re-point gnulib symlinks and
+# reconfigure when that is detected.
+for lnk in GNUmakefile maint.mk; do
+    if [ -L "$lnk" ] && [ ! -e "$lnk" ]; then
+        tgt=$(readlink "$lnk" | sed "s|.*/repos/gnulib/|$REPOS_DIR/gnulib/|")
+        if [ -e "$tgt" ]; then ln -sf "$tgt" "$lnk"; else rm -f "$lnk"; fi
+    fi
+done
+NEED_CONF=0
 if [ ! -f "Makefile" ]; then
-    echo "Configuring GNU coreutils..."
+    NEED_CONF=1
+else
+    conf_dir=$(sed -n 's/^abs_top_builddir = //p' Makefile | head -1)
+    [ "$conf_dir" = "$(pwd)" ] || NEED_CONF=1
+fi
+if [ "$NEED_CONF" -eq 1 ]; then
+    if [ -x ../gnulib/gnulib-tool ]; then
+        echo "Refreshing gnulib imports (dangling symlinks from a foreign build)..."
+        ../gnulib/gnulib-tool --update --symlink >/dev/null 2>&1 || true
+    fi
+    echo "Configuring GNU coreutils (stale or missing build config)..."
     ./configure --quiet 2>&1 | tail -10
 fi
 
@@ -92,8 +113,11 @@ for tool in cat cp mv rm mkdir ls sort wc grep sed head tail cut tr \
     ln -sf "$SILEX" "$TOOL_DIR/$tool"
 done
 
-# Add tool directory to front of PATH
-export PATH="$TOOL_DIR:$PATH"
+# The silex tools go on PATH only for the make check invocation below --
+# exporting them for the whole runner made the runner's own pipelines (and
+# automake's) use silex applets, and any missing flag broke the harness
+# rather than failing a test.
+SILEX_PATH="$TOOL_DIR:$PATH"
 
 # Verify Makefile was created
 if [ ! -f "Makefile" ]; then
@@ -123,8 +147,11 @@ TEST_CATEGORIES="
     tests/touch/*.sh
 "
 
-# Run tests
-make check TESTS="$TEST_CATEGORIES" 2>&1 || true
+# Run tests. Tool overrides stop automake's maintainer-mode rules from
+# regenerating configure/aclocal with this machine's (mismatched) autotools.
+PATH="$SILEX_PATH" make check TESTS="$TEST_CATEGORIES" \
+     AUTOCONF=true AUTOMAKE=true ACLOCAL=true AUTOHEADER=true \
+     AUTOM4TE=true MAKEINFO=true 2>&1 | tail -30 || true
 
 echo ""
 echo "=== GNU coreutils Test Results ==="

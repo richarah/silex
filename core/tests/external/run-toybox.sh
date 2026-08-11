@@ -65,9 +65,19 @@ echo "Running toybox test suite..."
 echo "(This may take 5-10 minutes)"
 echo ""
 
+# Run tests against SILEX's applets, not the toybox binary: build a PATH of
+# symlinks named after each silex applet and use toybox's TEST_HOST mode,
+# which tests whatever the PATH provides. (The old invocation built and
+# tested upstream toybox itself -- a measurement of toybox, not of silex.)
+SHIMS=$(mktemp -d)
+for a in $("$SILEX" --list 2>/dev/null); do
+    ln -s "$SILEX" "$SHIMS/$a" 2>/dev/null
+done
+trap 'rm -rf "$SHIMS"' EXIT
+
 # Run tests and capture output
 if [ -f "scripts/test.sh" ]; then
-    TEST_OUTPUT=$(bash scripts/test.sh 2>&1 || true)
+    TEST_OUTPUT=$(PATH="$SHIMS:$PATH" TEST_HOST=1 bash scripts/test.sh 2>&1 || true)
     echo "$TEST_OUTPUT" | tail -50
 
     # Parse results from output
