@@ -417,6 +417,7 @@ static int grep_stream(FILE *fp, const char *filename,
     long     byte_offset = 0;  /* -b: track byte position */
     long     count    = 0;
     int      binary   = 0;
+    int      binary_matched = 0;   /* pattern found within a binary file */
     int      result   = 1; /* assume no match */
 
     /* Context support */
@@ -454,13 +455,37 @@ static int grep_stream(FILE *fp, const char *filename,
         linenum++;
         byte_offset += linelen;  /* track byte position (includes newline) */
 
-        /* Binary detection: check for NUL bytes */
-        if (!binary) {
+        /* Binary detection: check for NUL bytes. A binary file is still
+         * SEARCHED -- GNU grep only reports "Binary file matches" when the
+         * pattern is actually present (exit 1 with no output otherwise).
+         * The old code stopped at the first NUL and reported a match
+         * unconditionally, which made autoconf's float-word-ordering probe
+         * (grep noonsees conftest) see both byte orders at once and abort
+         * cpython's configure. Match each NUL-separated segment. */
+        {
+            int line_has_nul = 0;
             for (ssize_t k = 0; k < linelen; k++) {
-                if (linebuf[k] == '\0') { binary = 1; break; }
+                if (linebuf[k] == '\0') { line_has_nul = 1; break; }
             }
+            if (line_has_nul) binary = 1;
         }
-        if (binary) break;
+        if (binary) {
+            if (!binary_matched) {
+                ssize_t blen = linelen;
+                if (blen > 0 && linebuf[blen - 1] == '\n')
+                    linebuf[--blen] = '\0';
+                const char *seg = linebuf;
+                const char *bend = linebuf + blen;
+                while (seg < bend + 1) {
+                    if (*seg && line_matches_any(seg, g)) {
+                        binary_matched = 1;
+                        break;
+                    }
+                    seg += strlen(seg) + 1;
+                }
+            }
+            continue;
+        }
 
         /* Strip trailing newline for matching */
         if (linelen > 0 && linebuf[linelen - 1] == '\n') {
@@ -609,14 +634,20 @@ static int grep_stream(FILE *fp, const char *filename,
     }
 
     if (binary) {
-        if (!g->opt_q && !g->opt_l) {
-            printf("Binary file %s matches\n",
-                   filename ? filename : "(stdin)");
-        } else if (g->opt_l && filename) {
-            printf("%s\n", filename);
+        int bin_hit = binary_matched;
+        if (g->opt_v) bin_hit = !bin_hit;
+        if (bin_hit) {
+            if (!g->opt_q && !g->opt_l && !g->opt_c) {
+                printf("Binary file %s matches\n",
+                       filename ? filename : "(stdin)");
+            } else if (g->opt_l && filename) {
+                printf("%s\n", filename);
+            }
+            result = 0;
+            g_matched_any = 1;
+        } else {
+            result = 1;
         }
-        result = 0;
-        g_matched_any = 1;
     }
 
     if (g->opt_c) {

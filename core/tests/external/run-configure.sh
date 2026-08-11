@@ -103,9 +103,27 @@ test_configure() {
     # for exactly that string, which is how a run where curl died with
     # "'echo' command not found" was still recorded as 5/5 PASS.
     _cfg_log=$(mktemp)
-    "$SILEX" ./configure --prefix="$TEST_PREFIX" \
-        --disable-shared --disable-dependency-tracking \
-        --quiet >"$_cfg_log" 2>&1
+    # Per-project quirks -- this suite measures SHELL compatibility, so
+    # options only remove environment dependencies, not shell work:
+    #  - curl: no TLS or libpsl dev libraries on this machine; configure
+    #    aborts identically under dash without --without-ssl/--without-libpsl.
+    #  - openssl: ./configure is PERL (dash fails on it identically); its
+    #    shell entry point is ./config, which takes no autoconf options.
+    case "$project" in
+        openssl)
+            "$SILEX" ./config >"$_cfg_log" 2>&1
+            ;;
+        curl)
+            "$SILEX" ./configure --prefix="$TEST_PREFIX" \
+                --disable-shared --disable-dependency-tracking \
+                --without-ssl --without-libpsl --quiet >"$_cfg_log" 2>&1
+            ;;
+        *)
+            "$SILEX" ./configure --prefix="$TEST_PREFIX" \
+                --disable-shared --disable-dependency-tracking \
+                --quiet >"$_cfg_log" 2>&1
+            ;;
+    esac
     EXIT_CODE=$?
     tail -50 "$_cfg_log"
     rm -f "$_cfg_log"

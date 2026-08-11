@@ -414,6 +414,7 @@ static int field_has_unprotected_glob(const char *s, const char *prot,
  * must ENCODE the value they hand back so a literal reserved byte in it is not
  * re-consumed by the caller's field-split decode. */
 static char *pp_decode(arena_t *a, const char *s);
+static char *pp_decode_full(arena_t *a, const char *s);
 static void  pp_escape_append(strbuf_t *out, const char *s);
 
 /* Return a ${...}-expansion DATA result (a variable's value, a trimmed value, a
@@ -699,7 +700,7 @@ static char *expand_braced_body(shell_ctx_t *sh, const char *body, int in_dquote
                  * genuine reserved byte in the data (`"${v=$ALL_ASCII}"` dropped
                  * a literal 0x04), so decode only when it was actually encoded. */
                 vars_set(&sh->vars, varname,
-                         guards ? pp_decode(sh->scratch, newval)
+                         guards ? pp_decode_full(sh->scratch, newval)
                                 : arena_strdup(sh->scratch, newval));
                 char *r = arena_strdup(sh->scratch, newval);
                 sb_free(&sb);
@@ -1734,6 +1735,33 @@ static void pp_escape_append(strbuf_t *out, const char *s)
     }
 }
 
+/* Like pp_decode, but ALSO strips the structural markers themselves (0x01
+ * field boundaries, 0x02/0x03 quote guards). For a value being STORED by
+ * ${var=word}: the word text may carry guards from its quoted parts, and the
+ * variable must receive the literal string (`: ${RM="rm -f"}` then `$RM`
+ * otherwise runs a command named "\x02rm"; curl's configure does exactly
+ * this via libtool). Literal 01/02/03 bytes in data are PP_ESC-encoded, so
+ * bare ones here are always markers. */
+static char *pp_decode_full(arena_t *a, const char *s)
+{
+    size_t n = strlen(s);
+    char *out = arena_alloc(a, n + 1);
+    size_t w = 0;
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (c == 0x01 || c == 0x02 || c == 0x03)
+            continue;
+        if (c == PP_ESC && i + 1 < n) {
+            out[w++] = (char)((unsigned char)s[i + 1] & ~0x40u);
+            i++;
+            continue;
+        }
+        out[w++] = (char)c;
+    }
+    out[w] = '\0';
+    return out;
+}
+
 static char *pp_decode(arena_t *a, const char *s)
 {
     size_t n = strlen(s);
@@ -2639,7 +2667,12 @@ glob_phase:
         if (sh->at_expanded_empty && expanded[0] == '\0')
             goto no_fields;
 
-        if (!do_ifs_split || expanded[0] != '\0') {
+        /* In a field-splitting context, an expansion whose content the split
+         * consumed entirely (whitespace-only, e.g. LIBS=" "; gcc $LIBS) yields
+         * ZERO fields -- re-creating one passed a literal " " argument to the
+         * linker in curl's configure ("ld: cannot find  :"). Only a NON-split
+         * word (quoted/literal) keeps its single field here. */
+        if (!do_ifs_split) {
             /* Literal word or non-empty result: create single field.
              *
              * nfields used to be set to 1 unconditionally, even when realloc
