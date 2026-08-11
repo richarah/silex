@@ -35,40 +35,41 @@ failure:
 That is fixed. Suites can now fail, and a suite that executes zero tests is a
 failure, not a pass.
 
-## Real numbers (2026-08-10)
+## Real numbers (2026-08-11; smoosh/toybox/Oils/modernish re-measured after
+## the conformance push of 2026-08-11, commits 782b1a1 + 376ac29)
 
 | Suite | Result | Notes |
 |-------|--------|-------|
-| **Smoosh** | **145 / 186 (78%)** | POSIX conformance ground-truth (formal Coq model). Run via upstream's own `tests/shell_tests.sh` against a pristine checkout. **Head-to-head on the identical runner: dash 143/186, bash 152/186.** silex is ahead of dash and within 7 tests of bash. Was 125/186 on 2026-07-12. |
-| **toybox** | **56 / 57 (98%)** | silex began as a toybox fork; high compatibility expected. The one failure is `chmod 000 dir`. |
+| **Smoosh** | **185 / 186 (99%)** | POSIX conformance ground-truth (formal Coq model), upstream's own runner, pristine checkout. **Head-to-head on the identical runner: dash 143/186, bash 152/186 — silex now leads both by a wide margin.** The single remaining failure (`builtin.times.ioerror`) expects the literal string `smoosh:` in stderr, which no other shell can honestly emit. Was 145 on 2026-08-10, 125 on 2026-07-12. One further test (`builtin.kill0_+5`) is inherently racy (asserts pid $$+5 doesn't exist) and occasionally flakes under load. |
+| **toybox** | **99 / 100 (99%)** | Now actually tests SILEX: the runner populates a PATH of silex applet symlinks and uses toybox's `TEST_HOST` mode (previously it built and tested upstream toybox itself). The one failure is host awk's `srand` seed — silex has no awk applet. |
 | **GNU grep** | **66 pass / 0 fail** (60 skipped) | No failures among executed tests. |
-| **modernish** | **all 18 files pass; 0 unexpected failures** | `bin/modernish --test`: 363 succeeded, 13 skipped, 10 tolerated `xfail`, **0 unexpected**. Was "blocked on a real silex bug" on 2026-07-12; the `V=${u:-$(echo A)}` bootstrap bug and ~30 further POSIX bugs are fixed. |
+| **modernish** | **all 18 files pass; 0 unexpected failures** | `bin/modernish --test`: 369 succeeded, 8 skipped, 9 tolerated `xfail`, **0 unexpected** ($LINENO support unlocked four previously-skipped capability tests). Improved from 363 on 2026-08-10 (BUG_CASEPAREN is fixed for real — case-aware command-substitution scanners — and one capability skip became a pass); 2 behaviors moved to tolerated-xfail because modernish now detects silex's POSIX-permitted special-builtin assignment persistence. |
 | mksh | 169 / 583 (29%) | mksh's suite targets the **ksh superset** (arrays, `[[ ]]`, coprocesses, `${|...}`, etc.), not POSIX `sh`. The bulk of the 414 failures are ksh-only features silex does not implement by design. Not a POSIX-conformance figure. |
-| Oils / OSH | **not measurable (harness bug)** | `run-oils-spec.sh` invokes upstream `sh_spec.py --shell`, which errors `no such option: --shell`. 222 spec cases present, 0 executed. Needs a runner fix, not a silex fix. |
+| Oils / OSH | **849 pass / 4291 run** | Runner fixed (the old one passed a nonexistent `--shell` option and executed zero tests; it now py3-patches a COPY of the vendored harness and runs all 139 non-Oil-language spec files). Baseline on the identical runner: **dash 3371 / 6216**. The gap is real follow-up material: 38 files crash or hang silex outright (~2000 cases lost), and the suite leans heavily on bash/ksh extensions. This row is a measurement, not a conformance claim. |
 | **ShellSpec** | **1696 examples, 0 failures** (58 skips) | ShellSpec's own core suite, run with silex as both runner and target shell — **byte-identical to dash on the same runner**. Was "fails to launch" earlier on 2026-08-10; fixing it surfaced and fixed 8 real silex bugs: 3-arg-max `test`/`[` (now full POSIX + XSI grammar), mid-word `#` starting comments, quote-blind word classifiers eating empty quoted fields, `${@:-}` gluing positionals, builtins beating functions in command search, errexit killing loops on exempt AND-lists, FLOW sentinels leaking as exit 234 through pipes/`&`, and recursive functions reusing the outer call's expanded redirect target. |
-| GNU coreutils | not run | Needs `./configure` + build first (`make: GNUmakefile: No such file or directory`). The runner does not perform that build step. |
-| GNU sed | not run | Same as coreutils — no build step, no `test-suite.log`. |
-| Autoconf/configure | not re-measured | Previously reported 5/5; the real figure was **2/5** (only sqlite and zlib). |
+| GNU sed | runner fixed; full `make check` still running at time of writing | The vendored checkout had been bootstrapped inside the Docker image at `/silex` — dangling `GNUmakefile` symlinks (which GNU make prefers over `Makefile`) broke every invocation. The runner now repairs the symlinks, reconfigures on path mismatch, and swaps the built `sed/sed` for a silex wrapper so the suite tests silex (previously it tested GNU's own binary). Full `make check` is extremely slow on this 9p filesystem; use `docker-run.sh` for routine measurement. |
+| GNU coreutils | **190 pass / 27 fail** (68 skip, 286 run) | First real measurement (the suite had never executed). Docker-era staleness repaired, corrupted generated artifacts (speedlist.h) regenerated, tool-shim PATH scoped to `make check` only, and the test globs updated to the current upstream layout (`tests/cat/*.sh`, not `tests/misc/cat-*.sh`). The 27 failures are unreviewed follow-up material — some will be silex applet gaps, some environment (9p filesystem, non-root). |
+| **Autoconf/configure** | **5/5** (curl, cpython, openssl, sqlite, zlib) | An honest 5/5 this time. Getting there took real fixes: `$LINENO` (without it configure rewrites itself through a sed shim silex executed pathologically -- curl spun for 2h of CPU), grep no longer claiming any pattern "matches" in NUL-containing files (broke cpython's float-word probe), `${var="quoted"}` no longer storing guard bytes (libtool's `: ${RM="rm -f"}` produced a command named `\x02rm`), and whitespace-only unquoted expansions yielding zero fields (ld was handed an empty filename). openssl is invoked via its `./config` entry point (its `./configure` is perl; dash fails on it identically) and curl gets `--without-ssl --without-libpsl` for dev libraries this machine lacks (dash aborts identically without them). |
 
-The smoosh 78% is measured, reproducible, and fails the build when it regresses:
+The smoosh 99% is measured, reproducible, and fails the build when it regresses:
 
 ```sh
 make core-external-test          # all suites; fails if any suite fails
 core/tests/external/run-smoosh.sh   # just smoosh
 ```
 
-## Where the 41 smoosh failures are
+## Where the last smoosh failure is
 
-Clustered, not scattered (these are the concrete remaining POSIX gaps):
+One test, and it is unwinnable by construction: `builtin.times.ioerror`
+compares stderr against the literal line `smoosh: times: I/O error` — the
+reference implementation's own name. Every cluster that was listed here on
+2026-08-10 (job control/monitor, traps in sub/supershells, non-lexical
+break/continue, interactive features, parse-error exit paths, builtin flag
+gaps) is fixed and green.
 
-| Cluster | Approx. count | Sample test names |
-|---|---|---|
-| Job control / monitor mode | ~10 | `sh.monitor.fg`, `sh.monitor.bg`, `builtin.kill.jobs`, `semantics.background.*` |
-| Traps in sub/supershells | ~10 | `builtin.trap.subshell.*`, `builtin.trap.supershell`, `semantics.traps.inherit/async` |
-| Non-lexical break/continue | ~4 | `builtin.break.nonlexical`, `builtin.continue.nonlexical`, `builtin.dot.break` |
-| Interactive features | ~4 | `sh.ps1.override`, `sh.interactive.ps1`, `builtin.history.nonposix` |
-| Parse-error exit paths | ~4 | `parse.error`, `parse.eval.error` |
-| Builtin flag gaps | remainder | e.g. `chmod -R`/`-r` unrecognized; `builtin.alias.empty`, `builtin.exec.badredir`, `builtin.times.ioerror` |
+Known real gaps that remain (from the Oils spec suite): 38 of its files
+crash or hang silex (~2000 cases not executed). That is the next
+conformance frontier.
 
 ## Reproducing
 
