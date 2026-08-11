@@ -94,6 +94,10 @@ typedef struct {
 } parser_t;
 
 void    parser_init(parser_t *p, lexer_t *l, arena_t *a);
+/* 1 when only newlines remain before EOF -- used to recognize the LAST
+ * command of a disposable subshell (tail-call exec). Consumes the newlines. */
+int     parser_at_eof(parser_t *p);
+
 void    parser_set_aliases(parser_t *p,
                            const char *(*lookup)(void *ctx, const char *name),
                            void *ctx);

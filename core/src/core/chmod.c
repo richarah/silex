@@ -28,6 +28,7 @@
  * ------------------------------------------------------------------------- */
 static mode_t  g_ref_mode;      /* mode from --reference, or sentinel */
 static int     g_verbose;
+static int     g_silent;
 static int     g_any_error;     /* set to 1 if any chmod fails */
 static char    g_modestr[256];  /* raw mode string for symbolic parsing */
 static int     g_use_ref;       /* 1 if --reference was supplied */
@@ -324,7 +325,8 @@ static void do_chmod(const char *path, const struct stat *st)
     }
 
     if (rc != 0) {
-        err_sys("chmod", "changing permissions of '%s'", path);
+        if (!g_silent)
+            err_sys("chmod", "changing permissions of '%s'", path);
         g_any_error = 1;
         return;
     }
@@ -361,6 +363,7 @@ int applet_chmod(int argc, char **argv)
 {
     int opt_recursive = 0;
     int opt_verbose   = 0;
+    int opt_silent    = 0;
     int have_mode     = 0;
     char ref_path[PATH_MAX];
     int  have_ref     = 0;
@@ -370,6 +373,7 @@ int applet_chmod(int argc, char **argv)
     g_any_error  = 0;
     g_use_ref    = 0;
     g_verbose    = 0;
+    g_silent     = 0;
     g_ref_mode   = 0;
     g_modestr[0] = '\0';
 
@@ -402,16 +406,38 @@ int applet_chmod(int argc, char **argv)
             continue;
         }
 
+        /* GNU: an argument like -r / -w+x / -rwx is a MODE, not options --
+         * `chmod -r scr` removes read permission (smoosh sh.file.weirdness).
+         * Only chars that can start a symbolic clause count; R/v/f stay
+         * options. */
+        {
+            const char *m = arg + 1;
+            int is_mode = (*m != '\0');
+            for (const char *q = m; *q && is_mode; q++)
+                if (!strchr("rwxXst01234567ugoa+-=,", *q))
+                    is_mode = 0;
+            if (is_mode) {
+                /* Treat the whole argument (with its leading '-') as a mode
+                 * string; stop option parsing here. */
+                break;
+            }
+        }
+
         /* Short flags */
         const char *p = arg + 1;
         while (*p) {
             switch (*p) {
             case 'R': opt_recursive = 1; break;
             case 'v': opt_verbose   = 1; break;
+            /* -f/--silent: suppress most error messages (GNU). The exit
+             * status still reflects failures; only the noise is dropped.
+             * smoosh's builtin.dot.path preamble runs `chmod -f 333 ...`
+             * under set -e, so rejecting the flag aborted the whole test. */
+            case 'f': opt_silent    = 1; break;
             default:
                 err_msg("chmod", "unrecognized option '-%c'", *p);
                 err_usage("chmod",
-                    "[-Rv] [--reference=RFILE] MODE FILE...");
+                    "[-Rfv] [--reference=RFILE] MODE FILE...");
                 return 1;
             }
             p++;
@@ -419,6 +445,7 @@ int applet_chmod(int argc, char **argv)
     }
 
     g_verbose = opt_verbose;
+    g_silent  = opt_silent;
 
     /* Resolve --reference */
     if (have_ref) {

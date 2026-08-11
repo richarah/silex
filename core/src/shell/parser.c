@@ -281,10 +281,13 @@ static void pend_prepend(parser_t *p, const token_t *toks, int n)
  * of its value. The first token of the value becomes the new command word, so an
  * alias chain expands and an alias to a keyword/operator (`not='! '` -> TOK_BANG)
  * reshapes the parse. Call only where a command word is expected. */
-static void expand_command_aliases(parser_t *p)
+/* Returns 1 when at least one alias name was consumed (so the caller can
+ * recognize a command that vanished entirely, e.g. `alias empty=''; empty`). */
+static int expand_command_aliases(parser_t *p)
 {
+    int consumed = 0;
     if (!p->alias_lookup)
-        return;
+        return 0;
     const char *active[64];
     int nactive = 0;
     int guard   = 0;
@@ -303,6 +306,7 @@ static void expand_command_aliases(parser_t *p)
         if (nactive < 64)
             active[nactive++] = t.text;   /* arena-owned; outlives the parse */
         consume(p);                       /* drop the alias name */
+        consumed = 1;
         if (val[0] == '\0')
             continue;                     /* alias to empty: vanishes */
         /* Re-lex the alias value; its token text is arena-allocated (p->arena),
@@ -321,6 +325,13 @@ static void expand_command_aliases(parser_t *p)
         lexer_free(&sub);
         pend_prepend(p, buf, n);
     }
+    return consumed;
+}
+
+int parser_at_eof(parser_t *p)
+{
+    skip_newlines(p);
+    return peek(p).type == TOK_EOF;
 }
 
 /* Consume token of expected type or set error and return it anyway */
@@ -392,9 +403,18 @@ static redir_t *parse_redirect(parser_t *p, int io_fd)
         return NULL;
     consume(p); /* consume the operator */
 
-    /* Target word */
+    /* Target word. Reserved words are only special in command position, so
+     * `echo >in` or `cat <done` must treat them as ordinary filenames -- the
+     * lexer already classified them, but their .text is intact. */
     token_t tgt = consume(p);
-    if (tgt.type != TOK_WORD && tgt.type != TOK_ASSIGN) {
+    if (tgt.type != TOK_WORD && tgt.type != TOK_ASSIGN &&
+        !(tgt.text && tgt.text[0] &&
+          tgt.type != TOK_NEWLINE && tgt.type != TOK_EOF &&
+          !is_redir_op(tgt.type) &&
+          tgt.type != TOK_SEMI && tgt.type != TOK_AMP &&
+          tgt.type != TOK_PIPE && tgt.type != TOK_AND_AND &&
+          tgt.type != TOK_OR_OR && tgt.type != TOK_LPAREN &&
+          tgt.type != TOK_RPAREN)) {
         parser_error(p, "expected word after redirect operator");
         return NULL;
     }
@@ -1177,11 +1197,28 @@ static node_t *parse_pipeline(parser_t *p)
     int negate = 0;
     /* Command-word position: expand aliases first, so `not`->`! ` is seen as the
      * TOK_BANG below rather than a command named "not". */
-    expand_command_aliases(p);
+    int alias_used = expand_command_aliases(p);
     if (peek(p).type == TOK_BANG) {
         consume(p);
         negate = 1;
-        expand_command_aliases(p);   /* the negated command's word */
+        alias_used |= expand_command_aliases(p);   /* the negated command's word */
+    }
+
+    /* An alias that expanded to nothing at all (`alias empty=''; empty`) is a
+     * valid empty command: it runs nothing and succeeds. Without this the
+     * parser demanded a command word and errored on the newline. Only applies
+     * when an alias really was consumed and only terminators remain --
+     * `empty > file` still parses as a redirect-only command below. */
+    tok_type_t after = peek(p).type;
+    if (alias_used &&
+        (after == TOK_NEWLINE || after == TOK_EOF || after == TOK_SEMI ||
+         after == TOK_AMP || after == TOK_AND_AND || after == TOK_OR_OR)) {
+        node_t *empty = alloc_node(p, N_CMD);
+        empty->u.cmd.words   = arena_alloc(p->arena, sizeof(char *));
+        empty->u.cmd.words[0] = NULL;
+        empty->u.cmd.assigns = NULL;
+        empty->u.cmd.redirs  = NULL;
+        return empty;
     }
 
     node_t *left = parse_command(p);

@@ -70,7 +70,36 @@ typedef struct shell_ctx {
     struct {
         char *action;
         int   set_in_this_shell; /* 1 if set in this shell level (not inherited) */
+        int   inherited;         /* subshell: parent's action kept ONLY so a
+                                  * `trap` listing can report it (POSIX); it is
+                                  * never executed and any trap modification
+                                  * wipes all inherited entries. */
     } traps[NSIG];
+    int         in_trap;           /* >0 while running a trap action */
+    int         trap_entry_status; /* $? when the current trap action started:
+                                    * a naked `exit` inside the action uses it */
+    int         errexit_fired;     /* set -e stopped execution (see shell.c) */
+    char      **history;           /* interactive command history (malloc'd) */
+    int         history_n;
+    int         history_cap;
+    int         opt_nolog;         /* set -o nolog: stop recording history */
+    int         opt_nonlexicalctrl; /* set -o nonlexicalctrl: break/continue
+                                      * in a function act on the CALLER's
+                                      * loops (dynamic scope; smoosh) */
+    int         opt_h;             /* set -h: hash utilities named in function
+                                    * bodies when the function is defined */
+    int         expansion_abort;   /* interactive: an expansion error aborts
+                                    * only the current command with this
+                                    * status (see expansion_abort()) */
+    int         disposable;        /* this shell IS a throwaway child (command
+                                    * substitution): its final command may
+                                    * tail-exec (see exec_in_place) */
+    int         exec_in_place;     /* this process is a disposable child and the
+                                    * command about to run is the last thing it
+                                    * does: an external command may execv() in
+                                    * place instead of fork+wait, keeping the
+                                    * process identity ($!, $PPID of the child)
+                                    * correct (smoosh background.pid & friends) */
     /* Function definitions: name -> node_t* */
     void       *funcs[256];  /* var_entry_t* array for func lookup */
     /* Alias definitions: name -> value string */
@@ -90,6 +119,11 @@ typedef struct shell_ctx {
     int         loop_depth;  /* current loop nesting depth; 0 = not in loop */
     int         interactive; /* 1 if shell is interactive (stdin is tty), 0 otherwise */
     int         in_command_builtin; /* 1 if executing via 'command' prefix (disables special builtin semantics) */
+    int         run_string_parse_error; /* set by shell_run_string on a parse
+                                         * error; eval (a special builtin)
+                                         * checks it to abort a non-interactive
+                                         * shell per POSIX (smoosh
+                                         * parse.eval.error) */
     /* Set while expanding a here-document body. The body expands like a
      * double-quoted string (parameter/command/arithmetic expansion happens) but
      * with two differences: `"` (and `'`) are literal, not quote delimiters, and
@@ -164,6 +198,10 @@ typedef struct shell_ctx {
     /* PATH resolution cache: command name → resolved absolute path.
      * Invalidated (path_cache_hash reset) when PATH changes. */
     void       *path_cache[256];  /* path_cache_entry_t*, open-addressing by FNV-1a */
+    /* Applet names executed this session, for `hash` listing (applets never
+     * enter the path cache -- they run in-process). Cleared by `hash -r`. */
+    const char *applets_seen[64];
+    int         applets_seen_n;
     uint32_t    path_cache_hash;  /* FNV-1a hash of PATH string when cache was built */
 } shell_ctx_t;
 
@@ -177,6 +215,9 @@ void shell_free(shell_ctx_t *sh);
 
 /* Signal handler installed by trap built-in */
 void shell_signal_handler(int sig);
+/* Record one command in the interactive history (no-op when not interactive
+ * or under set -o nolog). Takes ownership of nothing; copies the text. */
+void shell_history_add(shell_ctx_t *sh, const char *text);
 
 /* Strict integer parse for user-supplied numbers (exit codes, signal numbers,
  * file descriptors, shift/break/continue counts).

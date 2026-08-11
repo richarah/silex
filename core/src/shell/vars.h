@@ -46,6 +46,8 @@ int          vars_set(vars_t *v, const char *name, const char *value);
 int          vars_set_context(vars_t *v, const char *name, const char *value, const char *ctx);
 int          vars_set_local(vars_t *v, const char *name, const char *value);
 int          vars_export(vars_t *v, const char *name);
+/* 1 if NAME has an entry with the export flag (even declared-but-unset). */
+int          vars_is_exported(vars_t *v, const char *name);
 int          vars_export_context(vars_t *v, const char *name, const char *ctx);
 int          vars_readonly(vars_t *v, const char *name);
 int          vars_unset(vars_t *v, const char *name);

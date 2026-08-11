@@ -43,14 +43,14 @@ check "wait for all background jobs returns 0" \
 
 # --- job specs: %n, %+, %-, %string ------------------------------------------
 check "kill %n signals the job" \
-    "$("$MB" -c 'sleep 5 & kill %1; wait %1 2>/dev/null; echo $?')" "143"
+    "$("$MB" -c 'set -m; sleep 5 & kill %1; wait %1 2>/dev/null; echo $?')" "143"
 check "kill %string matches by command prefix" \
-    "$("$MB" -c 'sleep 5 & kill %sleep; wait %1 2>/dev/null; echo done')" "done"
+    "$("$MB" -c 'set -m; sleep 5 & kill %sleep; wait %1 2>/dev/null; echo done')" "done"
 check "kill -KILL %n uses the named signal" \
-    "$("$MB" -c 'sleep 5 & kill -KILL %1; wait %1 2>/dev/null; echo $?')" "137"
+    "$("$MB" -c 'set -m; sleep 5 & kill -KILL %1; wait %1 2>/dev/null; echo $?')" "137"
 check "%+ is the current job, %- the previous" \
-    "$("$MB" -c 'sleep 5 & sleep 5 & kill %+ %-; wait 2>/dev/null; echo done')" "done"
-"$MB" -c 'kill %9 2>/dev/null' ; check_exit "kill on a nonexistent job fails" "$?" "1"
+    "$("$MB" -c 'set -m; sleep 5 & sleep 5 & kill %+ %-; wait 2>/dev/null; echo done')" "done"
+"$MB" -c 'set -m; kill %9 2>/dev/null' ; check_exit "kill on a nonexistent job fails" "$?" "1"
 
 # --- fg -----------------------------------------------------------------------
 check "fg waits for the job to finish" \

@@ -69,6 +69,7 @@ static int exec_builtin_getopts(shell_ctx_t *sh, int argc, char **argv);
 static int exec_builtin_alias(shell_ctx_t *sh, int argc, char **argv);
 static int exec_builtin_unalias(shell_ctx_t *sh, int argc, char **argv);
 static int exec_builtin_hash(shell_ctx_t *sh, int argc, char **argv);
+static int exec_builtin_history(shell_ctx_t *sh, int argc, char **argv);
 static int exec_builtin_jobs(shell_ctx_t *sh, int argc, char **argv);
 static int exec_builtin_fg(shell_ctx_t *sh, int argc, char **argv);
 static int exec_builtin_bg(shell_ctx_t *sh, int argc, char **argv);
@@ -109,16 +110,30 @@ static const applet_t *find_applet_by_name(const char *name)
  * (rm -rf of the test tempdir) on every test. */
 static void subshell_reset_traps(shell_ctx_t *sh)
 {
+    /* A forked child is a fresh execution environment: it is NOT "inside" the
+     * parent's trap action, so a naked `exit` in `trap '(:; exit) && ...'`
+     * uses the subshell's own $?, not the pre-trap status (smoosh
+     * builtin.trap.subshell.loud). Nor is it inside the parent's loops:
+     * `( for ...; break 2; done )` clamps at the subshell (semantics.
+     * subshell.break). */
+    sh->in_trap = 0;
+    sh->loop_depth  = 0;
+    sh->break_level = 0;
     for (int i = 0; i < NSIG; i++)
         sh->traps[i].set_in_this_shell = 0;
-    sh->traps[0].action = SHELL_TRAP_DEFAULT;   /* EXIT: not inherited by subshell */
+    /* Keep the parent's action STRINGS, marked inherited, so `trap` with no
+     * operands in the subshell can report them (POSIX; smoosh
+     * builtin.trap.supershell). They are display-only: every execution site
+     * checks the flag, and any trap modification wipes them. */
+    if (sh->traps[0].action != SHELL_TRAP_DEFAULT)
+        sh->traps[0].inherited = 1;      /* EXIT: never fired by the subshell */
     for (int i = 1; i < NSIG; i++) {
         const char *act = sh->traps[i].action;
         if (act == SHELL_TRAP_DEFAULT)   /* NULL: already default */
             continue;
         if (act[0] == '\0')              /* "": ignored, stays ignored */
             continue;
-        sh->traps[i].action = SHELL_TRAP_DEFAULT;
+        sh->traps[i].inherited = 1;
         struct sigaction sa;
         memset(&sa, 0, sizeof(sa));
         sigemptyset(&sa.sa_mask);
@@ -205,6 +220,7 @@ static const shell_builtin_t shell_builtins[] = {
     { "alias",    exec_builtin_alias     },
     { "unalias",  exec_builtin_unalias   },
     { "hash",     exec_builtin_hash      },
+    { "history",  exec_builtin_history   },
     { "kill",     exec_builtin_kill      },
     { "jobs",     exec_builtin_jobs      },
     { "fg",       exec_builtin_fg        },
@@ -692,6 +708,14 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
          * command substitution -- so cmdsub_exit was always 0 and
          * `v=$(cmd); ret=$?` always saw success. */
         sh->last_cmdsub_exit = 0;
+        /* Assignments are expanded and applied LEFT TO RIGHT, each visible to
+         * the next (`x=5 y=$((x+2)) cmd` gives y=7 -- smoosh
+         * semantics.special.assign.visible). Apply each into the shell vars as
+         * an overlay while expanding, then restore; the per-path machinery
+         * below re-applies them where they belong. */
+        char **aov_saved = calloc((size_t)nassigns, sizeof(char *));
+        int   *aov_had   = calloc((size_t)nassigns, sizeof(int));
+        int   *aov_exp   = calloc((size_t)nassigns, sizeof(int));
         for (int i = 0; i < nassigns; i++) {
             const char *eq = strchr(assigns[i], '=');
             if (!eq) { anames[i] = NULL; avals[i] = NULL; continue; }
@@ -699,7 +723,35 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
             anames[i] = strndup(assigns[i], nlen);
             /* Use expand_word_assign for assignment values - enables ~: expansion */
             avals[i]  = expand_word_assign(sh, eq + 1);
+            if (anames[i] && aov_saved && aov_had && aov_exp) {
+                const char *ov = vars_get(&sh->vars, anames[i]);
+                aov_had[i]   = ov != NULL;
+                aov_saved[i] = ov ? strdup(ov) : NULL;
+                aov_exp[i]   = vars_is_exported(&sh->vars, anames[i]);
+                vars_set(&sh->vars, anames[i], avals[i] ? avals[i] : "");
+            }
         }
+        /* Restore the overlay (reverse order handles duplicate names). The
+         * word/command paths apply the values again through their own
+         * save/restore; special builtins get persistence there. */
+        if (aov_saved && aov_had && aov_exp) {
+            for (int i = nassigns - 1; i >= 0; i--) {
+                if (!anames[i]) continue;
+                if (aov_had[i])
+                    vars_set(&sh->vars, anames[i], aov_saved[i] ? aov_saved[i] : "");
+                else {
+                    vars_unset(&sh->vars, anames[i]);
+                    /* A declared-but-unset EXPORTED var must stay declared:
+                     * vars_unset killed the entry, recreate the declaration. */
+                    if (aov_exp[i])
+                        vars_export(&sh->vars, anames[i]);
+                }
+                free(aov_saved[i]);
+            }
+        }
+        free(aov_saved);
+        free(aov_had);
+        free(aov_exp);
         cmdsub_exit = sh->last_cmdsub_exit;
     }
 
@@ -714,14 +766,25 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
             free(anames[i]);
         }
         free(anames); free(avals);
+        int redir_err = 0;
         if (redirs) {
             redirect_ctx_t rctx = {NULL, 0};
             redirect_apply(sh, redirs, &rctx);
+            redir_err = rctx.error;
             redirect_restore(&rctx);
         }
+        /* A failed redirection on a command with no words is an error:
+         * `<-` alone must not report success (dash exits 2; smoosh 1). */
+        if (redir_err) return 1;
         /* Return cmd-sub exit status (POSIX: last cmd-sub exit, or 0 if none) */
         return assign_err ? 1 : cmdsub_exit;
     }
+
+    /* Consume the disposable-tail-call flag for exactly THIS command: nested
+     * execution (a function body, eval'd text) must not inherit it, or their
+     * first external command would replace the process mid-flight. */
+    int in_place = sh->exec_in_place;
+    sh->exec_in_place = 0;
 
     /* With command: env-prefix assignments will be applied in child process
      * or function scope, not in parent shell */
@@ -729,6 +792,13 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
     /* 2. Expand all words */
     char **expanded = expand_words(sh, words);
     int cmd_rc = 0;
+    /* An interactive expansion error (see expansion_abort) discards the
+     * command; the shell itself carries on with the next one. */
+    if (sh->expansion_abort) {
+        cmd_rc = sh->expansion_abort;
+        sh->expansion_abort = 0;
+        goto cmd_done;
+    }
     if (unlikely(!expanded || !expanded[0]))
         goto cmd_done;
 
@@ -802,7 +872,8 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
             cmd_rc = 1;
             /* POSIX: Special builtins must cause non-interactive shell to exit on redirect error
              * EXCEPT when invoked via 'command' prefix */
-            if (!sh->interactive && !sh->in_command_builtin && is_special_builtin(cmd)) {
+            if (!sh->interactive && !sh->in_command_builtin && !sh->in_trap &&
+                is_special_builtin(cmd)) {
                 /* Exit immediately with error status */
                 exit(1);
             }
@@ -837,7 +908,13 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
          * redirections), so skip the restore in that case. */
         int abuiltin_keep = (strcmp(cmd, "exec") == 0 && argc == 1) ||
                             reduces_to_bare_exec(expanded, argc);
-        if (nassigns > 0 && abuiltin_saved && abuiltin_had && !abuiltin_keep) {
+        /* POSIX: variable assignments preceding a SPECIAL builtin remain in
+         * effect after it completes (smoosh semantics.special.assign.visible).
+         * Only the ASSIGNMENTS persist -- redirects are still restored (only
+         * `exec` keeps those; abuiltin_keep above). */
+        int assigns_persist = is_special_builtin(cmd);
+        if (nassigns > 0 && abuiltin_saved && abuiltin_had && !abuiltin_keep &&
+            !assigns_persist) {
             for (int ai = 0; ai < nassigns; ai++) {
                 if (!anames[ai]) continue;
                 if (abuiltin_had[ai])
@@ -899,8 +976,15 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
          * function from freeing the CALLER's list, which old_pos still needs. */
         sh->positional_base   = NULL;
         sh->positional_base_n = 0;
-        sh->break_level  = 0;  /* Isolate break/continue from caller */
-        sh->loop_depth   = 0;  /* Functions don't inherit loop context */
+        /* break/continue scoping: LEXICAL by default (a function body is its
+         * own loop context; smoosh builtin.break.lexical), DYNAMIC under
+         * `set -o nonlexicalctrl` (the caller's loops stay visible; smoosh
+         * builtin.break.nonlexical). Process boundaries always clamp -- see
+         * subshell_reset_traps. */
+        if (!sh->opt_nonlexicalctrl) {
+            sh->break_level = 0;
+            sh->loop_depth  = 0;
+        }
 
         vars_push_scope(&sh->vars);
         /* Import environment-prefix variables into function scope */
@@ -920,14 +1004,20 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
         sh->positional_n      = old_n;
         sh->positional_base   = old_base;
         sh->positional_base_n = old_base_n;
-        sh->break_level  = old_break;
-        sh->loop_depth   = old_loop;
+        if (!sh->opt_nonlexicalctrl) {
+            sh->break_level = old_break;
+            sh->loop_depth  = old_loop;
+        }
 
         if (redirs) redirect_restore(&rctx);
 
-        /* Absorb flow control: functions isolate break/continue/return from caller */
+        /* Absorb `return` at the function boundary. break/continue are
+         * absorbed too under the default LEXICAL scoping; with
+         * `set -o nonlexicalctrl` they propagate to the caller's loops. */
         if (cmd_rc == FLOW_RETURN) cmd_rc = sh->last_exit;
-        if (cmd_rc == FLOW_BREAK || cmd_rc == FLOW_CONTINUE) cmd_rc = 0;
+        if (!sh->opt_nonlexicalctrl &&
+            (cmd_rc == FLOW_BREAK || cmd_rc == FLOW_CONTINUE))
+            cmd_rc = 0;
         goto cmd_done;
     }
 
@@ -1002,7 +1092,28 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
             if (redirs) redirect_restore(&rctx);
             goto cmd_done;
         }
+        /* Remember the applet for `hash` output (smoosh builtin.hash.nonposix
+         * expects `touch hi` to make `hash | grep touch` succeed). */
+        {
+            int seen_i;
+            for (seen_i = 0; seen_i < sh->applets_seen_n; seen_i++)
+                if (strcmp(sh->applets_seen[seen_i], ap->name) == 0) break;
+            if (seen_i == sh->applets_seen_n &&
+                sh->applets_seen_n < (int)(sizeof(sh->applets_seen) / sizeof(sh->applets_seen[0])))
+                sh->applets_seen[sh->applets_seen_n++] = ap->name;
+        }
         cmd_rc = ap->fn(argc, expanded);
+        /* Same deal as the shell-builtin path above: flush while the
+         * redirection is still applied so a full/broken target is charged to
+         * THIS command, and clear the sticky stdio error flag so it cannot
+         * leak into later commands or the shell's exit status. Applets that
+         * check their own flush (echo, printf) already returned non-zero;
+         * stay silent here -- smoosh expects no extra shell diagnostic. */
+        if (fflush(stdout) != 0 || ferror(stdout)) {
+            if (errno != EPIPE && cmd_rc == 0)
+                cmd_rc = 1;
+            clearerr(stdout);
+        }
         if (redirs) redirect_restore(&rctx);
         goto cmd_done;
     }
@@ -1052,6 +1163,39 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
         goto cmd_done;
     }
 
+    /* Disposable tail call: exec in place, no fork. Only set by subshell-type
+     * children (async, cmdsub, pipeline stages) for their final command. */
+    if (in_place) {
+        redirect_ctx_t rctx = {NULL, 0};
+        if (redirs) {
+            redirect_apply(sh, redirs, &rctx);
+            if (rctx.error) _exit(1);
+        }
+        vars_export_env(&sh->vars);
+        for (int i = 0; i < nassigns; i++) {
+            if (anames[i])
+                setenv(anames[i], avals[i] ? avals[i] : "", 1);
+        }
+        signal(SIGPIPE, SIG_DFL);
+        fflush(NULL);
+        execv(exec_path, expanded);
+        if (errno == ENOEXEC) {
+            int xargc = 0;
+            while (expanded[xargc]) xargc++;
+            char **sargv = malloc((size_t)(xargc + 2) * sizeof(char *));
+            if (sargv) {
+                sargv[0] = (char *)"sh";
+                sargv[1] = (char *)exec_path;
+                for (int xi = 1; xi <= xargc; xi++)
+                    sargv[xi + 1] = expanded[xi];
+                execv("/proc/self/exe", sargv);
+                execvp("sh", sargv);
+            }
+        }
+        perror(exec_path);
+        _exit(127);
+    }
+
     pid_t pid = fork();
     if (unlikely(pid < 0)) {
         perror("fork");
@@ -1096,6 +1240,23 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
         }
 
         execv(exec_path, expanded);
+        if (errno == ENOEXEC) {
+            /* POSIX: a file the kernel refuses (no shebang, plain text) is run
+             * as a shell script -- re-exec ourselves on it. /proc/self/exe is
+             * exact; argv[0]-less fallback "sh" covers non-Linux. smoosh
+             * semantics.simple.link runs `cmd.sh` (no #!) via PATH=. */
+            int xargc = 0;
+            while (expanded[xargc]) xargc++;
+            char **sargv = malloc((size_t)(xargc + 2) * sizeof(char *));
+            if (sargv) {
+                sargv[0] = (char *)"sh";
+                sargv[1] = (char *)exec_path;
+                for (int xi = 1; xi <= xargc; xi++)
+                    sargv[xi + 1] = expanded[xi];
+                execv("/proc/self/exe", sargv);
+                execvp("sh", sargv);
+            }
+        }
         perror(exec_path);
         _exit(127);
     }
@@ -1195,6 +1356,13 @@ static void pipeline_elim_trivial_cat(node_t **stages, int *nstages)
 
 int exec_pipeline(shell_ctx_t *sh, node_t *node)
 {
+    /* If this whole shell process is a disposable child whose last act is this
+     * pipeline (async `a | b &`), the FINAL stage may exec in place so $! is
+     * the real pid of that command (smoosh background.pipe.pid). Capture and
+     * clear -- the flag must not leak into arbitrary stage bodies. */
+    int tail_exec = sh->exec_in_place;
+    sh->exec_in_place = 0;
+
     /* Collect pipeline stages into a flat array */
     node_t *stages[256];
     int     nstages = 0;
@@ -1210,8 +1378,12 @@ int exec_pipeline(shell_ctx_t *sh, node_t *node)
     /* Pipe optimisation: eliminate trivial `cat | ...` */
     pipeline_elim_trivial_cat(stages, &nstages);
 
-    if (nstages == 1)
-        return exec_node(sh, stages[0]);
+    if (nstages == 1) {
+        sh->exec_in_place = (tail_exec && stages[0]->type == N_CMD);
+        int one_rc = exec_node(sh, stages[0]);
+        sh->exec_in_place = 0;
+        return one_rc;
+    }
 
     /* Build pipes */
     int pipes[255][2];
@@ -1263,7 +1435,9 @@ int exec_pipeline(shell_ctx_t *sh, node_t *node)
                 close(pipes[k][1]);
             }
 
+            sh->exec_in_place = (tail_exec && stages[i]->type == N_CMD);
             int rc = exec_node(sh, stages[i]);
+            sh->exec_in_place = 0;
 
             if (saved_stdin >= 0) {
                 dup2(saved_stdin, STDIN_FILENO);
@@ -1317,6 +1491,9 @@ int exec_pipeline(shell_ctx_t *sh, node_t *node)
                 close(pipes[k][1]);
             }
 
+            /* A forked stage child is disposable: a single-command stage may
+             * exec in place (one process per stage, like dash). */
+            sh->exec_in_place = (stages[i]->type == N_CMD);
             int rc = exec_node(sh, stages[i]);
             /* FLOW sentinels must not leak through _exit (1002 & 0xff = 234):
              * `... | { return N; }` acts like exit N from the stage subshell,
@@ -1431,7 +1608,7 @@ static void loop_scratch_end(shell_ctx_t *sh, loop_scratch_t *ls)
  * text, so this is best-effort: simple commands and pipelines are rebuilt from
  * their words; a compound command gets a generic label. Returns a malloc'd
  * string (owned by the caller / the job entry) or NULL. */
-static char *describe_node(node_t *node)
+char *describe_node(node_t *node)
 {
     if (!node) return NULL;
     switch (node->type) {
@@ -1462,8 +1639,81 @@ static char *describe_node(node_t *node)
     }
     case N_REDIR:
         return describe_node(node->u.redir_node.body);
+    case N_AND: case N_OR: case N_SEQ: {
+        const char *sep = node->type == N_AND ? " && " :
+                          node->type == N_OR  ? " || " : "; ";
+        char *l = describe_node(node->u.binary.left);
+        char *r = describe_node(node->u.binary.right);
+        size_t len = (l ? strlen(l) : 0) + (r ? strlen(r) : 0) + 8;
+        char *s = malloc(len);
+        if (s) snprintf(s, len, "%s%s%s", l ? l : "", sep, r ? r : "");
+        free(l);
+        free(r);
+        return s;
+    }
+    case N_NOT: {
+        char *l = describe_node(node->u.binary.left);
+        size_t len = (l ? strlen(l) : 0) + 3;
+        char *s = malloc(len);
+        if (s) snprintf(s, len, "! %s", l ? l : "");
+        free(l);
+        return s;
+    }
     default:
         return strdup("(compound command)");
+    }
+}
+
+/* set -h: walk a function body and pre-hash every command word -- applets are
+ * recorded for `hash` listing, externals resolved into the path cache. */
+static void hash_function_body(shell_ctx_t *sh, node_t *node)
+{
+    if (!node) return;
+    switch (node->type) {
+    case N_CMD: {
+        char **w = node->u.cmd.words;
+        if (!w || !w[0] || strchr(w[0], '/') || strchr(w[0], '$'))
+            return;
+        if (find_shell_builtin(w[0]))
+            return;
+        const applet_t *hap = find_applet_by_name(w[0]);
+        if (hap) {
+            int si;
+            for (si = 0; si < sh->applets_seen_n; si++)
+                if (strcmp(sh->applets_seen[si], hap->name) == 0) return;
+            if (sh->applets_seen_n <
+                (int)(sizeof(sh->applets_seen) / sizeof(sh->applets_seen[0])))
+                sh->applets_seen[sh->applets_seen_n++] = hap->name;
+            return;
+        }
+        char rbuf[PATH_MAX];
+        char *rp = path_resolve(sh, w[0], rbuf, sizeof(rbuf));
+        if (rp)
+            path_cache_put(sh, w[0], rp);
+        return;
+    }
+    case N_PIPE: case N_AND: case N_OR: case N_SEQ: case N_NOT: case N_ASYNC:
+        hash_function_body(sh, node->u.binary.left);
+        hash_function_body(sh, node->u.binary.right);
+        return;
+    case N_SUBSHELL: case N_BRACE: case N_REDIR:
+        hash_function_body(sh, node->u.redir_node.body);
+        return;
+    case N_IF:
+        hash_function_body(sh, node->u.if_node.cond);
+        hash_function_body(sh, node->u.if_node.then_b);
+        hash_function_body(sh, node->u.if_node.elif_chain);
+        hash_function_body(sh, node->u.if_node.else_b);
+        return;
+    case N_WHILE: case N_UNTIL:
+        hash_function_body(sh, node->u.loop.cond);
+        hash_function_body(sh, node->u.loop.body);
+        return;
+    case N_FOR:
+        hash_function_body(sh, node->u.for_node.body);
+        return;
+    default:
+        return;
     }
 }
 
@@ -1567,15 +1817,51 @@ int exec_node(shell_ctx_t *sh, node_t *node)
              * not receive the shell's terminal signals. setpgid is done in both
              * child and parent to avoid the classic race. */
             setpgid(0, 0);
-            char ppid_buf[32];
-            snprintf(ppid_buf, sizeof(ppid_buf), "%d", (int)getppid());
-            vars_set(&sh->vars, "PPID", ppid_buf);
-            /* Background subshell: reset inherited signal traps to default. */
+            /* $PPID is NOT updated in a subshell (POSIX: set at shell init,
+             * unchanged thereafter; smoosh semantics.backtick.ppid). */
+            /* Background subshell: reset inherited signal traps to default,
+             * and ignore INT/QUIT (POSIX: asynchronous lists run with those
+             * ignored when job control is off, so a ^C aimed at the fg job or
+             * a QUIT can't kill them -- an explicit trap still overrides). */
             subshell_reset_traps(sh);
-            int r = exec_node(sh, node->u.binary.left);
+            if (!sh->job_control) {
+                signal(SIGINT,  SIG_IGN);
+                signal(SIGQUIT, SIG_IGN);
+            }
+            /* `( ... ) &`: this forked child IS the subshell -- don't fork a
+             * second time for the N_SUBSHELL node, or $! names a middleman and
+             * `kill $!` leaves the real work running (smoosh
+             * semantics.subshell.background.traps). Redirect-less wrappers
+             * unwrap; the EXIT-trap firing below covers what the N_SUBSHELL
+             * path would have done. */
+            node_t *abody = node->u.binary.left;
+            while (abody->type == N_SUBSHELL && !abody->u.redir_node.redirs)
+                abody = abody->u.redir_node.body;
+            /* The child's last act is running this node: a simple command may
+             * exec in place so $! IS the command's pid (smoosh
+             * semantics.background.pid); exec_pipeline does the same for its
+             * final stage via the inherited flag. */
+            if (abody->type == N_CMD || abody->type == N_PIPE)
+                sh->exec_in_place = 1;
+            int r = exec_node(sh, abody);
             /* Same FLOW-sentinel normalization as pipeline stages/subshells. */
             if (r == FLOW_RETURN) r = sh->last_exit;
             if (r >= FLOW_BREAK) r = 0;
+            /* Fire an EXIT trap the unwrapped subshell body set (mirrors the
+             * N_SUBSHELL child path). */
+            {
+                const char *aexit = sh->traps[0].action;
+                if (sh->traps[0].set_in_this_shell &&
+                    aexit != SHELL_TRAP_DEFAULT && aexit[0] != '\0') {
+                    sh->traps[0].action = SHELL_TRAP_DEFAULT;
+                    sh->last_exit = r;
+                    sh->in_trap++;
+                    sh->trap_entry_status = r;
+                    int atrc = shell_run_string(sh, aexit);
+                    sh->in_trap--;
+                    r = (atrc >= 0 && atrc <= 255) ? atrc : 0;
+                }
+            }
             fflush(NULL);
             _exit(r);
         }
@@ -1599,10 +1885,7 @@ int exec_node(shell_ctx_t *sh, node_t *node)
             break;
         }
         if (pid == 0) {
-            /* Update PPID in child process */
-            char ppid_buf[32];
-            snprintf(ppid_buf, sizeof(ppid_buf), "%d", (int)getppid());
-            vars_set(&sh->vars, "PPID", ppid_buf);
+            /* $PPID stays the value the MAIN shell computed at init (POSIX). */
 
             /* Subshell: reset inherited signal traps to default (POSIX). */
             subshell_reset_traps(sh);
@@ -1619,15 +1902,19 @@ int exec_node(shell_ctx_t *sh, node_t *node)
             /* Normalize other flow control to 0 (break/continue outside loop) */
             if (r >= FLOW_BREAK) r = 0;
             sh->last_exit = r;
-            /* POSIX: Fire EXIT trap only if it was set in this subshell */
+            /* POSIX: Fire EXIT trap only if it was set in this subshell.
+             * On this normal-termination path the ACTION's status becomes the
+             * subshell's exit status (smoosh semantics.return.trap: a
+             * `return 5` before an `echo`-ing EXIT trap yields 0). */
             const char *exit_act = sh->traps[0].action;
             if (sh->traps[0].set_in_this_shell &&
                 exit_act != SHELL_TRAP_DEFAULT && exit_act[0] != '\0') {
                 sh->traps[0].action = SHELL_TRAP_DEFAULT;
-                int exit_code = sh->last_exit;  /* Save exit code before trap */
-                shell_run_string(sh, exit_act);
-                /* Trap can modify $?, but subshell exits with original code */
-                r = exit_code;
+                sh->in_trap++;
+                sh->trap_entry_status = sh->last_exit;
+                int trap_rc = shell_run_string(sh, exit_act);
+                sh->in_trap--;
+                r = (trap_rc >= 0 && trap_rc <= 255) ? trap_rc : 0;
             }
             fflush(NULL);
             _exit(r);
@@ -1692,11 +1979,13 @@ int exec_node(shell_ctx_t *sh, node_t *node)
              * break raw broke the enclosing construct and hung modernish. */
             if (cond == FLOW_RETURN) { rc = cond; break; }
             if (cond == FLOW_BREAK) {
-                if (sh->break_level > 0) { sh->break_level--; rc = cond; break; }
+                if (sh->break_level > 0 && sh->loop_depth > 1) { sh->break_level--; rc = cond; break; }
+                sh->break_level = 0;
                 rc = 0; break;
             }
             if (cond == FLOW_CONTINUE) {
-                if (sh->break_level > 0) { sh->break_level--; rc = cond; break; }
+                if (sh->break_level > 0 && sh->loop_depth > 1) { sh->break_level--; rc = cond; break; }
+                sh->break_level = 0;
                 continue;   /* re-evaluate the condition */
             }
             if (cond != 0) break;
@@ -1708,11 +1997,17 @@ int exec_node(shell_ctx_t *sh, node_t *node)
              * case inside its arg-loop). break/continue are handled below. */
             if (rc == FLOW_RETURN) break;
             if (rc == FLOW_BREAK) {
-                if (sh->break_level > 0) { sh->break_level--; break; }
+                /* `break N` with N deeper than the outermost loop stops AT the
+                 * outermost and execution continues after it (POSIX; smoosh
+                 * semantics.subshell.break): propagate only while there is an
+                 * enclosing loop to hand it to. */
+                if (sh->break_level > 0 && sh->loop_depth > 1) { sh->break_level--; break; }
+                sh->break_level = 0;
                 rc = 0; break;
             }
             if (rc == FLOW_CONTINUE) {
-                if (sh->break_level > 0) { sh->break_level--; break; }
+                if (sh->break_level > 0 && sh->loop_depth > 1) { sh->break_level--; break; }
+                sh->break_level = 0;
                 rc = 0; continue;
             }
             {
@@ -1747,11 +2042,13 @@ int exec_node(shell_ctx_t *sh, node_t *node)
              * break/continue is absorbed, not propagated. See N_WHILE. */
             if (cond == FLOW_RETURN) { rc = cond; break; }
             if (cond == FLOW_BREAK) {
-                if (sh->break_level > 0) { sh->break_level--; rc = cond; break; }
+                if (sh->break_level > 0 && sh->loop_depth > 1) { sh->break_level--; rc = cond; break; }
+                sh->break_level = 0;
                 rc = 0; break;
             }
             if (cond == FLOW_CONTINUE) {
-                if (sh->break_level > 0) { sh->break_level--; rc = cond; break; }
+                if (sh->break_level > 0 && sh->loop_depth > 1) { sh->break_level--; rc = cond; break; }
+                sh->break_level = 0;
                 continue;   /* re-evaluate the condition */
             }
             if (cond == 0) break;
@@ -1763,11 +2060,17 @@ int exec_node(shell_ctx_t *sh, node_t *node)
              * case inside its arg-loop). break/continue are handled below. */
             if (rc == FLOW_RETURN) break;
             if (rc == FLOW_BREAK) {
-                if (sh->break_level > 0) { sh->break_level--; break; }
+                /* `break N` with N deeper than the outermost loop stops AT the
+                 * outermost and execution continues after it (POSIX; smoosh
+                 * semantics.subshell.break): propagate only while there is an
+                 * enclosing loop to hand it to. */
+                if (sh->break_level > 0 && sh->loop_depth > 1) { sh->break_level--; break; }
+                sh->break_level = 0;
                 rc = 0; break;
             }
             if (rc == FLOW_CONTINUE) {
-                if (sh->break_level > 0) { sh->break_level--; break; }
+                if (sh->break_level > 0 && sh->loop_depth > 1) { sh->break_level--; break; }
+                sh->break_level = 0;
                 rc = 0; continue;
             }
             {
@@ -1827,11 +2130,17 @@ int exec_node(shell_ctx_t *sh, node_t *node)
              * as a wrong result rather than a hang because the list is finite. */
             if (rc == FLOW_RETURN) break;
             if (rc == FLOW_BREAK) {
-                if (sh->break_level > 0) { sh->break_level--; break; }
+                /* `break N` with N deeper than the outermost loop stops AT the
+                 * outermost and execution continues after it (POSIX; smoosh
+                 * semantics.subshell.break): propagate only while there is an
+                 * enclosing loop to hand it to. */
+                if (sh->break_level > 0 && sh->loop_depth > 1) { sh->break_level--; break; }
+                sh->break_level = 0;
                 rc = 0; break;
             }
             if (rc == FLOW_CONTINUE) {
-                if (sh->break_level > 0) { sh->break_level--; break; }
+                if (sh->break_level > 0 && sh->loop_depth > 1) { sh->break_level--; break; }
+                sh->break_level = 0;
                 rc = 0; continue;
             }
             {
@@ -1877,6 +2186,10 @@ int exec_node(shell_ctx_t *sh, node_t *node)
 
     case N_FUNC:
         func_register(sh, node->u.func.name, node->u.func.body);
+        /* set -h: remember the location of each utility named in the body at
+         * DEFINITION time (POSIX; smoosh semantics.-h.nonposix). */
+        if (sh->opt_h)
+            hash_function_body(sh, node->u.func.body);
         rc = 0;
         break;
 
@@ -1939,11 +2252,19 @@ static int exec_builtin_exit(shell_ctx_t *sh, int argc, char **argv)
      * publish `code` before running the action (`trap 'echo $?' 0; exit 42`
      * must print 42, not the previous command's status). The trap may then
      * change $?, but the shell still exits with the original `code`. */
+    /* A naked `exit` inside a trap action exits with the status the shell
+     * had when the trap action started (POSIX). */
+    if (argc < 2 && sh->in_trap)
+        code = sh->trap_entry_status & 0xff;
     const char *exit_action = sh->traps[0].action;
-    if (exit_action != SHELL_TRAP_DEFAULT && exit_action[0] != '\0') {
+    if (exit_action != SHELL_TRAP_DEFAULT && exit_action[0] != '\0' &&
+        !sh->traps[0].inherited) {
         sh->traps[0].action = SHELL_TRAP_DEFAULT;
         sh->last_exit = code;
+        sh->in_trap++;
+        sh->trap_entry_status = code;
         shell_run_string(sh, exit_action);
+        sh->in_trap--;
     }
     exit(code);
     return code; /* unreachable */
@@ -2016,6 +2337,13 @@ static int exec_builtin_kill(shell_ctx_t *sh, int argc, char **argv)
         if (!arg)
             break;                    /* argv is NULL-terminated at argc */
         if (arg[0] == '%') {
+            /* Job IDs require job control (POSIX; smoosh builtin.kill.jobs
+             * kills by %1 only after `set -m` and expects failure before). */
+            if (!sh->opt_m && !sh->job_control) {
+                fprintf(stderr, "silex: kill: %s: no job control\n", arg);
+                rc = 1;
+                continue;
+            }
             /* Job spec: signal the whole process group (negative pgid). */
             job_t *j = parse_jobspec(sh, arg);
             if (!j) {
@@ -2053,6 +2381,8 @@ static int set_option_byname(shell_ctx_t *sh, const char *name, int value)
     else if (strcmp(name, "noglob")   == 0) sh->opt_f = value;
     else if (strcmp(name, "noexec")   == 0) sh->opt_n = value;
     else if (strcmp(name, "monitor")  == 0) sh->opt_m = value;
+    else if (strcmp(name, "nolog")    == 0) sh->opt_nolog = value;
+    else if (strcmp(name, "nonlexicalctrl") == 0) sh->opt_nonlexicalctrl = value;
     else if (strcmp(name, "noclobber")== 0) sh->opt_C = value;
     else if (strcmp(name, "allexport")== 0) sh->opt_a = value;
     else if (strcmp(name, "pipefail") == 0) sh->opt_pipefail = value;
@@ -2077,6 +2407,8 @@ static int shell_option_on(shell_ctx_t *sh, const char *n)
     else if (strcmp(n, "noglob")   == 0) return sh->opt_f;
     else if (strcmp(n, "noexec")   == 0) return sh->opt_n;
     else if (strcmp(n, "monitor")  == 0) return sh->opt_m;
+    else if (strcmp(n, "nolog")    == 0) return sh->opt_nolog;
+    else if (strcmp(n, "nonlexicalctrl") == 0) return sh->opt_nonlexicalctrl;
     else if (strcmp(n, "noclobber")== 0) return sh->opt_C;
     else if (strcmp(n, "pipefail") == 0) return sh->opt_pipefail;
     return -1;
@@ -2085,7 +2417,7 @@ static int shell_option_on(shell_ctx_t *sh, const char *n)
 static void set_print_options(shell_ctx_t *sh, int reusable)
 {
     static const char *const opts[] = {
-        "allexport", "errexit", "nounset", "xtrace", "noglob",
+        "allexport", "errexit", "nounset", "xtrace", "noglob", "nolog",
         "noexec", "monitor", "noclobber", "pipefail",
     };
     for (size_t i = 0; i < sizeof(opts) / sizeof(opts[0]); i++) {
@@ -2122,6 +2454,7 @@ static int exec_builtin_set(shell_ctx_t *sh, int argc, char **argv)
                 case 'f': sh->opt_f = 1; break;
                 case 'n': sh->opt_n = 1; break;
                 case 'm': sh->opt_m = 1; break;
+                case 'h': sh->opt_h = 1; break;
                 case 'C': sh->opt_C = 1; break;
                 case 'o':
                     if (i + 1 < argc) {
@@ -2150,6 +2483,7 @@ static int exec_builtin_set(shell_ctx_t *sh, int argc, char **argv)
                 case 'f': sh->opt_f = 0; break;
                 case 'n': sh->opt_n = 0; break;
                 case 'm': sh->opt_m = 0; break;
+                case 'h': sh->opt_h = 0; break;
                 case 'C': sh->opt_C = 0; break;
                 case 'o':
                     if (i + 1 < argc) {
@@ -2244,12 +2578,14 @@ static int exec_builtin_export(shell_ctx_t *sh, int argc, char **argv)
 
     int rc = 0;
     for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--") == 0)
+            continue;   /* end-of-options marker, not an operand */
         const char *eq = strchr(argv[i], '=');
         size_t vn = eq ? (size_t)(eq - argv[i]) : strlen(argv[i]);
         if (!valid_var_name(argv[i], vn)) {
             fprintf(stderr, "silex: export: %s: bad variable name\n", argv[i]);
             rc = 1;
-            if (!sh->interactive && !sh->in_command_builtin) exit(1);
+            if (!sh->interactive && !sh->in_command_builtin && !sh->in_trap) exit(1);
             continue;
         }
         if (eq) {
@@ -2260,7 +2596,7 @@ static int exec_builtin_export(shell_ctx_t *sh, int argc, char **argv)
                     rc = 1;
                     /* POSIX: export is a special builtin; exit non-interactive shell on error
                      * EXCEPT when invoked via 'command' prefix */
-                    if (!sh->interactive && !sh->in_command_builtin) {
+                    if (!sh->interactive && !sh->in_command_builtin && !sh->in_trap) {
                         free(name);
                         exit(1);
                     }
@@ -2293,7 +2629,7 @@ static int exec_builtin_unset(shell_ctx_t *sh, int argc, char **argv)
                 else if (*p == 'v') func_mode = 0;
                 else {
                     fprintf(stderr, "silex: unset: -%c: bad option\n", *p);
-                    if (!sh->interactive && !sh->in_command_builtin) exit(1);
+                    if (!sh->interactive && !sh->in_command_builtin && !sh->in_trap) exit(1);
                     return 1;
                 }
             }
@@ -2309,7 +2645,7 @@ static int exec_builtin_unset(shell_ctx_t *sh, int argc, char **argv)
             if (!valid_var_name(argv[i], strlen(argv[i]))) {
                 fprintf(stderr, "silex: unset: %s: bad variable name\n", argv[i]);
                 rc = 1;
-                if (!sh->interactive && !sh->in_command_builtin) exit(1);
+                if (!sh->interactive && !sh->in_command_builtin && !sh->in_trap) exit(1);
                 continue;
             }
             if (vars_unset_context(&sh->vars, argv[i], "unset") != 0) {
@@ -2320,7 +2656,7 @@ static int exec_builtin_unset(shell_ctx_t *sh, int argc, char **argv)
                  * this guard, `command unset RO` on a readonly var killed the
                  * shell, failing modernish's FTL_CMDSPEXIT init check. Matches
                  * the export and readonly builtins above. */
-                if (!sh->interactive && !sh->in_command_builtin) {
+                if (!sh->interactive && !sh->in_command_builtin && !sh->in_trap) {
                     exit(1);
                 }
             }
@@ -2341,12 +2677,14 @@ static int exec_builtin_readonly(shell_ctx_t *sh, int argc, char **argv)
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-p") == 0)
             continue;   /* already handled above; ignore a stray -p among names */
+        if (strcmp(argv[i], "--") == 0)
+            continue;   /* end-of-options marker, not an operand */
         const char *eq = strchr(argv[i], '=');
         size_t vn = eq ? (size_t)(eq - argv[i]) : strlen(argv[i]);
         if (!valid_var_name(argv[i], vn)) {
             fprintf(stderr, "silex: readonly: %s: bad variable name\n", argv[i]);
             rc = 1;
-            if (!sh->interactive && !sh->in_command_builtin) exit(1);
+            if (!sh->interactive && !sh->in_command_builtin && !sh->in_trap) exit(1);
             continue;
         }
         if (eq) {
@@ -2357,7 +2695,7 @@ static int exec_builtin_readonly(shell_ctx_t *sh, int argc, char **argv)
                     rc = 1;
                     /* POSIX: readonly is a special builtin; exit non-interactive shell on error
                      * EXCEPT when invoked via 'command' prefix */
-                    if (!sh->interactive && !sh->in_command_builtin) {
+                    if (!sh->interactive && !sh->in_command_builtin && !sh->in_trap) {
                         free(name);
                         exit(1);
                     }
@@ -2552,6 +2890,15 @@ static int exec_builtin_eval(shell_ctx_t *sh, int argc, char **argv)
     int rc = shell_run_string(sh, sb_str(&sb));
     sh->in_command_builtin = saved_icb;
     sb_free(&sb);
+    /* POSIX: a syntax error in the text run by eval is an error of a special
+     * builtin, so a non-interactive shell exits (unless eval was reached via
+     * `command`, which demotes it). Command failures inside valid text do NOT
+     * exit -- only the parse error does (smoosh parse.eval.error). */
+    if (sh->run_string_parse_error) {
+        sh->run_string_parse_error = 0;
+        if (!sh->interactive && !saved_icb && !sh->in_trap)
+            exit(2);
+    }
     return rc;
 }
 
@@ -2593,6 +2940,17 @@ static int exec_builtin_trap(shell_ctx_t *sh, int argc, char **argv)
     const char *action = argv[1];
     /* POSIX: trap action is stored as-is and expanded when trap fires */
     const char *trap_action = action;
+
+    /* Any trap modification discards the display-only inherited entries a
+     * subshell kept around for `trap` listing (smoosh builtin.trap.supershell:
+     * after `trap 'echo so long' EXIT` the parent's EXIT trap no longer
+     * lists). */
+    for (int wi = 0; wi < NSIG; wi++) {
+        if (sh->traps[wi].inherited) {
+            sh->traps[wi].action    = SHELL_TRAP_DEFAULT;
+            sh->traps[wi].inherited = 0;
+        }
+    }
 
     int rc = 0;
     for (int i = 2; i < argc; i++) {
@@ -3218,8 +3576,15 @@ static int exec_builtin_fgbg(shell_ctx_t *sh, int argc, char **argv, int foregro
         }
     }
 
-    if (j->command)
-        fprintf(stderr, "%s\n", j->command);
+    /* fg reports the resumed command on STDOUT (bash/dash agree; smoosh's
+     * sh.monitor.fg does `fg >output` and greps it); bg's notice stays on
+     * stderr-style informational output. */
+    if (j->command) {
+        if (foreground)
+            printf("%s\n", j->command);
+        else
+            printf("[%d]+ %s &\n", j->id, j->command);  /* bash-style notice */
+    }
 
     if (foreground && sh->job_control && sh->tty_fd >= 0)
         tcsetpgrp(sh->tty_fd, j->pgid);   /* hand the terminal to the job first */
@@ -3356,7 +3721,7 @@ static int exec_builtin_source(shell_ctx_t *sh, int argc, char **argv)
                     fprintf(stderr, "%s: %s: not found\n", cmd, filename);
                     sh->last_exit = 1;
                     /* POSIX: source/. is a special builtin; exit non-interactive shell on error */
-                    if (!sh->interactive) {
+                    if (!sh->interactive && !sh->in_trap) {
                         exit(1);
                     }
                     return 1;
@@ -3405,6 +3770,11 @@ static int exec_builtin_source(shell_ctx_t *sh, int argc, char **argv)
     sh->in_command_builtin = 0;
     int rc = shell_run_file(sh, actual_path);
     sh->in_command_builtin = saved_icb;
+    /* break/continue are confined to the sourced script (smoosh
+     * builtin.dot.break: a `break` in the dot script does NOT break the
+     * caller's loop; `return` still returns to the caller, handled above). */
+    if (rc == FLOW_BREAK || rc == FLOW_CONTINUE)
+        rc = 0;
     return rc;
 }
 
@@ -4034,6 +4404,21 @@ static int exec_builtin_unalias(shell_ctx_t *sh, int argc, char **argv)
     return rc;
 }
 
+/* history [-c]: list (or clear) the interactive command history. Non-POSIX
+ * but exercised by smoosh builtin.history.nonposix. */
+static int exec_builtin_history(shell_ctx_t *sh, int argc, char **argv)
+{
+    if (argc >= 2 && strcmp(argv[1], "-c") == 0) {
+        for (int i = 0; i < sh->history_n; i++)
+            free(sh->history[i]);
+        sh->history_n = 0;
+        return 0;
+    }
+    for (int i = 0; i < sh->history_n; i++)
+        printf("%5d  %s\n", i + 1, sh->history[i]);
+    return 0;
+}
+
 static int exec_builtin_hash(shell_ctx_t *sh, int argc, char **argv)
 {
     /* hash [-r] [name ...] */
@@ -4043,6 +4428,7 @@ static int exec_builtin_hash(shell_ctx_t *sh, int argc, char **argv)
     /* Check for -r flag (clear cache) */
     if (i < argc && strcmp(argv[i], "-r") == 0) {
         path_cache_clear(sh);
+        sh->applets_seen_n = 0;
         was_r_flag = 1;
         i++;
     }
@@ -4052,6 +4438,8 @@ static int exec_builtin_hash(shell_ctx_t *sh, int argc, char **argv)
         /* If no -r flag was given, print the hash table */
         if (!was_r_flag) {
             /* Display cached entries */
+            for (int j = 0; j < sh->applets_seen_n; j++)
+                printf("builtin %s\n", sh->applets_seen[j]);
             for (int j = 0; j < 256; j++) {
                 path_cache_entry_t *e = sh->path_cache[j];
                 while (e) {

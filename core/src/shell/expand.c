@@ -29,6 +29,18 @@ static void expand_into(shell_ctx_t *sh, const char *word, strbuf_t *out,
 static const char *scan_braced_end(const char *p, int outer_dq);
 static const char *cmdsubst_body_end(const char *p);
 
+/* Abort an expansion with an error. A NON-interactive shell exits (POSIX);
+ * an interactive one (or forced -i) aborts only the current command: mark the
+ * shell so exec_simple_cmd discards the command with status `code`, and
+ * unwind by returning through the callers (smoosh
+ * semantics.interactive.expansion.exit). */
+static void expansion_abort(shell_ctx_t *sh, int code)
+{
+    if (!sh->interactive)
+        exit(code);
+    sh->expansion_abort = code;
+}
+
 /* -------------------------------------------------------------------------
  * Helpers
  * ------------------------------------------------------------------------- */
@@ -484,7 +496,8 @@ static char *expand_braced_body(shell_ctx_t *sh, const char *body, int in_dquote
     /* Empty expansion ${} is an error */
     if (body[0] == '\0') {
         fprintf(stderr, "silex: bad substitution\n");
-        exit(2);
+        expansion_abort(sh, 2);
+        return arena_strdup(sh->scratch, "");
     }
 
     /* Bash indirect (${!name}) and prefix (${!name@}, ${!name*}) expansion are
@@ -498,7 +511,8 @@ static char *expand_braced_body(shell_ctx_t *sh, const char *body, int in_dquote
     if (body[0] == '!' &&
         (is_name_char((unsigned char)body[1]) || body[1] == '@' || body[1] == '*')) {
         fprintf(stderr, "silex: bad substitution\n");
-        exit(2);
+        expansion_abort(sh, 2);
+        return arena_strdup(sh->scratch, "");
     }
 
     /* ${#VAR} — length */
@@ -507,7 +521,8 @@ static char *expand_braced_body(shell_ctx_t *sh, const char *body, int in_dquote
         const char *val = sh_getvar(sh, varname);
         if (!val && sh->opt_u) {
             fprintf(stderr, "silex: %s: unbound variable\n", varname);
-            exit(1);
+            expansion_abort(sh, 1);
+            return arena_strdup(sh->scratch, "");
         }
         char buf[32];
         snprintf(buf, sizeof(buf), "%zu", val ? strlen(val) : (size_t)0);
@@ -618,7 +633,12 @@ static char *expand_braced_body(shell_ctx_t *sh, const char *body, int in_dquote
                 sb_init(&sb, 64);
                 { int sj_ = sh->pp_join_unquoted; int wd_ = sh->pp_word_dq;
                   sh->pp_join_unquoted = !in_dquote; sh->pp_word_dq = in_dquote;
-                  expand_into(sh, word_part, &sb, in_dquote);
+                  /* Tilde expansion applies to the word of ${var-word} and
+                   * friends when unquoted (smoosh semantics.var.format.tilde:
+                   * `: ${x:=~}` must assign $HOME). */
+                  char *til_ = in_dquote ? NULL : expand_tilde(sh, word_part, 0);
+                  expand_into(sh, til_ ? til_ : word_part, &sb, in_dquote);
+                  free(til_);
                   sh->pp_join_unquoted = sj_; sh->pp_word_dq = wd_; }
                 char *r = arena_strdup(sh->scratch, sb_str(&sb));
                 sb_free(&sb);
@@ -635,7 +655,12 @@ static char *expand_braced_body(shell_ctx_t *sh, const char *body, int in_dquote
                 sb_init(&sb, 64);
                 { int sj_ = sh->pp_join_unquoted; int wd_ = sh->pp_word_dq;
                   sh->pp_join_unquoted = !in_dquote; sh->pp_word_dq = in_dquote;
-                  expand_into(sh, word_part, &sb, in_dquote);
+                  /* Tilde expansion applies to the word of ${var-word} and
+                   * friends when unquoted (smoosh semantics.var.format.tilde:
+                   * `: ${x:=~}` must assign $HOME). */
+                  char *til_ = in_dquote ? NULL : expand_tilde(sh, word_part, 0);
+                  expand_into(sh, til_ ? til_ : word_part, &sb, in_dquote);
+                  free(til_);
                   sh->pp_join_unquoted = sj_; sh->pp_word_dq = wd_; }
                 char *r = arena_strdup(sh->scratch, sb_str(&sb));
                 sb_free(&sb);
@@ -654,7 +679,12 @@ static char *expand_braced_body(shell_ctx_t *sh, const char *body, int in_dquote
                 int guards = sh->emit_guards;
                 { int sj_ = sh->pp_join_unquoted; int wd_ = sh->pp_word_dq;
                   sh->pp_join_unquoted = !in_dquote; sh->pp_word_dq = in_dquote;
-                  expand_into(sh, word_part, &sb, in_dquote);
+                  /* Tilde expansion applies to the word of ${var-word} and
+                   * friends when unquoted (smoosh semantics.var.format.tilde:
+                   * `: ${x:=~}` must assign $HOME). */
+                  char *til_ = in_dquote ? NULL : expand_tilde(sh, word_part, 0);
+                  expand_into(sh, til_ ? til_ : word_part, &sb, in_dquote);
+                  free(til_);
                   sh->pp_join_unquoted = sj_; sh->pp_word_dq = wd_; }
                 const char *newval = sb_str(&sb);
                 /* The VARIABLE must receive the decoded, literal value; the
@@ -678,12 +708,18 @@ static char *expand_braced_body(shell_ctx_t *sh, const char *body, int in_dquote
                 sb_init(&sb, 64);
                 { int sj_ = sh->pp_join_unquoted; int wd_ = sh->pp_word_dq;
                   sh->pp_join_unquoted = !in_dquote; sh->pp_word_dq = in_dquote;
-                  expand_into(sh, word_part, &sb, in_dquote);
+                  /* Tilde expansion applies to the word of ${var-word} and
+                   * friends when unquoted (smoosh semantics.var.format.tilde:
+                   * `: ${x:=~}` must assign $HOME). */
+                  char *til_ = in_dquote ? NULL : expand_tilde(sh, word_part, 0);
+                  expand_into(sh, til_ ? til_ : word_part, &sb, in_dquote);
+                  free(til_);
                   sh->pp_join_unquoted = sj_; sh->pp_word_dq = wd_; }
                 fprintf(stderr, "%s: %s\n", varname,
                         sb_len(&sb) > 0 ? sb_str(&sb) : "parameter null or not set");
                 sb_free(&sb);
-                exit(1);
+                expansion_abort(sh, 1);
+                return arena_strdup(sh->scratch, "");
             }
             if (pos_list)
                 return braced_positionals(sh, varname[0], in_dquote);
@@ -871,6 +907,7 @@ static char *cmd_subst(shell_ctx_t *sh, const char *cmd)
          * by a pipeline stage inside a command substitution). */
         for (int i = 0; i < NSIG; i++)
             sub.traps[i].set_in_this_shell = 0;
+        sub.disposable = 1;   /* the final command may tail-exec */
         shell_run_string(&sub, cmd);
         int ex = sub.last_exit;
         /* Fire EXIT trap if set in this command substitution */
@@ -878,7 +915,11 @@ static char *cmd_subst(shell_ctx_t *sh, const char *cmd)
         if (sub.traps[0].set_in_this_shell &&
             exit_act != SHELL_TRAP_DEFAULT && exit_act[0] != '\0') {
             sub.traps[0].action = SHELL_TRAP_DEFAULT;
-            shell_run_string(&sub, exit_act);
+            sub.in_trap++;
+            sub.trap_entry_status = ex;
+            int trap_rc = shell_run_string(&sub, exit_act);
+            sub.in_trap--;
+            ex = (trap_rc >= 0 && trap_rc <= 255) ? trap_rc : 0;
         }
         shell_free(&sub);
         fflush(NULL);
@@ -1007,7 +1048,8 @@ static void arith_read_operand(arith_ctx_t *ac, char *buf, size_t bufsz)
             const char *v = sh_getvar(ac->sh, inner);
             if (!v && ac->sh->opt_u) {
                 fprintf(stderr, "silex: %s: unbound variable\n", inner);
-                exit(1);
+                expansion_abort(ac->sh, 1);
+                return;
             }
             if (v)
                 while (*v && ni < bufsz - 1)
@@ -1150,6 +1192,22 @@ static long arith_primary(arith_ctx_t *ac)
         }
 
         const char *v = is_num ? NULL : sh_getvar(ac->sh, namebuf);
+        /* set -u: reading an unset name in arithmetic is an error, exactly as
+         * $name outside arithmetic would be (smoosh semantics.var.dashu).
+         * A plain assignment `$((x = 5))` writes without reading, so it is
+         * exempt; `x += 1`, `x++` etc. all read first and are not. */
+        if (!is_num && namebuf[0] != '\0' && !v && ac->sh->opt_u) {
+            size_t save_pos = ac->pos;
+            arith_skip_ws(ac);
+            const char *q = ac->src + ac->pos;
+            int plain_assign = (q[0] == '=' && q[1] != '=');
+            ac->pos = save_pos;
+            if (!plain_assign) {
+                fprintf(stderr, "silex: %s: unbound variable\n", namebuf);
+                expansion_abort(ac->sh, 1);
+                return 0;
+            }
+        }
         long cur_val = is_num ? litval : (v ? atol(v) : 0L);
 
         arith_skip_ws(ac);
@@ -1458,8 +1516,32 @@ static const char *cmdsubst_body_end(const char *p)
 {
     int depth = 1;
     int prev  = '(';
+    /* `case ... esac` awareness: an unprefixed pattern's bare `)` (POSIX
+     * allows `foo) cmd;;`) is NOT a paren that closes the substitution, so
+     * while inside case..esac no ( or ) adjusts depth (pairs in the body are
+     * balanced anyway). Tracked by spotting the words at command position. */
+    int case_depth = 0;
+    char kw[8]; int kwlen = 0; int at_cmdpos = 1, word_cmdpos = 0;
     while (*p && depth > 0) {
         char c = *p;
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_') {
+            if (kwlen == 0) word_cmdpos = at_cmdpos;
+            if (kwlen < 7) kw[kwlen++] = c;
+            else word_cmdpos = 0;
+        } else {
+            if (kwlen) {
+                kw[kwlen] = '\0';
+                if (word_cmdpos && strcmp(kw, "case") == 0) case_depth++;
+                else if (word_cmdpos && strcmp(kw, "esac") == 0 && case_depth > 0)
+                    case_depth--;
+                kwlen = 0;
+                at_cmdpos = 0;   /* the word we just saw fills the command slot */
+            }
+            if (c == ';' || c == '\n' || c == '&' || c == '|' || c == '(')
+                at_cmdpos = 1;
+            else if (c != ' ' && c != '\t')
+                at_cmdpos = 0;
+        }
         if (c == '#' &&
             (prev == ' ' || prev == '\t' || prev == '\n' || prev == '(' ||
              prev == ';' || prev == '&'  || prev == '|')) {
@@ -1489,8 +1571,11 @@ static const char *cmdsubst_body_end(const char *p)
             if (*p) p++;
             continue;
         }
-        if (c == '(') { depth++; p++; }
-        else if (c == ')') { depth--; if (depth == 0) break; p++; }
+        if (c == '(') { if (!case_depth) depth++; p++; }
+        else if (c == ')') {
+            if (!case_depth) { depth--; if (depth == 0) break; }
+            p++;
+        }
         else p++;
     }
     return p;
@@ -1950,7 +2035,8 @@ static void expand_into(shell_ctx_t *sh, const char *word, strbuf_t *out,
                      * interned, NUL-terminated name -- the VLA copy that used
                      * to be here was redundant AND sized by input. */
                     fprintf(stderr, "silex: %s: unbound variable\n", name);
-                    exit(1);
+                    expansion_abort(sh, 1);
+                    return;
                 }
                 continue;
             }
@@ -1962,7 +2048,8 @@ static void expand_into(shell_ctx_t *sh, const char *word, strbuf_t *out,
                 if (v) emit_data(sh, out, v);
                 else if (sh->opt_u) {
                     fprintf(stderr, "silex: $%c: unbound variable\n", *p);
-                    exit(1);
+                    expansion_abort(sh, 1);
+                    return;
                 }
                 p++;
                 continue;

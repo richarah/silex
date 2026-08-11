@@ -7,6 +7,8 @@
 #include "shell.h"
 
 int exec_node(shell_ctx_t *sh, node_t *node);
+/* One-line rendering of a node (malloc'd) -- job labels, history. */
+char *describe_node(node_t *node);
 int exec_simple_cmd(shell_ctx_t *sh, char **words, char **assigns, redir_t *redirs);
 int exec_pipeline(shell_ctx_t *sh, node_t *node);
 

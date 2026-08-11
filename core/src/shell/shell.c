@@ -40,9 +40,24 @@ void shell_signal_handler(int sig)
     const char *action = g_trap_shell->traps[sig].action;
     if (!action) return;                  /* SIG_DFL */
     if (action[0] == '\0') return;        /* SIG_IGN (SHELL_TRAP_IGNORE) */
+    if (g_trap_shell->traps[sig].inherited) return;  /* display-only */
 
-    /* Run the trap action string */
-    shell_run_string(g_trap_shell, action);
+    /* Run the trap action string. POSIX: $? is restored after a signal trap
+     * action, and a naked `exit` inside it uses the pre-trap status. Under
+     * set -e a failing command in the action exits the shell (smoosh
+     * semantics.errexit.trap). */
+    shell_ctx_t *sh = g_trap_shell;
+    int save_status = sh->last_exit;
+    sh->in_trap++;
+    sh->trap_entry_status = save_status;
+    sh->errexit_fired = 0;
+    int rc = shell_run_string(sh, action);
+    sh->in_trap--;
+    if (sh->errexit_fired && !sh->interactive) {
+        sh->errexit_fired = 0;
+        exit(rc & 0xff ? rc & 0xff : 1);
+    }
+    sh->last_exit = save_status;
 }
 
 /* -------------------------------------------------------------------------
@@ -54,7 +69,10 @@ static int errexit_should_stop(shell_ctx_t *sh, int rc)
 {
     int exempt = sh->and_or_exempt;
     sh->and_or_exempt = 0;
-    return sh->opt_e && rc != 0 && !sh->in_cond && !exempt;
+    int stop = sh->opt_e && rc != 0 && !sh->in_cond && !exempt;
+    if (stop)
+        sh->errexit_fired = 1;   /* lets a trap-action caller see the -e stop */
+    return stop;
 }
 
 /* -------------------------------------------------------------------------
@@ -178,6 +196,21 @@ int shell_init(shell_ctx_t *sh, int argc, char **argv)
     return 0;
 }
 
+void shell_history_add(shell_ctx_t *sh, const char *text)
+{
+    if (!sh->interactive || sh->opt_nolog || !text || !*text)
+        return;
+    if (sh->history_n >= sh->history_cap) {
+        int ncap = sh->history_cap ? sh->history_cap * 2 : 64;
+        char **nh = realloc(sh->history, (size_t)ncap * sizeof(char *));
+        if (!nh) return;
+        sh->history = nh;
+        sh->history_cap = ncap;
+    }
+    sh->history[sh->history_n] = strdup(text);
+    if (sh->history[sh->history_n]) sh->history_n++;
+}
+
 /* -------------------------------------------------------------------------
  * shell_run_string
  * ------------------------------------------------------------------------- */
@@ -240,16 +273,39 @@ int shell_run_string(shell_ctx_t *sh, const char *script)
     parser_set_aliases(&par, shell_alias_lookup_cb, sh);
 
     int rc = 0;
+    sh->run_string_parse_error = 0;
     for (;;) {
         node_t *node = parser_parse(&par);
         if (par.error) {
             sh->last_exit = 2;  /* Parse error returns exit code 2 */
+            sh->run_string_parse_error = 1;
             break;
         }
         if (!node) break;  /* EOF */
 
         if (!sh->opt_n) {
+            /* Disposable child (command substitution): its LAST command may
+             * tail-exec so the executed program keeps this process identity
+             * ($PPID reads the real parent -- smoosh semantics.backtick.ppid).
+             * Not if any trap is armed: exec would silently drop it. */
+            if (sh->interactive) {
+                char *h_ = describe_node(node);
+                shell_history_add(sh, h_);
+                free(h_);
+            }
+            if (sh->disposable && node->type == N_CMD && parser_at_eof(&par)) {
+                int has_trap = 0;
+                for (int ti = 0; ti < NSIG; ti++)
+                    if (sh->traps[ti].set_in_this_shell &&
+                        sh->traps[ti].action != SHELL_TRAP_DEFAULT) {
+                        has_trap = 1;
+                        break;
+                    }
+                if (!has_trap)
+                    sh->exec_in_place = 1;
+            }
             rc = exec_node(sh, node);
+            sh->exec_in_place = 0;
             /* Flow control (FLOW_BREAK / FLOW_CONTINUE / FLOW_RETURN) must
              * propagate to the CALLER, because this runs the argument of `eval`,
              * which is transparent to return/break/continue -- they act on the
@@ -294,7 +350,11 @@ int shell_run_string(shell_ctx_t *sh, const char *script)
 
 int shell_run_file(shell_ctx_t *sh, const char *path)
 {
-    sh->interactive = 0;  /* Running from file: non-interactive */
+    /* Running from a file is normally non-interactive, but an explicit -i
+     * keeps interactive semantics (sh.interactive preset by the caller;
+     * smoosh builtin.readonly.assign.interactive runs `sh -i scr` and expects
+     * errors to abort only the offending command). Don't clobber it here --
+     * `.` also routes through this function and must keep the CALLER's mode. */
     FILE *fp = fopen(path, "r");
     if (!fp) {
         perror(path);
@@ -385,6 +445,11 @@ int shell_run_file(shell_ctx_t *sh, const char *path)
         if (!node) break;  /* EOF */
 
         if (!sh->opt_n) {
+            if (sh->interactive) {
+                char *h_ = describe_node(node);
+                shell_history_add(sh, h_);
+                free(h_);
+            }
             rc = exec_node(sh, node);
             /* FLOW_RETURN inside a sourced script acts like exit from the script */
             if (rc == FLOW_RETURN) {
@@ -546,8 +611,12 @@ static int shell_run_interactive(shell_ctx_t *sh)
             prompt = vars_get(&sh->vars, "PS2");
             if (!prompt) prompt = "> ";
         }
-        fputs(prompt, stdout);
+        /* POSIX: prompts go to STANDARD ERROR (smoosh expects `$ ` on the
+         * .err channel), and stdout must be flushed first so output and
+         * prompts interleave correctly. */
         fflush(stdout);
+        fputs(prompt, stderr);
+        fflush(stderr);
 
         interactive_sigint = 0;
         ssize_t r = getline(&line, &linecap, stdin);
@@ -578,7 +647,13 @@ static int shell_run_interactive(shell_ctx_t *sh)
         if (input_incomplete(buf))
             continue;                   /* read another line under PS2 */
 
-        /* Parse and run the accumulated command from a string. */
+        /* Record the raw line in the history, then parse and run it. */
+        {
+            size_t hl = strlen(buf);
+            while (hl && buf[hl-1] == '\n') buf[--hl] = '\0';
+            shell_history_add(sh, buf);
+            if (hl < bufcap) buf[hl] = '\0';
+        }
         lexer_t  lex;
         parser_t par;
         lexer_init_str(&lex, buf, &sh->parse_arena);
@@ -605,7 +680,10 @@ static int shell_run_interactive(shell_ctx_t *sh)
 
 int shell_run_stdin(shell_ctx_t *sh)
 {
-    int interactive = isatty(STDIN_FILENO);
+    /* -i forces interactive even when stdin is a pipe/heredoc (POSIX; smoosh
+     * sh.ps1.override): prompts are printed and errors don't abort the shell.
+     * Otherwise auto-detect from the terminal. */
+    int interactive = sh->interactive || isatty(STDIN_FILENO);
     sh->interactive = interactive;
     shell_init_job_control(sh);
 
@@ -632,11 +710,14 @@ int shell_run_stdin(shell_ctx_t *sh)
     int rc = 0;
     for (;;) {
         node_t *node = parser_parse(&par);
-        if (!node) break;
+        /* Check the error flag BEFORE the NULL check: a parse error returns
+         * NULL, and testing !node first silently swallowed the error, so
+         * `echo 'eval )' | silex` exited 0 instead of 2 (smoosh parse.error). */
         if (par.error) {
             sh->last_exit = 2;  /* Parse error in non-interactive mode */
             break;
         }
+        if (!node) break;
 
         if (!sh->opt_n) {
             rc = exec_node(sh, node);
@@ -662,6 +743,11 @@ void positional_free(shell_ctx_t *sh);
 
 void shell_free(shell_ctx_t *sh)
 {
+    for (int hi = 0; hi < sh->history_n; hi++)
+        free(sh->history[hi]);
+    free(sh->history);
+    sh->history = NULL;
+
     path_cache_clear(sh);
     positional_free(sh);
     arena_free(&sh->parse_arena);

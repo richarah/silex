@@ -146,9 +146,14 @@ int applet_echo(int argc, char **argv)
     if (!opt_n && !stopped)
         putchar('\n');
 
-    /* Check for write errors (e.g., writing to /dev/full) */
-    if (fflush(stdout) != 0 || ferror(stdout))
+    /* Check for write errors (e.g., writing to /dev/full). Clear the sticky
+     * error flag: when echo runs in-process inside the shell, leaving it set
+     * makes the shell's exit-time flush report a stale write error and poison
+     * the script's exit status (smoosh builtin.echo.exitcode). */
+    if (fflush(stdout) != 0 || ferror(stdout)) {
+        clearerr(stdout);
         return 1;
+    }
 
     return 0;
 }

@@ -290,9 +290,32 @@ static void scan_cmd_subst(lexer_t *l)
     /* Char before the current one, to spot a `#` in command position. Seeded
      * with '(' (the just-consumed `$(`), itself a command-word delimiter. */
     int prev = '(';
+    /* `case ... esac` awareness (mirrors cmdsubst_body_end in expand.c): an
+     * unprefixed case pattern's bare `)` must not close the substitution.
+     * While inside case..esac, parens don't adjust depth at all. */
+    int case_depth = 0;
+    char kw[8]; int kwlen = 0; int at_cmdpos = 1, word_cmdpos = 0;
     while (depth > 0) {
         int c = lexer_getc(l);
         if (c == EOF) break;
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_') {
+            if (kwlen == 0) word_cmdpos = at_cmdpos;
+            if (kwlen < 7) kw[kwlen++] = (char)c;
+            else word_cmdpos = 0;
+        } else {
+            if (kwlen) {
+                kw[kwlen] = '\0';
+                if (word_cmdpos && strcmp(kw, "case") == 0) case_depth++;
+                else if (word_cmdpos && strcmp(kw, "esac") == 0 && case_depth > 0)
+                    case_depth--;
+                kwlen = 0;
+                at_cmdpos = 0;   /* the word we just saw fills the command slot */
+            }
+            if (c == ';' || c == '\n' || c == '&' || c == '|' || c == '(')
+                at_cmdpos = 1;
+            else if (c != ' ' && c != '\t')
+                at_cmdpos = 0;
+        }
         if (c == '#' &&
             (prev == ' ' || prev == '\t' || prev == '\n' || prev == '(' ||
              prev == ';' || prev == '&'  || prev == '|')) {
@@ -324,10 +347,11 @@ static void scan_cmd_subst(lexer_t *l)
                 wordbuf_append(l, (char)e);
             }
         } else if (c == '(') {
-            depth++;
+            if (!case_depth) depth++;
             wordbuf_append(l, (char)c);
         } else if (c == ')') {
-            depth--;
+            if (!case_depth) depth--;
+            else { wordbuf_append(l, ')'); continue; }
             wordbuf_append(l, ')');
         } else if (c == '\'') {
             wordbuf_append(l, '\'');

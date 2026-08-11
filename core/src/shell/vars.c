@@ -198,7 +198,13 @@ int vars_set_context(vars_t *v, const char *name, const char *value, const char 
         if (e) {
             if (e->readonly) {
                 if (ctx)
-                    fprintf(stderr, "%s: %s: is read only\n", ctx, name);
+                    if (strcmp(ctx, "unset") == 0)
+                        if (strcmp(ctx, "unset") == 0)
+            fprintf(stderr, "%s: %s is read-only\n", ctx, name);
+        else
+            fprintf(stderr, "%s: %s: is read only\n", ctx, name);
+                    else
+                        fprintf(stderr, "%s: %s: is read only\n", ctx, name);
                 else
                     fprintf(stderr, "silex: %s: readonly variable\n", name);
                 return 1;
@@ -287,7 +293,10 @@ int vars_export_context(vars_t *v, const char *name, const char *ctx)
         return 0;
     }
     if (e->readonly && ctx) {
-        fprintf(stderr, "%s: %s: is read only\n", ctx, name);
+        if (strcmp(ctx, "unset") == 0)
+            fprintf(stderr, "%s: %s is read-only\n", ctx, name);
+        else
+            fprintf(stderr, "%s: %s: is read only\n", ctx, name);
         return 1;
     }
     e->exported = 1;
@@ -328,6 +337,12 @@ int vars_unset_context(vars_t *v, const char *name, const char *ctx)
             if (strcmp(e->name, name) == 0) {
                 if (e->readonly) {
                     if (ctx)
+                        if (strcmp(ctx, "unset") == 0)
+                        if (strcmp(ctx, "unset") == 0)
+            fprintf(stderr, "%s: %s is read-only\n", ctx, name);
+        else
+            fprintf(stderr, "%s: %s: is read only\n", ctx, name);
+                    else
                         fprintf(stderr, "%s: %s: is read only\n", ctx, name);
                     else
                         fprintf(stderr, "silex: %s: readonly variable\n", name);
@@ -350,6 +365,19 @@ int vars_unset_context(vars_t *v, const char *name, const char *ctx)
     /* Not in the shell table, but a bare `environ` entry may still linger
      * (e.g. inherited but never imported): clear it too so unset is complete. */
     unsetenv(name);
+    return 0;
+}
+
+int vars_is_exported(vars_t *v, const char *name)
+{
+    for (var_scope_t *s = v->scope; s != NULL; s = s->parent) {
+        for (int i = 0; i < VARS_HASH_SIZE; i++) {
+            for (var_entry_t *e = s->buckets[i]; e != NULL; e = e->next) {
+                if (strcmp(e->name, name) == 0)
+                    return e->exported;
+            }
+        }
+    }
     return 0;
 }
 

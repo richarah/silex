@@ -27,7 +27,7 @@
  *   -x        trace
  *   -n        no execute (syntax check only)
  *   -f        disable globbing
- *   -i        interactive (ignored; auto-detected by isatty)
+ *   -i        interactive: forced on (otherwise auto-detected by isatty)
  *   -o OPT    set option by name
  *   --        end options
  */
@@ -36,7 +36,7 @@ int applet_sh(int argc, char **argv)
     const char *cmd_string = NULL;
     int         arg_start  = argc; /* default: no script file */
     int         opt_e = 0, opt_u = 0, opt_x = 0, opt_n = 0;
-    int         opt_f = 0, opt_pipefail = 0;
+    int         opt_f = 0, opt_pipefail = 0, opt_i = 0;
 
     int i;
     for (i = 1; i < argc; i++) {
@@ -70,7 +70,7 @@ int applet_sh(int argc, char **argv)
             case 'x': opt_x        = 1; break;
             case 'n': opt_n        = 1; break;
             case 'f': opt_f        = 1; break;
-            case 'i': /* interactive, auto-detected */ break;
+            case 'i': opt_i = 1; break;   /* force interactive mode */
             case 'o':
                 if (*(p + 1)) {
                     const char *on = p + 1;
@@ -156,6 +156,11 @@ int applet_sh(int argc, char **argv)
     sh.opt_n        = opt_n;
     sh.opt_f        = opt_f;
     sh.opt_pipefail = opt_pipefail;
+    /* -i: interactive semantics regardless of the input source (smoosh
+     * sh.ps1.override runs `sh -i <<EOF`): errors that would abort a
+     * non-interactive shell only abort the current command, prompts are
+     * printed when reading commands, and command lines enter the history. */
+    sh.interactive  = opt_i;
 
     int ret;
     if (cmd_string) {
@@ -166,12 +171,21 @@ int applet_sh(int argc, char **argv)
         ret = shell_run_stdin(&sh);
     }
 
-    /* Fire EXIT trap on normal script completion */
+    /* Fire EXIT trap on normal script completion. Per the Austin Group
+     * resolution smoosh encodes (builtin.trap.subshell.* tests): when the
+     * shell terminates NORMALLY (not via the exit builtin), the status of the
+     * trap action itself becomes the shell's exit status; an explicit `exit N`
+     * inside the action still wins (it exits directly), and a naked `exit`
+     * uses the pre-trap status (see exec_builtin_exit). */
     const char *exit_action = sh.traps[0].action;
-    if (exit_action != SHELL_TRAP_DEFAULT && exit_action[0] != '\0') {
+    if (exit_action != SHELL_TRAP_DEFAULT && exit_action[0] != '\0' &&
+        !sh.traps[0].inherited) {
         sh.traps[0].action = SHELL_TRAP_DEFAULT;
-        shell_run_string(&sh, exit_action);
-        /* POSIX: EXIT trap does not affect exit status unless it calls exit */
+        sh.in_trap++;
+        sh.trap_entry_status = ret;
+        int trap_rc = shell_run_string(&sh, exit_action);
+        sh.in_trap--;
+        ret = (trap_rc >= 0 && trap_rc <= 255) ? trap_rc : 0;
     }
 
     shell_free(&sh);
