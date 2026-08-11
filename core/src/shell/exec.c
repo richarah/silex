@@ -1730,6 +1730,8 @@ int exec_node(shell_ctx_t *sh, node_t *node)
     switch (node->type) {
 
     case N_CMD:
+        if (node->lineno > 0)
+            sh->current_lineno = node->lineno;
         rc = exec_simple_cmd(sh, node->u.cmd.words,
                              node->u.cmd.assigns,
                              node->u.cmd.redirs);

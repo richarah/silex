@@ -128,24 +128,20 @@ if [ ! -f "Makefile" ]; then
     exit 0
 fi
 
-# Run a subset of tests (running all 645 takes too long)
-# Focus on tools silex implements
-TEST_CATEGORIES="
-    tests/misc/cat-*.sh
-    tests/misc/head*.sh
-    tests/misc/tail*.sh
-    tests/misc/wc*.sh
-    tests/misc/sort*.sh
-    tests/misc/basename*.sh
-    tests/misc/dirname*.sh
-    tests/cp/*.sh
-    tests/mv/*.sh
-    tests/rm/*.sh
-    tests/mkdir/*.sh
-    tests/ln/*.sh
-    tests/chmod/*.sh
-    tests/touch/*.sh
-"
+# Run a subset of tests (running all 645 takes too long), focused on tools
+# silex implements. Globs are expanded HERE against whatever layout this
+# coreutils version uses (tests moved from tests/misc/cat-*.sh to
+# tests/cat/*.sh upstream) -- passing a nonexistent path in TESTS= makes
+# the whole check die with 'failed to create ....trs'.
+TEST_CATEGORIES=""
+for g in tests/cat/*.sh tests/head/*.sh tests/tail/*.sh tests/wc/*.sh \
+         tests/sort/*.sh tests/basename/*.sh tests/dirname/*.sh \
+         tests/misc/cat-*.sh tests/misc/head*.sh tests/misc/tail*.sh \
+         tests/misc/wc*.sh tests/misc/sort*.sh tests/misc/basename*.sh \
+         tests/cp/*.sh tests/mv/*.sh tests/rm/*.sh tests/mkdir/*.sh \
+         tests/ln/*.sh tests/chmod/*.sh tests/touch/*.sh; do
+    [ -f "$g" ] && TEST_CATEGORIES="$TEST_CATEGORIES $g"
+done
 
 # Run tests. Tool overrides stop automake's maintainer-mode rules from
 # regenerating configure/aclocal with this machine's (mismatched) autotools.

@@ -131,8 +131,9 @@ node_t *node_dup(arena_t *dst, const node_t *src)
     if (!src) return NULL;
     node_t *n = arena_alloc(dst, sizeof(node_t));
     memset(n, 0, sizeof(*n));
-    n->type  = src->type;
-    n->arena = dst;
+    n->type   = src->type;
+    n->arena  = dst;
+    n->lineno = src->lineno;
 
     switch (src->type) {
     case N_CMD:
@@ -518,6 +519,7 @@ static int try_io_number(const char *text, tok_type_t next_op)
  * ------------------------------------------------------------------------- */
 static node_t *parse_simple_command(parser_t *p)
 {
+    int start_lineno = peek(p).lineno;
     word_list_t assigns, words;
     wl_init(&assigns);
     wl_init(&words);
@@ -589,6 +591,7 @@ static node_t *parse_simple_command(parser_t *p)
     }
 
     node_t *n       = alloc_node(p, N_CMD);
+    n->lineno       = start_lineno;
     n->u.cmd.words   = wl_to_arena(p, &words);
     n->u.cmd.assigns = wl_to_arena(p, &assigns);
     n->u.cmd.redirs  = redir_head;
@@ -1084,6 +1087,7 @@ static node_t *parse_command(parser_t *p)
     /* Simple command (handles function detection too) */
     t = peek(p);
     if (t.type == TOK_WORD || t.type == TOK_ASSIGN || is_redir_op(t.type)) {
+        int cmd_lineno = t.lineno;   /* $LINENO for this command */
         /* Look ahead for WORD '(' ')' function definition */
         if (t.type == TOK_WORD) {
             /* We need two more tokens of lookahead.
@@ -1174,6 +1178,7 @@ static node_t *parse_command(parser_t *p)
             }
 
             node_t *n        = alloc_node(p, N_CMD);
+            n->lineno        = cmd_lineno;
             n->u.cmd.words   = wl_to_arena(p, &words);
             n->u.cmd.assigns = wl_to_arena(p, &assigns);
             n->u.cmd.redirs  = redir_head;

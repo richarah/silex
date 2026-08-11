@@ -86,6 +86,9 @@ typedef struct shell_ctx {
     int         opt_nonlexicalctrl; /* set -o nonlexicalctrl: break/continue
                                       * in a function act on the CALLER's
                                       * loops (dynamic scope; smoosh) */
+    int         current_lineno;    /* line of the currently executing simple
+                                    * command ($LINENO); configure scripts
+                                    * self-modify via sed when it's missing */
     int         opt_h;             /* set -h: hash utilities named in function
                                     * bodies when the function is defined */
     int         expansion_abort;   /* interactive: an expansion error aborts

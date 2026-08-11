@@ -131,10 +131,15 @@ static const char *sh_getvar(shell_ctx_t *sh, const char *name)
         return NULL;
     }
 
-    /* LINENO special */
+    /* LINENO special: the line of the simple command being executed. A user
+     * assignment to LINENO overrides (matching dash); without a real value
+     * autoconf's probe fails and configure rewrites itself through a sed
+     * shim that is pathological to execute. */
     if (strcmp(name, "LINENO") == 0) {
+        const char *user = vars_get(&sh->vars, name);
+        if (user) return user;
         char buf[32];
-        snprintf(buf, sizeof(buf), "0");
+        snprintf(buf, sizeof(buf), "%d", sh->current_lineno);
         return arena_strdup(sh->scratch, buf);
     }
 

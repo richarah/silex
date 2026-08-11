@@ -57,6 +57,7 @@ typedef struct case_item {
 typedef struct node {
     node_type_t  type;
     arena_t     *arena;
+    int          lineno;   /* 1-based source line of the command ($LINENO) */
     union {
         struct { char **words; char **assigns; redir_t *redirs; } cmd;
         struct { struct node *left; struct node *right; } binary;
