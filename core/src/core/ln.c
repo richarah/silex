@@ -9,6 +9,7 @@
 #include "../util/strbuf.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,10 +20,12 @@
 struct ln_opts {
     int symbolic;      /* -s */
     int force;         /* -f */
+    int interactive;   /* -i: prompt before replacing (last of -f/-i wins) */
     int verbose;       /* -v */
     int no_deref;      /* -n: treat dst symlink as file, not as directory */
     int relative;      /* -r */
     int no_target;     /* -T */
+    int logical;       /* -L: hard-link to symlink referent (-P: default) */
 };
 
 /* -------------------------------------------------------------------------
@@ -168,6 +171,24 @@ static char *compute_relative_path(const char *from_dir, const char *target,
  * ------------------------------------------------------------------------- */
 static int do_ln(const char *src, const char *dst, const struct ln_opts *opts)
 {
+    /* -i: ask before replacing an existing destination */
+    if (opts->interactive) {
+        struct stat dst_st;
+        if (lstat(dst, &dst_st) == 0) {
+            fprintf(stderr, "ln: replace '%s'? ", dst);
+            fflush(stderr);
+            int c = getchar(), first = c;
+            while (c != '\n' && c != EOF)
+                c = getchar();
+            if (first != 'y' && first != 'Y')
+                return 0;
+            if (unlink(dst) != 0) {
+                err_sys("ln", "cannot remove '%s'", dst);
+                return 1;
+            }
+        }
+    }
+
     /* -f: remove dst if it exists */
     if (opts->force) {
         /*
@@ -255,8 +276,12 @@ static int do_ln(const char *src, const char *dst, const struct ln_opts *opts)
         if (opts->verbose)
             printf("'%s' -> '%s'\n", dst, link_target);
     } else {
-        /* Hard link */
-        rc = link(src, dst);
+        /* Hard link.  -L links to the symlink's referent; the default
+         * (-P) links to the symlink itself (Linux link(2) semantics). */
+        if (opts->logical)
+            rc = linkat(AT_FDCWD, src, AT_FDCWD, dst, AT_SYMLINK_FOLLOW);
+        else
+            rc = link(src, dst);
         if (rc != 0) {
             err_sys("ln", "cannot create hard link '%s' -> '%s'", dst, src);
             return 1;
@@ -349,20 +374,27 @@ int applet_ln(int argc, char **argv)
         if (strcmp(arg, "--no-dereference") == 0)     { opts.no_deref = 1;  continue; }
         if (strcmp(arg, "--relative") == 0)           { opts.relative = 1;  continue; }
         if (strcmp(arg, "--no-target-directory") == 0){ opts.no_target = 1; continue; }
+        if (strcmp(arg, "--interactive") == 0)        { opts.interactive = 1; opts.force = 0; continue; }
+        if (strcmp(arg, "--logical") == 0)            { opts.logical = 1;   continue; }
+        if (strcmp(arg, "--physical") == 0)           { opts.logical = 0;   continue; }
 
         /* Short flags */
         const char *p = arg + 1;
         while (*p) {
             switch (*p) {
             case 's': opts.symbolic = 1;  break;
-            case 'f': opts.force    = 1;  break;
+            /* -f and -i override each other: the LAST one wins (POSIX) */
+            case 'f': opts.force    = 1; opts.interactive = 0; break;
+            case 'i': opts.interactive = 1; opts.force = 0;    break;
             case 'v': opts.verbose  = 1;  break;
             case 'n': opts.no_deref = 1;  break;
             case 'r': opts.relative = 1;  break;
             case 'T': opts.no_target = 1; break;
+            case 'L': opts.logical  = 1;  break;
+            case 'P': opts.logical  = 0;  break;
             default:
                 err_msg("ln", "unrecognized option '-%c'", *p);
-                err_usage("ln", "[-sfvnrT] TARGET LINK_NAME");
+                err_usage("ln", "[-sfinrTLPv] TARGET LINK_NAME");
                 return 1;
             }
             p++;

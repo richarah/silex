@@ -15,9 +15,13 @@
 #include <string.h>
 #include <sys/stat.h>
 
+/* Full chmod-style mode parser (chmod.c) */
+mode_t silex_parse_mode(const char *modestr, mode_t current, int is_dir);
+
 /*
  * Parse an octal or symbolic mode string.
- * For now only octal is supported (symbolic modes are rare in Dockerfiles).
+ * Symbolic modes are evaluated against 0777 minus the umask, matching
+ * GNU mkdir -m (tests/mkdir/special-1 uses "u=rwx,g=rx,o=w,-s,+t").
  * Returns the mode, or (mode_t)-1 on error.
  */
 static mode_t parse_mode_str(const char *s)
@@ -29,8 +33,9 @@ static mode_t parse_mode_str(const char *s)
             return (mode_t)-1;
         return (mode_t)val;
     }
-    /* TODO: symbolic mode parsing (chmod-style) — currently unsupported */
-    return (mode_t)-1;
+    mode_t mask = umask(0);
+    umask(mask);
+    return silex_parse_mode(s, 0777 & ~mask, 1);
 }
 
 /*

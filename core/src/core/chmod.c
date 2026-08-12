@@ -50,83 +50,78 @@ static mode_t parse_symbolic_clause(const char *clause, mode_t current, int is_d
     const char *p = clause;
 
     /* --- who --- */
-    /* which of user/group/other this clause applies to */
-    int who_u = 0, who_g = 0, who_o = 0;
-    int who_all = 0;
-
+    int who_u = 0, who_g = 0, who_o = 0, who_all = 0;
     while (*p == 'u' || *p == 'g' || *p == 'o' || *p == 'a') {
         if (*p == 'u') who_u = 1;
         else if (*p == 'g') who_g = 1;
         else if (*p == 'o') who_o = 1;
-        else if (*p == 'a') who_all = 1;
+        else who_all = 1;
         p++;
     }
-    /* Default: 'a' (all), but umask is applied – we match GNU: default is 'a' */
-    if (!who_u && !who_g && !who_o && !who_all) {
-        who_all = 1;
-    }
-    if (who_all) {
+    int who_default = (!who_u && !who_g && !who_o && !who_all);
+    if (who_default || who_all)
         who_u = who_g = who_o = 1;
-    }
 
-    /* --- operator --- */
-    char op = *p;
-    if (op != '+' && op != '-' && op != '=') {
+    /* GNU accepts a who-only clause ("chmod ug,+x f"): it changes nothing */
+    if (*p == '\0')
+        return result;
+    if (*p != '+' && *p != '-' && *p != '=')
         return (mode_t)-1;
-    }
-    p++;
 
-    /* --- permission bits --- */
-    /* Build a per-category permission mask from the permissions string */
-    /* We compute the bits for one "unit" (user), then shift for group/other */
-    mode_t u_bits = 0; /* bits to apply in user position */
-    mode_t g_bits = 0;
-    mode_t o_bits = 0;
-    mode_t special = 0; /* setuid / setgid / sticky */
+    /* --- one or more op+perms segments: u+r-w, --, a=r ... --- */
+    while (*p == '+' || *p == '-' || *p == '=') {
+        char op = *p++;
 
-    /* 'X': execute/search only if directory or any exec bit already set */
-    int any_exec = (current & (S_IXUSR | S_IXGRP | S_IXOTH)) != 0;
-    int do_X = is_dir || any_exec;
+        mode_t u_bits = 0, g_bits = 0, o_bits = 0, special = 0;
+        /* 'X': execute only if directory or some exec bit currently set
+         * (evaluated against the mode as modified so far) */
+        int any_exec = (result & (S_IXUSR | S_IXGRP | S_IXOTH)) != 0;
+        int do_X = is_dir || any_exec;
 
-    while (*p) {
-        switch (*p) {
-        case 'r':
-            if (who_u) u_bits |= S_IRUSR;
-            if (who_g) g_bits |= S_IRGRP;
-            if (who_o) o_bits |= S_IROTH;
-            break;
-        case 'w':
-            if (who_u) u_bits |= S_IWUSR;
-            if (who_g) g_bits |= S_IWGRP;
-            if (who_o) o_bits |= S_IWOTH;
-            break;
-        case 'x':
-            if (who_u) u_bits |= S_IXUSR;
-            if (who_g) g_bits |= S_IXGRP;
-            if (who_o) o_bits |= S_IXOTH;
-            break;
-        case 'X':
-            if (do_X) {
+        while (*p && *p != '+' && *p != '-' && *p != '=') {
+            mode_t src_r, src_w, src_x;
+            switch (*p) {
+            case 'r':
+                if (who_u) u_bits |= S_IRUSR;
+                if (who_g) g_bits |= S_IRGRP;
+                if (who_o) o_bits |= S_IROTH;
+                break;
+            case 'w':
+                if (who_u) u_bits |= S_IWUSR;
+                if (who_g) g_bits |= S_IWGRP;
+                if (who_o) o_bits |= S_IWOTH;
+                break;
+            case 'x':
                 if (who_u) u_bits |= S_IXUSR;
                 if (who_g) g_bits |= S_IXGRP;
                 if (who_o) o_bits |= S_IXOTH;
-            }
-            break;
-        case 's':
-            /* setuid if who includes u; setgid if who includes g */
-            if (who_u) special |= S_ISUID;
-            if (who_g) special |= S_ISGID;
-            break;
-        case 't':
-            special |= S_ISVTX;
-            break;
-        /* Source permissions: copy from current mode */
-        case 'u':
-            /* Copy user bits to relevant positions */
-            {
-                mode_t src_r = (current & S_IRUSR) ? 1 : 0;
-                mode_t src_w = (current & S_IWUSR) ? 1 : 0;
-                mode_t src_x = (current & S_IXUSR) ? 1 : 0;
+                break;
+            case 'X':
+                if (do_X) {
+                    if (who_u) u_bits |= S_IXUSR;
+                    if (who_g) g_bits |= S_IXGRP;
+                    if (who_o) o_bits |= S_IXOTH;
+                }
+                break;
+            case 's':
+                if (who_u) special |= S_ISUID;
+                if (who_g) special |= S_ISGID;
+                break;
+            case 't':
+                special |= S_ISVTX;
+                break;
+            /* Permission copies read the mode as modified so far */
+            case 'u': case 'g': case 'o':
+                if (*p == 'u') {
+                    src_r = result & S_IRUSR; src_w = result & S_IWUSR;
+                    src_x = result & S_IXUSR;
+                } else if (*p == 'g') {
+                    src_r = result & S_IRGRP; src_w = result & S_IWGRP;
+                    src_x = result & S_IXGRP;
+                } else {
+                    src_r = result & S_IROTH; src_w = result & S_IWOTH;
+                    src_x = result & S_IXOTH;
+                }
                 if (who_u) {
                     if (src_r) u_bits |= S_IRUSR;
                     if (src_w) u_bits |= S_IWUSR;
@@ -142,79 +137,30 @@ static mode_t parse_symbolic_clause(const char *clause, mode_t current, int is_d
                     if (src_w) o_bits |= S_IWOTH;
                     if (src_x) o_bits |= S_IXOTH;
                 }
+                break;
+            default:
+                return (mode_t)-1;
             }
-            break;
-        case 'g':
-            {
-                mode_t src_r = (current & S_IRGRP) ? 1 : 0;
-                mode_t src_w = (current & S_IWGRP) ? 1 : 0;
-                mode_t src_x = (current & S_IXGRP) ? 1 : 0;
-                if (who_u) {
-                    if (src_r) u_bits |= S_IRUSR;
-                    if (src_w) u_bits |= S_IWUSR;
-                    if (src_x) u_bits |= S_IXUSR;
-                }
-                if (who_g) {
-                    if (src_r) g_bits |= S_IRGRP;
-                    if (src_w) g_bits |= S_IWGRP;
-                    if (src_x) g_bits |= S_IXGRP;
-                }
-                if (who_o) {
-                    if (src_r) o_bits |= S_IROTH;
-                    if (src_w) o_bits |= S_IWOTH;
-                    if (src_x) o_bits |= S_IXOTH;
-                }
-            }
-            break;
-        case 'o':
-            {
-                mode_t src_r = (current & S_IROTH) ? 1 : 0;
-                mode_t src_w = (current & S_IWOTH) ? 1 : 0;
-                mode_t src_x = (current & S_IXOTH) ? 1 : 0;
-                if (who_u) {
-                    if (src_r) u_bits |= S_IRUSR;
-                    if (src_w) u_bits |= S_IWUSR;
-                    if (src_x) u_bits |= S_IXUSR;
-                }
-                if (who_g) {
-                    if (src_r) g_bits |= S_IRGRP;
-                    if (src_w) g_bits |= S_IWGRP;
-                    if (src_x) g_bits |= S_IXGRP;
-                }
-                if (who_o) {
-                    if (src_r) o_bits |= S_IROTH;
-                    if (src_w) o_bits |= S_IWOTH;
-                    if (src_x) o_bits |= S_IXOTH;
-                }
-            }
-            break;
-        default:
-            return (mode_t)-1;
+            p++;
         }
-        p++;
-    }
 
-    mode_t change_bits = u_bits | g_bits | o_bits | special;
-
-    switch (op) {
-    case '+':
-        result = current | change_bits;
-        break;
-    case '-':
-        result = current & ~change_bits;
-        break;
-    case '=':
-        /* Clear all affected bits, then set new ones */
-        {
+        mode_t change_bits = u_bits | g_bits | o_bits | special;
+        switch (op) {
+        case '+':
+            result |= change_bits;
+            break;
+        case '-':
+            result &= ~change_bits;
+            break;
+        case '=': {
             mode_t clear_mask = 0;
             if (who_u) clear_mask |= S_IRUSR | S_IWUSR | S_IXUSR | S_ISUID;
             if (who_g) clear_mask |= S_IRGRP | S_IWGRP | S_IXGRP | S_ISGID;
-            if (who_o) clear_mask |= S_IROTH | S_IWOTH | S_IXOTH;
-            /* sticky is cleared only if 'a' or 'o' in who */
-            if (who_o) clear_mask |= S_ISVTX;
-            result = (current & ~clear_mask) | change_bits;
+            if (who_o) clear_mask |= S_IROTH | S_IWOTH | S_IXOTH | S_ISVTX;
+            result = (result & ~clear_mask) | change_bits;
+            break;
         }
-        break;
+        }
     }
 
     return result;
@@ -226,6 +172,15 @@ static mode_t parse_symbolic_clause(const char *clause, mode_t current, int is_d
  * Convert a mode string to an absolute mode_t given the file's current mode.
  * Returns (mode_t)-1 on error.
  * ------------------------------------------------------------------------- */
+static mode_t parse_mode(const char *modestr, mode_t current, int is_dir);
+
+/* Shared entry point for other applets (mkdir -m) that need full
+ * chmod-style mode strings, symbolic clauses included. */
+mode_t silex_parse_mode(const char *modestr, mode_t current, int is_dir)
+{
+    return parse_mode(modestr, current, is_dir);
+}
+
 static mode_t parse_mode(const char *modestr, mode_t current, int is_dir)
 {
     /* Octal: starts with a digit */
@@ -377,13 +332,26 @@ int applet_chmod(int argc, char **argv)
     g_ref_mode   = 0;
     g_modestr[0] = '\0';
 
+    /* GNU getopt permutes: dash arguments anywhere before `--` are
+     * options (or dash-modes like -w), and operands may precede them --
+     * `chmod f -w` applies mode -w to file f.  Dash-modes accumulate
+     * into the mode string with ','; if none was seen, the FIRST operand
+     * is the mode (coreutils tests/chmod/usage.sh encodes this). */
+    char *operands[1024];
+    int nops = 0;
+    int seen_ddash = 0;
     for (i = 1; i < argc; i++) {
-        const char *arg = argv[i];
+        char *arg = argv[i];
 
-        if (strcmp(arg, "--") == 0) { i++; break; }
-
-        if (arg[0] != '-' || arg[1] == '\0')
-            break;
+        if (!seen_ddash && strcmp(arg, "--") == 0) {
+            seen_ddash = 1;
+            continue;
+        }
+        if (seen_ddash || arg[0] != '-' || arg[1] == '\0') {
+            if (nops < 1024)
+                operands[nops++] = arg;
+            continue;
+        }
 
         /* Long options */
         if (strcmp(arg, "--recursive") == 0) {
@@ -417,9 +385,16 @@ int applet_chmod(int argc, char **argv)
                 if (!strchr("rwxXst01234567ugoa+-=,", *q))
                     is_mode = 0;
             if (is_mode) {
-                /* Treat the whole argument (with its leading '-') as a mode
-                 * string; stop option parsing here. */
-                break;
+                size_t cur = strlen(g_modestr);
+                size_t add = strlen(arg);
+                if (cur + add + 2 >= sizeof(g_modestr)) {
+                    err_msg("chmod", "mode string too long");
+                    return 1;
+                }
+                if (cur) g_modestr[cur++] = ',';
+                memcpy(g_modestr + cur, arg, add + 1);
+                have_mode = 1;
+                continue;
             }
         }
 
@@ -456,20 +431,21 @@ int applet_chmod(int argc, char **argv)
         }
         g_ref_mode = ref_st.st_mode;
         g_use_ref  = 1;
-    } else {
-        /* Next argument must be the mode string */
-        if (i >= argc) {
+    } else if (!have_mode) {
+        /* No dash-mode was seen: the first operand is the mode */
+        if (nops == 0) {
             err_usage("chmod", "[-Rv] [--reference=RFILE] MODE FILE...");
             return 1;
         }
-        size_t mlen = strlen(argv[i]);
+        size_t mlen = strlen(operands[0]);
         if (mlen >= sizeof(g_modestr)) {
             err_msg("chmod", "mode string too long");
             return 1;
         }
-        memcpy(g_modestr, argv[i], mlen + 1);
+        memcpy(g_modestr, operands[0], mlen + 1);
         have_mode = 1;
-        i++;
+        memmove(operands, operands + 1, (size_t)(nops - 1) * sizeof(char *));
+        nops--;
     }
 
     if (!have_ref && !have_mode) {
@@ -477,13 +453,13 @@ int applet_chmod(int argc, char **argv)
         return 1;
     }
 
-    if (i >= argc) {
+    if (nops == 0) {
         err_usage("chmod", "[-Rv] [--reference=RFILE] MODE FILE...");
         return 1;
     }
 
-    for (; i < argc; i++) {
-        const char *path = argv[i];
+    for (int oi = 0; oi < nops; oi++) {
+        const char *path = operands[oi];
 
         if (opt_recursive) {
             /*

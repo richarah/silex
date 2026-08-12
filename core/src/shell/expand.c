@@ -813,6 +813,17 @@ static char *expand_braced_body(shell_ctx_t *sh, const char *body, int in_dquote
         if (pat[0] == '\0')
             return braced_ret(sh, s);
 
+        /* The replacement undergoes normal word expansion and quote
+         * removal (bash: ${v//x/$r} inserts $r's VALUE -- ShellSpec's
+         * fast replace_all path depends on this). */
+        strbuf_t rsb;
+        sb_init(&rsb, 32);
+        { int sj_ = sh->pp_join_unquoted; int wd_ = sh->pp_word_dq;
+          sh->pp_join_unquoted = !in_dquote; sh->pp_word_dq = in_dquote;
+          expand_into(sh, repl, &rsb, in_dquote);
+          sh->pp_join_unquoted = sj_; sh->pp_word_dq = wd_; }
+        repl = sb_str(&rsb);
+
         strbuf_t sb;
         sb_init(&sb, 128);
 
@@ -824,6 +835,7 @@ static char *expand_braced_body(shell_ctx_t *sh, const char *body, int in_dquote
         char *tmp = malloc(slen + 1);
         if (!tmp) {
             sb_free(&sb);
+            sb_free(&rsb);
             return braced_ret(sh, s);
         }
 
@@ -868,6 +880,7 @@ static char *expand_braced_body(shell_ctx_t *sh, const char *body, int in_dquote
         free(tmp);
         char *r = arena_strdup(sh->scratch, sb_str(&sb));
         sb_free(&sb);
+        sb_free(&rsb);
         return r;
     }
 
