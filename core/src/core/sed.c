@@ -118,6 +118,12 @@ typedef struct sed_cmd {
 /* ------------------------------------------------------------------ */
 
 static regex_t *g_last_re  = NULL;  /* last compiled regex (for empty pattern) */
+/* POSIX/GNU: an empty regex recalls the last regex EXECUTED at runtime, not
+ * the last one compiled. Updated at every address match and substitution;
+ * commands with an empty pattern carry re == NULL and read this instead.
+ * (GNU's own testsuite 'recall' case rejects compile-time binding -- and
+ * compile-time binding also loops forever on `:x;s//Y/;/f/bx`.) */
+static regex_t *g_exec_re  = NULL;
 static char    *g_last_src = NULL;
 
 /* ------------------------------------------------------------------ */
@@ -334,10 +340,9 @@ static int parse_addr(parser_t *ps, sed_addr_t *addr)
         if (!src) return -1;
         addr->re_src = src;
         if (strlen(src) == 0) {
-            /* Empty pattern reuses last */
-            if (g_last_re) {
-                addr->re = g_last_re;
-            }
+            /* Empty pattern: recall the last EXECUTED regex at match time
+             * (addr->re stays NULL; addr_match reads g_exec_re). */
+            addr->re = NULL;
         } else {
             if (sed_regcomp(&addr->re, src, 0, ps->ere, ps->icase) != 0) {
                 free(src);
@@ -518,14 +523,14 @@ static sed_cmd_t *parse_script(const char *script, int ere, int *err)
             cmd->re_src     = pattern;
             cmd->replacement = replacement;
 
-            /* Compile regex: empty pattern reuses last compiled src */
-            const char *re_src = (strlen(pattern) == 0) ? g_last_src : pattern;
-            if (!re_src) {
-                err_msg("sed", "no previous regex for empty s pattern");
-                *err = 1; free(cmd); return head;
+            /* Empty pattern: defer to the LAST EXECUTED regex at runtime
+             * (cmd->re stays NULL; do_subst reads g_exec_re). */
+            if (strlen(pattern) == 0) {
+                cmd->re = NULL;
+                break;
             }
             int icase = (cmd->subst_flags & SUBST_I) ? 1 : 0;
-            if (sed_regcomp(&cmd->re, re_src, 0, ere, icase) != 0) {
+            if (sed_regcomp(&cmd->re, pattern, 0, ere, icase) != 0) {
                 *err = 1; free(cmd); return head;
             }
             break;
@@ -581,8 +586,10 @@ static sed_cmd_t *parse_script(const char *script, int ere, int *err)
  */
 static int do_subst(sed_cmd_t *cmd, const char *line_in, strbuf_t *out_sb)
 {
-    if (!cmd->re)
+    regex_t *re = cmd->re ? cmd->re : g_exec_re;   /* empty pattern: recall */
+    if (!re)
         return 0;
+    g_exec_re = re;
 
     const char *src    = line_in;
     int         made   = 0;
@@ -593,7 +600,7 @@ static int do_subst(sed_cmd_t *cmd, const char *line_in, strbuf_t *out_sb)
 
     while (*src || (src == line_in && *line_in == '\0')) {
         int eflags = (made > 0) ? REG_NOTBOL : 0;
-        if (regexec(cmd->re, src, 10, m, eflags) != 0) {
+        if (regexec(re, src, 10, m, eflags) != 0) {
             /* No more matches */
             if (sb_append(out_sb, src) != 0) return -1;
             break;
@@ -728,9 +735,12 @@ static int addr_matches(const sed_addr_t *addr, long linenum,
         if (linenum < first) return 0;
         return ((linenum - first) % step) == 0;
     }
-    case ADDR_REGEX:
-        if (!addr->re) return 0;
-        return (regexec(addr->re, line, 0, NULL, 0) == 0);
+    case ADDR_REGEX: {
+        regex_t *are = addr->re ? addr->re : g_exec_re;  /* empty: recall */
+        if (!are) return 0;
+        g_exec_re = are;
+        return (regexec(are, line, 0, NULL, 0) == 0);
+    }
     }
     return 0;
 }
