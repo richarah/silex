@@ -555,8 +555,19 @@ static redir_t *parse_redirect(parser_t *p, int io_fd)
         hp->strip_tabs = (op_tok.type == TOK_DLESSDASH) ? 1 : 0;
         hp->no_expand  = no_expand;
         hp->body_out   = &r->heredoc;
-        hp->next       = p->lexer->heredocs;
-        p->lexer->heredocs = hp;
+        /* Append at the TAIL: bodies follow the command line in the order
+         * their << operators appeared, so a LIFO queue read them in reverse
+         * and mismatched the delimiters -- `cat <<EOF1 <<EOF2` scanned for
+         * EOF2 first and swallowed EOF1's body and terminator with it. */
+        hp->next = NULL;
+        if (!p->lexer->heredocs) {
+            p->lexer->heredocs = hp;
+        } else {
+            heredoc_pending_t *tail = p->lexer->heredocs;
+            while (tail->next)
+                tail = tail->next;
+            tail->next = hp;
+        }
 
         r->heredoc_no_expand = no_expand;
     }
@@ -1197,8 +1208,20 @@ static node_t *parse_command(parser_t *p)
             redir_t  *redir_head = NULL;
             redir_t **redir_tail = &redir_head;
 
-            /* name_tok is the first word of the command */
-            if (name_tok.type == TOK_ASSIGN) {
+            /* name_tok is the first word of the command -- unless it is an
+             * IO number introducing a redirect. This branch consumed the word
+             * up front (to look for `name ( )`), so without this check a
+             * command that is ONLY redirects, like a bare `2>&1` or
+             * `2>/dev/null`, ran a command named "2". */
+            int first_fd = (name_tok.type == TOK_WORD)
+                         ? try_io_number(name_tok.text, peek(p).type) : -1;
+            if (first_fd >= 0) {
+                redir_t *r = parse_redirect(p, first_fd);
+                if (r && !p->error) {
+                    *redir_tail = r;
+                    redir_tail  = &r->next;
+                }
+            } else if (name_tok.type == TOK_ASSIGN) {
                 wl_push(&assigns, name_tok.text);
             } else {
                 wl_push(&words, name_tok.text);

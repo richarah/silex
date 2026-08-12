@@ -159,6 +159,23 @@ static void print_q_string(const char *s)
  * Parse an argument to a numeric format spec.
  * Handles decimal, octal (0NNN), hex (0xHH), and character ('X).
  */
+/* Set when a conversion argument was not a valid number. POSIX: printf
+ * still writes a best-effort value but exits non-zero, so `printf %d 3abc`
+ * prints 3 AND fails -- silex used to warn and exit 0, which hid the error
+ * from every `set -e` script. */
+static int g_printf_argerr;
+
+/* Report a bad numeric operand the way dash does; the caller keeps the
+ * partially converted value. */
+static void bad_number(const char *s, int partial)
+{
+    if (partial)
+        fprintf(stderr, "silex: printf: %s: not completely converted\n", s);
+    else
+        fprintf(stderr, "silex: printf: %s: expected numeric value\n", s);
+    g_printf_argerr = 1;
+}
+
 static long long arg_to_llong(const char *s)
 {
     if (!s || *s == '\0') return 0;
@@ -169,15 +186,18 @@ static long long arg_to_llong(const char *s)
     char *endp;
     errno = 0;
     long long val = strtoll(s, &endp, 0);
-    if (errno != 0 || endp == s) {
-        /* Try as unsigned */
+    if (endp == s) {
+        /* Try as unsigned (e.g. a value above LLONG_MAX) */
         unsigned long long uval = strtoull(s, &endp, 0);
-        if (endp != s)
+        if (endp != s && *endp == '\0')
             return (long long)uval;
-        /* Non-numeric: return 0, print warning */
-        fprintf(stderr, "silex: printf: '%s': invalid number\n", s);
+        bad_number(s, 0);
         return 0;
     }
+    /* Trailing garbage -- including a trailing blank -- is an error, but the
+     * converted prefix is still used (dash). Leading blanks are fine. */
+    if (*endp != '\0')
+        bad_number(s, 1);
     return val;
 }
 
@@ -189,10 +209,12 @@ static unsigned long long arg_to_ullong(const char *s)
     char *endp;
     errno = 0;
     unsigned long long val = strtoull(s, &endp, 0);
-    if (errno != 0 || endp == s) {
-        fprintf(stderr, "silex: printf: '%s': invalid number\n", s);
+    if (endp == s) {
+        bad_number(s, 0);
         return 0;
     }
+    if (*endp != '\0')
+        bad_number(s, 1);
     return val;
 }
 
@@ -204,9 +226,11 @@ static double arg_to_double(const char *s)
     char *endp;
     double val = strtod(s, &endp);
     if (endp == s) {
-        fprintf(stderr, "silex: printf: '%s': invalid number\n", s);
+        bad_number(s, 0);
         return 0.0;
     }
+    if (*endp != '\0')
+        bad_number(s, 1);
     return val;
 }
 
@@ -289,19 +313,36 @@ static int process_format(const char *fmt, int argc, char **argv,
             p++;
         }
 
-        /* Width */
-        while (isdigit((unsigned char)*p)) {
-            if (si < (int)sizeof(spec) - 5) spec[si++] = *p;
+        /* Width -- either digits or `*`, which takes the value from the next
+         * ARGUMENT (`printf '[%*.*s]' 9 3 hello`). The number is spliced into
+         * the spec, so the C library never sees a `*` and needs no va_list. */
+        if (*p == '*') {
+            long long w = arg_to_llong((*arg_idx < argc) ? argv[(*arg_idx)++] : "");
+            /* A negative width means left-justify, exactly like the `-` flag */
+            si += snprintf(spec + si, sizeof(spec) - (size_t)si - 5, "%lld", w);
+            if (si > (int)sizeof(spec) - 5) si = (int)sizeof(spec) - 5;
             p++;
+        } else {
+            while (isdigit((unsigned char)*p)) {
+                if (si < (int)sizeof(spec) - 5) spec[si++] = *p;
+                p++;
+            }
         }
 
         /* Precision */
         if (*p == '.') {
             if (si < (int)sizeof(spec) - 5) spec[si++] = '.';
             p++;
-            while (isdigit((unsigned char)*p)) {
-                if (si < (int)sizeof(spec) - 5) spec[si++] = *p;
+            if (*p == '*') {
+                long long pr = arg_to_llong((*arg_idx < argc) ? argv[(*arg_idx)++] : "");
+                si += snprintf(spec + si, sizeof(spec) - (size_t)si - 5, "%lld", pr);
+                if (si > (int)sizeof(spec) - 5) si = (int)sizeof(spec) - 5;
                 p++;
+            } else {
+                while (isdigit((unsigned char)*p)) {
+                    if (si < (int)sizeof(spec) - 5) spec[si++] = *p;
+                    p++;
+                }
             }
         }
 
@@ -369,9 +410,11 @@ static int process_format(const char *fmt, int argc, char **argv,
 
 int applet_printf(int argc, char **argv)
 {
+    g_printf_argerr = 0;
     if (argc < 2) {
-        err_usage("printf", "FORMAT [ARG...]");
-        return 1;
+        /* dash exits 2 for a usage error */
+        fprintf(stderr, "silex: printf: usage: printf format [arg ...]\n");
+        return 2;
     }
 
     const char *fmt = argv[1];
@@ -381,7 +424,7 @@ int applet_printf(int argc, char **argv)
     if (first_arg >= argc) {
         int arg_idx = first_arg;
         process_format(fmt, argc, argv, &arg_idx);
-        return 0;
+        return g_printf_argerr;
     }
 
     /*
@@ -399,5 +442,5 @@ int applet_printf(int argc, char **argv)
         }
     }
 
-    return 0;
+    return g_printf_argerr;
 }

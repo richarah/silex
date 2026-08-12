@@ -43,6 +43,7 @@ static int exec_builtin_export(shell_ctx_t *sh, int argc, char **argv);
 static int exec_builtin_unset(shell_ctx_t *sh, int argc, char **argv);
 static int exec_builtin_readonly(shell_ctx_t *sh, int argc, char **argv);
 static int exec_builtin_cd(shell_ctx_t *sh, int argc, char **argv);
+static int exec_builtin_pwd(shell_ctx_t *sh, int argc, char **argv);
 static int exec_builtin_shift(shell_ctx_t *sh, int argc, char **argv);
 static int exec_builtin_exit(shell_ctx_t *sh, int argc, char **argv);
 static int exec_builtin_true(shell_ctx_t *sh, int argc, char **argv);
@@ -195,6 +196,7 @@ static const shell_builtin_t shell_builtins[] = {
     { "unset",    exec_builtin_unset     },
     { "readonly", exec_builtin_readonly  },
     { "cd",       exec_builtin_cd        },
+    { "pwd",      exec_builtin_pwd       },
     { "shift",    exec_builtin_shift     },
     { "exit",     exec_builtin_exit      },
     { "eval",     exec_builtin_eval      },
@@ -2806,6 +2808,39 @@ static int exec_builtin_cd(shell_ctx_t *sh, int argc, char **argv)
         dir = argv[i];
     }
 
+    /* CDPATH: for a directory operand that is not absolute and does not start
+     * with ./ or ../, each colon-separated entry is tried as a prefix and the
+     * first hit wins. POSIX also says the new directory is echoed when it came
+     * from a non-empty CDPATH entry (an empty entry means the cwd, silently). */
+    char cdpath_buf[PATH_MAX];
+    if (dir[0] != '/' && strcmp(dir, "-") != 0 &&
+        !(dir[0] == '.' && (dir[1] == '/' || dir[1] == '\0')) &&
+        !(dir[0] == '.' && dir[1] == '.' && (dir[2] == '/' || dir[2] == '\0'))) {
+        const char *cdpath = vars_get(&sh->vars, "CDPATH");
+        if (cdpath && *cdpath) {
+            const char *seg = cdpath;
+            while (seg) {
+                const char *colon = strchr(seg, ':');
+                size_t slen = colon ? (size_t)(colon - seg) : strlen(seg);
+                int n;
+                if (slen == 0)
+                    n = snprintf(cdpath_buf, sizeof(cdpath_buf), "%s", dir);
+                else
+                    n = snprintf(cdpath_buf, sizeof(cdpath_buf), "%.*s/%s",
+                                 (int)slen, seg, dir);
+                struct stat st;
+                if (n > 0 && (size_t)n < sizeof(cdpath_buf) &&
+                    stat(cdpath_buf, &st) == 0 && S_ISDIR(st.st_mode)) {
+                    dir = cdpath_buf;
+                    if (slen > 0)
+                        print_dir = 1;
+                    break;
+                }
+                seg = colon ? colon + 1 : NULL;
+            }
+        }
+    }
+
     /* The base for a relative path and the value stored as OLDPWD is the current
      * logical $PWD (falling back to getcwd() when PWD is unset or not absolute). */
     char cwdbuf[PATH_MAX];
@@ -2857,6 +2892,61 @@ static int exec_builtin_cd(shell_ctx_t *sh, int argc, char **argv)
         if (print_dir) printf("%s\n", pwd);
     }
     return 0;
+}
+
+/*
+ * pwd [-L|-P]
+ *
+ * POSIX requires pwd to be BUILT IN: only the shell knows the logical $PWD,
+ * which preserves the symlink names used to arrive. Without a builtin the
+ * shell fell through to /usr/bin/pwd, which calls getcwd() and therefore
+ * reported the physical path -- `cd /tmp/link; pwd` printed /tmp/real, and
+ * no amount of correct `cd` bookkeeping could show through.
+ *
+ * -L (default) prints $PWD when it is absolute, free of . / .. components,
+ * and really names the current directory; otherwise it falls back to
+ * getcwd(). -P always resolves symlinks.
+ */
+static int exec_builtin_pwd(shell_ctx_t *sh, int argc, char **argv)
+{
+    int physical = 0;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--") == 0) break;
+        if (strcmp(argv[i], "-L") == 0) { physical = 0; continue; }
+        if (strcmp(argv[i], "-P") == 0) { physical = 1; continue; }
+        if (argv[i][0] == '-' && argv[i][1] != '\0') {
+            fprintf(stderr, "silex: pwd: %s: invalid option\n", argv[i]);
+            return 2;
+        }
+        break;
+    }
+
+    if (!physical) {
+        const char *pwd = vars_get(&sh->vars, "PWD");
+        if (pwd && pwd[0] == '/') {
+            int dotdot = 0;
+            for (const char *q = pwd; *q; q++) {
+                if (*q != '/') continue;
+                if (q[1] == '.' && (q[2] == '/' || q[2] == '\0')) dotdot = 1;
+                if (q[1] == '.' && q[2] == '.' &&
+                    (q[3] == '/' || q[3] == '\0')) dotdot = 1;
+            }
+            struct stat a, b;
+            if (!dotdot && stat(pwd, &a) == 0 && stat(".", &b) == 0 &&
+                a.st_dev == b.st_dev && a.st_ino == b.st_ino) {
+                printf("%s\n", pwd);
+                return (fflush(stdout) != 0 || ferror(stdout)) ? 1 : 0;
+            }
+        }
+    }
+
+    char buf[PATH_MAX];
+    if (!getcwd(buf, sizeof(buf))) {
+        fprintf(stderr, "silex: pwd: %s\n", strerror(errno));
+        return 1;
+    }
+    printf("%s\n", buf);
+    return (fflush(stdout) != 0 || ferror(stdout)) ? 1 : 0;
 }
 
 static int exec_builtin_shift(shell_ctx_t *sh, int argc, char **argv)
@@ -2916,6 +3006,14 @@ static int exec_builtin_exec_cmd(shell_ctx_t *sh, int argc, char **argv)
 
 static int exec_builtin_trap(shell_ctx_t *sh, int argc, char **argv)
 {
+    /* `--` ends options. `trap` prints its own traps in that form
+     * (`trap -- 'act' EXIT`), so eval'ing that output must work. */
+    if (argc >= 2 && strcmp(argv[1], "--") == 0) {
+        argv = argv + 1;
+        argv[0] = (char *)"trap";
+        argc--;
+    }
+
     /* trap with no arguments: print all traps */
     if (argc < 2) {
         for (int sig = 0; sig < NSIG; sig++) {

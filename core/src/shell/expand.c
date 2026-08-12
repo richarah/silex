@@ -1929,9 +1929,12 @@ static void expand_into(shell_ctx_t *sh, const char *word, strbuf_t *out,
             p++;
             if (!*p) break;
             if (in_dquote) {
-                /* Inside "...", backslash only escapes $, `, ", \, newline */
-                if (*p == '$' || *p == '`' || *p == '"' ||
-                    *p == '\\' || *p == '\n') {
+                /* Inside "...", backslash only escapes $, `, ", \, newline.
+                 * A here-doc body is expanded with in_dquote=1, but there `"`
+                 * is ordinary text and is NOT escapable, so `\"` must stay
+                 * both characters (POSIX 2.7.4). */
+                if (*p == '$' || *p == '`' || *p == '\\' || *p == '\n' ||
+                    (*p == '"' && !sh->in_heredoc)) {
                     if (*p != '\n') sb_appendc(out, *p);
                 } else {
                     sb_appendc(out, '\\');
