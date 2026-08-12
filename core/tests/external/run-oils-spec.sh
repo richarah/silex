@@ -65,17 +65,22 @@ for f in spec/*.test.sh; do
         spec/ysh-*|spec/oil-*|spec/hay*|spec/stateful*) continue ;;  # Oil language, not POSIX sh
     esac
     NFILES=$((NFILES + 1))
-    out=$(PYTHONPATH="$WORK/harness" timeout 90 python3 "$WORK/harness/test/sh_spec.py" \
-            --tmp-env "$WORK/tmp" --path-env "$PATH" "$f" "$SILEX" 2>/dev/null)
-    # summary block: lines "\tpass\tN" and "\tFAIL\tN" (with color codes)
-    # ANSI color sequences contain digits, so bridge with a greedy .* and
-    # anchor on the final tab-number.
-    p=$(printf '%s\n' "$out" | sed -n 's/.*pass.*[^0-9]\([0-9][0-9]*\)$/\1/p' | tail -1)
-    fl=$(printf '%s\n' "$out" | sed -n 's/.*FAIL.*[^0-9]\([0-9][0-9]*\)$/\1/p' | tail -1)
-    if [ -z "${p:-}" ] && [ -z "${fl:-}" ]; then
+    # --stats-file gives machine-readable counters. (Scraping the ANSI
+    # summary table silently loses every file whose cases all have the SAME
+    # result: sh_spec.py skips "trivial" summaries, so all-pass and all-fail
+    # files -- 36 of 139 -- were miscounted as "crashed".)
+    rm -f "$WORK/stats"
+    PYTHONPATH="$WORK/harness" timeout 90 python3 "$WORK/harness/test/sh_spec.py" \
+            --tmp-env "$WORK/tmp" --path-env "$PATH" \
+            --stats-file "$WORK/stats" \
+            --stats-template '%(num_passed)d %(num_failed)d %(num_cases_run)d' \
+            "$f" "$SILEX" >/dev/null 2>&1
+    if [ ! -f "$WORK/stats" ]; then
         ERRFILES=$((ERRFILES + 1))
+        echo "  no result (crash/hang): $f"
         continue
     fi
+    read -r p fl _total < "$WORK/stats"
     PASS=$((PASS + ${p:-0}))
     FAIL=$((FAIL + ${fl:-0}))
 done

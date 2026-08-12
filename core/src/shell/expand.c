@@ -775,28 +775,46 @@ static char *expand_braced_body(shell_ctx_t *sh, const char *body, int in_dquote
         p++;  /* skip the operator '/' */
         int global = (*p == '/');
         if (global) p++;
-        /* Split on the next unescaped '/' */
+        /* Split on the next unescaped, unquoted '/'. Three bash quirks
+         * matter here: a backslash escapes the separator (pattern \/ is a
+         * literal slash), quotes hide it (${x//'/'/c}), and a '/' in the
+         * FIRST pattern position is literal, not a separator -- ${x////c}
+         * is global replace of '/' by 'c', and ${x///} is global delete of
+         * '/' (Oils var-op-patsub: "confusing unquoted slash matches
+         * bash"). */
         const char *pat_start = p;
-        const char *sep = strchr(p, '/');
+        const char *sep = NULL;
+        char q_state = 0;
+        for (const char *q = p; *q; ) {
+            if (q_state == 0 && q[0] == '\\' && q[1]) { q += 2; continue; }
+            if (q_state == 0 && (*q == '\'' || *q == '"')) { q_state = *q; q++; continue; }
+            if (q_state && *q == q_state) { q_state = 0; q++; continue; }
+            if (q_state == 0 && *q == '/' && q > p) { sep = q; break; }
+            q++;
+        }
         char pat_buf[512];
         const char *repl = "";
-        if (sep) {
-            size_t plen = (size_t)(sep - pat_start);
-            if (plen >= sizeof(pat_buf)) plen = sizeof(pat_buf) - 1;
-            memcpy(pat_buf, pat_start, plen);
-            pat_buf[plen] = '\0';
+        size_t plen = sep ? (size_t)(sep - pat_start) : strlen(pat_start);
+        if (plen >= sizeof(pat_buf)) plen = sizeof(pat_buf) - 1;
+        memcpy(pat_buf, pat_start, plen);
+        pat_buf[plen] = '\0';
+        if (sep)
             repl = sep + 1;
-        } else {
-            size_t plen = strlen(pat_start);
-            if (plen >= sizeof(pat_buf)) plen = sizeof(pat_buf) - 1;
-            memcpy(pat_buf, pat_start, plen);
-            pat_buf[plen] = '\0';
-        }
+
+        /* Quote-aware, expanded pattern -- same treatment as '#'/'%'. */
+        const char *pat = expand_word_pattern(sh, pat_buf);
 
         const char *s = val ? val : "";
+        size_t slen = strlen(s);
+
+        /* Empty pattern (${v//}, ${v///repl}): bash substitutes nothing.
+         * Matching it would also never advance the scan position below --
+         * this exact case used to hang the shell. */
+        if (pat[0] == '\0')
+            return braced_ret(sh, s);
+
         strbuf_t sb;
         sb_init(&sb, 128);
-        size_t slen = strlen(s);
 
         /* This used to declare `char tmp[mlen + 1]` inside the inner loop -- a
          * variable-length array sized by the remaining length of the subject.
@@ -815,9 +833,17 @@ static char *expand_braced_body(shell_ctx_t *sh, const char *body, int in_dquote
             /* Try matching at position i */
             int matched = 0;
             for (size_t mlen = slen - i; ; mlen--) {
+                /* A zero-length match can never advance the scan position;
+                 * accept it only for an empty subject (bash: with v empty,
+                 * substituting pattern * yields one replacement) and stop
+                 * there. Otherwise a global star-pattern substitution would
+                 * append the replacement again after the final match and
+                 * loop forever. */
+                if (mlen == 0 && slen != 0)
+                    break;
                 memcpy(tmp, s + i, mlen);
                 tmp[mlen] = '\0';
-                if (fnmatch(pat_buf, tmp, 0) == 0) {
+                if (fnmatch(pat, tmp, 0) == 0) {
                     sb_append(&sb, repl);
                     i += mlen;
                     matched = 1;
@@ -826,6 +852,8 @@ static char *expand_braced_body(shell_ctx_t *sh, const char *body, int in_dquote
                 }
                 if (mlen == 0) break;
             }
+            if (matched && slen == 0)
+                break;
             if (!matched) {
                 if (i < slen)
                     sb_appendc(&sb, s[i]);

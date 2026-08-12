@@ -3785,6 +3785,11 @@ static int exec_builtin_break(shell_ctx_t *sh, int argc, char **argv)
     int n = 1;
     if (argc >= 2 && sh_parse_int(argv[1], 1, INT_MAX, &n) != 0) {
         fprintf(stderr, "silex: break: %s: numeric argument required\n", argv[1]);
+        /* POSIX: break is a special builtin; a bad operand aborts a
+         * non-interactive shell (dash exits 2). Returning 1 here would
+         * leave `while true; do break $bad; done` spinning forever. */
+        if (!sh->interactive && !sh->in_command_builtin && !sh->in_trap)
+            exit(2);
         return 1;
     }
     if (n < 1) n = 1;
@@ -3799,6 +3804,9 @@ static int exec_builtin_continue(shell_ctx_t *sh, int argc, char **argv)
     int n = 1;
     if (argc >= 2 && sh_parse_int(argv[1], 1, INT_MAX, &n) != 0) {
         fprintf(stderr, "silex: continue: %s: numeric argument required\n", argv[1]);
+        /* Same special-builtin abort rule as break above. */
+        if (!sh->interactive && !sh->in_command_builtin && !sh->in_trap)
+            exit(2);
         return 1;
     }
     if (n < 1) n = 1;
