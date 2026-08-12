@@ -700,10 +700,31 @@ int shell_run_stdin(shell_ctx_t *sh)
      * `read` in the script consumes exactly its bytes and no more. */
     setvbuf(stdin, NULL, _IONBF, 0);
 
+    /* Read the script through a PRIVATE FILE over a dup of fd 0, never the
+     * global `stdin` object. In-process applets that read stdin (wc, sort,
+     * ... -- anything using the stdio `stdin`) leave the EOF flag set on
+     * that shared FILE, and the shell then saw EOF and silently dropped
+     * the rest of the script: `echo x | wc -l` followed by anything at all
+     * executed only the pipeline. dup() shares the file DESCRIPTION, so the
+     * offset stays common with fd 0 -- a command that legitimately consumes
+     * the script (POSIX) still does, and `read` still takes exactly its own
+     * bytes. Only the stdio bookkeeping is now ours alone. */
+    FILE *script_fp = NULL;
+    int   script_fd = dup(STDIN_FILENO);
+    if (script_fd >= 0) {
+        script_fp = fdopen(script_fd, "r");
+        if (script_fp)
+            setvbuf(script_fp, NULL, _IONBF, 0);
+        else
+            close(script_fd);
+    }
+    if (!script_fp)
+        script_fp = stdin;   /* out of descriptors: degrade, don't die */
+
     lexer_t  lex;
     parser_t par;
 
-    lexer_init_fp(&lex, stdin, &sh->parse_arena);
+    lexer_init_fp(&lex, script_fp, &sh->parse_arena);
     parser_init(&par, &lex, &sh->parse_arena);
     parser_set_aliases(&par, shell_alias_lookup_cb, sh);
 
@@ -729,6 +750,8 @@ int shell_run_stdin(shell_ctx_t *sh)
     }
 
     lexer_free(&lex);
+    if (script_fp != stdin)
+        fclose(script_fp);
     return sh->last_exit;
 }
 

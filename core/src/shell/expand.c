@@ -892,6 +892,31 @@ static char *expand_braced_body(shell_ctx_t *sh, const char *body, int in_dquote
  * Command substitution: run command, capture stdout
  * ------------------------------------------------------------------------- */
 
+/* POSIX 2.6.3: inside `...`, a backslash keeps its literal meaning EXCEPT
+ * before '$', '`' or '\', where it escapes them. The body is therefore
+ * un-escaped once before being parsed as a command: `echo \\$` runs
+ * `echo \$` (prints '$'), while `echo \z` runs `echo \z` unchanged. This
+ * is why backticks need twice the backslashes of $( ). Returns malloc'd
+ * text, or NULL on allocation failure. */
+static char *backtick_cmd(const char *start, size_t len)
+{
+    char *out = malloc(len + 1);
+    if (!out)
+        return NULL;
+    size_t w = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (start[i] == '\\' && i + 1 < len &&
+            (start[i + 1] == '$' || start[i + 1] == '`' ||
+             start[i + 1] == '\\')) {
+            out[w++] = start[++i];
+            continue;
+        }
+        out[w++] = start[i];
+    }
+    out[w] = '\0';
+    return out;
+}
+
 static char *cmd_subst(shell_ctx_t *sh, const char *cmd)
 {
     /* Create a pipe */
@@ -2143,7 +2168,7 @@ static void expand_into(shell_ctx_t *sh, const char *word, strbuf_t *out,
                 p++;
             }
             size_t clen = (size_t)(p - start);
-            char *cmd = strndup(start, clen);
+            char *cmd = backtick_cmd(start, clen);
             char *result = cmd_subst(sh, cmd ? cmd : "");
             free(cmd);
             emit_data(sh, out, result);

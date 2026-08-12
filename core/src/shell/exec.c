@@ -3816,6 +3816,69 @@ static int exec_builtin_continue(shell_ctx_t *sh, int argc, char **argv)
     return FLOW_CONTINUE;
 }
 
+/* Apply one POSIX symbolic umask clause to `allowed` (the permissions the
+ * mask GRANTS, i.e. 0777 & ~umask -- symbolic umask operands describe what
+ * is allowed, which is why `umask u=r` yields mask 0300).
+ *
+ * Grammar per clause: [ugoa]* ( [-+=] [rwxXugo]* )+
+ * Several ops may follow one who-list (`u=rw,u+x`, and even `=+rwx+rx`),
+ * each applied to the running value -- so a permcopy (`a=u`) and `X` see
+ * the result of the preceding ops, not the original mask. `s`/`t` are
+ * accepted and contribute no bits (file-only), matching dash.
+ * Returns the new allowed set, or (mode_t)-1 on a syntax error. */
+static mode_t umask_apply_clause(const char *clause, mode_t allowed)
+{
+    const char *p = clause;
+    int who_u = 0, who_g = 0, who_o = 0;
+
+    while (*p == 'u' || *p == 'g' || *p == 'o' || *p == 'a') {
+        if (*p == 'u') who_u = 1;
+        else if (*p == 'g') who_g = 1;
+        else if (*p == 'o') who_o = 1;
+        else who_u = who_g = who_o = 1;
+        p++;
+    }
+    if (!who_u && !who_g && !who_o)          /* no who: all (POSIX) */
+        who_u = who_g = who_o = 1;
+
+    if (*p != '+' && *p != '-' && *p != '=')
+        return (mode_t)-1;                   /* empty or malformed clause */
+
+    while (*p == '+' || *p == '-' || *p == '=') {
+        char op = *p++;
+        mode_t bits = 0;
+        int any_exec = (allowed & 0111) != 0;
+
+        while (*p && *p != '+' && *p != '-' && *p != '=') {
+            mode_t src;
+            switch (*p) {
+            case 'r': bits |= 0444; break;
+            case 'w': bits |= 0222; break;
+            case 'x': bits |= 0111; break;
+            case 'X': if (any_exec) bits |= 0111; break;
+            case 's': case 't': break;       /* file-only bits: no effect */
+            case 'u': case 'g': case 'o':
+                src = (*p == 'u') ? (allowed >> 6) & 07
+                    : (*p == 'g') ? (allowed >> 3) & 07
+                                  :  allowed       & 07;
+                bits |= (src << 6) | (src << 3) | src;
+                break;
+            default:
+                return (mode_t)-1;
+            }
+            p++;
+        }
+
+        mode_t who_mask = (who_u ? 0700 : 0) | (who_g ? 0070 : 0) |
+                          (who_o ? 0007 : 0);
+        bits &= who_mask;
+        if (op == '+')      allowed |= bits;
+        else if (op == '-') allowed &= ~bits;
+        else                allowed = (allowed & ~who_mask) | bits;
+    }
+    return allowed & 0777;
+}
+
 static int exec_builtin_umask(shell_ctx_t *sh, int argc, char **argv)
 {
     (void)sh;
@@ -3840,14 +3903,50 @@ static int exec_builtin_umask(shell_ctx_t *sh, int argc, char **argv)
             return 1;
         return 0;
     }
-    /* Set umask */
-    char *end;
-    unsigned long val = strtoul(argv[i], &end, 8);
-    if (*end != '\0' || val > 0777) {
-        fprintf(stderr, "silex: umask: invalid mode: %s\n", argv[i]);
-        return 1;
+    /* Set umask. An operand of all octal digits is a mask; anything else is
+     * a comma-separated symbolic mode. */
+    const char *arg = argv[i];
+    int all_octal = (arg[0] != '\0');
+    for (const char *q = arg; *q; q++)
+        if (*q < '0' || *q > '7') { all_octal = 0; break; }
+
+    if (all_octal) {
+        /* POSIX leaves an over-long mask unspecified; dash keeps the low 9
+         * bits (`umask 1234567` -> 0567) rather than rejecting it. */
+        unsigned long val = strtoul(arg, NULL, 8);
+        umask((mode_t)(val & 0777));
+        return 0;
     }
-    umask((mode_t)val);
+
+    /* Reject anything starting with '-' as an option, not a mode: `umask
+     * -rwx` must fail without touching the mask (dash: "Illegal option"). */
+    if (arg[0] == '-') {
+        fprintf(stderr, "silex: umask: Illegal option %s\n", arg);
+        return 2;
+    }
+
+    mode_t cur = umask(0); umask(cur);
+    mode_t allowed = (~cur) & 0777;
+    const char *q = arg;
+    while (*q) {
+        const char *comma = strchr(q, ',');
+        size_t len = comma ? (size_t)(comma - q) : strlen(q);
+        char clause[64];
+        if (len == 0 || len >= sizeof(clause)) {
+            fprintf(stderr, "silex: umask: Illegal mode: %s\n", arg);
+            return 1;   /* empty clause (`u+r,,u-r`) or absurdly long */
+        }
+        memcpy(clause, q, len);
+        clause[len] = '\0';
+        mode_t next = umask_apply_clause(clause, allowed);
+        if (next == (mode_t)-1) {
+            fprintf(stderr, "silex: umask: Illegal mode: %s\n", arg);
+            return 1;   /* the mask is left untouched on error */
+        }
+        allowed = next;
+        q = comma ? comma + 1 : q + len;
+    }
+    umask((~allowed) & 0777);
     return 0;
 }
 
