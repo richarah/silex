@@ -1,10 +1,10 @@
 # External Test Suite Scorecard
 
-**Measured:** 2026-08-10, monorepo `core/`, glibc x86_64 (silex run as the
-musl-static release binary). Supersedes the 2026-07-12 figures.
-ShellSpec row re-measured later the same day after the `test`/`[` rewrite
-and 7 further conformance fixes (commits 06b17b0..26fbbc2); smoosh and
-modernish re-verified unchanged after those fixes.
+**Measured:** 2026-08-12, monorepo `core/`, glibc x86_64. Supersedes the
+2026-08-10/11 figures. Major changes this round: the Oils runner now
+measures every spec file (the "38 crashing files" were 36 parts runner
+artifact + 2 real shell hangs, both fixed), and the sed applet was
+rewritten GNU-compatible (suite went 6 -> 50 passes).
 
 Before trusting any number here, read why an earlier version of this file was
 meaningless.
@@ -45,10 +45,10 @@ failure, not a pass.
 | **GNU grep** | **66 pass / 0 fail** (60 skipped) | No failures among executed tests. |
 | **modernish** | **all 18 files pass; 0 unexpected failures** | `bin/modernish --test`: 369 succeeded, 8 skipped, 9 tolerated `xfail`, **0 unexpected** ($LINENO support unlocked four previously-skipped capability tests). Improved from 363 on 2026-08-10 (BUG_CASEPAREN is fixed for real — case-aware command-substitution scanners — and one capability skip became a pass); 2 behaviors moved to tolerated-xfail because modernish now detects silex's POSIX-permitted special-builtin assignment persistence. |
 | mksh | 169 / 583 (29%) | mksh's suite targets the **ksh superset** (arrays, `[[ ]]`, coprocesses, `${|...}`, etc.), not POSIX `sh`. The bulk of the 414 failures are ksh-only features silex does not implement by design. Not a POSIX-conformance figure. |
-| Oils / OSH | **849 pass / 4291 run** | Runner fixed (the old one passed a nonexistent `--shell` option and executed zero tests; it now py3-patches a COPY of the vendored harness and runs all 139 non-Oil-language spec files). Baseline on the identical runner: **dash 3371 / 6216**. The gap is real follow-up material: 38 files crash or hang silex outright (~2000 cases lost), and the suite leans heavily on bash/ksh extensions. This row is a measurement, not a conformance claim. |
+| Oils / OSH | **907 pass / 2802 run, all 139 files measured** | The "38 files crash or hang silex" claim (2026-08-11) was mostly a SECOND runner bug: sh_spec.py skips its summary table when every case in a file has the same result, so all-pass and all-fail files (36 of the 38) were miscounted as "crashed". The runner now uses `--stats-file` for exact counters. The 2 files that really hung exposed real shell bugs, both fixed: `break $bad` looped forever (special-builtin error now aborts, like dash), and `${v//}` empty-pattern patsub never advanced (plus a family of patsub fixes: bash's confusing-slash parse, quoted patterns, expanded replacements). Baseline on the identical runner: **dash 957 / 2339**. The suite leans heavily on bash/ksh extensions; this row is a measurement, not a conformance claim. |
 | **ShellSpec** | **1696 examples, 0 failures** (58 skips) | ShellSpec's own core suite, run with silex as both runner and target shell — **byte-identical to dash on the same runner**. Was "fails to launch" earlier on 2026-08-10; fixing it surfaced and fixed 8 real silex bugs: 3-arg-max `test`/`[` (now full POSIX + XSI grammar), mid-word `#` starting comments, quote-blind word classifiers eating empty quoted fields, `${@:-}` gluing positionals, builtins beating functions in command search, errexit killing loops on exempt AND-lists, FLOW sentinels leaking as exit 234 through pipes/`&`, and recursive functions reusing the outer call's expanded redirect target. |
-| GNU sed | **6 pass / 45 fail** (17 skip, 70 run) | The vendored checkout had been bootstrapped inside the Docker image at `/silex` — dangling `GNUmakefile` symlinks (which GNU make prefers over `Makefile`) broke every invocation. The runner now repairs the symlinks, reconfigures on path mismatch, and swaps the built `sed/sed` for a silex wrapper so the suite tests silex (previously it tested GNU's own binary). What looked like 9p slowness was actually silex's sed spinning forever on GNU's `recall` test (`:x;s//Y/;/f/bx`): an empty regex must recall the last EXECUTED regex, and silex bound it at compile time. With execute-time recall implemented the suite finishes in minutes. First real numbers: 6/70 — the 45 failures are unreviewed follow-up (a mix of GNU extensions, `--posix` behaviors, and small gaps like CRLF-tolerant `-f` script files). |
-| GNU coreutils | **190 pass / 27 fail** (68 skip, 286 run) | First real measurement (the suite had never executed). Docker-era staleness repaired, corrupted generated artifacts (speedlist.h) regenerated, tool-shim PATH scoped to `make check` only, and the test globs updated to the current upstream layout (`tests/cat/*.sh`, not `tests/misc/cat-*.sh`). The 27 failures are unreviewed follow-up material — some will be silex applet gaps, some environment (9p filesystem, non-root). |
+| **GNU sed** | **50 pass / 1 fail** (17 skip, 70 run) | sed applet rewritten GNU-compatible (was 6/45 on 2026-08-11; the old mini-sed had broken `N`/`D`/`P`, approximated regex ranges, and none of the GNU option/error surface). Now implements the full command set (D P Q R T W F e v z), GNU addressing (`0,/re/`, `0r` prepend, `+N`/`~N`), s-flags with exact GNU error strings and flag ordering, case conversion and `\cX`/`\dNNN`/`\oNNN`/`\xHH` escapes, `-s -z -u -l -i[SUFFIX] --posix --sandbox --follow-symlinks`, missing-final-newline preservation via delayed delimiters, per-filename shared R/w streams, and GNU exit codes (1/2/4). Behaviors were validated against the vendored GNU binary as an oracle. The single remaining failure is nulldata's dot-matches-NUL subtest: glibc's regex never lets `.` match a NUL byte (GNU sed ships its own engine); everything else in that test passes. |
+| GNU coreutils | 190 pass / 27 fail (68 skip, 286 run) | The 27 failures are now TRIAGED (2026-08-12): the majority are environment — the checkout lives on WSL2 drvfs (`/mnt/c`) where **chmod is a no-op** (`chmod 0 f` leaves the file readable), so every permission-semantics test (rm/cp/mv fail-perm class, sort-exit-early, chmod result checks) fails regardless of applet correctness, and the tail inotify tests need a real fs. Running the failing tests on native ext4 against the coreutils binaries as oracle exposed 3 real applet gaps, all fixed: chmod lacked GNU argv permutation (`chmod f -w`) and multi-op symbolic clauses (`u+r-w`, `--`, who-only `ug`), mkdir `-m` rejected symbolic modes (`u=rwx,g=rx,o=w,-s,+t` → 1752), and ln lacked `-i`/`-L`/`-P`. Silex's symbolic-chmod results now match GNU on every tests/chmod/usage.sh case. An honest re-measure of the suite itself needs a native-fs copy of the checkout — still open. |
 | **Autoconf/configure** | **5/5** (curl, cpython, openssl, sqlite, zlib) | An honest 5/5 this time. Getting there took real fixes: `$LINENO` (without it configure rewrites itself through a sed shim silex executed pathologically -- curl spun for 2h of CPU), grep no longer claiming any pattern "matches" in NUL-containing files (broke cpython's float-word probe), `${var="quoted"}` no longer storing guard bytes (libtool's `: ${RM="rm -f"}` produced a command named `\x02rm`), and whitespace-only unquoted expansions yielding zero fields (ld was handed an empty filename). openssl is invoked via its `./config` entry point (its `./configure` is perl; dash fails on it identically) and curl gets `--without-ssl --without-libpsl` for dev libraries this machine lacks (dash aborts identically without them). |
 
 The smoosh 99% is measured, reproducible, and fails the build when it regresses:
@@ -67,9 +67,11 @@ reference implementation's own name. Every cluster that was listed here on
 break/continue, interactive features, parse-error exit paths, builtin flag
 gaps) is fixed and green.
 
-Known real gaps that remain (from the Oils spec suite): 38 of its files
-crash or hang silex (~2000 cases not executed). That is the next
-conformance frontier.
+Known real gaps that remain: the Oils spec suite's 1895 failing cases
+(most are bash/ksh extension tests, but a real POSIX subset hides among
+them — unreviewed); the coreutils suite needs a native-fs home before
+its permission tests measure anything; sed's dot-matches-NUL corner
+needs a length-aware regex engine.
 
 ## Reproducing
 
