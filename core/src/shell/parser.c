@@ -284,6 +284,12 @@ static void pend_prepend(parser_t *p, const token_t *toks, int n)
  * reshapes the parse. Call only where a command word is expected. */
 /* Returns 1 when at least one alias name was consumed (so the caller can
  * recognize a command that vanished entirely, e.g. `alias empty=''; empty`). */
+/* Sentinel queued after the tokens of an alias value that ended in a blank.
+ * POSIX: when an alias value ends in a <blank>, the word FOLLOWING it is
+ * itself checked for alias substitution. Recognised by POINTER identity, so
+ * no real word token can be mistaken for it. */
+static char alias_blank_marker[] = "";
+
 static int expand_command_aliases(parser_t *p)
 {
     int consumed = 0;
@@ -291,30 +297,67 @@ static int expand_command_aliases(parser_t *p)
         return 0;
     const char *active[64];
     int nactive = 0;
+    /* Words already scanned past (the tokens of an expanded value, and any
+     * word that turned out not to be an alias). They are pushed back in
+     * front of the stream when we finish. */
+    token_t prefix[512];
+    int np      = 0;
+    int markers = 0;   /* blank-continuation sentinels still ahead */
+    int eligible = 1;  /* is the token at the head in an alias-checked position? */
     int guard   = 0;
+
     while (guard++ < 1000) {
         token_t t = peek(p);
-        if (t.type != TOK_WORD || !t.text)
+
+        /* End of a value that ended in a blank: the next word becomes
+         * eligible, and the recursion guard resets -- `echo-x echo-x` must
+         * expand BOTH words, which a command-wide guard would prevent. */
+        if (t.type == TOK_WORD && t.text == alias_blank_marker) {
+            consume(p);
+            markers--;
+            nactive  = 0;
+            eligible = 1;
+            continue;
+        }
+
+        const char *val = NULL;
+        if (eligible && t.type == TOK_WORD && t.text) {
+            int seen = 0;
+            for (int i = 0; i < nactive; i++)
+                if (strcmp(active[i], t.text) == 0) { seen = 1; break; }
+            if (!seen)
+                val = p->alias_lookup(p->alias_ctx, t.text);
+        }
+
+        if (!val) {
+            /* Not expandable here. Step over it only to reach a pending
+             * sentinel; with none ahead there is nothing left to do. Words
+             * stepped over are NOT eligible, so an alias name sitting inside
+             * a value (`alias e_='echo one '` with `one` also an alias) stays
+             * literal, as POSIX requires. */
+            if (markers > 0 && t.type != TOK_EOF && np < 512) {
+                prefix[np++] = consume(p);
+                eligible = 0;
+                continue;
+            }
             break;
-        int seen = 0;
-        for (int i = 0; i < nactive; i++)
-            if (strcmp(active[i], t.text) == 0) { seen = 1; break; }
-        if (seen)
-            break;
-        const char *val = p->alias_lookup(p->alias_ctx, t.text);
-        if (!val)
-            break;
+        }
+
         if (nactive < 64)
             active[nactive++] = t.text;   /* arena-owned; outlives the parse */
         consume(p);                       /* drop the alias name */
-        consumed = 1;
-        if (val[0] == '\0')
-            continue;                     /* alias to empty: vanishes */
+        if (np == 0 && markers == 0)
+            consumed = 1;                 /* an actual command word vanished */
+
+        size_t vlen = strlen(val);
+        int ends_blank = (vlen > 0 &&
+                          (val[vlen - 1] == ' ' || val[vlen - 1] == '\t'));
+
         /* Re-lex the alias value; its token text is arena-allocated (p->arena),
          * so it survives lexer_free. */
         lexer_t sub;
         lexer_init_str(&sub, val, p->arena);
-        token_t buf[256];
+        token_t buf[257];
         int n = 0;
         for (;;) {
             token_t tk = lexer_next(&sub);
@@ -324,8 +367,41 @@ static int expand_command_aliases(parser_t *p)
                 buf[n++] = tk;
         }
         lexer_free(&sub);
-        pend_prepend(p, buf, n);
+
+        if (ends_blank) {
+            token_t m;
+            memset(&m, 0, sizeof(m));
+            m.type = TOK_WORD;
+            m.text = alias_blank_marker;
+            buf[n++] = m;
+            markers++;
+        }
+        if (n > 0)
+            pend_prepend(p, buf, n);
+        /* The value's own first token is still a command word, so it stays
+         * eligible: `alias hi='e_ hello'` with `alias e_='echo __'` chains. */
+        eligible = 1;
     }
+
+    /* A sentinel must never reach the parser (it would look like an empty
+     * word). Only reachable if the guard above ran out. */
+    while (markers > 0) {
+        token_t t = peek(p);
+        if (t.type == TOK_EOF)
+            break;
+        token_t got = consume(p);
+        if (got.type == TOK_WORD && got.text == alias_blank_marker) {
+            markers--;
+            continue;
+        }
+        if (np < 512)
+            prefix[np++] = got;
+        else
+            break;
+    }
+
+    if (np > 0)
+        pend_prepend(p, prefix, np);
     return consumed;
 }
 

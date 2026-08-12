@@ -38,64 +38,94 @@ int applet_sh(int argc, char **argv)
     int         opt_e = 0, opt_u = 0, opt_x = 0, opt_n = 0;
     int         opt_f = 0, opt_pipefail = 0, opt_i = 0;
 
+    /* POSIX option parsing: options are read until `--`, `-`, or the first
+     * OPERAND; -c does not itself consume an argument, the first operand
+     * becomes the command string. That ordering matters:
+     *   sh -c -x 'echo hi'   -> -x is a flag, 'echo hi' is the string
+     *   sh -c -z             -> an illegal OPTION, not a command named -z
+     *   sh -c -- 'echo hi'   -> `--` ends options, then the string
+     *   sh -c 'echo' -z      -> -z is past the string: it is $0, not a flag
+     * The old loop took argv[i+1] as the string the moment it saw -c, so all
+     * four ran the wrong thing (`silex: --: command not found`). */
+    int want_cmd_string = 0;
     int i;
     for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--") == 0) {
             arg_start = i + 1;
             break;
         }
-        if (argv[i][0] != '-') {
+        /* A lone "-" ends option processing too (and is not an operand). */
+        if (strcmp(argv[i], "-") == 0) {
+            arg_start = i + 1;
+            break;
+        }
+        /* `+x` turns an option off; `+c` is accepted as a synonym for -c
+         * (dash runs `sh +c 'echo hi'`). */
+        if (argv[i][0] != '-' && argv[i][0] != '+') {
             arg_start = i;
             break;
         }
+        int set_on = (argv[i][0] == '-');
         const char *p = argv[i] + 1;
         int stop = 0;
         while (*p && !stop) {
             switch (*p) {
             case 'c':
                 if (*(p + 1)) {
+                    /* attached form: -cCMD */
                     cmd_string = p + 1;
-                    p = p + strlen(p) - 1; /* skip to end */
-                } else if (i + 1 < argc) {
-                    cmd_string = argv[++i];
+                    p = p + strlen(p) - 1;
+                    arg_start = i + 1;
+                    stop = 1;
                 } else {
-                    fprintf(stderr, "silex: sh: -c requires an argument\n");
-                    return 1;
+                    want_cmd_string = 1;
                 }
-                arg_start = i + 1;
-                stop = 1;
                 break;
-            case 'e': opt_e        = 1; break;
-            case 'u': opt_u        = 1; break;
-            case 'x': opt_x        = 1; break;
-            case 'n': opt_n        = 1; break;
-            case 'f': opt_f        = 1; break;
-            case 'i': opt_i = 1; break;   /* force interactive mode */
-            case 'o':
+            case 'v': /* verbose: accepted (echoing input is not implemented) */
+                break;
+            case 'e': opt_e        = set_on; break;
+            case 'u': opt_u        = set_on; break;
+            case 'x': opt_x        = set_on; break;
+            case 'n': opt_n        = set_on; break;
+            case 'f': opt_f        = set_on; break;
+            case 'i': opt_i        = set_on; break;
+            case 'o': {
+                const char *name = NULL;
                 if (*(p + 1)) {
-                    const char *on = p + 1;
-                    if      (strcmp(on, "errexit")  == 0) opt_e = 1;
-                    else if (strcmp(on, "nounset")  == 0) opt_u = 1;
-                    else if (strcmp(on, "xtrace")   == 0) opt_x = 1;
-                    else if (strcmp(on, "pipefail") == 0) opt_pipefail = 1;
-                    else if (strcmp(on, "noglob")   == 0) opt_f = 1;
+                    name = p + 1;
                     p = p + strlen(p) - 1;
                 } else if (i + 1 < argc) {
-                    const char *on = argv[++i];
-                    if      (strcmp(on, "errexit")  == 0) opt_e = 1;
-                    else if (strcmp(on, "nounset")  == 0) opt_u = 1;
-                    else if (strcmp(on, "xtrace")   == 0) opt_x = 1;
-                    else if (strcmp(on, "pipefail") == 0) opt_pipefail = 1;
-                    else if (strcmp(on, "noglob")   == 0) opt_f = 1;
+                    name = argv[++i];
                     stop = 1;
                 }
+                if (name) {
+                    if      (strcmp(name, "errexit")  == 0) opt_e = set_on;
+                    else if (strcmp(name, "nounset")  == 0) opt_u = set_on;
+                    else if (strcmp(name, "xtrace")   == 0) opt_x = set_on;
+                    else if (strcmp(name, "pipefail") == 0) opt_pipefail = set_on;
+                    else if (strcmp(name, "noglob")   == 0) opt_f = set_on;
+                }
                 break;
+            }
             default:
-                fprintf(stderr, "silex: sh: unknown option: -%c\n", *p);
-                return 1;
+                /* dash: "Illegal option -z", exit 2 */
+                fprintf(stderr, "silex: %c%c: Illegal option %c%c\n",
+                        set_on ? '-' : '+', *p, set_on ? '-' : '+', *p);
+                return 2;
             }
             if (!stop) p++;
         }
+    }
+
+    /* -c was given without an attached string: the first operand is it, and
+     * everything after that operand is $0, $1, ... */
+    if (want_cmd_string && !cmd_string) {
+        if (arg_start >= argc) {
+            fprintf(stderr, "silex: sh: -c requires an argument\n");
+            return 2;
+        }
+        cmd_string = argv[arg_start];
+        arg_start++;
     }
 
     /* Build positional parameter argv for shell_init.

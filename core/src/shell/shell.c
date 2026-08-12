@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <fcntl.h>
 #include <unistd.h>
 
 /* -------------------------------------------------------------------------
@@ -710,7 +711,13 @@ int shell_run_stdin(shell_ctx_t *sh)
      * the script (POSIX) still does, and `read` still takes exactly its own
      * bytes. Only the stdio bookkeeping is now ours alone. */
     FILE *script_fp = NULL;
-    int   script_fd = dup(STDIN_FILENO);
+    /* Park it at 10 or above, CLOEXEC: a plain dup() takes the lowest free
+     * descriptor -- fd 3 -- so a script's own `exec 3>file` would clobber
+     * the shell's reading handle and the script would end right there. The
+     * same reasoning (and the same base) as the redirect saver in
+     * redirect.c. CLOEXEC keeps it out of every child; fd 0 is untouched,
+     * so `read` and inherited stdin are unaffected. */
+    int   script_fd = fcntl(STDIN_FILENO, F_DUPFD_CLOEXEC, 10);
     if (script_fd >= 0) {
         script_fp = fdopen(script_fd, "r");
         if (script_fp)
