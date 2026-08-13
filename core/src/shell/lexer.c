@@ -119,8 +119,33 @@ void lexer_init_fp(lexer_t *l, FILE *fp, arena_t *a)
     l->has_pushback = 0;
 }
 
+void lexer_set_verbose(lexer_t *l, const int *flag)
+{
+    l->verbose = flag;
+}
+
+/* -v echoes the shell's input verbatim as it is consumed. Buffered per line
+ * rather than written per character: stderr is unbuffered, so a naive fputc
+ * per character costs one write(2) per byte of script. */
+static void verbose_flush(lexer_t *l)
+{
+    if (l->vlen) {
+        fwrite(l->vbuf, 1, l->vlen, stderr);
+        fflush(stderr);
+        l->vlen = 0;
+    }
+}
+
+static void verbose_emit(lexer_t *l, int c)
+{
+    l->vbuf[l->vlen++] = (char)c;
+    if (c == '\n' || l->vlen == sizeof(l->vbuf))
+        verbose_flush(l);
+}
+
 void lexer_free(lexer_t *l)
 {
+    verbose_flush(l);
     free(l->wordbuf);
     l->wordbuf     = NULL;
     l->wordbuf_len = 0;
@@ -137,14 +162,20 @@ static int lexer_getc(lexer_t *l)
         l->has_pushback = 0;
         return l->pushback;
     }
+    int c;
     if (l->input) {
-        unsigned char c = (unsigned char)l->input[l->pos];
+        c = (unsigned char)l->input[l->pos];
         if (c == '\0')
             return EOF;
         l->pos++;
-        return (int)c;
+    } else {
+        c = fgetc(l->fp);
+        if (c == EOF)
+            return EOF;
     }
-    return fgetc(l->fp);
+    if (l->verbose && *l->verbose)
+        verbose_emit(l, c);
+    return c;
 }
 
 static void lexer_ungetc(lexer_t *l, int c)
@@ -501,6 +532,15 @@ static void scan_single_quote(lexer_t *l)
     }
 }
 
+/* The one-character parameter names: `$?`, `$@`, `$*`, `$#`, `$-`, `$$`,
+ * `$!`, `$0`. Anything else after a `$` (that is not a name character, `{`
+ * or `(`) leaves the `$` literal. */
+static int is_special_param_char(int c)
+{
+    return c == '@' || c == '*' || c == '#' || c == '?' ||
+           c == '-' || c == '$' || c == '!' || c == '0';
+}
+
 /*
  * Scan double-quoted string.  $, `, \ are still active.
  * Called after the opening '"' has been consumed.
@@ -544,6 +584,15 @@ static void scan_double_quote(lexer_t *l)
             } else if (next == '{') {
                 wordbuf_append(l, '$');
                 scan_param_expand(l, 1);
+            } else if (next == '"' || next == '`' || next == '\\') {
+                /* A `$` that is not followed by a name, `{` or `(` is a
+                 * literal dollar -- and the character after it keeps its own
+                 * meaning. Swallowing it here consumed the CLOSING quote of
+                 * `"$"`, so the quote scan ran on to end of input and the rest
+                 * of the line became part of the word (`printf "%s" "$"; echo`
+                 * passed `; echo` to printf). Push it back for the loop. */
+                wordbuf_append(l, '$');
+                lexer_ungetc(l, next);
             } else {
                 wordbuf_append(l, '$');
                 if (next != EOF) {
@@ -836,6 +885,14 @@ restart:
                  * old code appended the OPENING quote as a literal, leaving the
                  * CLOSING quote to start a runaway quote scan that swallowed the
                  * following tokens (e.g. the `in` of a `case`). */
+                wordbuf_append(l, '$');
+                lexer_ungetc(l, next);
+            } else if (next != EOF && !is_name_char((unsigned char)next) &&
+                       !is_special_param_char(next)) {
+                /* Nothing an expansion could continue with: the `$` is literal
+                 * and the next character keeps its own meaning. Appending it
+                 * blindly pulled operators into the word -- `echo $;` made the
+                 * word `$;`, so the `;` never terminated the command. */
                 wordbuf_append(l, '$');
                 lexer_ungetc(l, next);
             } else {

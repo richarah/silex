@@ -99,6 +99,7 @@ int shell_init(shell_ctx_t *sh, int argc, char **argv)
     sh->opt_e        = 0;
     sh->opt_u        = 0;
     sh->opt_x        = 0;
+    sh->opt_v        = 0;
     sh->opt_f        = 0;
     sh->opt_pipefail = 0;
     sh->opt_n        = 0;
@@ -270,6 +271,7 @@ int shell_run_string(shell_ctx_t *sh, const char *script)
     sh->in_command_builtin = 0;
 
     lexer_init_str(&lex, script, &parse_local);
+    lexer_set_verbose(&lex, &sh->opt_v);
     parser_init(&par, &lex, &parse_local);
     parser_set_aliases(&par, shell_alias_lookup_cb, sh);
 
@@ -428,6 +430,7 @@ int shell_run_file(shell_ctx_t *sh, const char *path)
     arena_init(&local, "run-file");
 
     lexer_init_str(&lex, src, &parse_local);
+    lexer_set_verbose(&lex, &sh->opt_v);
     parser_init(&par, &lex, &parse_local);
     parser_set_aliases(&par, shell_alias_lookup_cb, sh);
 
@@ -658,6 +661,7 @@ static int shell_run_interactive(shell_ctx_t *sh)
         lexer_t  lex;
         parser_t par;
         lexer_init_str(&lex, buf, &sh->parse_arena);
+        lexer_set_verbose(&lex, &sh->opt_v);
         parser_init(&par, &lex, &sh->parse_arena);
         parser_set_aliases(&par, shell_alias_lookup_cb, sh);
         for (;;) {
@@ -732,6 +736,7 @@ int shell_run_stdin(shell_ctx_t *sh)
     parser_t par;
 
     lexer_init_fp(&lex, script_fp, &sh->parse_arena);
+    lexer_set_verbose(&lex, &sh->opt_v);
     parser_init(&par, &lex, &sh->parse_arena);
     parser_set_aliases(&par, shell_alias_lookup_cb, sh);
 

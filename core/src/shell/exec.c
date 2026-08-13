@@ -196,6 +196,9 @@ static const shell_builtin_t shell_builtins[] = {
     { "unset",    exec_builtin_unset     },
     { "readonly", exec_builtin_readonly  },
     { "cd",       exec_builtin_cd        },
+    /* `chdir` is cd under its historical name; dash and busybox ash both
+     * provide it, and scripts written against them use it. */
+    { "chdir",    exec_builtin_cd        },
     { "pwd",      exec_builtin_pwd       },
     { "shift",    exec_builtin_shift     },
     { "exit",     exec_builtin_exit      },
@@ -296,6 +299,28 @@ static const char *signal_number_to_name(int sig)
  * readonly, return, set, shift, times, trap, unset.
  * Special builtins must cause the shell to exit on certain errors
  * (e.g., redirect failures, readonly violations) in non-interactive mode. */
+/* POSIX 2.8.1: an ERROR in a special built-in makes a non-interactive shell
+ * exit -- `shift 3` with two parameters, `set -o bogus`, `readonly` on a
+ * read-only name all end the script, and `|| true` does not rescue them
+ * (dash, mksh and ksh do this; bash needs `set -o posix`).
+ *
+ * Only the special builtins whose non-zero status can ONLY mean "the utility
+ * itself failed" are listed. `eval`, `.` and `exec` return the status of what
+ * they ran, `exit`/`return`/`break`/`continue` carry flow control, and `:`
+ * never fails -- for those a non-zero result is an ordinary status and must
+ * not kill the shell. */
+static int special_builtin_error_exits(const char *name)
+{
+    return (strcmp(name, "export")   == 0 ||
+            strcmp(name, "readonly") == 0 ||
+            strcmp(name, "set")      == 0 ||
+            strcmp(name, "shift")    == 0 ||
+            strcmp(name, "unset")    == 0);
+    /* `trap` is deliberately absent: dash and bash both DIAGNOSE a bad signal
+     * name and carry on with status 0, so treating it as fatal would invent a
+     * divergence rather than close one. `times` likewise. */
+}
+
 static int is_special_builtin(const char *name)
 {
     return (strcmp(name, ":") == 0 ||
@@ -688,6 +713,31 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
     int nassigns = 0;
     if (assigns) while (assigns[nassigns]) nassigns++;
 
+    /* A command that is ONLY assignments takes its redirections FIRST, so a
+     * command substitution in an assigned value reads them:
+     *
+     *     paths=`tr '\n' ':'`<<EOF
+     *
+     * is a documented idiom (the Oils suite's "blog post example"). Expanding
+     * the value before applying the here-document left the backtick reading
+     * the shell's own stdin -- from a terminal that HANGS, and in a script it
+     * silently ate the rest of the file. With a command name present the
+     * redirections belong to that command and are applied further down, as
+     * before. */
+    int assign_only = (!words || !words[0]);
+    redirect_ctx_t arctx = { NULL, 0 };
+    int arctx_active = 0;
+    if (assign_only && redirs) {
+        redirect_apply(sh, redirs, &arctx);
+        arctx_active = 1;
+        if (arctx.error) {
+            /* A failed redirection means the command does not run at all --
+             * not even the assignments (POSIX). */
+            redirect_restore(&arctx);
+            return 1;
+        }
+    }
+
     /* Expand all assign values up front.
      * Track cmd-sub exit status: per POSIX, assignment-only commands exit with
      * the status of the last command substitution (or 0 if none). */
@@ -710,6 +760,25 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
          * command substitution -- so cmdsub_exit was always 0 and
          * `v=$(cmd); ret=$?` always saw success. */
         sh->last_cmdsub_exit = 0;
+        /* POSIX 2.8.1: assigning to a read-only variable is a VARIABLE
+         * ASSIGNMENT ERROR -- a non-interactive shell writes one diagnostic
+         * and exits (dash: status 2). Detected before anything is applied,
+         * because the machinery below assigns each value three times (overlay,
+         * restore, final apply) and each pass printed its own "readonly
+         * variable" line while the shell carried on regardless. The values are
+         * still expanded first, so a command substitution in the offending
+         * assignment runs, as it does in dash. */
+        const char *ro_name = NULL;
+        for (int i = 0; i < nassigns; i++) {
+            const char *eq = strchr(assigns[i], '=');
+            if (!eq) continue;
+            size_t nl = (size_t)(eq - assigns[i]);
+            char nbuf[256];
+            if (nl >= sizeof(nbuf)) continue;
+            memcpy(nbuf, assigns[i], nl);
+            nbuf[nl] = '\0';
+            if (vars_is_readonly(&sh->vars, nbuf)) { ro_name = assigns[i]; break; }
+        }
         /* Assignments are expanded and applied LEFT TO RIGHT, each visible to
          * the next (`x=5 y=$((x+2)) cmd` gives y=7 -- smoosh
          * semantics.special.assign.visible). Apply each into the shell vars as
@@ -725,7 +794,7 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
             anames[i] = strndup(assigns[i], nlen);
             /* Use expand_word_assign for assignment values - enables ~: expansion */
             avals[i]  = expand_word_assign(sh, eq + 1);
-            if (anames[i] && aov_saved && aov_had && aov_exp) {
+            if (!ro_name && anames[i] && aov_saved && aov_had && aov_exp) {
                 const char *ov = vars_get(&sh->vars, anames[i]);
                 aov_had[i]   = ov != NULL;
                 aov_saved[i] = ov ? strdup(ov) : NULL;
@@ -736,7 +805,7 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
         /* Restore the overlay (reverse order handles duplicate names). The
          * word/command paths apply the values again through their own
          * save/restore; special builtins get persistence there. */
-        if (aov_saved && aov_had && aov_exp) {
+        if (!ro_name && aov_saved && aov_had && aov_exp) {
             for (int i = nassigns - 1; i >= 0; i--) {
                 if (!anames[i]) continue;
                 if (aov_had[i])
@@ -755,10 +824,22 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
         free(aov_had);
         free(aov_exp);
         cmdsub_exit = sh->last_cmdsub_exit;
+
+        if (ro_name) {
+            const char *eq = strchr(ro_name, '=');
+            fprintf(stderr, "silex: %.*s: readonly variable\n",
+                    (int)(eq ? eq - ro_name : (ptrdiff_t)strlen(ro_name)), ro_name);
+            for (int i = 0; i < nassigns; i++) free(anames[i]);
+            free(anames); free(avals);
+            if (!sh->interactive)
+                exit(2);
+            if (arctx_active) redirect_restore(&arctx);
+            return 2;
+        }
     }
 
     /* If no command words, apply to shell scope */
-    if (unlikely(!words || !words[0])) {
+    if (unlikely(assign_only)) {
         for (int i = 0; i < nassigns; i++) {
             if (!anames[i]) continue;
             if (vars_set(&sh->vars, anames[i], avals[i] ? avals[i] : "") != 0)
@@ -768,16 +849,10 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
             free(anames[i]);
         }
         free(anames); free(avals);
-        int redir_err = 0;
-        if (redirs) {
-            redirect_ctx_t rctx = {NULL, 0};
-            redirect_apply(sh, redirs, &rctx);
-            redir_err = rctx.error;
-            redirect_restore(&rctx);
-        }
-        /* A failed redirection on a command with no words is an error:
-         * `<-` alone must not report success (dash exits 2; smoosh 1). */
-        if (redir_err) return 1;
+        /* The redirections were applied above (and a failure already returned
+         * 1 -- `<-` alone must not report success). Undo them: only `exec`
+         * makes a redirection permanent. */
+        if (arctx_active) redirect_restore(&arctx);
         /* Return cmd-sub exit status (POSIX: last cmd-sub exit, or 0 if none) */
         return assign_err ? 1 : cmdsub_exit;
     }
@@ -819,9 +894,32 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
      * post-expansion, to stderr before it runs -- this is POSIX `set -x`.
      * opt_x was previously set but never consulted, so `set -x` traced nothing.
      * PS4 supplies the prefix (POSIX; default "+ "). */
-    if (sh->opt_x || sh->trace_level >= 1) {
+    if ((sh->opt_x || sh->trace_level >= 1) && !sh->in_ps4) {
         const char *ps4 = vars_get(&sh->vars, "PS4");
-        fputs(ps4 ? ps4 : "+ ", stderr);
+        /* PS4 is expanded before it is printed (POSIX), so `PS4='[last=$?] '`
+         * shows the status of the PREVIOUS command -- which means the
+         * expansion itself must not disturb $?, and a command substitution
+         * inside PS4 would. Printing it raw made every trace line literally
+         * read "[last=$?]". */
+        if (ps4) {
+            int saved_status = sh->last_exit;
+            /* Tracing is OFF while PS4 itself is expanded. A `$(...)` in PS4
+             * runs in a forked subshell that INHERITS opt_x, so with tracing
+             * still on that subshell traced its own command, expanded PS4
+             * again, forked again -- `PS4='$(date)'; set -x` was a fork bomb.
+             * Clearing the flag (rather than a local guard) is what the child
+             * inherits, and matches bash: the PS4 expansion is not traced. */
+            int saved_x = sh->opt_x, saved_tl = sh->trace_level;
+            sh->opt_x = 0; sh->trace_level = 0;
+            sh->in_ps4 = 1;
+            const char *x = expand_word(sh, ps4);
+            sh->in_ps4 = 0;
+            sh->opt_x = saved_x; sh->trace_level = saved_tl;
+            sh->last_exit = saved_status;
+            fputs(x ? x : ps4, stderr);
+        } else {
+            fputs("+ ", stderr);
+        }
         for (int ti = 0; ti < argc; ti++) {
             if (ti) fputc(' ', stderr);
             fputs(expanded[ti], stderr);
@@ -881,6 +979,18 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
             }
         } else {
             cmd_rc = sfn(sh, argc, expanded);
+
+            /* A failed special builtin ends a non-interactive shell (2.8.1).
+             * `command shift 3` is exempt (the `command` prefix removes the
+             * special-builtin properties), as is a trap action, which must
+             * return to whatever it interrupted -- the same exemptions the
+             * redirect-error path above uses. dash reports 2 for this class of
+             * shell error whatever the builtin's own status was. */
+            if (cmd_rc != 0 && !sh->interactive && !sh->in_command_builtin &&
+                !sh->in_trap && special_builtin_error_exits(cmd)) {
+                fflush(stdout);
+                exit(2);
+            }
 
             /* A builtin whose output could not be written has not succeeded.
              *
@@ -1809,8 +1919,19 @@ int exec_node(shell_ctx_t *sh, node_t *node)
         if (!sh->interactive)
             job_reap_and_prune(&sh->jobs);
         char *jobcmd = describe_node(node->u.binary.left);
+        /* Block every signal across the fork. The child inherits the parent's
+         * trap HANDLERS and only clears them a few instructions later, so a
+         * signal aimed at the new job in that window (`cmd & kill -URG $!`,
+         * which is exactly how the Oils suite tests this) ran the PARENT's
+         * trap action inside the child -- the action fired twice, once per
+         * process. Both sides restore the mask once the child's traps are
+         * back to default. */
+        sigset_t async_all, async_oldmask;
+        sigfillset(&async_all);
+        sigprocmask(SIG_BLOCK, &async_all, &async_oldmask);
         pid_t pid = fork();
         if (pid < 0) {
+            sigprocmask(SIG_SETMASK, &async_oldmask, NULL);
             perror("fork");
             free(jobcmd);
             rc = 1;
@@ -1832,6 +1953,7 @@ int exec_node(shell_ctx_t *sh, node_t *node)
                 signal(SIGINT,  SIG_IGN);
                 signal(SIGQUIT, SIG_IGN);
             }
+            sigprocmask(SIG_SETMASK, &async_oldmask, NULL);
             /* `( ... ) &`: this forked child IS the subshell -- don't fork a
              * second time for the N_SUBSHELL node, or $! names a middleman and
              * `kill $!` leaves the real work running (smoosh
@@ -1870,6 +1992,7 @@ int exec_node(shell_ctx_t *sh, node_t *node)
             _exit(r);
         }
         setpgid(pid, pid);
+        sigprocmask(SIG_SETMASK, &async_oldmask, NULL);
         sh->last_bg_pid = pid;
         job_t *j = job_register(&sh->jobs, pid, pid, jobcmd);
         free(jobcmd);
@@ -2382,6 +2505,9 @@ static int set_option_byname(shell_ctx_t *sh, const char *name, int value)
     if      (strcmp(name, "errexit")  == 0) sh->opt_e = value;
     else if (strcmp(name, "nounset")  == 0) sh->opt_u = value;
     else if (strcmp(name, "xtrace")   == 0) sh->opt_x = value;
+    else if (strcmp(name, "verbose")  == 0) sh->opt_v = value;
+    else if (strcmp(name, "vi")       == 0) { sh->opt_vi = value; if (value) sh->opt_emacs = 0; }
+    else if (strcmp(name, "emacs")    == 0) { sh->opt_emacs = value; if (value) sh->opt_vi = 0; }
     else if (strcmp(name, "noglob")   == 0) sh->opt_f = value;
     else if (strcmp(name, "noexec")   == 0) sh->opt_n = value;
     else if (strcmp(name, "monitor")  == 0) sh->opt_m = value;
@@ -2408,6 +2534,9 @@ static int shell_option_on(shell_ctx_t *sh, const char *n)
     else if (strcmp(n, "errexit")  == 0) return sh->opt_e;
     else if (strcmp(n, "nounset")  == 0) return sh->opt_u;
     else if (strcmp(n, "xtrace")   == 0) return sh->opt_x;
+    else if (strcmp(n, "verbose")  == 0) return sh->opt_v;
+    else if (strcmp(n, "vi")       == 0) return sh->opt_vi;
+    else if (strcmp(n, "emacs")    == 0) return sh->opt_emacs;
     else if (strcmp(n, "noglob")   == 0) return sh->opt_f;
     else if (strcmp(n, "noexec")   == 0) return sh->opt_n;
     else if (strcmp(n, "monitor")  == 0) return sh->opt_m;
@@ -2421,8 +2550,8 @@ static int shell_option_on(shell_ctx_t *sh, const char *n)
 static void set_print_options(shell_ctx_t *sh, int reusable)
 {
     static const char *const opts[] = {
-        "allexport", "errexit", "nounset", "xtrace", "noglob", "nolog",
-        "noexec", "monitor", "noclobber", "pipefail",
+        "allexport", "errexit", "nounset", "xtrace", "verbose", "noglob", "nolog",
+        "noexec", "monitor", "noclobber", "pipefail", "vi", "emacs",
     };
     for (size_t i = 0; i < sizeof(opts) / sizeof(opts[0]); i++) {
         const char *n = opts[i];
@@ -2447,6 +2576,21 @@ static int exec_builtin_set(shell_ctx_t *sh, int argc, char **argv)
     int had_dashdash = 0;   /* explicit `--`: assign positionals even if none follow */
     for (i = 1; i < argc; i++) {
         const char *arg = argv[i];
+        /* A lone `-` is the historical option terminator: it turns OFF -x and
+         * -v and stops option processing, but (unlike `--`) leaves $@ alone
+         * when nothing follows it. `set - a b` therefore sets a b, `set - -`
+         * sets a single `-`, and `set + -` leaves the positionals untouched.
+         * A lone `+` is an ignored flag -- option processing CONTINUES past it
+         * (`set -x + -v x y` still enables -v). Both used to fall through to
+         * the operand branch, which made `set - a b` produce "- a b". */
+        if (arg[0] == '-' && arg[1] == '\0') {
+            sh->opt_x = 0;
+            sh->opt_v = 0;
+            i++;
+            break;
+        }
+        if (arg[0] == '+' && arg[1] == '\0')
+            continue;
         if (arg[0] == '-' && arg[1] != '\0') {
             if (arg[1] == '-' && arg[2] == '\0') { had_dashdash = 1; i++; break; } /* -- */
             for (int k = 1; arg[k]; k++) {
@@ -2455,6 +2599,7 @@ static int exec_builtin_set(shell_ctx_t *sh, int argc, char **argv)
                 case 'e': sh->opt_e = 1; break;
                 case 'u': sh->opt_u = 1; break;
                 case 'x': sh->opt_x = 1; break;
+                case 'v': sh->opt_v = 1; break;
                 case 'f': sh->opt_f = 1; break;
                 case 'n': sh->opt_n = 1; break;
                 case 'm': sh->opt_m = 1; break;
@@ -2484,6 +2629,7 @@ static int exec_builtin_set(shell_ctx_t *sh, int argc, char **argv)
                 case 'e': sh->opt_e = 0; break;
                 case 'u': sh->opt_u = 0; break;
                 case 'x': sh->opt_x = 0; break;
+                case 'v': sh->opt_v = 0; break;
                 case 'f': sh->opt_f = 0; break;
                 case 'n': sh->opt_n = 0; break;
                 case 'm': sh->opt_m = 0; break;
@@ -2556,6 +2702,14 @@ static int exec_builtin_set(shell_ctx_t *sh, int argc, char **argv)
         sh->positional_n      = n;
         sh->positional_base   = pos;
         sh->positional_base_n = n;
+
+        /* New positional parameters restart option scanning: `set -- -c -d`
+         * after an earlier getopts loop must see -c, not resume at the old
+         * OPTIND. dash does this (its getopts state lives with the parameter
+         * list); bash famously does not, and its own manual tells scripts to
+         * reset OPTIND by hand. */
+        vars_set(&sh->vars, "OPTIND", "1");
+        vars_set(&sh->vars, "__OPTPOS", "1");
     }
     return 0;
 }
@@ -2931,9 +3085,13 @@ static int exec_builtin_pwd(shell_ctx_t *sh, int argc, char **argv)
                 if (q[1] == '.' && q[2] == '.' &&
                     (q[3] == '/' || q[3] == '\0')) dotdot = 1;
             }
-            struct stat a, b;
-            if (!dotdot && stat(pwd, &a) == 0 && stat(".", &b) == 0 &&
-                a.st_dev == b.st_dev && a.st_ino == b.st_ino) {
+            /* The shell maintains $PWD itself, so a logical `pwd` prints it
+             * without re-checking that it still names the current directory.
+             * It used to stat($PWD) against "." and fall back to getcwd() when
+             * they differed -- so after `rmdir "$PWD"` (the directory is gone
+             * but the process is still in it) `pwd` failed with ENOENT where
+             * dash and bash keep reporting the path. */
+            if (!dotdot) {
                 printf("%s\n", pwd);
                 return (fflush(stdout) != 0 || ferror(stdout)) ? 1 : 0;
             }
@@ -3037,9 +3195,41 @@ static int exec_builtin_trap(shell_ctx_t *sh, int argc, char **argv)
         return 0;
     }
 
-    const char *action = argv[1];
+    /* trap has no options; anything else starting with '-' (other than the
+     * action "-", meaning "reset") is a usage error. `trap -1 EXIT` used to
+     * install a trap that ran a command called "-1". */
+    if (argv[1][0] == '-' && argv[1][1] != '\0') {
+        fprintf(stderr, "silex: trap: Illegal option %s\n", argv[1]);
+        /* A USAGE error in a special builtin ends a non-interactive shell
+         * (2.8.1) -- and dash does exit here, though it merely diagnoses an
+         * unknown SIGNAL name below and carries on. The EXIT trap still runs,
+         * because this is a normal shell exit. */
+        if (!sh->interactive && !sh->in_command_builtin && !sh->in_trap)
+            exit(2);
+        return 2;
+    }
+
+    /* POSIX 2.14: "If the first operand is an unsigned decimal integer, the
+     * shell shall treat all operands as conditions" -- `trap 0 2` and
+     * `trap 0 EXIT` RESET those traps, they do not install an action called
+     * "0". (A first operand of " 42 " has spaces, so it is an action, and a
+     * shell then really does try to run `42`.) */
+    int first_is_signum = 1;
+    for (const char *d = argv[1]; *d; d++)
+        if (!isdigit((unsigned char)*d)) { first_is_signum = 0; break; }
+    if (argv[1][0] == '\0') first_is_signum = 0;
+
+    /* An action with no condition after it is an error, not a no-op:
+     * `trap 'foo'` must fail (dash: "foo: bad trap"). */
+    if (!first_is_signum && argc == 2) {
+        fprintf(stderr, "silex: trap: %s: bad trap\n", argv[1]);
+        return 1;
+    }
+
+    const char *action = first_is_signum ? "-" : argv[1];
     /* POSIX: trap action is stored as-is and expanded when trap fires */
     const char *trap_action = action;
+    int cond_start = first_is_signum ? 1 : 2;
 
     /* Any trap modification discards the display-only inherited entries a
      * subshell kept around for `trap` listing (smoosh builtin.trap.supershell:
@@ -3053,7 +3243,7 @@ static int exec_builtin_trap(shell_ctx_t *sh, int argc, char **argv)
     }
 
     int rc = 0;
-    for (int i = 2; i < argc; i++) {
+    for (int i = cond_start; i < argc; i++) {
         /* Resolve the condition to a signal number. A numeric operand must be a
          * valid signal, not whatever atoi() made of the string; otherwise look
          * the name up in the shared table (EXIT, INT, SIGALRM, CONT, ...). */
@@ -3109,10 +3299,18 @@ static int exec_builtin_read(shell_ctx_t *sh, int argc, char **argv)
      * -Wshadow (unlike gcc's) rejects shadowing it. */
     int raw = 0;
     int opt_i = 1;
-    while (opt_i < argc && argv[opt_i][0] == '-') {
-        if (strcmp(argv[opt_i], "-r") == 0) { raw = 1; opt_i++; }
-        else if (strcmp(argv[opt_i], "--") == 0) { opt_i++; break; }
-        else break;
+    while (opt_i < argc && argv[opt_i][0] == '-' && argv[opt_i][1] != '\0') {
+        if (strcmp(argv[opt_i], "--") == 0) { opt_i++; break; }
+        /* An unknown option is a usage error (status 2, like dash), not a
+         * variable name: `read -n 5` used to create variables called "-n" and
+         * "5" and report EOF. Combined flags (`-rr`) are accepted; only -r is
+         * defined. */
+        for (const char *o = argv[opt_i] + 1; *o; o++) {
+            if (*o == 'r') { raw = 1; continue; }
+            fprintf(stderr, "silex: read: Illegal option -%c\n", *o);
+            return 2;
+        }
+        opt_i++;
     }
 
     strbuf_t line;
@@ -3273,6 +3471,12 @@ static int test_unary(shell_ctx_t *sh, const char *op, const char *a, int with_o
     case 'z': return (a[0] == '\0') ? 0 : 1;
     case 'n': return (a[0] != '\0') ? 0 : 1;
     case 'e': return (stat(a, &st) == 0) ? 0 : 1;
+    /* `-a` is deliberately NOT a unary file test here. It is the AND operator,
+     * and dash -- the reference for this grammar -- rejects `[ -a FILE ]` with
+     * "unexpected operator" rather than treating it as `-e FILE`. (The Oils
+     * `blog2` file walks the whole `-a -a -a ...` ambiguity ladder; matching it
+     * exactly would mean reproducing dash's argc-indexed special cases, which
+     * disagree with each other by design.) */
     case 'f': return (stat(a, &st) == 0 && S_ISREG(st.st_mode)) ? 0 : 1;
     case 'd': return (stat(a, &st) == 0 && S_ISDIR(st.st_mode)) ? 0 : 1;
     case 'L':
@@ -3592,29 +3796,49 @@ static pid_t jobspec_or_pid(shell_ctx_t *sh, const char *arg)
 
 static int exec_builtin_wait(shell_ctx_t *sh, int argc, char **argv)
 {
+    /* POSIX: `wait` takes any number of pids/job ids and reports the status of
+     * the LAST one; only the first operand used to be waited for. An operand
+     * that is not a job id and not a number is a usage error (status 2, as in
+     * dash), while a well-formed pid that is not a child of this shell is 127
+     * -- it used to report "no such job" and 127 for both, and an unknown pid
+     * silently succeeded. */
     if (argc >= 2) {
-        pid_t pid = jobspec_or_pid(sh, argv[1]);
-        if (pid == (pid_t)-1) {
-            fprintf(stderr, "silex: wait: %s: no such job\n", argv[1]);
-            return 127;
+        int rc = 0;
+        for (int i = 1; i < argc; i++) {
+            if (argv[i][0] != '%') {
+                int n;
+                if (sh_parse_int(argv[i], 0, INT_MAX, &n) != 0) {
+                    fprintf(stderr, "silex: wait: %s: Illegal number\n", argv[i]);
+                    return 2;
+                }
+            }
+            pid_t pid = jobspec_or_pid(sh, argv[i]);
+            job_t *j  = (pid == (pid_t)-1) ? NULL : job_find_by_pid(&sh->jobs, pid);
+            if (!j) {
+                /* Not one of our children: POSIX says status > 128; every
+                 * shell surveyed reports 127. No diagnostic (dash prints none). */
+                rc = 127;
+                continue;
+            }
+            rc = job_wait(&sh->jobs, pid);
+            if (j->state == JOB_DONE) job_remove(&sh->jobs, j);
         }
-        int rc = job_wait(&sh->jobs, pid);
-        job_t *j = job_find_by_pid(&sh->jobs, pid);
-        if (j && j->state == JOB_DONE) job_remove(&sh->jobs, j);
         return rc;
     }
-    /* Wait for all background jobs. */
-    int rc = 0;
+    /* Wait for ALL background jobs: the shell waits for each, but the status of
+     * a plain `wait` is 0 -- the individual statuses are not reported (POSIX,
+     * and dash/bash/mksh agree). Returning the last job's status made
+     * `sleep 1 & wait; echo $?` report the job's exit code. */
     job_t *j = sh->jobs.head;
     while (j) {
         job_t *next = j->next;
         if (j->state == JOB_RUNNING)
-            rc = job_wait(&sh->jobs, j->pid);
+            job_wait(&sh->jobs, j->pid);
         if (j->state == JOB_DONE)
             job_remove(&sh->jobs, j);
         j = next;
     }
-    return rc;
+    return 0;
 }
 
 /* jobs [-l|-p]: list jobs. -l adds the pgid, -p prints only pids. */
@@ -4384,14 +4608,10 @@ static int exec_builtin_type(shell_ctx_t *sh, int argc, char **argv)
     return ret;
 }
 
-static int exec_builtin_getopts(shell_ctx_t *sh, int argc, char **argv)
+static int getopts_scan(shell_ctx_t *sh, int argc, char **argv,
+                        const char *varname)
 {
-    if (argc < 3) {
-        fprintf(stderr, "silex: getopts: usage: getopts optstring name [arg...]\n");
-        return 1;
-    }
     const char *optstring = argv[1];
-    const char *varname   = argv[2];
     int silent = (optstring[0] == ':');
     if (silent) optstring++;
 
@@ -4476,6 +4696,15 @@ static int exec_builtin_getopts(shell_ctx_t *sh, int argc, char **argv)
             fprintf(stderr, "silex: getopts: illegal option -- %c\n", opt);
             vars_unset(&sh->vars, "OPTARG");
         }
+        /* Consume the bad option like any other flag character, so the next
+         * call looks at what follows it. Leaving OPTIND where it was made the
+         * reported index one short (`ERROR 2` where every other shell says 3)
+         * and re-examined the same character. */
+        optpos++;
+        if ((size_t)optpos >= strlen(arg)) {
+            opt_i++;
+            optpos = 1;
+        }
     } else {
         vars_set(&sh->vars, varname, opt_str);
         if (p[1] == ':') {
@@ -4522,6 +4751,26 @@ static int exec_builtin_getopts(shell_ctx_t *sh, int argc, char **argv)
     vars_set(&sh->vars, "__OPTPOS", buf);
 
     return 0;
+}
+
+static int exec_builtin_getopts(shell_ctx_t *sh, int argc, char **argv)
+{
+    if (argc < 3) {
+        fprintf(stderr, "silex: getopts: usage: getopts optstring name [arg...]\n");
+        return 1;
+    }
+    /* The name operand must be a valid variable name: `getopts 'hc:' opt-` is
+     * a usage error (dash: status 2), not a silent success that assigns
+     * nothing. The option is still SCANNED first -- dash reports the bad name
+     * with OPTIND and OPTARG already advanced past it -- so the scan runs into
+     * a scratch name that is discarded. */
+    if (!valid_var_name(argv[2], strlen(argv[2]))) {
+        fprintf(stderr, "silex: getopts: %s: bad variable name\n", argv[2]);
+        getopts_scan(sh, argc, argv, "__OPTBADNAME");
+        vars_unset(&sh->vars, "__OPTBADNAME");
+        return 2;
+    }
+    return getopts_scan(sh, argc, argv, argv[2]);
 }
 
 /* -------------------------------------------------------------------------

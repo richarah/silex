@@ -50,6 +50,7 @@ int          vars_export(vars_t *v, const char *name);
 int          vars_is_exported(vars_t *v, const char *name);
 int          vars_export_context(vars_t *v, const char *name, const char *ctx);
 int          vars_readonly(vars_t *v, const char *name);
+int          vars_is_readonly(vars_t *v, const char *name);  /* query, no diagnostic */
 int          vars_unset(vars_t *v, const char *name);
 int          vars_unset_context(vars_t *v, const char *name, const char *ctx);
 void         vars_export_env(vars_t *v);    /* call setenv for all exported vars */

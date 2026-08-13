@@ -70,10 +70,18 @@ typedef struct {
     /* one-char pushback */
     int                pushback;
     int                has_pushback;
+    /* set -v (verbose): points at the shell's live option flag, so a `set -v`
+     * partway through a script takes effect from the next character read.
+     * NULL means "no shell attached" -- the lexer echoes nothing. */
+    const int         *verbose;
+    char               vbuf[256];   /* echo buffer, flushed per line */
+    size_t             vlen;
 } lexer_t;
 
 void    lexer_init_str(lexer_t *l, const char *input, arena_t *a);
 void    lexer_init_fp(lexer_t *l, FILE *fp, arena_t *a);
+/* Echo input to stderr as it is read while *flag is non-zero (set -v). */
+void    lexer_set_verbose(lexer_t *l, const int *flag);
 void    lexer_free(lexer_t *l);
 token_t lexer_next(lexer_t *l);
 token_t lexer_peek(lexer_t *l);

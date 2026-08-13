@@ -66,7 +66,12 @@ check "unexported variable not visible in child" "$got" "absent"
 
 # --- readonly: assignment rejected ---
 "$MB" -c 'readonly RO=fixed; RO=changed' 2>/dev/null
-check_exit "readonly: reassignment fails (non-zero exit)" "$?" "1"
+# Assigning to a read-only variable is a variable assignment error: the
+# non-interactive shell exits there and then (POSIX 2.8.1, status 2 as in dash),
+# rather than reporting 1 and running the rest of the script.
+check_exit "readonly: reassignment is fatal" "$?" "2"
+got=$("$MB" -c 'readonly RO=fixed; RO=changed; echo SHOULD_NOT_PRINT' 2>/dev/null)
+check "readonly: reassignment stops the script" "$got" ""
 
 got=$("$MB" -c 'readonly RO=fixed; echo $RO')
 check "readonly: value still readable" "$got" "fixed"

@@ -35,8 +35,11 @@ int applet_sh(int argc, char **argv)
 {
     const char *cmd_string = NULL;
     int         arg_start  = argc; /* default: no script file */
-    int         opt_e = 0, opt_u = 0, opt_x = 0, opt_n = 0;
+    int         opt_e = 0, opt_u = 0, opt_x = 0, opt_n = 0, opt_v = 0;
     int         opt_f = 0, opt_pipefail = 0, opt_i = 0;
+    /* Login shell: `sh -l`, or invoked with a leading '-' in argv[0] (how
+     * login(1) and terminal emulators start one). */
+    int         opt_l = (argv[0] && argv[0][0] == '-');
 
     /* POSIX option parsing: options are read until `--`, `-`, or the first
      * OPERAND; -c does not itself consume an argument, the first operand
@@ -81,27 +84,29 @@ int applet_sh(int argc, char **argv)
                     want_cmd_string = 1;
                 }
                 break;
-            case 'v': /* verbose: accepted (echoing input is not implemented) */
-                break;
+            case 'v': opt_v        = set_on; break;
             case 'e': opt_e        = set_on; break;
             case 'u': opt_u        = set_on; break;
             case 'x': opt_x        = set_on; break;
             case 'n': opt_n        = set_on; break;
             case 'f': opt_f        = set_on; break;
             case 'i': opt_i        = set_on; break;
+            case 'l': opt_l        = set_on; break;
             case 'o': {
+                /* The option NAME is always the next argv, never text attached
+                 * to the flag -- that is what makes `sh -oo errexit noglob`
+                 * (dash, bash) set both options: `-oo` is two `o` flags, each
+                 * taking one following word. Reading an attached name instead
+                 * turned that into the single bogus option "o" and silently
+                 * set nothing. */
                 const char *name = NULL;
-                if (*(p + 1)) {
-                    name = p + 1;
-                    p = p + strlen(p) - 1;
-                } else if (i + 1 < argc) {
+                if (i + 1 < argc)
                     name = argv[++i];
-                    stop = 1;
-                }
                 if (name) {
                     if      (strcmp(name, "errexit")  == 0) opt_e = set_on;
                     else if (strcmp(name, "nounset")  == 0) opt_u = set_on;
                     else if (strcmp(name, "xtrace")   == 0) opt_x = set_on;
+                    else if (strcmp(name, "verbose")  == 0) opt_v = set_on;
                     else if (strcmp(name, "pipefail") == 0) opt_pipefail = set_on;
                     else if (strcmp(name, "noglob")   == 0) opt_f = set_on;
                 }
@@ -183,6 +188,7 @@ int applet_sh(int argc, char **argv)
     sh.opt_e        = opt_e;
     sh.opt_u        = opt_u;
     sh.opt_x        = opt_x;
+    sh.opt_v        = opt_v;
     sh.opt_n        = opt_n;
     sh.opt_f        = opt_f;
     sh.opt_pipefail = opt_pipefail;
@@ -191,6 +197,27 @@ int applet_sh(int argc, char **argv)
      * non-interactive shell only abort the current command, prompts are
      * printed when reading commands, and command lines enter the history. */
     sh.interactive  = opt_i;
+
+    /* A login shell reads the system and user profiles first (dash reads both
+     * unconditionally; a missing or unreadable one is simply skipped, which is
+     * why this checks readability instead of letting shell_run_file report
+     * ENOENT). Their exit status is not the shell's. */
+    if (opt_l) {
+        const char *home = getenv("HOME");
+        char        userprofile[4096];
+        const char *profiles[2];
+        int         nprof = 0;
+        profiles[nprof++] = "/etc/profile";
+        if (home && *home &&
+            (size_t)snprintf(userprofile, sizeof(userprofile), "%s/.profile", home)
+                < sizeof(userprofile))
+            profiles[nprof++] = userprofile;
+        int saved_status = sh.last_exit;
+        for (int j = 0; j < nprof; j++)
+            if (access(profiles[j], R_OK) == 0)
+                shell_run_file(&sh, profiles[j]);
+        sh.last_exit = saved_status;
+    }
 
     int ret;
     if (cmd_string) {

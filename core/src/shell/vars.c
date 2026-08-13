@@ -188,6 +188,22 @@ static void var_store_value(vars_t *v, var_entry_t *e, const char *value)
         setenv(e->name, e->value, 1);
 }
 
+/* Diagnostic for an attempt to write or unset a read-only variable. `ctx` is
+ * the builtin's name when one is responsible (`readonly`, `export`, `unset`),
+ * which shells put in front of the message; NULL for a plain assignment. */
+static void readonly_error(const char *ctx, const char *name)
+{
+    if (!ctx)
+        fprintf(stderr, "silex: %s: readonly variable\n", name);
+    else if (strcmp(ctx, "unset") == 0)
+        /* smoosh's builtin.unset compares stderr byte for byte and expects
+         * this exact wording ("unset: x is read-only"), which differs from the
+         * assignment/export message below. */
+        fprintf(stderr, "%s: %s is read-only\n", ctx, name);
+    else
+        fprintf(stderr, "%s: %s: is read only\n", ctx, name);
+}
+
 int vars_set_context(vars_t *v, const char *name, const char *value, const char *ctx)
 {
     unsigned int idx = fnv1a(name);
@@ -197,16 +213,7 @@ int vars_set_context(vars_t *v, const char *name, const char *value, const char 
         var_entry_t *e = scope_find(s, name, idx);
         if (e) {
             if (e->readonly) {
-                if (ctx)
-                    if (strcmp(ctx, "unset") == 0)
-                        if (strcmp(ctx, "unset") == 0)
-            fprintf(stderr, "%s: %s is read-only\n", ctx, name);
-        else
-            fprintf(stderr, "%s: %s: is read only\n", ctx, name);
-                    else
-                        fprintf(stderr, "%s: %s: is read only\n", ctx, name);
-                else
-                    fprintf(stderr, "silex: %s: readonly variable\n", name);
+                readonly_error(ctx, name);
                 return 1;
             }
             var_store_value(v, e, value);
@@ -310,6 +317,12 @@ int vars_export(vars_t *v, const char *name)
     return vars_export_context(v, name, NULL);
 }
 
+int vars_is_readonly(vars_t *v, const char *name)
+{
+    var_entry_t *e = vars_find(v, name);
+    return e != NULL && e->readonly;
+}
+
 int vars_readonly(vars_t *v, const char *name)
 {
     var_entry_t *e = vars_find(v, name);
@@ -336,16 +349,7 @@ int vars_unset_context(vars_t *v, const char *name, const char *ctx)
             var_entry_t *e = *pp;
             if (strcmp(e->name, name) == 0) {
                 if (e->readonly) {
-                    if (ctx)
-                        if (strcmp(ctx, "unset") == 0)
-                        if (strcmp(ctx, "unset") == 0)
-            fprintf(stderr, "%s: %s is read-only\n", ctx, name);
-        else
-            fprintf(stderr, "%s: %s: is read only\n", ctx, name);
-                    else
-                        fprintf(stderr, "%s: %s: is read only\n", ctx, name);
-                    else
-                        fprintf(stderr, "silex: %s: readonly variable\n", name);
+                    readonly_error(ctx, name);
                     return 1;
                 }
                 *pp = e->next;

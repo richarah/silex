@@ -7,6 +7,7 @@
 #include "parser.h"
 #include "lexer.h"
 #include "../util/arena.h"
+#include "../util/charclass.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -844,6 +845,19 @@ static node_t *parse_for_cmd(parser_t *p)
     if (p->error) return NULL;
 
     char       *var   = var_tok.text;
+    /* The loop variable must be a NAME (POSIX grammar): `for i.j in ...` is a
+     * syntax error, not a loop over a variable called "i.j". Without the check
+     * the loop ran and the assignment silently went nowhere. */
+    if (var) {
+        const char *q = var;
+        int ok = is_alpha_underscore((unsigned char)*q);
+        for (; ok && *q; q++)
+            if (!is_name_char((unsigned char)*q)) ok = 0;
+        if (!ok) {
+            parser_error(p, "bad for loop variable");
+            return NULL;
+        }
+    }
     word_list_t words;
     wl_init(&words);
     int saw_in = 0;
@@ -1271,6 +1285,17 @@ static node_t *parse_command(parser_t *p)
                     consume(p);
                     wl_push(&words, cur.text);
                     continue;
+                }
+
+                /* `(` cannot follow a command word: `echo a(b)` is a syntax
+                 * error, not `echo a` followed by the subshell `(b)`. Only a
+                 * function definition's `name()` may put a paren there, and
+                 * that was handled before this loop. */
+                if (cur.type == TOK_LPAREN && (words.count > 0 || assigns.count > 0)) {
+                    parser_error(p, "unexpected '('");
+                    wl_free(&assigns);
+                    wl_free(&words);
+                    return NULL;
                 }
 
                 break;

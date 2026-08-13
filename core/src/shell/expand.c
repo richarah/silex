@@ -81,10 +81,14 @@ static const char *sh_getvar(shell_ctx_t *sh, const char *name)
             if (sh->opt_e) sb_appendc(&sb, 'e');
             if (sh->opt_u) sb_appendc(&sb, 'u');
             if (sh->opt_x) sb_appendc(&sb, 'x');
+            if (sh->opt_v) sb_appendc(&sb, 'v');
             if (sh->opt_f) sb_appendc(&sb, 'f');
             if (sh->opt_n) sb_appendc(&sb, 'n');
             if (sh->opt_m) sb_appendc(&sb, 'm');
             if (sh->opt_C) sb_appendc(&sb, 'C');
+            /* `i` is how a script asks "am I interactive?" (the documented
+             * `case $- in *i*` idiom); dash reports it and silex did not. */
+            if (sh->interactive) sb_appendc(&sb, 'i');
             char *r = arena_strdup(sh->scratch, sb_str(&sb));
             sb_free(&sb);
             return r;
@@ -521,8 +525,13 @@ static char *expand_braced_body(shell_ctx_t *sh, const char *body, int in_dquote
         return arena_strdup(sh->scratch, "");
     }
 
-    /* ${#VAR} — length */
-    if (body[0] == '#' && body[1] != '\0' && body[1] != '}') {
+    /* ${#VAR} — length. A `#` or `%` right after the `#` is the STRIP operator
+     * applied to the special parameter `#`, not part of a variable name:
+     * `${###}` is $# with an empty prefix stripped (= $#), the way dash, bash
+     * and ksh all read it. Taking it as a name gave the length of a variable
+     * called "##", i.e. 0. */
+    if (body[0] == '#' && body[1] != '\0' && body[1] != '}' &&
+        !((body[1] == '#' && body[2] != '\0') || body[1] == '%')) {
         const char *varname = body + 1;
         const char *val = sh_getvar(sh, varname);
         if (!val && sh->opt_u) {
@@ -550,6 +559,15 @@ static char *expand_braced_body(shell_ctx_t *sh, const char *body, int in_dquote
     }
 
     size_t namelen = (size_t)(p - body);
+    /* No parameter at all: `${%}`, `${.}`, `${ x}`. POSIX has no such
+     * expansion, and treating it as an operator on an empty name quietly
+     * produced the empty string. dash calls this "Bad substitution" and a
+     * non-interactive shell exits (status 2). */
+    if (namelen == 0) {
+        fprintf(stderr, "silex: bad substitution\n");
+        expansion_abort(sh, 2);
+        return arena_strdup(sh->scratch, "");
+    }
     /* Was a VLA sized by the name length in ${...}, i.e. by the input. Names
      * are short in practice, so use a fixed buffer and reject anything absurd
      * rather than putting an attacker-controlled size on the stack. */
@@ -1056,7 +1074,12 @@ typedef struct {
 
 static void arith_skip_ws(arith_ctx_t *ac)
 {
-    while (ac->src[ac->pos] == ' ' || ac->src[ac->pos] == '\t')
+    /* A newline is whitespace inside `$(( ))` -- the expression may be written
+     * across lines (`$((1\n+ 2))`), and a value substituted into it can carry
+     * one. Only space and tab were skipped, so the parser stopped at the line
+     * break and silently returned the first operand. */
+    while (ac->src[ac->pos] == ' '  || ac->src[ac->pos] == '\t' ||
+           ac->src[ac->pos] == '\n' || ac->src[ac->pos] == '\r')
         ac->pos++;
 }
 
@@ -1568,14 +1591,135 @@ static long arith_expr(arith_ctx_t *ac)
     return val;
 }
 
+/* POSIX 2.6.4: the text between `$((` and `))` first undergoes parameter
+ * expansion, command substitution and quote removal; the RESULT is then parsed
+ * as an arithmetic expression. Doing the substitutions textually up front is
+ * what makes the constructs shells actually use work:
+ *
+ *   $((1 + $(echo 1)${undefined:-3}))   two expansions that concatenate to 13
+ *   $((1 + $((2 + 3)) + 4))             a nested arithmetic expansion
+ *   $((`echo 1` + 2))                   backticks
+ *
+ * Evaluating them from inside the expression parser (as an operand each) could
+ * not express the first at all -- `$(echo 1)` was taken as a complete operand,
+ * so the `${undefined:-3}` glued to it started a new token -- and `$((` was
+ * read as a command substitution of `(2 + 3)`, which the shell then tried to
+ * RUN. The parser's own $-handling stays for the operand cases that must not be
+ * pre-substituted, e.g. a bare name used as an lvalue. */
+static char *arith_presubst(shell_ctx_t *sh, const char *expr)
+{
+    strbuf_t sb;
+    sb_init(&sb, 64);
+    const char *p = expr;
+
+    while (*p) {
+        if (*p == '\\' && p[1]) {              /* escaped: copy both bytes */
+            sb_appendc(&sb, *p++);
+            sb_appendc(&sb, *p++);
+            continue;
+        }
+        if (*p == '`') {                       /* `cmd` */
+            const char *start = ++p;
+            while (*p && *p != '`') p += (*p == '\\' && p[1]) ? 2 : 1;
+            char *cmd = backtick_cmd(start, (size_t)(p - start));
+            if (*p == '`') p++;
+            char *r = cmd_subst(sh, cmd ? cmd : "");
+            free(cmd);
+            if (r) sb_append(&sb, r);
+            continue;
+        }
+        if (*p == '$' && p[1] == '(' && p[2] == '(') {   /* nested $(( )) */
+            const char *start = p + 3;
+            const char *q     = start;
+            int depth = 2;
+            while (*q && depth > 0) {
+                if      (*q == '(') depth++;
+                else if (*q == ')') depth--;
+                if (depth > 0) q++;
+            }
+            /* q is at the final ')' of the pair (or at NUL if unterminated) */
+            size_t ilen = (size_t)(q - start);
+            if (ilen > 0) ilen--;              /* drop the first ')' of `))` */
+            char *inner = strndup(start, *q ? ilen : (size_t)(q - start));
+            char  nbuf[32];
+            snprintf(nbuf, sizeof(nbuf), "%ld",
+                     expand_arith(sh, inner ? inner : ""));
+            free(inner);
+            sb_append(&sb, nbuf);
+            p = *q ? q + 1 : q;
+            continue;
+        }
+        if (*p == '$' && p[1] == '(') {        /* $(cmd) */
+            const char *start = p + 2;
+            const char *end   = cmdsubst_body_end(start);
+            char *cmd = strndup(start, (size_t)(end - start));
+            char *r   = cmd_subst(sh, cmd ? cmd : "");
+            free(cmd);
+            if (r) sb_append(&sb, r);
+            p = (*end == ')') ? end + 1 : end;
+            continue;
+        }
+        if (*p == '$' && p[1] == '{') {        /* ${...} */
+            const char *end = scan_braced_end(p + 2, 0);
+            size_t tlen = (size_t)((*end == '}' ? end + 1 : end) - p);
+            char *tok = strndup(p, tlen);
+            char *val = expand_word(sh, tok ? tok : "");
+            free(tok);
+            if (val) sb_append(&sb, val);
+            p += tlen;
+            continue;
+        }
+        if (*p == '$' && (is_special_var(p[1]) || is_digit((unsigned char)p[1]) ||
+                          is_alpha_underscore((unsigned char)p[1]))) {
+            const char *q = p + 1;
+            if (is_alpha_underscore((unsigned char)*q))
+                while (is_name_char((unsigned char)*q)) q++;
+            else
+                q++;                            /* $?, $#, $1, ... */
+            char *tok = strndup(p, (size_t)(q - p));
+            char *val = expand_word(sh, tok ? tok : "");
+            free(tok);
+            if (val) sb_append(&sb, val);
+            p = q;
+            continue;
+        }
+        sb_appendc(&sb, *p++);
+    }
+
+    char *out = arena_strdup(sh->scratch, sb_str(&sb));
+    sb_free(&sb);
+    return out;
+}
+
 long expand_arith(shell_ctx_t *sh, const char *expr)
 {
+    /* The inner expansions produce plain text: no field-splitting guards or
+     * "$@" boundary markers, whatever the enclosing word is doing. */
+    int saved_guards = sh->emit_guards;
+    sh->emit_guards  = 0;
+    const char *src  = arith_presubst(sh, expr);
+    sh->emit_guards  = saved_guards;
+
     arith_ctx_t ac;
-    ac.src   = expr;
+    ac.src   = src;
     ac.pos   = 0;
     ac.sh    = sh;
     ac.depth = 0;
-    return arith_expr(&ac);
+    long val = arith_expr(&ac);
+
+    /* Everything must have been consumed. Trailing text means the expression
+     * was not arithmetic at all -- `$((1 + 2.3))` (no floating point) or
+     * `$((echo hello))` -- which POSIX makes a shell error, not a silent 0.
+     * dash prints this message and exits 2; so does silex now, and an
+     * interactive shell discards the command instead of exiting. */
+    arith_skip_ws(&ac);
+    if (src[ac.pos] != '\0') {
+        fprintf(stderr, "silex: arithmetic expression: expecting EOF: \"%s\"\n", src);
+        if (!sh->interactive)
+            exit(2);
+        expansion_abort(sh, 2);
+    }
+    return val;
 }
 
 /* Advance `p` (pointing at the first char after the '(' of a `$(`) to the
@@ -1779,6 +1923,18 @@ static const char *skip_dquote_end(const char *p)
 #define QG_OPEN  '\x02'
 #define QG_CLOSE '\x03'
 
+/* A quoted region that expanded to NOTHING (`""`, `''`, `"$empty"`) still
+ * contributes a field to the split -- POSIX 2.6.5: field splitting acts on the
+ * expansion's characters, and a quoted null is a zero-length *field*, not an
+ * absence. Guards alone cannot express that: strip QG_OPEN/QG_CLOSE from an
+ * empty region and nothing is left to mark, so `""$A` lost its leading empty
+ * field entirely. This zero-width placeholder stands in for the region inside
+ * the guards, so the splitter sees a (protected, hence non-delimiter)
+ * character that keeps its field alive; it is removed when the field is
+ * decoded, and merges away silently when the field has other content
+ * (`""abc""` is still the single field `abc`). */
+#define QG_NULL  '\x05'
+
 /* "$@"/"$*" is flattened into one string with 0x01 field-boundary markers that a
  * later pass splits on. A LITERAL 0x01 (or a quote-guard 0x02/0x03) inside a
  * positional parameter would be mistaken for a marker -- modernish injects such
@@ -1792,7 +1948,7 @@ static void pp_escape_append(strbuf_t *out, const char *s)
 {
     for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
         unsigned char c = *p;
-        if (c == 0x01 || c == 0x02 || c == 0x03 || c == PP_ESC) {
+        if (c == 0x01 || c == 0x02 || c == 0x03 || c == QG_NULL || c == PP_ESC) {
             sb_appendc(out, (char)PP_ESC);
             sb_appendc(out, (char)(c | 0x40u));
         } else {
@@ -1815,7 +1971,7 @@ static char *pp_decode_full(arena_t *a, const char *s)
     size_t w = 0;
     for (size_t i = 0; i < n; i++) {
         unsigned char c = (unsigned char)s[i];
-        if (c == 0x01 || c == 0x02 || c == 0x03)
+        if (c == 0x01 || c == 0x02 || c == 0x03 || c == QG_NULL)
             continue;
         if (c == PP_ESC && i + 1 < n) {
             out[w++] = (char)((unsigned char)s[i + 1] & ~0x40u);
@@ -1837,6 +1993,10 @@ static char *pp_decode(arena_t *a, const char *s)
         if ((unsigned char)s[i] == PP_ESC && i + 1 < n) {
             out[w++] = (char)((unsigned char)s[i + 1] & ~0x40u);
             i++;
+        } else if ((unsigned char)s[i] == QG_NULL) {
+            /* placeholder for an empty quoted region: it kept the field
+             * alive through the split and has no data of its own */
+            continue;
         } else {
             out[w++] = s[i];
         }
@@ -1864,15 +2024,23 @@ static void guard_open(shell_ctx_t *sh, strbuf_t *out)
     if (!sh->emit_guards) return;
     if (sh->quote_guard_depth++ == 0) {
         sb_appendc(out, QG_OPEN);
-        sh->at_quote_guard = 1;
+        sh->at_quote_guard   = 1;
+        sh->qg_empty_at_open = sh->at_expanded_empty;
     }
 }
 
 static void guard_close(shell_ctx_t *sh, strbuf_t *out)
 {
     if (!sh->emit_guards) return;
-    if (sh->quote_guard_depth > 0 && --sh->quote_guard_depth == 0)
+    if (sh->quote_guard_depth > 0 && --sh->quote_guard_depth == 0) {
+        /* Nothing was appended since the matching QG_OPEN: the quoted region
+         * is empty, so leave a placeholder that survives guard stripping --
+         * unless the region was an empty "$@", which yields no field at all. */
+        if (sb_len(out) > 0 && sb_str(out)[sb_len(out) - 1] == QG_OPEN &&
+            sh->at_expanded_empty == sh->qg_empty_at_open)
+            sb_appendc(out, QG_NULL);
         sb_appendc(out, QG_CLOSE);
+    }
 }
 
 static void expand_into(shell_ctx_t *sh, const char *word, strbuf_t *out,
@@ -2555,8 +2723,14 @@ expand_result_t expand_word_full(shell_ctx_t *sh, const char *word)
 
     /* "$@" word-boundary split: \x01 markers inserted by expand_into for "$@".
      * Gated on at_field_boundary so a literal 0x01 byte in the data (not from
-     * "$@") is left intact rather than treated as a field boundary and dropped. */
-    if (sh->at_field_boundary && strchr(expanded, '\x01')) {
+     * "$@") is left intact rather than treated as a field boundary and dropped.
+     *
+     * Only for a word with NO unquoted expansion of its own (`"$@"`, `x"$@"`).
+     * When the word also needs IFS splitting (`$x"$@"`), returning here skipped
+     * that split entirely and glued the two together -- `x=" y "; set -- p q`
+     * gave `[ y p][q]` instead of `[y][p][q]`. Such words are handled by the
+     * IFS splitter below, which treats \x01 as a hard field boundary. */
+    if (!do_ifs_split && sh->at_field_boundary && strchr(expanded, '\x01')) {
         char *copy2 = strdup(expanded);
         if (copy2) {
             int cap2 = 4, n2 = 0;
@@ -2689,13 +2863,29 @@ expand_result_t expand_word_full(shell_ctx_t *sh, const char *word)
         fields[nfields++] = pp_decode(sh->scratch, (s));                     \
     } while (0)
 
+    /* A \x01 emitted for "$@" is a HARD field boundary: it separates two
+     * positional parameters, so it ends the current field whatever IFS says,
+     * and the field before it is kept even when empty (`set -- "" b`). Only
+     * meaningful when the markers are ours -- see at_field_boundary. */
+#define AT_BOUND(ptr) (sh->at_field_boundary && *(ptr) == '\x01')
+
     /* Ignore leading IFS whitespace. */
     while (IFS_WS(cp)) cp++;
 
+    int last_was_bound = 0;
     while (*cp) {
         char *fstart = cp;
-        while (*cp && !IFS_IS(cp)) cp++;
+        while (*cp && !IFS_IS(cp) && !AT_BOUND(cp)) cp++;
         char *fend = cp;                 /* field is [fstart, fend) */
+
+        if (AT_BOUND(cp)) {
+            *fend = '\0';
+            EMIT(fstart);
+            cp = fend + 1;
+            last_was_bound = 1;
+            continue;
+        }
+        last_was_bound = 0;
 
         if (*cp == '\0') {
             /* Trailing field: emit only if non-empty (trailing empty dropped). */
@@ -2713,6 +2903,11 @@ expand_result_t expand_word_full(shell_ctx_t *sh, const char *word)
          * delimiter preserves the (possibly empty) field before it. */
         if (saw_nws || fend > fstart) { *fend = '\0'; EMIT(fstart); }
     }
+    /* The word ended on a \x01: the parameter after it is empty and is still a
+     * field (`set -- a ""`). cp points at the terminating NUL of `copy`, which
+     * keeps it inside the buffer that EMIT's glob scan indexes. */
+    if (last_was_bound) EMIT(cp);
+#undef AT_BOUND
 #undef PROT_AT
 #undef IFS_IS
 #undef IFS_WS

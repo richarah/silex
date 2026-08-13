@@ -42,6 +42,11 @@ typedef struct shell_ctx {
     int         opt_e;       /* set -e */
     int         opt_u;       /* set -u */
     int         opt_x;       /* set -x */
+    int         opt_v;       /* set -v / -o verbose: echo input as it is read */
+    int         in_ps4;      /* expanding $PS4 for a trace line: suppresses
+                              * tracing, so a `$(...)` inside PS4 does not
+                              * re-enter the tracer for its own command and
+                              * expand PS4 again, forever */
     int         opt_f;       /* set -f: no glob */
     int         opt_pipefail;
     int         opt_n;       /* set -n: no execute */
@@ -83,6 +88,13 @@ typedef struct shell_ctx {
     int         history_n;
     int         history_cap;
     int         opt_nolog;         /* set -o nolog: stop recording history */
+    /* set -o vi / -o emacs: the line-editing mode. Tracked and reported (a
+     * script that saves and restores options with `set +o` must get its choice
+     * back, and `set -o vi` must not fail); silex's REPL has no editing modes
+     * to switch between, so nothing else consults them. Mutually exclusive,
+     * like every shell that has them. */
+    int         opt_vi;
+    int         opt_emacs;
     int         opt_nonlexicalctrl; /* set -o nonlexicalctrl: break/continue
                                       * in a function act on the CALLER's
                                       * loops (dynamic scope; smoosh) */
@@ -188,6 +200,12 @@ typedef struct shell_ctx {
     int         emit_guards;       /* 1 while expanding a word that will IFS-split */
     int         quote_guard_depth; /* nesting depth of open quoted regions */
     int         at_quote_guard;    /* set once a QG_OPEN was actually emitted */
+    /* Value of at_expanded_empty when the current outermost quoted region
+     * opened. An empty region normally leaves a placeholder so it still counts
+     * as a field, but a `"$@"` with no positional parameters must vanish
+     * without one (POSIX: zero fields, not one empty field) -- comparing
+     * against this tells the two apart even in a mixed word like `$x"$@"`. */
+    int         qg_empty_at_open;
     /* Exit status of the most recent command substitution performed during word
      * expansion. POSIX 2.9.1: a command with no command name but containing a
      * command substitution completes with the status of the LAST command

@@ -189,8 +189,11 @@ check "assigning a declared-but-unset exported var enters the environment" \
     "$("$MB" -c 'unset baz; export baz; baz=hi; env | grep "^baz="')" "baz=hi"
 check "set (no args) does not list a declared-but-unset var" \
     "$("$MB" -c 'unset onlydecl; export onlydecl; set | grep "^onlydecl" || echo absent')" "absent"
+# The assignment is a variable assignment error, which ends a non-interactive
+# shell (POSIX 2.8.1) -- so it is run in a subshell here, and the parent both
+# survives and still sees `q` unset.
 check "a readonly declared-but-unset var still cannot be assigned" \
-    "$("$MB" -c 'unset q; readonly q; q=val; echo "[${q-UNSET}]"' 2>/dev/null)" "[UNSET]"
+    "$("$MB" -c 'unset q; readonly q; (q=val); echo "[${q-UNSET}]"' 2>/dev/null)" "[UNSET]"
 
 # -----------------------------------------------------------------------
 # ulimit builtin: modernish probes it with `thisshellhas --bi=ulimit` (a POSIX

@@ -361,7 +361,11 @@ check "set -o noglob then +o noglob toggles" \
 "$MB" -c 'set -o nounset; echo "$undefined_var"' 2>/dev/null
 check_exit "set -o nounset: unset var errors" "$?" "1"
 "$MB" -c 'set -o bogusname' 2>/dev/null
-check_exit "set -o bogus: rejected" "$?" "1"
+# `set` is a SPECIAL builtin: POSIX 2.8.1 makes its error fatal to a
+# non-interactive shell, and dash reports 2 for that class of shell error.
+check_exit "set -o bogus: rejected" "$?" "2"
+"$MB" -c 'set -o bogusname || true; echo SHOULD_NOT_PRINT' 2>/dev/null
+check_exit "set -o bogus: fatal even with || true" "$?" "2"
 
 # --- xtrace (set -x) actually prints the command, to stderr, post-expansion ----
 # opt_x was set but never consulted, so `set -x` traced nothing.
