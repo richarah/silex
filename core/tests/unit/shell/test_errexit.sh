@@ -76,6 +76,25 @@ check_exit "set -e: subshell false exits parent" "$?" "1"
 got=$("$MB" -c 'false; echo continued')
 check "without set -e: false does not exit" "$got" "continued"
 
+# --- set -e: a `!` pipeline is exempt, INCLUDING its own inverted result ---
+# POSIX 2.9.2: -e is ignored when the pipeline begins with `!`. Running the
+# negated command in a condition context is not enough -- `! true` yields 1,
+# and that 1 must not kill the shell either.
+got=$("$MB" -c 'set -o errexit; echo one; ! true; echo two; ! false; echo three')
+check "set -e: '! true' does not exit" "$got" "one
+two
+three"
+
+got=$("$MB" -c 'set -o errexit; echo one; ! true; echo two')
+check "set -e: '! true' on one line does not exit" "$got" "one
+two"
+
+# The exemption reaches through a function call: `! f` where f runs `set -e;
+# false` must neither stop f nor stop the caller.
+got=$("$MB" -c 'f() { set -e; false; echo in_f; }; set -e; ! f; echo after')
+check "set -e: '! f' exempts the function body and the result" "$got" "in_f
+after"
+
 echo
 echo "errexit tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

@@ -685,14 +685,17 @@ static token_t make_word_tok(lexer_t *l, int quoted, int has_unquoted_assign)
  * Main lexer: read and return the next raw token (no lookahead)
  * ------------------------------------------------------------------------- */
 
-static token_t lexer_read(lexer_t *l)
+static token_t lexer_read_raw(lexer_t *l)
 {
     int c;
 
 restart:
-    /* Skip spaces and tabs (but not newlines) */
+    /* Skip spaces and tabs (but not newlines). Whether any were skipped is
+     * recorded for the token: the IO_NUMBER rule below needs to know that
+     * `6>` and `6 >` are different things. */
     do {
         c = lexer_getc(l);
+        if (c == ' ' || c == '\t') l->blank_before = 1;
     } while (c == ' ' || c == '\t');
 
     if (c == EOF)
@@ -956,6 +959,16 @@ restart:
 
     token_t t = make_word_tok(l, quoted, has_unquoted_assign);
     t.lineno  = start_lineno;
+    return t;
+}
+
+/* lexer_read_raw() has too many return points to stamp each one, so the
+ * blank-before flag is collected on the lexer and attached here. */
+static token_t lexer_read(lexer_t *l)
+{
+    l->blank_before = 0;
+    token_t t = lexer_read_raw(l);
+    t.blank_before = l->blank_before;
     return t;
 }
 

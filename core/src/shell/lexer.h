@@ -43,6 +43,12 @@ typedef struct {
     tok_type_t  type;
     char       *text;    /* arena-allocated; NULL for non-word tokens */
     int         lineno;
+    /* 1 if blanks (space/tab) were skipped before this token. The IO_NUMBER
+     * rule needs it: POSIX only reads a digit word as a file descriptor when
+     * the redirect operator follows it with NO intervening blank, so
+     * `seq 5 6 > f` redirects stdout and passes 6 to seq, while `seq 5 6> f`
+     * redirects fd 6. */
+    int         blank_before;
 } token_t;
 
 /* Heredoc pending entry */
@@ -70,6 +76,8 @@ typedef struct {
     /* one-char pushback */
     int                pushback;
     int                has_pushback;
+    /* set by lexer_read()'s blank-skipping loop, harvested into the token */
+    int                blank_before;
     /* set -v (verbose): points at the shell's live option flag, so a `set -v`
      * partway through a script takes effect from the next character read.
      * NULL means "no shell attached" -- the lexer echoes nothing. */

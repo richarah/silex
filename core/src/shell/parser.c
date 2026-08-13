@@ -581,9 +581,17 @@ static redir_t *parse_redirect(parser_t *p, int io_fd)
  * e.g., "2>" → fd=2, ">&"
  * Returns the fd value or -1.
  * ------------------------------------------------------------------------- */
-static int try_io_number(const char *text, tok_type_t next_op)
+static int try_io_number(const char *text, token_t next)
 {
-    if (!is_redir_op(next_op))
+    if (!is_redir_op(next.type))
+        return -1;
+    /* POSIX 2.10.2 rule 2: the digits are an IO_NUMBER only when the redirect
+     * operator follows immediately. A blank between them makes the digits an
+     * ordinary argument -- `seq 5 6 > f` passes 6 to seq and redirects stdout,
+     * where `seq 5 6> f` redirects fd 6. Missing this check silently ate the
+     * last argument of any command whose final operand was numeric and was
+     * followed by a redirect (`bytes 512 > ok.txt` called bytes with none). */
+    if (next.blank_before)
         return -1;
     if (!text)
         return -1;
@@ -635,7 +643,7 @@ static node_t *parse_simple_command(parser_t *p)
             /* Check if it could be an IO number followed by a redirect */
             token_t saved = consume(p);  /* consume the word */
             token_t nxt   = peek(p);
-            int fd = try_io_number(saved.text, nxt.type);
+            int fd = try_io_number(saved.text, nxt);
             if (fd >= 0) {
                 redir_t *r = parse_redirect(p, fd);
                 if (r) {
@@ -670,6 +678,23 @@ static node_t *parse_simple_command(parser_t *p)
 
         /* Nothing else belongs to simple command */
         break;
+    }
+
+    /* A redirect may only FOLLOW a compound command, never prefix one: the
+     * grammar attaches redirect_list to compound_command, and `>f for i in ...`
+     * has no production. We would otherwise parse the `>f` as a redirect-only
+     * command and then let the loop run unredirected, silently doing something
+     * the script did not ask for. Only reachable with no command word -- after
+     * one, `for` is an ordinary argument (handled above). */
+    if (words.count == 0) {
+        tok_type_t nt = peek(p).type;
+        if (nt == TOK_FOR || nt == TOK_IF || nt == TOK_WHILE ||
+            nt == TOK_UNTIL || nt == TOK_CASE) {
+            parser_error(p, "redirection cannot precede a compound command");
+            wl_free(&assigns);
+            wl_free(&words);
+            return NULL;
+        }
     }
 
     if (assigns.count == 0 && words.count == 0 && redir_head == NULL) {
@@ -1091,7 +1116,7 @@ static redir_t *collect_trailing_redirects(parser_t *p)
             /* direct redirect op: use default fd */
         } else if (rt.type == TOK_WORD) {
             token_t w = consume(p);
-            fd = try_io_number(w.text, peek(p).type);
+            fd = try_io_number(w.text, peek(p));
             if (fd < 0)
                 break; /* not an io number; stop collecting */
         } else {
@@ -1228,7 +1253,7 @@ static node_t *parse_command(parser_t *p)
              * command that is ONLY redirects, like a bare `2>&1` or
              * `2>/dev/null`, ran a command named "2". */
             int first_fd = (name_tok.type == TOK_WORD)
-                         ? try_io_number(name_tok.text, peek(p).type) : -1;
+                         ? try_io_number(name_tok.text, peek(p)) : -1;
             if (first_fd >= 0) {
                 redir_t *r = parse_redirect(p, first_fd);
                 if (r && !p->error) {
@@ -1258,7 +1283,7 @@ static node_t *parse_command(parser_t *p)
                 if (cur.type == TOK_WORD) {
                     token_t saved = consume(p);
                     token_t nxt   = peek(p);
-                    int fd = try_io_number(saved.text, nxt.type);
+                    int fd = try_io_number(saved.text, nxt);
                     if (fd >= 0) {
                         redir_t *r = parse_redirect(p, fd);
                         if (r) {

@@ -257,6 +257,17 @@ static int signal_from_name(const char *name)
         { "STOP", SIGSTOP }, { "TSTP", SIGTSTP }, { "TTIN", SIGTTIN },
         { "TTOU", SIGTTOU }, { "BUS", SIGBUS }, { "TRAP", SIGTRAP },
         { "URG", SIGURG }, { "WINCH", SIGWINCH },
+        /* The rest of the POSIX set. Missing here, `trap - XFSZ` -- what a
+         * script writes before deliberately exceeding `ulimit -f` -- failed
+         * with "bad trap". */
+        { "XCPU", SIGXCPU }, { "XFSZ", SIGXFSZ }, { "VTALRM", SIGVTALRM },
+        { "PROF", SIGPROF }, { "SYS", SIGSYS },
+#ifdef SIGPOLL
+        { "POLL", SIGPOLL },
+#endif
+#ifdef SIGIO
+        { "IO", SIGIO },
+#endif
         { NULL, 0 }
     };
     for (int i = 0; tbl[i].n; i++)
@@ -290,6 +301,11 @@ static const char *signal_number_to_name(int sig)
     case SIGTSTP: return "TSTP";
     case SIGTTIN: return "TTIN";
     case SIGTTOU: return "TTOU";
+    case SIGXCPU: return "XCPU";
+    case SIGXFSZ: return "XFSZ";
+    case SIGVTALRM: return "VTALRM";
+    case SIGPROF: return "PROF";
+    case SIGSYS:  return "SYS";
     default:      return NULL;
     }
 }
@@ -1893,6 +1909,11 @@ int exec_node(shell_ctx_t *sh, node_t *node)
         /* Propagate flow control immediately (don't invert it!) */
         if (rc >= FLOW_BREAK) break;
         rc = (rc == 0) ? 1 : 0;
+        /* POSIX 2.9.2: -e is ignored when the pipeline begins with `!`, and
+         * that covers the pipeline's OWN result, not just the negated command.
+         * in_cond above only spares the inner command; without this, `set -e;
+         * ! true` inverted 0 to 1 and then killed the shell on it. */
+        sh->and_or_exempt = 1;
         break;
     }
 
@@ -3334,6 +3355,10 @@ static int exec_builtin_read(shell_ctx_t *sh, int argc, char **argv)
         if (n <= 0) { c = EOF; break; }
         c = ch;
         if (c == '\n') break;
+        /* Skip NUL: it cannot be stored in a shell variable, and dropping it
+         * (as dash and bash do) keeps the rest of the line instead of
+         * truncating the value at the first NUL. */
+        if (c == '\0') continue;
         if (!raw && c == '\\') {
             unsigned char nch;
             ssize_t n2 = read(STDIN_FILENO, &nch, 1);
@@ -4344,6 +4369,14 @@ static int exec_builtin_ulimit(shell_ctx_t *sh, int argc, char **argv)
 
     const char *newval = (i < argc) ? argv[i] : NULL;
 
+    /* At most ONE operand, and none at all under -a. Extra operands were
+     * silently dropped, so `ulimit 1 2` and `ulimit -a 42` both reported
+     * success -- a typo'd limit looked like it had been applied. */
+    if (newval != NULL && (show_all || i + 1 < argc)) {
+        fprintf(stderr, "silex: ulimit: too many arguments\n");
+        return 2;
+    }
+
     /* A bare print (and -a) shows the hard limit under -H, else the soft one;
      * setting with neither -H nor -S changes both (dash/bash convention). */
     int use_hard = (hard && !soft);
@@ -4392,10 +4425,17 @@ static int exec_builtin_ulimit(shell_ctx_t *sh, int argc, char **argv)
     } else {
         char *end;
         errno = 0;
+        /* Reject the sign explicitly: strtoull() accepts a leading '-' and
+         * wraps it, so `ulimit -f -- -42` set a limit of 2^64-42 blocks and
+         * returned success. dash calls this "bad number". */
+        if (newval[0] == '-' || newval[0] == '+') {
+            fprintf(stderr, "silex: ulimit: %s: bad number\n", newval);
+            return 2;
+        }
         unsigned long long raw = strtoull(newval, &end, 10);
         if (end == newval || *end != '\0' || errno != 0) {
-            fprintf(stderr, "silex: ulimit: %s: invalid number\n", newval);
-            return 1;
+            fprintf(stderr, "silex: ulimit: %s: bad number\n", newval);
+            return 2;
         }
         nv = (rlim_t)raw * L->factor;
     }
@@ -4543,10 +4583,28 @@ static int exec_builtin_command(shell_ctx_t *sh, int argc, char **argv)
     }
     requoted[nargs] = NULL;
 
+    /* -p searches the system default PATH instead of $PATH -- for EXECUTION,
+     * not only for -v. It was parsed and then ignored here, so `command -p ls`
+     * with PATH='' reported "command not found" and, worse, `command -p hello`
+     * happily ran a `hello` the caller had put on $PATH: the whole point of -p
+     * is that it cannot. Expressed as a PATH= command prefix, which
+     * exec_simple_cmd_inner already resolves against without disturbing the
+     * shell's own PATH. */
+    char **assigns = NULL;
+    if (use_defpath) {
+        size_t plen = strlen(search_path);
+        char *pa = arena_alloc(sh->scratch, plen + 8);
+        /* single-quoted: the value is re-expanded like any assignment word */
+        snprintf(pa, plen + 8, "PATH='%s'", search_path);
+        assigns = arena_alloc(sh->scratch, 2 * sizeof(char *));
+        assigns[0] = pa;
+        assigns[1] = NULL;
+    }
+
     /* Execute name bypassing shell functions (builtins still apply, but without special builtin semantics) */
     int old_in_command = sh->in_command_builtin;
     sh->in_command_builtin = 1;
-    int rc = exec_simple_cmd(sh, requoted, NULL, NULL);
+    int rc = exec_simple_cmd(sh, requoted, assigns, NULL);
     sh->in_command_builtin = old_in_command;
     return rc;
 }

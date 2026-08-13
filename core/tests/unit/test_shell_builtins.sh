@@ -99,6 +99,57 @@ check "getopts: loop over multiple flags" \
     "abc" \
     "$("$SILEX" sh -c 'OPTIND=1; while getopts abc opt -a -b -c; do printf "%s" "$opt"; done; echo')"
 
+# --- ulimit rejects what it used to silently accept ---
+# Extra operands were dropped and a leading '-' was fed to strtoull, which
+# wraps it: `ulimit -f -- -42` reported success after setting a limit of
+# 2^64-42 blocks. A mistyped limit must fail loudly, not look applied.
+check "ulimit: extra operand is an error" \
+    "2" \
+    "$("$SILEX" sh -c 'ulimit 1 2 2>/dev/null; echo $?')"
+check "ulimit: -a takes no operand" \
+    "2" \
+    "$("$SILEX" sh -c 'ulimit -a 42 2>/dev/null >/dev/null; echo $?')"
+check "ulimit: negative limit is a bad number" \
+    "2" \
+    "$("$SILEX" sh -c 'ulimit -f -- -42 2>/dev/null; echo $?')"
+check "ulimit: a plain query still works" \
+    "0" \
+    "$("$SILEX" sh -c 'ulimit -f >/dev/null; echo $?')"
+
+# --- trap knows the rest of the POSIX signal names ---
+# `trap - XFSZ` is what a script writes before deliberately exceeding
+# `ulimit -f`; it used to fail with "bad trap".
+check "trap: XFSZ is a known signal" \
+    "ok" \
+    "$("$SILEX" sh -c 'trap - XFSZ 2>/dev/null && echo ok')"
+check "trap: XCPU is a known signal" \
+    "ok" \
+    "$("$SILEX" sh -c 'trap - XCPU 2>/dev/null && echo ok')"
+
+# --- command -p searches the DEFAULT path, for execution and not just -v ---
+# -p was parsed and then ignored on the execution path, so it happily ran a
+# utility the caller had planted on $PATH -- the one thing -p exists to prevent.
+check "command -p ignores \$PATH for lookup" \
+    "127" \
+    "$("$SILEX" sh -c 'd=$(mktemp -d); printf "#!/bin/sh\necho planted\n" > $d/plantedcmd; chmod +x $d/plantedcmd; PATH=$d; command -p plantedcmd >/dev/null 2>&1; echo $?')"
+check "command -p finds a standard utility with \$PATH empty" \
+    "0" \
+    "$("$SILEX" sh -c 'PATH=""; command -p ls >/dev/null 2>&1; echo $?')"
+
+# --- date operands ---
+# A bare operand is the obsolescent set-the-clock form, NOT a format string:
+# `date %x` printed the time and succeeded where every other date rejects it,
+# so a configure probe testing `date FMT` took the wrong branch.
+check "date: a non-+ operand is an invalid date, not a format" \
+    "1" \
+    "$("$SILEX" sh -c 'date %x >/dev/null 2>&1; echo $?')"
+check "date: +FORMAT still works" \
+    "ok" \
+    "$("$SILEX" sh -c 'date +ok')"
+check "date: a second operand is an extra operand" \
+    "1" \
+    "$("$SILEX" sh -c 'date +%Y +%m >/dev/null 2>&1; echo $?')"
+
 echo ""
 echo "shell_builtins: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

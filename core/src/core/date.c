@@ -242,6 +242,62 @@ static void format_iso8601(const struct tm *tm_val, const char *timespec,
     strftime(buf, bufsz, "%Y-%m-%dT%H:%M:%S%z", tm_val);
 }
 
+/* Parse the obsolescent operand form MMDDhhmm[[CC]YY][.ss] into a time_t,
+ * relative to the current year when no year is given. Returns 0 on success,
+ * -1 if the string is not that shape or the fields are out of range. */
+static int parse_settime_operand(const char *s, time_t *out)
+{
+    size_t len = strlen(s);
+    char digits[13];
+    int  sec = 0;
+
+    const char *dot = strchr(s, '.');
+    if (dot) {
+        if (strlen(dot + 1) != 2 ||
+            !isdigit((unsigned char)dot[1]) || !isdigit((unsigned char)dot[2]))
+            return -1;
+        sec = (dot[1] - '0') * 10 + (dot[2] - '0');
+        len = (size_t)(dot - s);
+    }
+    if (len != 8 && len != 10 && len != 12)
+        return -1;
+    for (size_t k = 0; k < len; k++)
+        if (!isdigit((unsigned char)s[k])) return -1;
+    memcpy(digits, s, len);
+    digits[len] = '\0';
+
+#define D2(off) ((digits[off] - '0') * 10 + (digits[(off) + 1] - '0'))
+    int mon = D2(0), day = D2(2), hour = D2(4), min = D2(6);
+    int year;
+    time_t now = time(NULL);
+    struct tm cur;
+    localtime_r(&now, &cur);
+    if (len == 12)      year = D2(8) * 100 + D2(10);
+    else if (len == 10) { int yy = D2(8); year = yy < 69 ? 2000 + yy : 1900 + yy; }
+    else                year = cur.tm_year + 1900;
+#undef D2
+
+    if (mon < 1 || mon > 12 || day < 1 || day > 31 ||
+        hour > 23 || min > 59 || sec > 60)
+        return -1;
+
+    struct tm tm_set;
+    memset(&tm_set, 0, sizeof(tm_set));
+    tm_set.tm_year  = year - 1900;
+    tm_set.tm_mon   = mon - 1;
+    tm_set.tm_mday  = day;
+    tm_set.tm_hour  = hour;
+    tm_set.tm_min   = min;
+    tm_set.tm_sec   = sec;
+    tm_set.tm_isdst = -1;
+
+    time_t t = mktime(&tm_set);
+    if (t == (time_t)-1)
+        return -1;
+    *out = t;
+    return 0;
+}
+
 /* ------------------------------------------------------------------ */
 /* Main                                                                  */
 /* ------------------------------------------------------------------ */
@@ -255,6 +311,7 @@ int applet_date(int argc, char **argv)
     const char *opt_format = NULL;  /* +FORMAT */
     const char *opt_iso    = NULL;  /* -I[TIMESPEC] */
     const char *set_date   = NULL;  /* -s DATE */
+    const char *op_settime = NULL;  /* bare MMDDhhmm[[CC]YY][.ss] operand */
     int i;
 
     for (i = 1; i < argc; i++) {
@@ -262,8 +319,12 @@ int applet_date(int argc, char **argv)
 
         if (strcmp(arg, "--") == 0) { i++; break; }
 
-        /* +FORMAT */
+        /* +FORMAT -- at most one */
         if (arg[0] == '+') {
+            if (opt_format) {
+                err_msg("date", "extra operand '%s'", arg);
+                return 1;
+            }
             opt_format = arg + 1;
             continue;
         }
@@ -340,6 +401,29 @@ int applet_date(int argc, char **argv)
         }
     }
 
+    /* Anything left is an operand. `date [+FORMAT]` takes at most one, and a
+     * non-'+' operand is the obsolescent MMDDhhmm[[CC]YY][.ss] "set the clock"
+     * form -- NOT a format string. Both used to be dropped on the floor, so
+     * `date %x` printed the current time and SUCCEEDED where every other date
+     * reports an invalid date. A configure probe that tests `date FMT` to pick
+     * a code path therefore took the wrong branch. */
+    for (; i < argc; i++) {
+        const char *arg = argv[i];
+        if (arg[0] == '+') {
+            if (opt_format) {
+                err_msg("date", "extra operand '%s'", arg);
+                return 1;
+            }
+            opt_format = arg + 1;
+            continue;
+        }
+        if (opt_set || set_date || opt_format || op_settime) {
+            err_msg("date", "extra operand '%s'", arg);
+            return 1;
+        }
+        op_settime = arg;
+    }
+
     /* Determine the time to display */
     time_t t;
     if (opt_date) {
@@ -364,6 +448,31 @@ int applet_date(int argc, char **argv)
             return 1;
         }
         t = set_t;
+    }
+
+    /* Set system time from the bare operand. GNU reports the clock failure but
+     * still prints the date it would have set, so the exit status is the only
+     * thing that says the clock did not move. */
+    if (op_settime) {
+        time_t set_t;
+        if (parse_settime_operand(op_settime, &set_t) != 0) {
+            err_msg("date", "invalid date '%s'", op_settime);
+            return 1;
+        }
+        struct timespec ts = { set_t, 0 };
+        int failed = (clock_settime(CLOCK_REALTIME, &ts) != 0);
+        if (failed)
+            err_sys("date", "cannot set date");
+        t = set_t;
+        if (failed) {
+            /* fall through to print, then fail */
+            struct tm tmp;
+            localtime_r(&t, &tmp);
+            char b[256];
+            strftime(b, sizeof(b), "%a %b %e %H:%M:%S %Z %Y", &tmp);
+            puts(b);
+            return 1;
+        }
     }
 
     /* Convert to tm.

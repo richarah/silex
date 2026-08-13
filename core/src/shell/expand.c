@@ -1027,6 +1027,18 @@ static char *cmd_subst(shell_ctx_t *sh, const char *cmd)
         sb_appendn(&sb, buf, (size_t)n);
     close(pipefd[0]);
 
+    /* Drop NUL bytes rather than letting them terminate the value. A shell
+     * variable is a C string, so `s=$(printf '.\0.')` truncated to "." here;
+     * dash and bash SKIP the NULs and keep the rest, giving "..". Truncating
+     * silently loses data that the script can still see the length of. */
+    {
+        size_t r = 0, w = 0;
+        for (; r < sb.len; r++)
+            if (sb.buf[r] != '\0') sb.buf[w++] = sb.buf[r];
+        sb.len = w;
+        sb.buf[w] = '\0';
+    }
+
     int status;
     waitpid(pid, &status, 0);
 

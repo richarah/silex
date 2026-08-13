@@ -327,6 +327,26 @@ check "brace-alt: unquoted \$v still splits"           "$(qflds 'x=1; v="p q"; p
 check "guard-neutral: \"\$@\" separate fields"         "$(qflds 'set -- "a b" c; printf "[%s]" "$@"')"   "[a b][c]"
 check "guard-neutral: unquoted \$v splits"             "$(qflds 'v="a b c"; printf "[%s]" $v')"          "[a][b][c]"
 
+# --- NUL bytes are DROPPED, not treated as a terminator ---
+# A shell variable is a C string, so a NUL in captured output used to truncate
+# the value there and silently discard everything after it. dash and bash skip
+# the NUL and keep the rest; the length is the observable difference.
+check "cmdsub: NUL is skipped, the rest of the output survives" \
+    "$("$SILEX" -c 's=$(printf ".\000."); echo len=${#s} val=$s')" \
+    "len=2 val=.."
+check "cmdsub: output of only NULs is the empty string" \
+    "$("$SILEX" -c 's=$(printf "\000"); echo len=${#s}')" \
+    "len=0"
+check "read: NUL is skipped, the rest of the line survives" \
+    "$(printf '.\000.' | "$SILEX" -c 'read s; echo len=${#s} val=$s')" \
+    "len=2 val=.."
+# With the NUL gone, ${s#?} strips a real character rather than appearing to
+# strip from an already-truncated string (Oils issue 2269).
+check "strip op after a NUL-bearing cmdsub" \
+    "$("$SILEX" -c 's=$(printf "\000x"); echo len=${#s}; t=${s#?}; echo len=${#t}')" \
+    "len=1
+len=0"
+
 echo ""
 echo "expansion tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

@@ -210,6 +210,32 @@ check "block redirect of a live fd 3 is saved and restored" \
     "$("$SILEX" -c "exec 3>$TMPDIR_REDIR/a.txt; { echo B >&3; } 3>$TMPDIR_REDIR/b.txt; echo C >&3; exec 3>&-; echo \"a=[\$(cat $TMPDIR_REDIR/a.txt)] b=[\$(cat $TMPDIR_REDIR/b.txt)]\"")" \
     "a=[C] b=[B]"
 
+# --- IO_NUMBER requires the operator to be adjacent (POSIX 2.10.2 rule 2) ---
+# `N>` is a file descriptor; `N >` is an ordinary argument followed by a
+# redirect of stdout. Treating them alike silently ATE the last argument of
+# every command whose final operand was numeric: `seq 5 6 > f` ran `seq 5` and
+# pointed fd 6 at the file, and `f 512 > out` called f with no arguments.
+check "a digit word separated by a blank is an argument, not an fd" \
+    "$("$SILEX" -c "seq 5 6 > $TMPDIR_REDIR/io.txt; cat $TMPDIR_REDIR/io.txt" | tr '\n' ' ')" \
+    "5 6 "
+check "an adjacent digit IS an fd" \
+    "$("$SILEX" -c "echo hi 2>$TMPDIR_REDIR/io2.txt; echo -n; test -s $TMPDIR_REDIR/io2.txt && echo nonempty || echo empty")" \
+    "hi
+empty"
+check "words after a mid-command redirect are kept" \
+    "$("$SILEX" -c "echo a 5 >$TMPDIR_REDIR/io3.txt b; cat $TMPDIR_REDIR/io3.txt")" \
+    "a 5 b"
+
+# --- a redirect may FOLLOW a compound command, never prefix one ---
+# `>f for i in ...` has no production in the grammar. Parsing it as a
+# redirect-only command left the loop running UNREDIRECTED -- output went to
+# the terminal while the script believed it was captured.
+"$SILEX" -c '>'"$TMPDIR_REDIR"'/pre.txt for i in 1 2; do echo $i; done' >/dev/null 2>&1
+check_exit "redirect prefixing a for loop is a syntax error" "$?" "2"
+check "a suffix redirect on the same loop still works" \
+    "$("$SILEX" -c 'for i in 1 2; do echo $i; done > '"$TMPDIR_REDIR"'/suf.txt; cat '"$TMPDIR_REDIR"'/suf.txt' | tr '\n' ' ')" \
+    "1 2 "
+
 echo ""
 echo "redirect tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
