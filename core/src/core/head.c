@@ -238,18 +238,32 @@ int applet_head(int argc, char **argv)
         }
         if (strcmp(arg, "--verbose") == 0) { opt_v = 1; continue; }
 
-        /* Long --lines=N / --bytes=N */
-        if (strncmp(arg, "--lines=", 8) == 0) {
-            if (parse_count(arg + 8, &count, &negative) != 0) {
-                err_msg("head", "invalid number of lines: '%s'", arg + 8);
+        /* Long --lines/--bytes, joined (`--bytes=4`) or separated
+         * (`--bytes 4`) -- getopt_long accepts both for a required
+         * argument, and only the joined form was handled. */
+        if (strncmp(arg, "--lines", 7) == 0 &&
+            (arg[7] == '\0' || arg[7] == '=')) {
+            const char *val = arg[7] == '=' ? arg + 8 : (++i < argc ? argv[i] : NULL);
+            if (!val) {
+                err_usage("head", "[-n N] [-c N] [-qv] [FILE...]");
+                return 1;
+            }
+            if (parse_count(val, &count, &negative) != 0) {
+                err_msg("head", "invalid number of lines: '%s'", val);
                 return 1;
             }
             use_bytes = 0;
             continue;
         }
-        if (strncmp(arg, "--bytes=", 8) == 0) {
-            if (parse_count(arg + 8, &count, &negative) != 0) {
-                err_msg("head", "invalid number of bytes: '%s'", arg + 8);
+        if (strncmp(arg, "--bytes", 7) == 0 &&
+            (arg[7] == '\0' || arg[7] == '=')) {
+            const char *val = arg[7] == '=' ? arg + 8 : (++i < argc ? argv[i] : NULL);
+            if (!val) {
+                err_usage("head", "[-n N] [-c N] [-qv] [FILE...]");
+                return 1;
+            }
+            if (parse_count(val, &count, &negative) != 0) {
+                err_msg("head", "invalid number of bytes: '%s'", val);
                 return 1;
             }
             use_bytes = 1;

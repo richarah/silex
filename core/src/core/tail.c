@@ -423,17 +423,33 @@ int applet_tail(int argc, char **argv)
             strcmp(arg, "--silent") == 0)  { opt_q = 1; continue; }
         if (strcmp(arg, "--verbose") == 0) { opt_v = 1; continue; }
 
-        if (strncmp(arg, "--lines=", 8) == 0) {
-            if (parse_count(arg + 8, &count, &plus_mode) != 0) {
-                err_msg("tail", "invalid number of lines: '%s'", arg + 8);
+        /* getopt_long takes a required argument either joined (`--bytes=4`)
+         * or as the NEXT word (`--bytes 4`); only the joined form was
+         * accepted, so `tail --bytes 4` -- the form the Oils umask test and
+         * plenty of scripts use -- died on "unrecognized option '--'". */
+        if (strncmp(arg, "--lines", 7) == 0 &&
+            (arg[7] == '\0' || arg[7] == '=')) {
+            const char *val = arg[7] == '=' ? arg + 8 : (++i < argc ? argv[i] : NULL);
+            if (!val) {
+                err_usage("tail", "[-n N] [-c N] [-fqv] [--pid PID] [FILE...]");
+                return 1;
+            }
+            if (parse_count(val, &count, &plus_mode) != 0) {
+                err_msg("tail", "invalid number of lines: '%s'", val);
                 return 1;
             }
             use_bytes = 0;
             continue;
         }
-        if (strncmp(arg, "--bytes=", 8) == 0) {
-            if (parse_count(arg + 8, &count, &plus_mode) != 0) {
-                err_msg("tail", "invalid number of bytes: '%s'", arg + 8);
+        if (strncmp(arg, "--bytes", 7) == 0 &&
+            (arg[7] == '\0' || arg[7] == '=')) {
+            const char *val = arg[7] == '=' ? arg + 8 : (++i < argc ? argv[i] : NULL);
+            if (!val) {
+                err_usage("tail", "[-n N] [-c N] [-fqv] [--pid PID] [FILE...]");
+                return 1;
+            }
+            if (parse_count(val, &count, &plus_mode) != 0) {
+                err_msg("tail", "invalid number of bytes: '%s'", val);
                 return 1;
             }
             use_bytes = 1;

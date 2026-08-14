@@ -417,8 +417,23 @@ int applet_printf(int argc, char **argv)
         return 2;
     }
 
-    const char *fmt = argv[1];
-    int first_arg = 2;
+    /* `--` ends the options, so the FORMAT is the word after it. Without
+     * this, `printf -- '-%s-\n' a b` took "--" itself as the format and
+     * printed a bare "--", swallowing every argument -- and `printf --` is
+     * how a script writes a format that begins with a dash. Only argv[1] is
+     * considered: a later "--" is an ordinary argument (`printf '%s\n' -- a`
+     * prints "--" then "a"). A lone "-" is a format, not an option. */
+    int fmt_idx = 1;
+    if (strcmp(argv[1], "--") == 0) {
+        if (argc < 3) {
+            fprintf(stderr, "silex: printf: usage: printf format [arg ...]\n");
+            return 2;
+        }
+        fmt_idx = 2;
+    }
+
+    const char *fmt = argv[fmt_idx];
+    int first_arg = fmt_idx + 1;
 
     /* If there are no extra arguments, run once */
     if (first_arg >= argc) {

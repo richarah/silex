@@ -222,6 +222,48 @@ check "applet env: an exported var keeps its old value and export" \
     "V=[orig] inenv=1" \
     "$("$SILEX" sh -c 'export V=orig; V=temp date +%H >/dev/null; echo "V=[$V] inenv=$(env | grep -c "^V=orig")"')"
 
+# --- printf: `--` ends the options ---
+# Without this the format was taken to be "--" itself, so `printf -- FMT a b`
+# printed a bare "--" and swallowed every argument. `printf --` is how a
+# script writes a format that begins with a dash.
+check "printf: -- is not the format" \
+    "-a b-x y--" \
+    "$("$SILEX" sh -c "printf -- '-%s-%s-%s-\n' 'a b' 'x y'")"
+check "printf: -- then a format that cycles" \
+    "-a-b-|-c-d-|-e--|" \
+    "$("$SILEX" sh -c "printf -- '-%s-%s-\n' a b c d e" | tr '\n' '|')"
+check "printf: a later -- is an ordinary argument" \
+    "--|a|" \
+    "$("$SILEX" sh -c "printf '%s\n' -- a" | tr '\n' '|')"
+check "printf: -- with nothing after it is a usage error" \
+    "2" \
+    "$("$SILEX" sh -c 'printf -- 2>/dev/null; echo $?')"
+check "printf: -- -- prints a literal --" \
+    "--" \
+    "$("$SILEX" sh -c 'printf -- --')"
+check "printf: a lone - is a format, not an option" \
+    "-" \
+    "$("$SILEX" sh -c 'printf -')"
+
+# --- head/tail: a long option's argument may be the NEXT word ---
+# getopt_long accepts `--bytes=4` and `--bytes 4` alike; only the joined
+# form was handled, so `tail --bytes 4` died on "unrecognized option '--'".
+check "tail: --bytes N (separated)" \
+    "0022" \
+    "$("$SILEX" sh -c 'umask 0022; umask | tail --bytes 5')"
+check "tail: --bytes=N (joined) still works" \
+    "0022" \
+    "$("$SILEX" sh -c 'umask 0022; umask | tail --bytes=5')"
+check "tail: --lines N (separated)" \
+    "c" \
+    "$("$SILEX" sh -c 'printf "a\nb\nc\n" | tail --lines 1')"
+check "head: --bytes N (separated)" \
+    "ab" \
+    "$("$SILEX" sh -c 'printf "abcdef\n" | head --bytes 2')"
+check "head: --lines N (separated)" \
+    "a" \
+    "$("$SILEX" sh -c 'printf "a\nb\nc\n" | head --lines 1')"
+
 echo ""
 echo "shell_builtins: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
