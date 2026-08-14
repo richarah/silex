@@ -317,6 +317,14 @@ int vars_export(vars_t *v, const char *name)
     return vars_export_context(v, name, NULL);
 }
 
+void vars_unexport(vars_t *v, const char *name)
+{
+    var_entry_t *e = vars_find(v, name);
+    if (e)
+        e->exported = 0;
+    unsetenv(name);
+}
+
 int vars_is_readonly(vars_t *v, const char *name)
 {
     var_entry_t *e = vars_find(v, name);

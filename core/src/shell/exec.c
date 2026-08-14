@@ -1184,9 +1184,17 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
                 if (all_done) { cmd_rc = 0; goto cmd_done; }
             }
         }
-        /* 'sh' applet may call exit(); run it in a fork so the parent survives.
-         * Also exports vars so they are visible to the sub-shell. */
-        if (strcmp(cmd, "sh") == 0) {
+        /* Applets that never return to their caller must run in a fork, or
+         * they take the whole shell with them:
+         *   sh    may call exit();
+         *   env   EXECS the command it is given -- correct for a standalone
+         *         /usr/bin/env, fatal in-process. `echo a; env echo b; echo c`
+         *         printed a and b and then the shell was simply gone, exit 0,
+         *         with `c` never reached. Applets are dispatched ahead of PATH
+         *         by design, so this hit every `env CMD` in every script.
+         * Both also need the shell's exported vars and the VAR=val prefix
+         * pushed into the child's environment. */
+        if (strcmp(cmd, "sh") == 0 || strcmp(cmd, "env") == 0) {
             fflush(NULL);
             pid_t apid = fork();
             if (apid < 0) { perror("fork"); cmd_rc = 1; goto cmd_done; }
@@ -1230,7 +1238,57 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
                 sh->applets_seen_n < (int)(sizeof(sh->applets_seen) / sizeof(sh->applets_seen[0])))
                 sh->applets_seen[sh->applets_seen_n++] = ap->name;
         }
+
+        /* A `VAR=val applet` prefix has to reach the applet's ENVIRONMENT.
+         * An external utility gets this for free from the exec; an applet
+         * runs in-process and reads getenv(), so without this the binding is
+         * simply invisible -- `TZ=UTC date` printed local time, and
+         * `LC_ALL=C sort` sorted in the caller's locale. The shell-builtin
+         * path above already does this; the applet path never did.
+         *
+         * vars_export() calls setenv(), so the value lands in `environ`
+         * immediately. Restore covers the export FLAG too: a var that existed
+         * unexported must not stay exported afterwards. */
+        char **aapp_saved = NULL;
+        int   *aapp_had   = NULL;
+        int   *aapp_exp   = NULL;
+        if (nassigns > 0) {
+            aapp_saved = calloc((size_t)nassigns, sizeof(char *));
+            aapp_had   = calloc((size_t)nassigns, sizeof(int));
+            aapp_exp   = calloc((size_t)nassigns, sizeof(int));
+            if (aapp_saved && aapp_had && aapp_exp) {
+                for (int ai = 0; ai < nassigns; ai++) {
+                    if (!anames[ai]) continue;
+                    const char *ov = vars_get(&sh->vars, anames[ai]);
+                    aapp_had[ai]   = ov != NULL;
+                    aapp_saved[ai] = ov ? strdup(ov) : NULL;
+                    aapp_exp[ai]   = vars_is_exported(&sh->vars, anames[ai]);
+                    vars_set(&sh->vars, anames[ai], avals[ai] ? avals[ai] : "");
+                    vars_export(&sh->vars, anames[ai]);
+                }
+            }
+        }
+
         cmd_rc = ap->fn(argc, expanded);
+
+        if (nassigns > 0 && aapp_saved && aapp_had && aapp_exp) {
+            for (int ai = nassigns - 1; ai >= 0; ai--) {
+                if (!anames[ai]) continue;
+                if (aapp_had[ai]) {
+                    vars_set(&sh->vars, anames[ai],
+                             aapp_saved[ai] ? aapp_saved[ai] : "");
+                    if (!aapp_exp[ai])
+                        vars_unexport(&sh->vars, anames[ai]);
+                } else {
+                    vars_unset(&sh->vars, anames[ai]);
+                }
+            }
+        }
+        if (aapp_saved)
+            for (int ai = 0; ai < nassigns; ai++) free(aapp_saved[ai]);
+        free(aapp_saved);
+        free(aapp_had);
+        free(aapp_exp);
         /* Same deal as the shell-builtin path above: flush while the
          * redirection is still applied so a full/broken target is charged to
          * THIS command, and clear the sticky stdio error flag so it cannot

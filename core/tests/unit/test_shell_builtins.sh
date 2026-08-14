@@ -183,6 +183,45 @@ check "test: -t with a non-numeric operand is an error" "2" "$(st '[ -t invalid 
 check "test: -t inside an expression is an error too"   "2" "$(st '[ x -a -t invalid ]')"
 check "test: -t under ! is still an error"              "2" "$(st '[ ! -t invalid ]')"
 
+# --- the `env` applet must not take the shell with it ---
+# env EXECS the command it is given. That is right for a standalone
+# /usr/bin/env and fatal for an applet dispatched in-process: the shell was
+# simply replaced, so everything after `env CMD` silently never ran and the
+# script still exited 0.
+check "env: the script continues after 'env CMD'" \
+    "before mid after" \
+    "$("$SILEX" sh -c 'echo before; env echo mid; echo after' | tr '\n' ' ' | sed 's/ $//')"
+check "env: exit status of the command is reported" \
+    "1" \
+    "$("$SILEX" sh -c 'env false; echo $?')"
+check "env: a missing command is 127" \
+    "127" \
+    "$("$SILEX" sh -c 'env nosuchcmd_xyz 2>/dev/null; echo $?')"
+check "env: NAME=VAL operands reach the command" \
+    "1-2" \
+    "$("$SILEX" sh -c 'FOO=1 env BAR=2 sh -c "echo \$FOO-\$BAR"')"
+
+# --- a VAR=val prefix must reach an APPLET's environment ---
+# An external utility gets the binding from the exec; an applet runs
+# in-process and reads getenv(), so `TZ=UTC date` printed local time and
+# `LC_ALL=C sort` sorted in the caller's locale. Applets beat PATH by design,
+# so these idioms were broken for every script.
+check "applet env: TZ=UTC reaches the date applet" \
+    "$(TZ=UTC date +%H)" \
+    "$("$SILEX" sh -c 'TZ=UTC date +%H')"
+check "applet env: TZ=Asia/Tokyo reaches the date applet" \
+    "$(TZ=Asia/Tokyo date +%H)" \
+    "$("$SILEX" sh -c 'TZ=Asia/Tokyo date +%H')"
+check "applet env: the binding does not outlive the command" \
+    "TZ=[] inenv=0" \
+    "$("$SILEX" sh -c 'TZ=UTC date +%H >/dev/null; echo "TZ=[$TZ] inenv=$(env | grep -c "^TZ=")"')"
+check "applet env: an unexported var is not left exported" \
+    "V=[orig] inenv=0" \
+    "$("$SILEX" sh -c 'V=orig; V=temp date +%H >/dev/null; echo "V=[$V] inenv=$(env | grep -c "^V=")"')"
+check "applet env: an exported var keeps its old value and export" \
+    "V=[orig] inenv=1" \
+    "$("$SILEX" sh -c 'export V=orig; V=temp date +%H >/dev/null; echo "V=[$V] inenv=$(env | grep -c "^V=orig")"')"
+
 echo ""
 echo "shell_builtins: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

@@ -46,6 +46,10 @@ int          vars_set(vars_t *v, const char *name, const char *value);
 int          vars_set_context(vars_t *v, const char *name, const char *value, const char *ctx);
 int          vars_set_local(vars_t *v, const char *name, const char *value);
 int          vars_export(vars_t *v, const char *name);
+/* Clear the export flag and drop NAME from `environ`; the variable itself
+ * keeps its value. Used to undo the temporary export a `VAR=val cmd` prefix
+ * needs in order to reach an in-process applet's environment. */
+void         vars_unexport(vars_t *v, const char *name);
 /* 1 if NAME has an entry with the export flag (even declared-but-unset). */
 int          vars_is_exported(vars_t *v, const char *name);
 int          vars_export_context(vars_t *v, const char *name, const char *ctx);
