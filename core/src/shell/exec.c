@@ -3487,8 +3487,11 @@ static int test_int(test_ctx_t *t, const char *s, long long *out)
 /* Apply a unary primary. Returns 0/1, or -1 if op is not a unary primary.
  * `with_o` selects whether `-o NAME` (the ksh/bash shell-option test that
  * modernish detects as TESTO and uses for `isset -o`) is accepted here; in
- * expression context -o must stay the OR operator. */
-static int test_unary(shell_ctx_t *sh, const char *op, const char *a, int with_o)
+ * expression context -o must stay the OR operator.
+ * `err` receives 1 when the operator matched but its operand was invalid
+ * (only `-t`, whose operand is a file descriptor number); such a test is
+ * status 2, not merely false. */
+static int test_unary(shell_ctx_t *sh, const char *op, const char *a, int with_o, int *err)
 {
     struct stat st;
     if (op[0] != '-' || op[1] == '\0' || op[2] != '\0') return -1;
@@ -3521,7 +3524,12 @@ static int test_unary(shell_ctx_t *sh, const char *op, const char *a, int with_o
     case 's': return (stat(a, &st) == 0 && st.st_size > 0) ? 0 : 1;
     case 't': {
         int fd;
-        return (sh_parse_int(a, 0, INT_MAX, &fd) == 0 && isatty(fd)) ? 0 : 1;
+        if (sh_parse_int(a, 0, INT_MAX, &fd) != 0) {
+            fprintf(stderr, "silex: test: %s: integer expression expected\n", a);
+            if (err) *err = 1;
+            return 2;
+        }
+        return isatty(fd) ? 0 : 1;
     }
     case 'o':
         if (!with_o) return -1;
@@ -3593,11 +3601,15 @@ static const char *t_peek(test_ctx_t *t)
 
 static int t_primary(test_ctx_t *t)
 {
-    if (t->pos >= t->ac) {
-        fprintf(stderr, "silex: test: argument expected\n");
-        t->err = 1;
-        return 2;
-    }
+    /* A primary that runs out of words is a MISSING EXPRESSION, which is
+     * false -- not a syntax error. dash's primary() returns 0 for EOI, and
+     * that is what makes the whole `[ -a -a ... ]` ladder terminate with a
+     * status instead of a diagnostic: each `-a` evaluates as a non-empty
+     * string (true), and the dangling one on the right takes the AND to
+     * false. An operator whose operand is missing IS still an error, but
+     * those are diagnosed where the operator is consumed (test_binary's
+     * caller below, and the unary arm), not here. */
+    if (t->pos >= t->ac) return 1;
     const char *tok = t->av[t->pos++];
 
     if (strcmp(tok, "(") == 0) {
@@ -3612,26 +3624,42 @@ static int t_primary(test_ctx_t *t)
         return r;
     }
 
+    /* A BINARY primary wins over a unary one -- but only when its right
+     * operand is actually there. That proviso is the whole rule, and both
+     * halves are load-bearing:
+     *
+     *   test x -a -f = y     `-f` is the LEFT OPERAND of `=`, so this is the
+     *                        string compare "-f" = "y" (false), not a file
+     *                        test on "=" with a stray trailing "y";
+     *   [ x -a -e = ]        `=` has no right operand, so `-e` reverts to the
+     *                        file test and `=` is its operand (false).
+     *
+     * Checking unary first breaks the former (silex used to reject it as
+     * "too many arguments"); checking binary unconditionally breaks the
+     * latter (it would become an "argument expected" error). dash draws the
+     * line exactly here, and `test $# -ne 0 -a "$1" != "--"` -- the sqsh
+     * configure idiom behind Oils #2409 -- is the case that cares. */
+    if (t->ac - t->pos >= 2 && test_is_binary(t->av[t->pos])) {
+        const char *op = t->av[t->pos++];
+        return test_binary(t, tok, op, t->av[t->pos++]);
+    }
+
     /* Unary primary with its operand available. -a/-o can't start a primary,
      * so no ambiguity check is needed: test_unary(with_o=0) rejects -o and
      * -a was never unary. */
     if (t->pos < t->ac) {
-        int u = test_unary(t->sh, tok, t->av[t->pos], 0);
+        int u = test_unary(t->sh, tok, t->av[t->pos], 0, &t->err);
         if (u >= 0) {
             t->pos++;
-            return u;
+            return t->err ? 2 : u;
         }
     }
 
-    /* Plain operand, possibly the left side of a binary primary. */
+    /* A binary operator left with no right operand: an error, not a word. */
     if (t->pos < t->ac && test_is_binary(t->av[t->pos])) {
-        const char *op = t->av[t->pos++];
-        if (t->pos >= t->ac) {
-            fprintf(stderr, "silex: test: argument expected\n");
-            t->err = 1;
-            return 2;
-        }
-        return test_binary(t, tok, op, t->av[t->pos++]);
+        fprintf(stderr, "silex: test: argument expected\n");
+        t->err = 1;
+        return 2;
     }
     return tok[0] ? 0 : 1;
 }
@@ -3691,8 +3719,12 @@ static int test_eval(shell_ctx_t *sh, char **av, int n)
             r = test_eval(sh, av + 1, 1);
             return (r == 2) ? 2 : !r;
         }
-        r = test_unary(sh, av[0], av[1], 1);
-        if (r >= 0) return r;
+        {
+            int uerr = 0;
+            r = test_unary(sh, av[0], av[1], 1, &uerr);
+            if (uerr) return 2;
+            if (r >= 0) return r;
+        }
         break;
     case 3:
         /* $2 being a binary primary wins, so `test ! = !` compares strings. */

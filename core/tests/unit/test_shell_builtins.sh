@@ -150,6 +150,39 @@ check "date: a second operand is an extra operand" \
     "1" \
     "$("$SILEX" sh -c 'date +%Y +%m >/dev/null 2>&1; echo $?')"
 
+# --- test/[ expression grammar: the three rules dash draws and silex did not ---
+# 1. A primary that runs out of words is a MISSING EXPRESSION (false), not a
+#    syntax error. This is what makes the `-a -a -a ...` ladder (Oils blog2)
+#    return a status: every `-a` is a non-empty string (true) and the dangling
+#    one on the right takes the AND to false.
+st() { "$SILEX" sh -c "$1"' >/dev/null 2>&1; echo $?'; }
+check "test: [ -a -a ] is false, not an error"            "1" "$(st '[ -a -a ]')"
+check "test: [ -a -a -a ] is true"                        "0" "$(st '[ -a -a -a ]')"
+check "test: [ -a -a -a -a ] is false"                    "1" "$(st '[ -a -a -a -a ]')"
+check "test: [ -a -a -a -a -a ] is true"                  "0" "$(st '[ -a -a -a -a -a ]')"
+check "test: [ -a -a -a -a -a -a ] is false"              "1" "$(st '[ -a -a -a -a -a -a ]')"
+check "test: trailing -a operand missing is false"        "1" "$(st '[ a -a ]')"
+check "test: trailing -o operand missing short-circuits"  "0" "$(st '[ a -o ]')"
+check "test: ! with no operand is true"                   "0" "$(st '[ x -a ! ]')"
+
+# 2. A BINARY operator wins over a unary one, but only when its right operand
+#    exists. `test $# -ne 0 -a "$1" != "--"` (the sqsh configure idiom behind
+#    Oils #2409) hinges on "-z" being the LEFT OPERAND of `!=`, not a string
+#    test whose operand is "!=" with a stray trailing "--".
+check "test: -z is the left operand of != when one follows" \
+    "0" "$(st 'set -- -z; test $# -ne 0 -a "$1" != "--"')"
+check "test: -f is the left operand of = when one follows" \
+    "1" "$(st 'test x -a -f = y')"
+check "test: -e reverts to a file test when = has no operand" \
+    "1" "$(st '[ x -a -e = ]')"
+check "test: a binary operator with no right operand is an error" \
+    "2" "$(st '[ x -a y = ]')"
+
+# 3. `-t` takes a file descriptor NUMBER; garbage is status 2, not false.
+check "test: -t with a non-numeric operand is an error" "2" "$(st '[ -t invalid ]')"
+check "test: -t inside an expression is an error too"   "2" "$(st '[ x -a -t invalid ]')"
+check "test: -t under ! is still an error"              "2" "$(st '[ ! -t invalid ]')"
+
 echo ""
 echo "shell_builtins: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
