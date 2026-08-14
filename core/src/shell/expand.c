@@ -1061,6 +1061,7 @@ static char *cmd_subst(shell_ctx_t *sh, const char *cmd)
     sh->last_cmdsub_exit = WIFEXITED(status) ? WEXITSTATUS(status)
                          : WIFSIGNALED(status) ? 128 + WTERMSIG(status)
                          : 1;
+    sh->last_cmdsub_seen = 1;
 
     /* Strip trailing newlines (POSIX) */
     while (sb.len > 0 && sb.buf[sb.len - 1] == '\n') {

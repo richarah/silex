@@ -759,6 +759,19 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
      * the status of the last command substitution (or 0 if none). */
     char **anames = NULL, **avals = NULL;
     int cmdsub_exit = 0;
+    int assign_cmdsub_seen = 0;
+    /* POSIX 2.9.1: with no command name, the command completes with the
+     * status of the LAST command substitution performed. expand.c records
+     * each one in last_cmdsub_exit and raises last_cmdsub_seen; zero both
+     * first so "no substitution at all" yields 0.
+     *
+     * The reset covers the WHOLE simple command, not just the assignments:
+     * the words may expand to nothing too (`$unset`, `$(false)`), and that
+     * case needs the same status. last_cmdsub_exit used to be read from
+     * sh->last_exit, which expand.c never set for a command substitution --
+     * so cmdsub_exit was always 0 and `v=$(cmd); ret=$?` always saw success. */
+    sh->last_cmdsub_exit = 0;
+    sh->last_cmdsub_seen = 0;
     if (nassigns > 0) {
         anames = malloc((size_t)nassigns * sizeof(char *));
         avals  = malloc((size_t)nassigns * sizeof(char *));
@@ -767,15 +780,6 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
             fprintf(stderr, "silex: out of memory\n");
             return 1;
         }
-        /* POSIX 2.9.1: with no command name, the command completes with the
-         * status of the LAST command substitution performed. expand.c records
-         * each one in last_cmdsub_exit; zero it first so "no substitution at
-         * all" yields 0.
-         *
-         * This used to read sh->last_exit, which expand.c never set for a
-         * command substitution -- so cmdsub_exit was always 0 and
-         * `v=$(cmd); ret=$?` always saw success. */
-        sh->last_cmdsub_exit = 0;
         /* POSIX 2.8.1: assigning to a read-only variable is a VARIABLE
          * ASSIGNMENT ERROR -- a non-interactive shell writes one diagnostic
          * and exits (dash: status 2). Detected before anything is applied,
@@ -840,6 +844,7 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
         free(aov_had);
         free(aov_exp);
         cmdsub_exit = sh->last_cmdsub_exit;
+        assign_cmdsub_seen = sh->last_cmdsub_seen;
 
         if (ro_name) {
             const char *eq = strchr(ro_name, '=');
@@ -882,7 +887,12 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
     /* With command: env-prefix assignments will be applied in child process
      * or function scope, not in parent shell */
 
-    /* 2. Expand all words */
+    /* 2. Expand all words.
+     * The assignment side of the tally is already banked in cmdsub_exit /
+     * assign_cmdsub_seen; start a fresh one so the words' own substitutions
+     * can be told apart from theirs. */
+    sh->last_cmdsub_exit = 0;
+    sh->last_cmdsub_seen = 0;
     char **expanded = expand_words(sh, words);
     int cmd_rc = 0;
     /* An interactive expansion error (see expansion_abort) discards the
@@ -892,8 +902,52 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
         sh->expansion_abort = 0;
         goto cmd_done;
     }
-    if (unlikely(!expanded || !expanded[0]))
+    if (unlikely(!expanded || !expanded[0])) {
+        /* The words expanded away to nothing, so there is no command name --
+         * `$unset`, `$(false)`, `foo=bar $unset`. POSIX 2.9.1 says such a
+         * command still performs its redirections and its assignments, and
+         * completes with the status of the LAST command substitution.
+         * silex treated it as a no-op returning 0, which lost all three:
+         * `$(exit 42)` reported success, `> f` never created the file, and a
+         * `foo=bar $unset` binding was rolled back with the temp overlay
+         * instead of persisting (Oils temp-binding 3, exit-status 8/9/10).
+         *
+         * "Last performed" follows POSIX expansion order -- words (step 2)
+         * before assignments (step 4) -- so an assignment's substitution wins
+         * over a word's: `foo=$(exit 1) $(exit 2)` is 1 in dash and bash. */
+        int words_cmdsub_seen  = sh->last_cmdsub_seen;
+        int words_cmdsub_exit  = sh->last_cmdsub_exit;
+
+        redirect_ctx_t ectx = { NULL, 0 };
+        if (redirs) {
+            redirect_apply(sh, redirs, &ectx);
+            if (ectx.error) {
+                /* A failed redirection means the command does not run at all
+                 * -- not even the assignments -- as in the assignment-only
+                 * path above, and with the same status. */
+                redirect_restore(&ectx);
+                cmd_rc = 1;
+                goto cmd_done;
+            }
+        }
+
+        for (int i = 0; i < nassigns; i++) {
+            if (!anames[i]) continue;
+            if (vars_set(&sh->vars, anames[i], avals[i] ? avals[i] : "") != 0)
+                cmd_rc = 1;
+            else if (sh->opt_a)
+                vars_export(&sh->vars, anames[i]);   /* allexport */
+        }
+
+        if (cmd_rc == 0)
+            cmd_rc = assign_cmdsub_seen ? cmdsub_exit
+                   : words_cmdsub_seen  ? words_cmdsub_exit
+                   : 0;
+
+        /* Only `exec` makes a redirection permanent. */
+        if (redirs) redirect_restore(&ectx);
         goto cmd_done;
+    }
 
     {
     const char *cmd = expanded[0];

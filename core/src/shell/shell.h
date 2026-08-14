@@ -216,6 +216,12 @@ typedef struct shell_ctx {
      * echo's status, i.e. 0). Only the assignment-only path in exec_simple_cmd
      * consumes this. */
     int         last_cmdsub_exit;
+    /* Raised alongside last_cmdsub_exit. A status of 0 cannot be told from
+     * "no substitution ran at all" by value, and the two differ: with no
+     * command name the assignments' substitution outranks the words', so
+     * exec_simple_cmd has to know whether one happened, not just what it
+     * returned. */
+    int         last_cmdsub_seen;
     /* PATH resolution cache: command name → resolved absolute path.
      * Invalidated (path_cache_hash reset) when PATH changes. */
     void       *path_cache[256];  /* path_cache_entry_t*, open-addressing by FNV-1a */

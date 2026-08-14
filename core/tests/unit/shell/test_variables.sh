@@ -242,6 +242,44 @@ check "commandv: absolute path to executable is echoed" \
 "$MB" -c 'command -v /nonexistent/xyz' >/dev/null 2>&1
 check_exit "commandv: nonexistent pathname returns non-zero" "$?" "127"
 
+# -----------------------------------------------------------------------
+# A simple command whose words expand to NOTHING (POSIX 2.9.1)
+# -----------------------------------------------------------------------
+# There is no command name, but the command still performs its redirections
+# and its assignments, and completes with the status of the last command
+# substitution. silex used to treat it as a no-op returning 0, losing all
+# three.
+check "empty argv: \$(false) is the command's status" \
+    "$("$MB" -c '$(false); echo $?')" "1"
+check "empty argv: \$(exit 42) is the command's status" \
+    "$("$MB" -c '$(exit 42); echo $?')" "42"
+check "empty argv: the LAST substitution wins" \
+    "$("$MB" -c '$(exit 42) $(exit 43); echo $?')" "43"
+check "empty argv: backtick form too" \
+    "$("$MB" -c '`false`; echo $?')" "1"
+check "empty argv: a real command name is unaffected" \
+    "$("$MB" -c 'true $(false); echo $?')" "0"
+check "empty argv: no substitution at all is 0" \
+    "$("$MB" -c 'unset u; $u; echo $?')" "0"
+check "empty argv: status is visible to 'if'" \
+    "$("$MB" -c 'if `false`; then echo T; else echo F; fi')" "F"
+# POSIX expands the words (step 2) before the assignments (step 4), so an
+# assignment's substitution is the LAST one performed and outranks a word's.
+check "empty argv: an assignment's substitution outranks a word's" \
+    "$("$MB" -c 'foo=$(exit 1) $(exit 2); echo $?')" "1"
+# With no command name the binding is not a temp binding -- it persists,
+# exactly as if the words had not been written at all (Oils temp-binding 3).
+check "empty argv: the assignment persists" \
+    "$("$MB" -c 'foo=alive! $unset; echo $foo')" "alive!"
+EMPTYARGV_D=$(mktemp -d)
+check "empty argv: redirections are still performed" \
+    "$("$MB" -c 'unset u; $u > '"$EMPTYARGV_D"'/f; test -f '"$EMPTYARGV_D"'/f && echo made')" "made"
+rm -rf "$EMPTYARGV_D"
+check "empty argv: a failed redirection skips the assignment" \
+    "$("$MB" -c 'unset u; v=set $u < /nonexistent; echo "[$v]"' 2>/dev/null)" "[]"
+check "empty argv: set -e acts on the substitution's status" \
+    "$("$MB" -c 'set -e; $(false); echo reached')" ""
+
 echo ""
 echo "variable tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
