@@ -84,6 +84,14 @@ typedef struct {
     const int         *verbose;
     char               vbuf[256];   /* echo buffer, flushed per line */
     size_t             vlen;
+    /* Set (to a static string naming the construct) when a quote or
+     * substitution runs into end of input without its closer. The scanners
+     * cannot return a token type -- an unterminated `'` still yields a WORD --
+     * so they record it here and the parser turns it into a syntax error
+     * BEFORE the half-read command is handed to the executor. Without this
+     * `echo 'abc` printed abc and exited 0, silently swallowing the rest of
+     * the script into the runaway quote. First error wins. */
+    const char        *error;
 } lexer_t;
 
 void    lexer_init_str(lexer_t *l, const char *input, arena_t *a);

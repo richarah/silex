@@ -70,6 +70,31 @@ void parser_error(parser_t *p, const char *msg)
     p->error = 1;
 }
 
+/* A token that can only be consumed by an enclosing compound command. The
+ * list parsers stop on these (they are how a body knows it has ended), so at
+ * TOP level one left over means the input is unparsable -- and it has to be
+ * diagnosed BEFORE the commands in front of it run. `echo 1 ;; echo 2` used
+ * to print 1 and then report the error, because the leftover `;;` was only
+ * met on the NEXT parse call, after `echo 1` had been executed. */
+static int is_scope_terminator(tok_type_t t)
+{
+    return t == TOK_FI    || t == TOK_DONE || t == TOK_ESAC  || t == TOK_THEN ||
+           t == TOK_ELSE  || t == TOK_ELIF || t == TOK_DO    ||
+           t == TOK_RPAREN || t == TOK_RBRACE || t == TOK_DSEMI;
+}
+
+/* Turn a lexer-level "ran off the end of the input" into a parse error.
+ * Returns 1 if one was pending. */
+static int check_lex_error(parser_t *p)
+{
+    if (!p->lexer->error) return 0;
+    if (!p->error) {
+        fprintf(stderr, "silex: syntax error: %s\n", p->lexer->error);
+        p->error = 1;
+    }
+    return 1;
+}
+
 /* -------------------------------------------------------------------------
  * Node allocation helpers
  * ------------------------------------------------------------------------- */
@@ -1550,6 +1575,17 @@ static node_t *parse_line(parser_t *p)
             break;   /* NEWLINE / EOF / stray terminator: the line ends here */
         }
 
+        /* Two separators in a row have no command between them, which the
+         * grammar has no production for: `echo a; ; echo b` is a syntax error
+         * in dash and bash. parse_and_or below returns NULL for the `;`
+         * WITHOUT setting an error, so the loop used to just break, hand back
+         * `echo a`, and let the driver resume after the stray separator --
+         * silently running both commands. */
+        if (peek(p).type == TOK_SEMI || peek(p).type == TOK_AMP) {
+            parser_error(p, "unexpected ';'");
+            return NULL;
+        }
+
         /* Fold this (possibly async-wrapped) unit into the sequence. */
         if (!result) {
             result = unit;
@@ -1595,16 +1631,20 @@ static node_t *parse_line(parser_t *p)
 /* Parse one logical line (see parse_line). Returns NULL at EOF. */
 node_t *parser_parse(parser_t *p)
 {
-    /* Skip leading newlines and semicolons between top-level commands.
-     * This allows the shell loop to call parser_parse repeatedly on input
-     * like "X=hello; echo $X" — after X=hello is parsed the ';' must be
-     * consumed before trying to parse the next command. */
+    /* Skip blank lines between top-level commands. A `;` is NOT skippable
+     * here: parse_line consumes its own separators, so a `;` still sitting in
+     * front of us has no command before it -- `;` and `; echo b` are syntax
+     * errors, not no-ops. */
     for (;;) {
         tok_type_t t = peek(p).type;
-        if (t == TOK_NEWLINE || t == TOK_SEMI)
+        if (t == TOK_NEWLINE)
             consume(p);
         else
             break;
+    }
+    if (peek(p).type == TOK_SEMI) {
+        parser_error(p, "unexpected ';'");
+        return NULL;
     }
     token_t t = peek(p);
     if (t.type == TOK_EOF)
@@ -1615,6 +1655,16 @@ node_t *parser_parse(parser_t *p)
     /* If parse_line returned NULL but we're not at EOF, it's a parse error */
     if (!result && !p->error && peek(p).type != TOK_EOF) {
         parser_error(p, "unexpected token");
+    }
+
+    /* Both of these must be tested HERE, before the caller executes `result`.
+     * A quote or substitution that ran off the end of the input still handed
+     * back a perfectly ordinary WORD token, and a terminator no enclosing
+     * construct can consume merely stopped the list quietly. */
+    if (check_lex_error(p) ||
+        (!p->error && is_scope_terminator(peek(p).type))) {
+        if (!p->error) parser_error(p, "unexpected token");
+        return NULL;
     }
 
     return result;
@@ -1633,6 +1683,12 @@ node_t *parser_parse_list(parser_t *p)
     /* If parse_list returned NULL but we're not at EOF, it's a parse error */
     if (!result && !p->error && peek(p).type != TOK_EOF) {
         parser_error(p, "unexpected token");
+    }
+
+    if (check_lex_error(p) ||
+        (!p->error && is_scope_terminator(peek(p).type))) {
+        if (!p->error) parser_error(p, "unexpected token");
+        return NULL;
     }
 
     return result;

@@ -309,6 +309,14 @@ done:
  * Quote and substitution handling inside word scanning
  * ------------------------------------------------------------------------- */
 
+/* Record that a construct ran off the end of the input. The first one wins:
+ * an unterminated `"` inside an unterminated `$(` should name the innermost
+ * thing that actually failed to close. */
+static void lex_unterminated(lexer_t *l, const char *what)
+{
+    if (!l->error) l->error = what;
+}
+
 /*
  * Collect characters inside $(...) — track nesting depth.
  * Called after the opening '(' has been consumed.
@@ -328,7 +336,7 @@ static void scan_cmd_subst(lexer_t *l)
     char kw[8]; int kwlen = 0; int at_cmdpos = 1, word_cmdpos = 0;
     while (depth > 0) {
         int c = lexer_getc(l);
-        if (c == EOF) break;
+        if (c == EOF) { lex_unterminated(l, "unexpected EOF in $( (expecting `)')"); break; }
         if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_') {
             if (kwlen == 0) word_cmdpos = at_cmdpos;
             if (kwlen < 7) kw[kwlen++] = (char)c;
@@ -447,7 +455,7 @@ static void scan_param_expand(lexer_t *l, int outer_dq)
     wordbuf_append(l, '{');
     while (depth > 0) {
         int c = lexer_getc(l);
-        if (c == EOF) break;
+        if (c == EOF) { lex_unterminated(l, "unexpected EOF in ${ (missing `}')"); break; }
         if (in_squote) {
             /* Single quotes: everything literal (backslash included) until '. */
             wordbuf_append(l, (char)c);
@@ -459,7 +467,7 @@ static void scan_param_expand(lexer_t *l, int outer_dq)
             /* Escapes the next byte; the `}` in `\}` does not close the word. */
             int n = lexer_getc(l);
             wordbuf_append(l, '\\');
-            if (n == EOF) break;
+            if (n == EOF) { lex_unterminated(l, "unexpected EOF in ${ (missing `}')"); break; }
             if (n == '\n') l->lineno++;
             wordbuf_append(l, (char)n);
             continue;
@@ -498,7 +506,7 @@ static void scan_arith(lexer_t *l)
     int depth = 2; /* track matching parens */
     while (depth > 0) {
         int c = lexer_getc(l);
-        if (c == EOF) break;
+        if (c == EOF) { lex_unterminated(l, "unexpected EOF in $(( (missing `))')"); break; }
         if (c == '(') {
             depth++;
             wordbuf_append(l, (char)c);
@@ -524,6 +532,7 @@ static void scan_single_quote(lexer_t *l)
     for (;;) {
         int c = lexer_getc(l);
         if (c == EOF || c == '\'') {
+            if (c == EOF) lex_unterminated(l, "unterminated quoted string");
             wordbuf_append(l, '\'');
             break;
         }
@@ -551,6 +560,7 @@ static void scan_double_quote(lexer_t *l)
     for (;;) {
         int c = lexer_getc(l);
         if (c == EOF || c == '"') {
+            if (c == EOF) lex_unterminated(l, "unterminated quoted string");
             wordbuf_append(l, '"');
             break;
         }
@@ -607,7 +617,7 @@ static void scan_double_quote(lexer_t *l)
             /* backtick command substitution */
             for (;;) {
                 int q = lexer_getc(l);
-                if (q == EOF) break;
+                if (q == EOF) { lex_unterminated(l, "EOF in backquote substitution"); break; }
                 if (q == '`') {
                     wordbuf_append(l, '`');
                     break;
@@ -908,7 +918,7 @@ restart:
             wordbuf_append(l, '`');
             for (;;) {
                 int q = lexer_getc(l);
-                if (q == EOF) break;
+                if (q == EOF) { lex_unterminated(l, "EOF in backquote substitution"); break; }
                 if (q == '`') {
                     wordbuf_append(l, '`');
                     break;
