@@ -582,9 +582,16 @@ void vars_print_exports(vars_t *v)
                     }
                     if (!shadowed) {
                         if (e->value && e->value[0] != '\0') {
-                            /* Variable has a value: print export NAME=VALUE */
-                            /* TODO: shell quote the value properly */
-                            printf("export %s='%s'\n", e->name, e->value);
+                            /* POSIX: the listing must be suitable for reinput.
+                             * This printed the value between bare quotes, so
+                             * any value CONTAINING a quote came back mangled --
+                             * V=a'b'c listed as export V='a'b'c', which
+                             * re-reads as abc, and an odd number of quotes made
+                             * `eval "$(export -p)"` a syntax error. That is the
+                             * standard save/restore idiom; ShellSpec's
+                             * shellspec_list_envkeys evals this output. */
+                            fputs("export ", stdout);
+                            print_squoted_assignment(e->name, e->value);
                         } else {
                             /* Variable is exported but unset (or empty): print export NAME */
                             printf("export %s\n", e->name);

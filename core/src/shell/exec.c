@@ -3295,6 +3295,22 @@ static int exec_builtin_exec_cmd(shell_ctx_t *sh, int argc, char **argv)
     return 127;
 }
 
+/* Write S inside single quotes so the result re-reads as S: an embedded quote
+ * becomes '\'' (close, escaped quote, reopen). POSIX requires the listings
+ * produced by `trap` and `alias` to be suitable for reinput, and printing the
+ * text between bare quotes silently broke that for any action or alias
+ * containing a quote -- `trap "echo 'bye'" EXIT` listed as
+ * `trap -- 'echo 'bye'' EXIT`, which re-reads as `echo bye`. */
+static void print_squoted(const char *s)
+{
+    putchar('\'');
+    for (const char *p = s; p && *p; p++) {
+        if (*p == '\'') fputs("'\\''", stdout);
+        else putchar((unsigned char)*p);
+    }
+    putchar('\'');
+}
+
 static int exec_builtin_trap(shell_ctx_t *sh, int argc, char **argv)
 {
     /* `--` ends options. `trap` prints its own traps in that form
@@ -3322,7 +3338,9 @@ static int exec_builtin_trap(shell_ctx_t *sh, int argc, char **argv)
                 printf("trap -- '' %s\n", signame);
             } else {
                 /* Print the action with proper quoting */
-                printf("trap -- '%s' %s\n", act, signame);
+                fputs("trap -- ", stdout);
+                print_squoted(act);
+                printf(" %s\n", signame);
             }
         }
         return 0;
@@ -4991,7 +5009,9 @@ static int exec_builtin_alias(shell_ctx_t *sh, int argc, char **argv)
         for (int i = 0; i < 256; i++) {
             alias_entry_t *e = sh->aliases[i];
             while (e) {
-                printf("alias %s='%s'\n", e->name, e->value);
+                printf("alias %s=", e->name);
+                print_squoted(e->value);
+                putchar('\n');
                 e = e->next;
             }
         }
@@ -5014,7 +5034,9 @@ static int exec_builtin_alias(shell_ctx_t *sh, int argc, char **argv)
             /* Print specific alias */
             const char *value = alias_lookup(sh, arg);
             if (value) {
-                printf("alias %s='%s'\n", arg, value);
+                printf("alias %s=", arg);
+                print_squoted(value);
+                putchar('\n');
             } else {
                 fprintf(stderr, "alias: %s: not found\n", arg);
                 return 1;
