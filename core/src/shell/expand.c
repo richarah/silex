@@ -2546,10 +2546,19 @@ static const char *skip_construct(const char *p)
     return p;
 }
 
-/* Append `c` to `out` so fnmatch() treats it as a literal, not a metacharacter. */
+/* Append `c` to `out` so fnmatch() treats it as a literal, not a metacharacter.
+ *
+ * `- ! ^ :` are metacharacters only INSIDE a bracket expression (range, two
+ * spellings of negation, and the [:class:] delimiter), and only the escape can
+ * say which a quoted one was meant to be. Emitting them bare made a quoted
+ * range separator act as a range: `case - in [C\-D]` did not match, and the
+ * same pattern used for pathname expansion silently matched the wrong files.
+ * Escaping them outside a bracket expression is a no-op for fnmatch/glob, so
+ * the distinction does not have to be tracked here. */
 static void pat_emit_literal(strbuf_t *out, char c)
 {
-    if (c == '\\' || c == '*' || c == '?' || c == '[' || c == ']')
+    if (c == '\\' || c == '*' || c == '?' || c == '[' || c == ']' ||
+        c == '-'  || c == '!' || c == '^' || c == ':')
         sb_appendc(out, '\\');
     sb_appendc(out, c);
 }
@@ -3043,6 +3052,29 @@ no_fields:
     int nfinal = 0;
     int fcap   = 0;
 
+    /* A backslash-escaped metacharacter must reach glob() as an ESCAPE, not as
+     * the bare character. The field below has already been quote-removed, so
+     * `_tmp/\[???\]` arrived as `_tmp/[???]` -- a real bracket expression, which
+     * matched the file named `?` instead of the one named `[abc]`. Rebuild the
+     * pattern from the source word with the same quote-aware builder `case` uses
+     * (it emits quoted metacharacters escaped), and glob THAT.
+     *
+     * Deliberately narrow, and the `$`/backtick exclusion is not optional:
+     * expand_word_pattern() EXPANDS the word, so on a word carrying an
+     * expansion this would be a SECOND expansion of it -- running `$(...)`
+     * twice, assigning `${x=v}` twice, re-reading a variable that the first
+     * pass consumed. (modernish's LOCAL aborted with "_Msh_2: unbound
+     * variable" on exactly that.) Restricting it to a literal word with a
+     * backslash leaves nothing to expand, covers every case the escape matters
+     * for, and keeps every other glob on the existing path byte for byte.
+     *
+     * Note this pattern is used ONLY to match; a no-match still falls back to
+     * the plain unescaped field, so the escapes never reach the output. */
+    const char *escpat = NULL;
+    if (!sh->opt_f && nfields == 1 && strchr(word, '\\') &&
+        !strchr(word, '$') && !strchr(word, '`'))
+        escpat = expand_word_pattern(sh, word);
+
     /* A field undergoes pathname expansion when the pre-expansion word carried a
      * literal unquoted metacharacter (do_glob), OR the field carries an
      * UNPROTECTED metacharacter recorded during the split (fglob[i]) -- typically
@@ -3062,8 +3094,13 @@ no_fields:
              * filesystem and by the order the files happened to be created.
              * That makes link order -- and therefore the output binary --
              * depend on how the source tree was checked out. */
-            int r = glob(f, GLOB_NOCHECK, NULL, &g);
-            if (r == 0) {
+            /* With `escpat` there is a pattern whose escapes must be honoured,
+             * so GLOB_NOCHECK is wrong here: it would hand the escaped PATTERN
+             * back as the result when nothing matched. Ask for a real
+             * no-match instead and let the fallback below emit the plain field. */
+            int r = escpat ? glob(escpat, 0, NULL, &g)
+                           : glob(f, GLOB_NOCHECK, NULL, &g);
+            if (r == 0 && g.gl_pathc > 0) {
                 for (size_t gi = 0; gi < g.gl_pathc; gi++) {
                     if (nfinal >= fcap) {
                         fcap = fcap ? fcap * 2 : 8;
