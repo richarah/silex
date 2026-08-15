@@ -13,6 +13,7 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <fnmatch.h>
 #include <glob.h>
 #include <pwd.h>
@@ -902,7 +903,18 @@ static char *expand_braced_body(shell_ctx_t *sh, const char *body, int in_dquote
         return r;
     }
 
-    /* Fallback: return raw value */
+    /* Anything still left after the name is not an operator this shell (or
+     * POSIX) knows: `${a&}`, `${x^^}`, `${v!}`. Returning the plain value
+     * here meant a typo'd or bash-only modifier expanded to $a as if the
+     * modifier had never been written -- `${a&}` printed $a, silently. dash
+     * calls it "Bad substitution" and a non-interactive shell exits 2, which
+     * is the same treatment the no-name case above already gets. */
+    if (*p != '\0') {
+        fprintf(stderr, "silex: bad substitution\n");
+        expansion_abort(sh, 2);
+        return arena_strdup(sh->scratch, "");
+    }
+
     return braced_ret(sh, val);
 }
 
@@ -945,11 +957,29 @@ static char *cmd_subst(shell_ctx_t *sh, const char *cmd)
         return arena_strdup(sh->scratch, "");
     }
 
+    /* A second, out-of-band channel carrying one fact back from the child: did
+     * the body fail to PARSE? A syntax error inside `$(...)` is a syntax error
+     * of the script, and POSIX makes that fatal to a non-interactive shell --
+     * `echo $(if true)` must print nothing and exit 2, not substitute the empty
+     * string and carry on as if the substitution had merely failed. The child's
+     * exit status cannot carry it (any status is a legal status for a command
+     * that really ran), so it gets its own fd. CLOEXEC matters: the child is
+     * `disposable` and its last command may tail-exec, and the exec'd program
+     * must not hold the write end open. If the pipe cannot be made, fall back
+     * to the old behaviour rather than failing the substitution. */
+    int errfd[2];
+    if (pipe(errfd) < 0) { errfd[0] = errfd[1] = -1; }
+    else {
+        fcntl(errfd[1], F_SETFD, FD_CLOEXEC);
+        fcntl(errfd[0], F_SETFD, FD_CLOEXEC);
+    }
+
     pid_t pid = fork();
     if (pid < 0) {
         perror("fork");
         close(pipefd[0]);
         close(pipefd[1]);
+        if (errfd[0] >= 0) { close(errfd[0]); close(errfd[1]); }
         return arena_strdup(sh->scratch, "");
     }
 
@@ -958,6 +988,7 @@ static char *cmd_subst(shell_ctx_t *sh, const char *cmd)
         close(pipefd[0]);
         dup2(pipefd[1], STDOUT_FILENO);
         close(pipefd[1]);
+        if (errfd[0] >= 0) close(errfd[0]);
 
         /* Run the command in a sub-shell */
         shell_ctx_t sub;
@@ -999,6 +1030,10 @@ static char *cmd_subst(shell_ctx_t *sh, const char *cmd)
             sub.traps[i].set_in_this_shell = 0;
         sub.disposable = 1;   /* the final command may tail-exec */
         shell_run_string(&sub, cmd);
+        if (sub.run_string_parse_error && errfd[1] >= 0) {
+            ssize_t w_ = write(errfd[1], "E", 1);
+            (void)w_;
+        }
         int ex = sub.last_exit;
         /* Fire EXIT trap if set in this command substitution */
         const char *exit_act = sub.traps[0].action;
@@ -1018,6 +1053,7 @@ static char *cmd_subst(shell_ctx_t *sh, const char *cmd)
 
     /* Parent: read from pipe */
     close(pipefd[1]);
+    if (errfd[1] >= 0) close(errfd[1]);
 
     strbuf_t sb;
     sb_init(&sb, 256);
@@ -1039,8 +1075,26 @@ static char *cmd_subst(shell_ctx_t *sh, const char *cmd)
         sb.buf[w] = '\0';
     }
 
+    int parse_error = 0;
+    if (errfd[0] >= 0) {
+        char eb;
+        parse_error = (read(errfd[0], &eb, 1) == 1);
+        close(errfd[0]);
+    }
+
     int status;
     waitpid(pid, &status, 0);
+
+    /* The body did not parse. dash reaches the same place at parse time and
+     * kills the script; do the same, after reaping the child so nothing is
+     * left behind. An interactive shell abandons the command instead. */
+    if (parse_error) {
+        if (!sh->interactive) {
+            fflush(NULL);
+            exit(2);
+        }
+        sh->run_string_parse_error = 1;
+    }
 
     /* Record the substitution's status, but do NOT touch sh->last_exit.
      *
