@@ -151,7 +151,9 @@ else
 fi
 
 # --- $! PID of last backgrounded process ---
-got=$("$MB" -c 'sleep 0 &; BGPID=$!; wait; echo $BGPID')
+# `&` already terminates the command: `&;` is a syntax error in dash and bash,
+# and this test only ever passed because silex used to accept the stray `;`.
+got=$("$MB" -c 'sleep 0 & BGPID=$!; wait; echo $BGPID')
 if printf '%s' "$got" | grep -qE '^[0-9]+$'; then
     echo "PASS: \$! is a numeric PID of bg process"
     PASS=$((PASS + 1))
