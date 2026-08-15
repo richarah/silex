@@ -1075,15 +1075,26 @@ static char *cmd_subst(shell_ctx_t *sh, const char *cmd)
         sb.buf[w] = '\0';
     }
 
+    int status;
+    waitpid(pid, &status, 0);
+
+    /* Reap FIRST, then read what the child left, and read it NON-BLOCKING.
+     *
+     * Waiting for EOF on this pipe deadlocks: the child's own descendants
+     * inherit the write end, and one that outlives it (a background job, a
+     * subshell blocked on a FIFO -- modernish's LOOP does exactly this) holds
+     * the pipe open forever while the parent sits in read(). Only the direct
+     * child ever writes here, and it writes before _exit, so once waitpid()
+     * returns the byte is already in the pipe buffer if it is coming at all;
+     * EAGAIN means it is not. */
     int parse_error = 0;
     if (errfd[0] >= 0) {
         char eb;
+        int fl = fcntl(errfd[0], F_GETFL);
+        if (fl != -1) fcntl(errfd[0], F_SETFL, fl | O_NONBLOCK);
         parse_error = (read(errfd[0], &eb, 1) == 1);
         close(errfd[0]);
     }
-
-    int status;
-    waitpid(pid, &status, 0);
 
     /* The body did not parse. dash reaches the same place at parse time and
      * kills the script; do the same, after reaping the child so nothing is
