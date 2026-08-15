@@ -77,9 +77,18 @@ case "$got" in
     *)   check "wc: filename with spaces" "fail" "ok" ;;
 esac
 
-# grep on file with leading dash
-got=$("$SILEX" grep -- 'dash' -- "$DASHFILE")
+# grep on file with leading dash.
+# ONE `--` ends the options; a second is an ordinary operand, i.e. a file named
+# "--" (GNU behaves identically, down to the error message). This test used to
+# pass two and expect the second to vanish, so it only ever "passed" back when
+# grep also returned 0 after failing to open a file.
+got=$("$SILEX" grep -- 'dash' "$DASHFILE")
 check "grep: filename with leading dash" "$got" "dash content"
+
+# A file that cannot be opened is exit 2 even when another file matched --
+# a match must not mask the error (GNU: "if any error occurs ... exit 2").
+"$SILEX" grep 'dash' "$TMPDIR_EDGE/no-such-file" "$DASHFILE" >/dev/null 2>&1
+check "grep: unreadable file is exit 2 despite a match" "$?" "2"
 
 echo ""
 echo "filename edge tests: $PASS passed, $FAIL failed"

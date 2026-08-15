@@ -1182,6 +1182,12 @@ int applet_grep(int argc, char **argv)
     }
 
     int final_result = 1; /* no match yet */
+    /* An error is remembered SEPARATELY from the match result. A match used to
+     * overwrite it (`r == 2 && final_result != 0`), so `grep pat missing found`
+     * printed "No such file or directory" and still exited 0 -- a script
+     * checking grep's status could not tell a clean search from one that never
+     * opened half its files. GNU: any error is exit 2, even with matches. */
+    int had_error = 0;
     int nfiles = argc - i;
 
     if (nfiles == 0) {
@@ -1190,7 +1196,7 @@ int applet_grep(int argc, char **argv)
         if (r == 0)
             final_result = 0;
         else if (r == 2)
-            final_result = 2;
+            had_error = 1;
     } else {
         int show_fname = (nfiles > 1) || g.opt_r || g.opt_H;
         if (g.opt_h) show_fname = 0;  /* -h overrides */
@@ -1198,16 +1204,18 @@ int applet_grep(int argc, char **argv)
             int r = grep_path(argv[j], show_fname, &g);
             if (r == 0)
                 final_result = 0;
-            else if (r == 2 && final_result != 0)
-                final_result = 2;
+            else if (r == 2)
+                had_error = 1;
         }
     }
 
     grep_opts_free(&g);
 
+    /* -q reports only whether something matched: POSIX says it exits 0 on a
+     * match even when a file could not be read. */
     if (g.opt_q && g_matched_any)
         return 0;
-    return final_result;
+    return had_error ? 2 : final_result;
 
 parse_error:
     /* Every option-parsing error jumps here so the strdup'd pattern list is
