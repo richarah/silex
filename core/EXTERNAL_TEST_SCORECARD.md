@@ -1,12 +1,12 @@
 # External Test Suite Scorecard
 
-**Measured:** 2026-08-14, monorepo `core/`, glibc x86_64. Supersedes the
-2026-08-10/11/12 figures. This round: coreutils re-measured on a native
-filesystem (**0 failures**, the previous 27 were drvfs's no-op chmod), and
-the Oils suite converted from a score into a gap finder via a per-case
-silex-vs-dash differential (**198 -> 167 -> 107 -> 86 -> 71** real POSIX
-gaps as the queue was worked; silex now passes **1053** of the 2802 cases
-to dash's 957).
+**Measured:** 2026-08-15, monorepo `core/`, glibc x86_64. Supersedes the
+2026-08-10/11/12 figures. coreutils is measured on a native filesystem
+(**0 failures**, the previous 27 were drvfs's no-op chmod), and the Oils
+suite is used as a gap finder rather than a score, via a per-case
+silex-vs-dash differential (**198 -> 167 -> 107 -> 86 -> 71 -> 59** real
+POSIX gaps as the queue was worked; silex now passes **1056** of the 2802
+cases to dash's 957).
 
 Before trusting any number here, read why an earlier version of this file was
 meaningless.
@@ -45,9 +45,9 @@ failure, not a pass.
 | **Smoosh** | **185 / 186 (99%)** | POSIX conformance ground-truth (formal Coq model), upstream's own runner, pristine checkout. **Head-to-head on the identical runner: dash 143/186, bash 152/186 — silex now leads both by a wide margin.** The single remaining failure (`builtin.times.ioerror`) expects the literal string `smoosh:` in stderr, which no other shell can honestly emit. Was 145 on 2026-08-10, 125 on 2026-07-12. One further test (`builtin.kill0_+5`) is inherently racy (asserts pid $$+5 doesn't exist) and occasionally flakes under load. |
 | **toybox** | **99 / 100 (99%)** | Now actually tests SILEX: the runner populates a PATH of silex applet symlinks and uses toybox's `TEST_HOST` mode (previously it built and tested upstream toybox itself). The one failure is host awk's `srand` seed — silex has no awk applet. |
 | **GNU grep** | **66 pass / 0 fail** (60 skipped) | No failures among executed tests. |
-| **modernish** | **all 18 files pass; 0 unexpected failures** | `bin/modernish --test`: 370 succeeded, 8 skipped, 8 tolerated `xfail`, **0 unexpected** (was 369/9 before the 2026-08-13 queue run; one xfail became a pass). ($LINENO support unlocked four previously-skipped capability tests.) Improved from 363 on 2026-08-10 (BUG_CASEPAREN is fixed for real — case-aware command-substitution scanners — and one capability skip became a pass); 2 behaviors moved to tolerated-xfail because modernish now detects silex's POSIX-permitted special-builtin assignment persistence. |
+| **modernish** | **all 18 files pass; 0 unexpected failures** | `bin/modernish --test`: 371 succeeded, **0 unexpected** (370 before the 2026-08-15 queue run; 369 before the 2026-08-13 one). ($LINENO support unlocked four previously-skipped capability tests.) Improved from 363 on 2026-08-10 (BUG_CASEPAREN is fixed for real — case-aware command-substitution scanners — and one capability skip became a pass); 2 behaviors moved to tolerated-xfail because modernish now detects silex's POSIX-permitted special-builtin assignment persistence. |
 | mksh | 169 / 583 (29%) | mksh's suite targets the **ksh superset** (arrays, `[[ ]]`, coprocesses, `${|...}`, etc.), not POSIX `sh`. The bulk of the 414 failures are ksh-only features silex does not implement by design. Not a POSIX-conformance figure. |
-| Oils / OSH | **1053 pass / 2802 run, all 139 files measured** (dash, same runner: 957 pass) | Was 907 on 2026-08-12, 972 then 1017 on 2026-08-13, 1037 earlier on 2026-08-14. The suite is used as a GAP FINDER rather than a score: running sh_spec.py with silex AND dash in one invocation and diffing per case isolates the cases where **dash passes and silex fails** -- real POSIX gaps -- from the bash/ksh extension cases neither shell passes (the bulk of the failures). That differential went **198 -> 167 -> 107** over 2026-08-13 and **107 -> 86 -> 71** over 2026-08-14 (96 cases fixed in all, none regressed -- each figure was re-measured over all 139 files, and `comm` on consecutive case lists shows every survivor was already in the previous list). The remainder is the honest POSIX to-do list (top files: array 5, builtin-trap 4, var-num 3, toysh-posix 3, parse-errors 3, glob 3, func-parsing 3, builtin-cd 3, alias 3). A few are unwinnable by construction (`var-num` greps for a shell whose $0 ends in "sh"; `array` wants bash arrays). Reproduce with `core/tests/external/run-oils-differential.sh` (see below). |
+| Oils / OSH | **1056 pass / 2802 run, all 139 files measured** (dash, same runner: 957 pass) | Was 907 on 2026-08-12, 972 then 1017 on 2026-08-13, 1037 then 1053 on 2026-08-14. The suite is used as a GAP FINDER rather than a score: running sh_spec.py with silex AND dash in one invocation and diffing per case isolates the cases where **dash passes and silex fails** -- real POSIX gaps -- from the bash/ksh extension cases neither shell passes (the bulk of the failures). That differential went **198 -> 167 -> 107** over 2026-08-13, **107 -> 86 -> 71** over 2026-08-14, and **71 -> 59** on 2026-08-15 (108 cases fixed in all, none regressed -- each figure was re-measured over all 139 files, and `comm` on consecutive case lists shows every survivor was already in the previous list). The remainder is the honest POSIX to-do list (top files: array 4, builtin-trap 4, var-num 3, func-parsing 3, builtin-cd 3, alias 3). A few are unwinnable by construction (`var-num` greps for a shell whose $0 ends in "sh"; `array` wants bash arrays). Reproduce with `core/tests/external/run-oils-differential.sh` (see below). |
 | **ShellSpec** | **1696 examples, 0 failures** (58 skips) | ShellSpec's own core suite, run with silex as both runner and target shell — **byte-identical to dash on the same runner**. Was "fails to launch" earlier on 2026-08-10; fixing it surfaced and fixed 8 real silex bugs: 3-arg-max `test`/`[` (now full POSIX + XSI grammar), mid-word `#` starting comments, quote-blind word classifiers eating empty quoted fields, `${@:-}` gluing positionals, builtins beating functions in command search, errexit killing loops on exempt AND-lists, FLOW sentinels leaking as exit 234 through pipes/`&`, and recursive functions reusing the outer call's expanded redirect target. |
 | **GNU sed** | **50 pass / 1 fail** (17 skip, 70 run) | sed applet rewritten GNU-compatible (was 6/45 on 2026-08-11; the old mini-sed had broken `N`/`D`/`P`, approximated regex ranges, and none of the GNU option/error surface). Now implements the full command set (D P Q R T W F e v z), GNU addressing (`0,/re/`, `0r` prepend, `+N`/`~N`), s-flags with exact GNU error strings and flag ordering, case conversion and `\cX`/`\dNNN`/`\oNNN`/`\xHH` escapes, `-s -z -u -l -i[SUFFIX] --posix --sandbox --follow-symlinks`, missing-final-newline preservation via delayed delimiters, per-filename shared R/w streams, and GNU exit codes (1/2/4). Behaviors were validated against the vendored GNU binary as an oracle. The single remaining failure is nulldata's dot-matches-NUL subtest: glibc's regex never lets `.` match a NUL byte (GNU sed ships its own engine); everything else in that test passes. |
 | **GNU coreutils** | **243 pass / 0 fail** (43 skip, 286 run) | Measured on a NATIVE filesystem (2026-08-13). The previous 190/27 was measured on WSL2 drvfs (`/mnt/c`), where **chmod is a no-op** — `chmod 0 f` leaves the file readable — so every permission-semantics test failed for the filesystem's reasons, not silex's. Copying the configured checkout to ext4 and rerunning gives **zero failures**. Three real applet gaps were found and fixed along the way by testing the failures on ext4 against the GNU binaries as oracle: chmod lacked GNU argv permutation (`chmod f -w`) and multi-op symbolic clauses (`u+r-w`, who-only `ug`), mkdir `-m` rejected symbolic modes (`u=rwx,g=rx,o=w,-s,+t` → 1752), and ln lacked `-i`/`-L`/`-P`. Reproduce with `core/tests/external/run-gnu-coreutils-native.sh` (copies the checkout to /tmp once and runs against a snapshot of the binary — rebuilding mid-run otherwise fails every tool symlink with ETXTBSY). |
@@ -220,6 +220,79 @@ Two deliberate divergences remain:
   in the gap list. Note that this is about the shell's own dispatch: the
   toybox and coreutils runners exercise the applets through a PATH of silex
   symlinks and are unaffected.
+
+### What the 2026-08-15 queue run fixed (71 -> 59)
+
+Twelve cases. The theme this time is input the shell used to **accept**: every
+one of these ran with status 0 and no diagnostic, which is worse than a wrong
+answer, because a typo produced no signal at all. Three of them corrupt
+ordinary scripts and none was caught by any suite.
+
+- **An unterminated quote or substitution was silently accepted.** `echo 'abc`
+  printed abc and exited 0. The scanners hit EOF, stopped, and handed back an
+  ordinary WORD -- there was no channel for "this construct never closed". The
+  damage is not the missing error but what the runaway construct does to the
+  rest of the file: `echo $(echo inner` followed by `echo after` printed
+  "inner after", having pulled the following lines into the substitution and
+  run them there. All six forms (`'` `"` `` ` `` `$(` `${` `$((`) now report
+  and exit 2 like dash. Fixed `parse-errors` 17 and 18, `command-sub` 28.
+- **A leftover scope terminator was diagnosed one command too late.** The list
+  parsers stop on `done`/`fi`/`esac`/`then`/`else`/`elif`/`do`/`)`/`}`/`;;` --
+  that is how a compound body knows it has ended -- so at top level
+  `echo 1 ;; echo 2` handed back `echo 1`, the driver ran it, and only the
+  NEXT parse call met the stray `;;`. dash prints nothing and exits 2. Now
+  checked where the command is handed back, not where the next one is fetched.
+  Fixed `parse-errors` 19, `toysh-posix` 20.
+- **A separator with no command before it was a no-op**: `;`, `; echo b`,
+  `echo a; ; echo b` and `cmd &;` all ran. The grammar has no production for
+  any of them. `&;` appeared in silex's own `$!` test, which had only ever
+  passed because of this. Fixed `posix` 9.
+- **A syntax error inside `$( )` was not a syntax error of the script.**
+  `echo $(if true)` substituted the empty string and exited 0: the body is
+  parsed lazily in the forked child, so the parse error became only that
+  child's exit status -- indistinguishable from a command that ran and failed.
+  The child now reports it on its own out-of-band pipe. Two traps in that:
+  the fd must be CLOEXEC (the child is `disposable` and may tail-exec), and
+  the parent must reap the child and read NON-BLOCKING, because a descendant
+  of the child inherits the write end across fork and one that outlives it
+  holds the pipe open forever -- modernish's LOCAL deadlocked on exactly that,
+  40 minutes for 4 seconds of CPU. Fixed `toysh-posix` 21, `array` 46.
+- **An unknown `${}` operator returned the plain value**, as if the operator
+  had never been written: `${a&}` printed $a, and every bash-only modifier
+  degraded silently instead of failing. Same "bad substitution" the no-name
+  case (`${%}`) already reported. Fixed `var-sub` 0.
+- **A quoted glob metacharacter did not survive pathname expansion.**
+  `echo \[???\]` matched the file named `?`: quote removal runs before the
+  field reaches glob(), so the escaped brackets arrived as a real bracket
+  expression and the shell confidently returned the wrong file. Pathname
+  expansion now builds its pattern with the same quote-aware builder `case`
+  uses -- but only for a LITERAL word, because that builder expands what it is
+  given and using it on a word carrying an expansion is a SECOND expansion of
+  it (`$(...)` twice, `${x=v}` twice; modernish's LOCAL aborted with
+  "_Msh_2: unbound variable" before the gate was narrowed). The builder itself
+  also had to start escaping `- ! ^ :`, which are metacharacters only inside a
+  bracket expression -- that alone fixed `case - in [C\-D]`, which had never
+  matched. Fixed `glob` 15, 18, 19.
+
+Two more bugs fell out of the suites rather than the queue:
+
+- **`export -p`, `alias` and `trap` listings were not re-inputtable.** All
+  three printed the value between bare quotes, so `export V="a'b'c"` listed as
+  `export V='a'b'c'`, which re-reads as `abc`; with an odd number of quotes it
+  is not parsable at all, making `eval "$(export -p)"` -- the standard
+  save/restore idiom -- a syntax error. POSIX requires all three to be
+  suitable for reinput. `set` and `readonly -p` already used the escaping
+  helper; `export -p` had a TODO next to it. Found by ShellSpec, whose
+  `shellspec_list_envkeys` evals `export -p` output: it had been losing the
+  quotes all along and only started failing once an unterminated quote became
+  a real error.
+- **`grep` returned 0 after failing to open a file**, as long as some other
+  file matched -- a match overwrote the error. A script could not tell a clean
+  search from one that never opened half its arguments. GNU: any error is exit
+  2, with `-q` the documented exception. The edge test covering this was
+  itself wrong (it passed two `--` and expected the second to vanish; one ends
+  the options, a second is a file named "--", exactly as GNU treats it) and
+  had only passed because of the same bug. The edge suite is green again.
 
 ## Finding real gaps: the silex-vs-dash differential
 
