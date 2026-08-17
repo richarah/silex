@@ -93,6 +93,21 @@ static const applet_t *find_applet_by_name(const char *name)
     return find_applet(name);
 }
 
+/* An applet runs IN-PROCESS, so a write to a closed pipe would deliver
+ * SIGPIPE to the shell itself. At the default disposition that killed the
+ * whole process: `(cat </dev/zero; echo $? >&7) | true` lost the `echo` --
+ * the subshell was simply gone, where the same line with /usr/bin/cat prints
+ * 141 (oils #2530). A handler over the applet call keeps the process alive
+ * and records that the signal arrived, so the COMMAND can report 141 the way
+ * the external utility it stands in for would. The disposition is restored
+ * immediately afterwards, so the shell's own writes are unaffected. */
+static volatile sig_atomic_t applet_got_sigpipe;
+static void applet_sigpipe_handler(int sig)
+{
+    (void)sig;
+    applet_got_sigpipe = 1;
+}
+
 /* Reset traps when entering a subshell (a forked `( )`, `&`, or non-last
  * pipeline stage). POSIX -- and both dash and bash -- reset every non-ignored
  * signal trap to its DEFAULT action in a subshell: a signal delivered there
@@ -1323,7 +1338,19 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
             }
         }
 
+        struct sigaction sa_pipe, sa_pipe_prev;
+        sa_pipe.sa_handler = applet_sigpipe_handler;
+        sigemptyset(&sa_pipe.sa_mask);
+        sa_pipe.sa_flags = 0;
+        applet_got_sigpipe = 0;
+        int pipe_hooked = (sigaction(SIGPIPE, &sa_pipe, &sa_pipe_prev) == 0);
+
         cmd_rc = ap->fn(argc, expanded);
+
+        if (pipe_hooked) {
+            sigaction(SIGPIPE, &sa_pipe_prev, NULL);
+            if (applet_got_sigpipe) cmd_rc = 128 + SIGPIPE;
+        }
 
         if (nassigns > 0 && aapp_saved && aapp_had && aapp_exp) {
             for (int ai = nassigns - 1; ai >= 0; ai--) {
@@ -1395,6 +1422,16 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
          * so apply them here around the message and restore afterwards. */
         redirect_ctx_t rctx = {NULL, 0};
         if (redirs) redirect_apply(sh, redirs, &rctx);
+        /* A redirection that could not be performed already reported itself,
+         * and the command never runs -- so there is nothing to call "not
+         * found". `[[ -f < ]]` printed BOTH errors and exited 127, claiming a
+         * missing command when the real failure was the redirect. */
+        if (rctx.error) {
+            if (redirs) redirect_restore(&rctx);
+            sh->last_exit = 1;
+            cmd_rc = 1;
+            goto cmd_done;
+        }
         fprintf(stderr, "silex: %s: command not found\n", cmd);
         fflush(stderr);
         if (redirs) redirect_restore(&rctx);
@@ -1432,8 +1469,13 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
                 execvp("sh", sargv);
             }
         }
+        /* POSIX: 126 when the command was FOUND but could not be executed
+         * (not executable, a directory, a bad interpreter); 127 only when it
+         * could not be found. Reporting 127 for both meant a script could not
+         * tell a typo in the name from a missing `chmod +x`. */
+        int exec_errno = errno;
         perror(exec_path);
-        _exit(127);
+        _exit(exec_errno == ENOENT || exec_errno == ENOTDIR ? 127 : 126);
     }
 
     pid_t pid = fork();
@@ -1497,8 +1539,13 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
                 execvp("sh", sargv);
             }
         }
+        /* POSIX: 126 when the command was FOUND but could not be executed
+         * (not executable, a directory, a bad interpreter); 127 only when it
+         * could not be found. Reporting 127 for both meant a script could not
+         * tell a typo in the name from a missing `chmod +x`. */
+        int exec_errno = errno;
         perror(exec_path);
-        _exit(127);
+        _exit(exec_errno == ENOENT || exec_errno == ENOTDIR ? 127 : 126);
     }
 
     /* Parent */
@@ -3916,7 +3963,11 @@ static int exec_builtin_local(shell_ctx_t *sh, int argc, char **argv)
                 vars_set_local(&sh->vars, name, eq + 1);
                 free(name);
             }
-        } else {
+        } else if (!vars_is_local(&sh->vars, argv[i])) {
+            /* Declaring the SAME name local twice must not wipe the value the
+             * first declaration gave it: `local foo=bar; local foo` still has
+             * bar in dash and bash. Only the first `local foo` creates the
+             * (empty) entry. */
             vars_set_local(&sh->vars, argv[i], "");
         }
     }
@@ -4279,7 +4330,14 @@ static int exec_builtin_source(shell_ctx_t *sh, int argc, char **argv)
      * the sourced file runs with normal lookup. Clear the flag for the run. */
     int saved_icb = sh->in_command_builtin;
     sh->in_command_builtin = 0;
+    /* script_parse_error means "the script the shell was asked to run would not
+     * parse", which decides whether the EXIT trap's status may override the
+     * shell's. A SOURCED file that will not parse is an error in the caller's
+     * script, not that; leaving the flag set would silently suppress the trap's
+     * status for the rest of the run. */
+    int saved_spe = sh->script_parse_error;
     int rc = shell_run_file(sh, actual_path);
+    sh->script_parse_error = saved_spe;
     sh->in_command_builtin = saved_icb;
     /* break/continue are confined to the sourced script (smoosh
      * builtin.dot.break: a `break` in the dot script does NOT break the
@@ -4773,10 +4831,18 @@ static int exec_builtin_command(shell_ctx_t *sh, int argc, char **argv)
 
 static int exec_builtin_type(shell_ctx_t *sh, int argc, char **argv)
 {
-    (void)sh;
     int ret = 0;
     for (int i = 1; i < argc; i++) {
         const char *name = argv[i];
+        /* Report in the order the shell itself resolves a command name:
+         * alias, keyword, function, builtin, PATH. `type` used to skip
+         * aliases and functions entirely, so `type f` said "not found" for
+         * a function the very next line could call. */
+        const char *alias_val = alias_lookup(sh, name);
+        if (alias_val) {
+            printf("%s is an alias for %s\n", name, alias_val);
+            continue;
+        }
         /* Check shell keywords first */
         const char *keywords[] = {
             "!", "{", "}", "case", "do", "done", "elif", "else", "esac",
@@ -4791,8 +4857,16 @@ static int exec_builtin_type(shell_ctx_t *sh, int argc, char **argv)
             }
         }
         if (is_keyword) continue;
+        if (func_lookup(sh, name)) {
+            printf("%s is a shell function\n", name);
+            continue;
+        }
         if (find_shell_builtin(name)) {
-            printf("%s is a shell builtin\n", name);
+            /* POSIX's special builtins differ in ways a script can observe
+             * (assignments persist, errors are fatal), so `type` calls them
+             * out -- that is what the name is for. */
+            printf("%s is a %sshell builtin\n", name,
+                   is_special_builtin(name) ? "special " : "");
             continue;
         }
         if (find_applet(name)) {

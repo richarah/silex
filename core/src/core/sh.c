@@ -221,6 +221,7 @@ int applet_sh(int argc, char **argv)
 
     int ret;
     if (cmd_string) {
+        sh.cmd_string_top = 1;   /* see shell.h: top-level break/continue/return */
         ret = shell_run_string(&sh, cmd_string);
     } else if (arg_start < argc) {
         ret = shell_run_file(&sh, argv[arg_start]);
@@ -242,7 +243,12 @@ int applet_sh(int argc, char **argv)
         sh.trap_entry_status = ret;
         int trap_rc = shell_run_string(&sh, exit_action);
         sh.in_trap--;
-        ret = (trap_rc >= 0 && trap_rc <= 255) ? trap_rc : 0;
+        /* A syntax error is the shell's own failure: it exits 2 whether or
+         * not an EXIT trap runs. Letting the trap's status win turned every
+         * unparsable script into a successful one as soon as it had a
+         * cleanup trap -- dash and bash both keep the 2. */
+        if (!sh.script_parse_error)
+            ret = (trap_rc >= 0 && trap_rc <= 255) ? trap_rc : 0;
     }
 
     shell_free(&sh);

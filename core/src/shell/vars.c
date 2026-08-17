@@ -255,6 +255,11 @@ int vars_set(vars_t *v, const char *name, const char *value)
     return vars_set_context(v, name, value, NULL);
 }
 
+int vars_is_local(vars_t *v, const char *name)
+{
+    return scope_find(v->scope, name, fnv1a(name)) != NULL;
+}
+
 int vars_set_local(vars_t *v, const char *name, const char *value)
 {
     unsigned int idx = fnv1a(name);

@@ -539,41 +539,42 @@ static redir_t *parse_redirect(parser_t *p, int io_fd)
      * expansion is suppressed in the heredoc body (POSIX). Strip the
      * quotes to get the actual delimiter string used for matching. */
     if (op_tok.type == TOK_DLESS || op_tok.type == TOK_DLESSDASH) {
+        /* POSIX: the delimiter is the word after QUOTE REMOVAL, and any
+         * quoting anywhere in the word suppresses expansion in the body. The
+         * word may mix forms and quote only part of itself -- `<<'EOF'"2"`
+         * ends at a line reading EOF2 -- so scan the whole thing instead of
+         * testing its first character. Stripping only the outer pair made the
+         * delimiter `EOF'"2`, which no line could match, and the here-doc ran
+         * on to the end of the file. */
         const char *raw = tgt.text;
-        char *actual_delim = tgt.text;
-        int no_expand = 0;
-
-        if (raw[0] == '\'') {
-            /* Single-quoted: 'EOF' — strip outer single quotes */
-            size_t len = strlen(raw);
-            if (len >= 2) {
-                actual_delim = arena_alloc(p->arena, len - 1);
-                memcpy(actual_delim, raw + 1, len - 2);
-                actual_delim[len - 2] = '\0';
-            }
-            no_expand = 1;
-        } else if (raw[0] == '"') {
-            /* Double-quoted: "EOF" — strip outer double quotes */
-            size_t len = strlen(raw);
-            if (len >= 2) {
-                actual_delim = arena_alloc(p->arena, len - 1);
-                memcpy(actual_delim, raw + 1, len - 2);
-                actual_delim[len - 2] = '\0';
-            }
-            no_expand = 1;
-        } else if (raw[0] == '\\') {
-            /* Backslash-escaped: \EOF — remove backslashes */
-            size_t len = strlen(raw);
-            actual_delim = arena_alloc(p->arena, len + 1);
+        int   no_expand = 0;
+        char *actual_delim = arena_alloc(p->arena, strlen(raw) + 1);
+        {
             const char *src = raw;
-            char *dst = actual_delim;
+            char       *dst = actual_delim;
             while (*src) {
-                if (*src == '\\' && *(src + 1) != '\0')
+                if (*src == '\\' && src[1]) {
+                    no_expand = 1;
                     src++;
-                *dst++ = *src++;
+                    *dst++ = *src++;
+                } else if (*src == '\'') {
+                    no_expand = 1;
+                    src++;
+                    while (*src && *src != '\'') *dst++ = *src++;
+                    if (*src == '\'') src++;
+                } else if (*src == '"') {
+                    no_expand = 1;
+                    src++;
+                    while (*src && *src != '"') {
+                        if (*src == '\\' && src[1]) src++;
+                        *dst++ = *src++;
+                    }
+                    if (*src == '"') src++;
+                } else {
+                    *dst++ = *src++;
+                }
             }
             *dst = '\0';
-            no_expand = 1;
         }
 
         heredoc_pending_t *hp = arena_alloc(p->arena, sizeof(heredoc_pending_t));
@@ -649,9 +650,23 @@ static node_t *parse_simple_command(parser_t *p)
     redir_t **redir_tail = &redir_head;
 
     int seen_cmd_word = 0; /* have we seen a non-assign WORD yet */
+    int alias_tried   = 0; /* the command word was offered for alias substitution */
 
     for (;;) {
         token_t t = peek(p);
+
+        if (t.type == TOK_WORD && !seen_cmd_word && !alias_tried) {
+            /* POSIX substitutes an alias for the COMMAND WORD, which may be
+             * preceded by assignments and redirections -- `>out e_ 1` and
+             * `V=1 e_ 1` both have to find the alias e_. parse_pipeline only
+             * checks the head of the stage, so a command reached through this
+             * path (it starts with an assignment or a redirect) never got the
+             * offer and ran a program literally named e_. Once only: `alias
+             * e_=e_` must expand a single time and then stand. */
+            alias_tried = 1;
+            expand_command_aliases(p);
+            continue;
+        }
 
         if (t.type == TOK_ASSIGN) {
             consume(p);
@@ -692,11 +707,27 @@ static node_t *parse_simple_command(parser_t *p)
             continue;
         }
 
+        /* `(` cannot follow an assignment or a command word. POSIX has no
+         * production for it, so `a=(1 2 3)` is a syntax error and not the
+         * assignment `a=` followed by the subshell `(1 2 3)` -- which is how
+         * it used to run, quietly executing the array elements as commands.
+         * (The command-word case is caught in the WORD-first branch below.) */
+        if (t.type == TOK_LPAREN && (seen_cmd_word || assigns.count > 0)) {
+            parser_error(p, "unexpected '('");
+            wl_free(&assigns);
+            wl_free(&words);
+            return NULL;
+        }
+
         /* POSIX: reserved words are only keywords at command-name position.
          * After the command name is established, treat keyword tokens as
-         * plain word arguments (e.g. 'echo done', 'echo fi', 'echo then'). */
-        if (seen_cmd_word && t.text != NULL) {
+         * plain word arguments (e.g. 'echo done', 'echo fi', 'echo then').
+         * An assignment prefix ends keyword recognition too: the next word
+         * names the command, so `FOO=bar for` looks for a program called
+         * "for" rather than starting a loop. */
+        if ((seen_cmd_word || assigns.count > 0) && t.text != NULL) {
             consume(p);
+            seen_cmd_word = 1;
             wl_push(&words, t.text);
             continue;
         }
@@ -890,9 +921,17 @@ static node_t *parse_until_cmd(parser_t *p)
  * ------------------------------------------------------------------------- */
 static node_t *parse_for_cmd(parser_t *p)
 {
-    /* FOR already consumed */
-    token_t var_tok = expect(p, TOK_WORD, "expected variable name in for");
-    if (p->error) return NULL;
+    /* FOR already consumed.
+     * A reserved word is only reserved in command position, so the loop
+     * variable may be spelled like one: `for in in a b c` loops over a
+     * variable named "in", which dash accepts. Take any token that carries
+     * text and let the NAME check below reject what is not a name. */
+    token_t var_tok = peek(p);
+    if (var_tok.text == NULL) {
+        parser_error(p, "expected variable name in for");
+        return NULL;
+    }
+    consume(p);
 
     char       *var   = var_tok.text;
     /* The loop variable must be a NAME (POSIX grammar): `for i.j in ...` is a
@@ -1177,7 +1216,21 @@ static node_t *wrap_trailing_redirects(parser_t *p, node_t *body)
 
 static node_t *parse_function_def(parser_t *p, char *func_name)
 {
-    /* '(' and ')' already consumed by caller */
+    /* '(' and ')' already consumed by caller.
+     *
+     * The name is a literal, fixed at parse time -- it is never expanded, so a
+     * name carrying an expansion cannot mean anything. `$foo-bar() { ... }`
+     * and `foo-$(echo hi)() { ... }` used to define a function whose name was
+     * the unexpanded text, which no later call could ever name. dash and bash
+     * both make it a syntax error. (Characters outside POSIX's NAME set are
+     * still allowed, as in bash: `foo-bar` and `a.b` are fine.) */
+    for (const char *q = func_name; q && *q; q++) {
+        if (*q == '$' || *q == '`') {
+            parser_error(p, "bad function name");
+            return NULL;
+        }
+    }
+
     skip_newlines(p);
     node_t *body = parse_compound_command(p);
     if (!body || p->error) {

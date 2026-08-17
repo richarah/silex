@@ -159,7 +159,12 @@ int redirect_apply(struct shell_ctx *sh, redir_t *redirs, redirect_ctx_t *ctx)
                     ctx->error = 1;
                     return -1;
                 }
-                if (dup2(src, fd) < 0) {
+                /* `n>&n` / `n<&n` duplicates a descriptor onto itself: a
+                 * no-op that dash and bash both allow even when n is CLOSED,
+                 * where dup2 would report EBADF. `: 3>&3` used to abort the
+                 * script (a redirection error on a special builtin is fatal)
+                 * over a redirection that asks for nothing. */
+                if (src != fd && dup2(src, fd) < 0) {
                     /* Every real shell reports this ("N: Bad file descriptor");
                      * ShellSpec asserts stderr is non-empty when writing to a
                      * closed fd. */
@@ -199,7 +204,12 @@ int redirect_apply(struct shell_ctx *sh, redir_t *redirs, redirect_ctx_t *ctx)
                     ctx->error = 1;
                     return -1;
                 }
-                if (dup2(src, fd) < 0) {
+                /* `n>&n` / `n<&n` duplicates a descriptor onto itself: a
+                 * no-op that dash and bash both allow even when n is CLOSED,
+                 * where dup2 would report EBADF. `: 3>&3` used to abort the
+                 * script (a redirection error on a special builtin is fatal)
+                 * over a redirection that asks for nothing. */
+                if (src != fd && dup2(src, fd) < 0) {
                     /* Every real shell reports this ("N: Bad file descriptor");
                      * ShellSpec asserts stderr is non-empty when writing to a
                      * closed fd. */

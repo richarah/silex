@@ -101,15 +101,21 @@ static const char *sh_getvar(shell_ctx_t *sh, const char *name)
             /* Join all positionals: $* uses first char of IFS, $@ uses space */
             strbuf_t sb;
             sb_init(&sb, 64);
-            char sep;
+            /* POSIX: $* joins with the FIRST character of IFS. An IFS that
+             * is set but EMPTY joins with nothing; only an UNSET IFS falls
+             * back to a space. Treating the two alike made
+             * `set -- "" ""; IFS=` yield " " rather than "", so `${*:-word}`
+             * saw a non-null value and skipped the default. */
+            char sep     = ' ';
+            int  has_sep = 1;
             if (name[0] == '*') {
                 const char *ifs = sh_getvar(sh, "IFS");
-                sep = (ifs && ifs[0]) ? ifs[0] : ' ';
-            } else {
-                sep = ' ';
+                if (!ifs)           sep = ' ';
+                else if (ifs[0])    sep = ifs[0];
+                else                has_sep = 0;
             }
             for (int i = 0; i < sh->positional_n; i++) {
-                if (i > 0) sb_appendc(&sb, sep);
+                if (i > 0 && has_sep) sb_appendc(&sb, sep);
                 sb_append(&sb, sh->positional[i]);
             }
             char *r = arena_strdup(sh->scratch, sb_str(&sb));
@@ -469,7 +475,12 @@ static char *expand_braced(shell_ctx_t *sh, const char *body, int in_dquote)
         sh->in_heredoc = 0;
         in_dquote = 0;
     }
+    /* Everything inside the braces is part of the expansion's RESULT, so its
+     * literal text is subject to field splitting (see in_subst_word). */
+    int save_sw = sh->in_subst_word;
+    sh->in_subst_word = 1;
     char *r = expand_braced_body(sh, body, in_dquote);
+    sh->in_subst_word = save_sw;
     sh->in_heredoc = save_h;
     sh->in_assign  = save_a;
     return r;
@@ -928,16 +939,22 @@ static char *expand_braced_body(shell_ctx_t *sh, const char *body, int in_dquote
  * `echo \$` (prints '$'), while `echo \z` runs `echo \z` unchanged. This
  * is why backticks need twice the backslashes of $( ). Returns malloc'd
  * text, or NULL on allocation failure. */
-static char *backtick_cmd(const char *start, size_t len)
+static char *backtick_cmd(const char *start, size_t len, int in_dq)
 {
     char *out = malloc(len + 1);
     if (!out)
         return NULL;
     size_t w = 0;
     for (size_t i = 0; i < len; i++) {
+        /* Inside "..." the enclosing double quotes get their say first, and
+         * there `\"` yields a bare `"`. So `echo "x `echo \"hi\"`"` runs
+         * `echo "hi"` and prints hi, while the $( ) spelling of the same line
+         * prints "hi" -- the difference every shell has and the reason
+         * virtualenv's activate script is written the way it is. Without this
+         * the backslashes survived into the command and it printed "hi". */
         if (start[i] == '\\' && i + 1 < len &&
             (start[i + 1] == '$' || start[i + 1] == '`' ||
-             start[i + 1] == '\\')) {
+             start[i + 1] == '\\' || (in_dq && start[i + 1] == '"'))) {
             out[w++] = start[++i];
             continue;
         }
@@ -1699,7 +1716,7 @@ static char *arith_presubst(shell_ctx_t *sh, const char *expr)
         if (*p == '`') {                       /* `cmd` */
             const char *start = ++p;
             while (*p && *p != '`') p += (*p == '\\' && p[1]) ? 2 : 1;
-            char *cmd = backtick_cmd(start, (size_t)(p - start));
+            char *cmd = backtick_cmd(start, (size_t)(p - start), 0);
             if (*p == '`') p++;
             char *r = cmd_subst(sh, cmd ? cmd : "");
             free(cmd);
@@ -1898,7 +1915,13 @@ static const char *scan_braced_end(const char *p, int outer_dq)
     int inner_dq = 0;
     while (*p) {
         if (*p == '\\') { p += p[1] ? 2 : 1; continue; }
-        if (*p == '\'' && !outer_dq && !inner_dq) {
+        /* A `'...'` region is literal FOR THE SCAN even when the whole ${...}
+         * sits inside double quotes: dash and bash both end `"${var#'}'}"` at
+         * the last brace, not the one between the quotes. (Whether the quotes
+         * are then REMOVED is a separate question, decided by the expander;
+         * dash keeps them, and so does silex.) Only an inner `"..."` opened
+         * within this ${...} makes `'` ordinary data. */
+        if (*p == '\'' && !inner_dq) {
             p++;
             while (*p && *p != '\'') p++;
             if (*p == '\'') p++;
@@ -2121,6 +2144,34 @@ static void guard_close(shell_ctx_t *sh, strbuf_t *out)
     }
 }
 
+/* Append one LITERAL character of the word -- text the script typed, not the
+ * result of an expansion.
+ *
+ * POSIX 2.6.5 splits "the results of expansions and substitutions", so a
+ * literal IFS character in the word is not a separator. With `IFS=x`, dash
+ * makes `${w}x` the two fields "A" and "Bx"; silex split on the literal x as
+ * well, which started a third, empty field -- and empty fields are dropped, so
+ * the trailing character disappeared from the command's arguments entirely.
+ * Wrapping it in the guards a quoted region uses is enough to keep the
+ * splitter off it. Only words carrying an unquoted expansion emit guards at
+ * all (a word without one is never split), so this is inert otherwise. */
+static void emit_literal_char(shell_ctx_t *sh, strbuf_t *out, char c)
+{
+    if (sh->emit_guards && sh->quote_guard_depth == 0 &&
+        !sh->in_subst_word && c != '\0') {
+        const char *ifs = sh_getvar(sh, "IFS");
+        int is_sep = ifs ? (strchr(ifs, (unsigned char)c) != NULL)
+                         : (c == ' ' || c == '\t' || c == '\n');
+        if (is_sep) {
+            guard_open(sh, out);
+            sb_appendc(out, c);
+            guard_close(sh, out);
+            return;
+        }
+    }
+    sb_appendc(out, c);
+}
+
 static void expand_into(shell_ctx_t *sh, const char *word, strbuf_t *out,
                         int in_dquote)
 {
@@ -2188,7 +2239,7 @@ static void expand_into(shell_ctx_t *sh, const char *word, strbuf_t *out,
                 }
             } else {
                 if (*p == '\n') { p++; continue; } /* line continuation */
-                sb_appendc(out, *p);
+                emit_literal_char(sh, out, *p);
             }
             p++;
             continue;
@@ -2339,20 +2390,38 @@ static void expand_into(shell_ctx_t *sh, const char *word, strbuf_t *out,
                         emit_data(sh, out, sh->positional[pi]);
                     }
                 } else {
-                    /* Unquoted $* or $@: when IFS is empty, still split on \x01 */
+                    /* Unquoted $* or $@: the parameters are joined and the
+                     * result is then IFS-split, which reproduces "one initial
+                     * field per parameter" for every IFS that can separate
+                     * them. The separator must be IFS's FIRST character, not a
+                     * space: with `IFS=zx` a space separates nothing, so
+                     * `for i in $@` saw the single field "a b c " where every
+                     * other shell sees "a b" and "c".
+                     *
+                     * An IFS that is set but EMPTY cannot separate anything at
+                     * all, so there the parameters are kept apart by explicit
+                     * \x01 boundaries instead -- and an empty parameter is
+                     * skipped outright, because unquoted it contributes no
+                     * field (only "$@" turns it into an empty one) and so must
+                     * not leave a boundary behind. Where a real separator is
+                     * used the same empty parameter collapses on its own. */
                     const char *ifs = sh_getvar(sh, "IFS");
                     if (ifs && ifs[0] == '\0') {
-                        /* Empty IFS: use \x01 to separate positionals */
                         int esc = (sh->positional_n >= 2) || sh->emit_guards;
+                        int emitted = 0;
                         for (int pi = 0; pi < sh->positional_n; pi++) {
-                            if (pi > 0) { sb_appendc(out, '\x01'); sh->at_field_boundary = 1; }
+                            if (sh->positional[pi][0] == '\0') continue;
+                            if (emitted++) {
+                                sb_appendc(out, '\x01');
+                                sh->at_field_boundary = 1;
+                            }
                             if (esc) pp_escape_append(out, sh->positional[pi]);
                             else     sb_append(out, sh->positional[pi]);
                         }
                     } else {
-                        /* Non-empty or unset IFS: join with space (default behavior) */
-                        char spec[2] = { *p, '\0' };
-                        const char *v = sh_getvar(sh, spec);
+                        /* sh_getvar("*") joins with IFS[0] (a space when IFS
+                         * is unset), which is what both $* and $@ need here. */
+                        const char *v = sh_getvar(sh, "*");
                         if (v) emit_data(sh, out, v);
                     }
                 }
@@ -2417,7 +2486,7 @@ static void expand_into(shell_ctx_t *sh, const char *word, strbuf_t *out,
                 p++;
             }
             size_t clen = (size_t)(p - start);
-            char *cmd = backtick_cmd(start, clen);
+            char *cmd = backtick_cmd(start, clen, in_dquote);
             char *result = cmd_subst(sh, cmd ? cmd : "");
             free(cmd);
             emit_data(sh, out, result);
@@ -2425,7 +2494,7 @@ static void expand_into(shell_ctx_t *sh, const char *word, strbuf_t *out,
             continue;
         }
 
-        sb_appendc(out, *p++);
+        emit_literal_char(sh, out, *p++);
     }
 }
 
@@ -2765,6 +2834,7 @@ expand_result_t expand_word_full(shell_ctx_t *sh, const char *word)
     sh->emit_guards       = do_ifs_split;
     sh->quote_guard_depth = 0;
     sh->at_quote_guard    = 0;
+    sh->in_subst_word     = 0;
 
     char *expanded = expand_word(sh, word);
     sh->emit_guards = 0;

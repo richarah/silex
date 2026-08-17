@@ -277,6 +277,9 @@ int shell_run_string(shell_ctx_t *sh, const char *script)
 
     int rc = 0;
     sh->run_string_parse_error = 0;
+    /* Consume the flag: nested eval/trap strings must not inherit it. */
+    int is_top_string = sh->cmd_string_top;
+    sh->cmd_string_top = 0;
     for (;;) {
         node_t *node = parser_parse(&par);
         if (par.error) {
@@ -316,7 +319,16 @@ int shell_run_string(shell_ctx_t *sh, const char *script)
              * last_exit and continuing (as before) meant `f() { eval "return 3"; }`
              * never returned from f; the sentinel leaked upward and exited the
              * shell. modernish's FTL_EVALRET / FTL_EVALCOBR checks exercise this. */
-            if (rc >= FLOW_BREAK && rc <= FLOW_RETURN) {
+            /* ... unless this IS the outermost script (`sh -c '...'`), where
+             * there is no caller to act on. dash runs on past a top-level
+             * break or continue with $? untouched, and stops at a top-level
+             * return as if the script had ended. Propagating instead made the
+             * sentinel the shell's exit status: `sh -c 'return'` exited 234. */
+            int top = (is_top_string && sh->call_depth == 0);
+            if (rc >= FLOW_BREAK && rc <= FLOW_RETURN && top) {
+                if (rc == FLOW_RETURN) break;   /* `return` already set last_exit */
+                rc = sh->last_exit;             /* break/continue: a no-op here */
+            } else if (rc >= FLOW_BREAK && rc <= FLOW_RETURN) {
                 sh->scratch = saved_scratch;
                 sh->in_command_builtin = saved_icb;
                 arena_free(&local);
@@ -444,6 +456,7 @@ int shell_run_file(shell_ctx_t *sh, const char *path)
         node_t *node = parser_parse(&par);
         if (par.error) {
             sh->last_exit = 2;  /* Parse error returns exit code 2 */
+            sh->script_parse_error = 1;
             break;
         }
         if (!node) break;  /* EOF */
@@ -748,12 +761,20 @@ int shell_run_stdin(shell_ctx_t *sh)
          * `echo 'eval )' | silex` exited 0 instead of 2 (smoosh parse.error). */
         if (par.error) {
             sh->last_exit = 2;  /* Parse error in non-interactive mode */
+            sh->script_parse_error = 1;
             break;
         }
         if (!node) break;
 
         if (!sh->opt_n) {
             rc = exec_node(sh, node);
+            /* A flow sentinel that reaches the top level of the script has no
+             * loop or function to act on. `return` ends the script (as it does
+             * in a sourced file); `break`/`continue` are a no-op. Storing the
+             * sentinel in last_exit published it as $?, so a stray `return`
+             * made the next command see "status=1002". */
+            if (rc == FLOW_RETURN) break;
+            if (rc == FLOW_BREAK || rc == FLOW_CONTINUE) rc = sh->last_exit;
             sh->last_exit = rc;
             arena_reset(&sh->scratch_arena);
             if (errexit_should_stop(sh, rc))

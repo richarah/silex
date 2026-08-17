@@ -45,6 +45,10 @@ const char  *vars_get(vars_t *v, const char *name);
 int          vars_set(vars_t *v, const char *name, const char *value);
 int          vars_set_context(vars_t *v, const char *name, const char *value, const char *ctx);
 int          vars_set_local(vars_t *v, const char *name, const char *value);
+/* 1 if NAME already has an entry in the INNERMOST scope, i.e. `local NAME`
+ * has already run here. Lets a second `local NAME` keep the value it was
+ * given rather than re-declaring it empty. */
+int          vars_is_local(vars_t *v, const char *name);
 int          vars_export(vars_t *v, const char *name);
 /* Clear the export flag and drop NAME from `environ`; the variable itself
  * keeps its value. Used to undo the temporary export a `VAR=val cmd` prefix

@@ -206,6 +206,27 @@ typedef struct shell_ctx {
      * without one (POSIX: zero fields, not one empty field) -- comparing
      * against this tells the two apart even in a mixed word like `$x"$@"`. */
     int         qg_empty_at_open;
+    /* Set while expanding the inside of a `${...}`. A literal IFS character
+     * typed in the WORD of a `${v-word}` is part of the expansion's result and
+     * so IS split (`IFS=x; echo ${v:-AxBxC}` prints three fields), whereas the
+     * same character typed in the word around the substitution is not. Both
+     * arrive at expand_into() as plain literal text; this is what tells them
+     * apart. */
+    int         in_subst_word;
+    /* Set by the `sh -c STRING` entry point for the ONE shell_run_string call
+     * that runs the script itself. There a stray `break`, `continue` or
+     * `return` has no enclosing loop or function to act on: it must not be
+     * propagated to the caller, where the sentinel became the shell's exit
+     * status (`sh -c 'return'` exited 234, i.e. 1002 & 0xff). Consumed on
+     * entry so that the eval arguments and trap actions nested inside -- which
+     * DO propagate, as `f() { eval "return 3"; }` needs -- never see it. */
+    int         cmd_string_top;
+    /* Set when the shell stopped because the SCRIPT would not parse. A syntax
+     * error is the shell's own failure and exits 2 whatever else happens; an
+     * EXIT trap that runs on the way out must not overwrite that status with
+     * its own, or `trap 'echo cleaning' EXIT` turns every syntax error into a
+     * successful run. */
+    int         script_parse_error;
     /* Exit status of the most recent command substitution performed during word
      * expansion. POSIX 2.9.1: a command with no command name but containing a
      * command substitution completes with the status of the LAST command
