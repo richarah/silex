@@ -112,8 +112,13 @@ settle(fd, acc, 0.4)
 os.write(fd, b"for i in a b c\n")
 os.write(fd, b"do echo LOOP_$i\n")
 os.write(fd, b"done\n")
+# Each marker gets its own bounded wait. Testing for LOOP_b with a bare `in`
+# assumed it had arrived in the same read as LOOP_a, which is only true while
+# the three echoes land in one 4096-byte chunk -- under ASan they arrive
+# separately and the suite failed on a shell that had done nothing wrong.
 ok = (read_until(fd, acc, b"LOOP_a", 4) and
-      b"LOOP_b" in acc and read_until(fd, acc, b"LOOP_c", 4))
+      read_until(fd, acc, b"LOOP_b", 4) and
+      read_until(fd, acc, b"LOOP_c", 4))
 report("multi-line for loop via PS2 continuation", ok, acc)
 kill(pid)
 
