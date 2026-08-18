@@ -459,10 +459,19 @@ containing `$( )` (`here-doc` 6), tilde expansion in a `${v-word}`
 That is 19 unwinnable-or-deliberate and 14 open, which is the whole 33: the
 list above is the sweep's `gaps.txt` in full, not a selection from it.
 
-One inconsistency inside the `builtin-trap` 0 divergence is worth fixing on
-its own terms, whichever side is taken: silex lists inherited traps in
-`( trap )` and in `trap | cat`, but not in `$(trap)`. The three should
-agree.
+One inconsistency inside the `builtin-trap` 0 divergence was worth fixing on
+its own terms, whichever side is taken: silex listed inherited traps in
+`( trap )` and in `trap | cat`, but not in `$(trap)`. Fixed on 2026-08-18 --
+the command-substitution child now carries the parent's action strings as
+display-only `inherited` entries, the same ones `subshell_reset_traps()`
+keeps, so all four listing contexts agree and `saved=$(trap)` followed by
+`eval "$saved"` round-trips. It moves no Oils case (`builtin-trap` 0 was
+already failing on the other two contexts and still fails; the divergence
+itself stands), which is the point: it removes an inconsistency that was
+wrong under either resolution. Execution semantics are untouched -- an
+inherited EXIT trap still does not fire when the substitution ends, and an
+inherited signal trap still takes the default action inside it, both
+verified against dash and bash.
 
 ## Finding real gaps: the silex-vs-dash differential
 
