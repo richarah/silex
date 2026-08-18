@@ -385,17 +385,15 @@ int vars_unset_context(vars_t *v, const char *name, const char *ctx)
     return 0;
 }
 
+/* A name always lands in the same bucket, so hashing it finds the same entry
+ * the old full-table sweep did -- it just skips the 255 buckets that cannot
+ * hold it. This is called once per variable assignment in a command, and the
+ * sweep made every assignment O(VARS_HASH_SIZE) rather than O(1): it was the
+ * single largest self-time cost in the parameter-expansion benchmark. */
 int vars_is_exported(vars_t *v, const char *name)
 {
-    for (var_scope_t *s = v->scope; s != NULL; s = s->parent) {
-        for (int i = 0; i < VARS_HASH_SIZE; i++) {
-            for (var_entry_t *e = s->buckets[i]; e != NULL; e = e->next) {
-                if (strcmp(e->name, name) == 0)
-                    return e->exported;
-            }
-        }
-    }
-    return 0;
+    var_entry_t *e = vars_find(v, name);
+    return e ? e->exported : 0;
 }
 
 int vars_unset(vars_t *v, const char *name)

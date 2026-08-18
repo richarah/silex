@@ -818,10 +818,24 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
          * the next (`x=5 y=$((x+2)) cmd` gives y=7 -- smoosh
          * semantics.special.assign.visible). Apply each into the shell vars as
          * an overlay while expanding, then restore; the per-path machinery
-         * below re-applies them where they belong. */
-        char **aov_saved = calloc((size_t)nassigns, sizeof(char *));
-        int   *aov_had   = calloc((size_t)nassigns, sizeof(int));
-        int   *aov_exp   = calloc((size_t)nassigns, sizeof(int));
+         * below re-applies them where they belong.
+         *
+         * A SINGLE assignment has no "next" to be visible to, so the overlay is
+         * observable only to itself -- and its own RHS was already expanded
+         * before the store, so it cannot see it either. Leaving the arrays NULL
+         * skips the store and the matching restore below (both are already
+         * guarded on them), which takes three callocs, a strdup, two var-store
+         * writes and three frees off every `x=...`, `x=$y cmd` and `IFS=: cmd`
+         * -- by far the commonest shape an assignment comes in. Two or more
+         * assignments still get the full left-to-right overlay. */
+        char **aov_saved = NULL;
+        int   *aov_had   = NULL;
+        int   *aov_exp   = NULL;
+        if (nassigns > 1) {
+            aov_saved = calloc((size_t)nassigns, sizeof(char *));
+            aov_had   = calloc((size_t)nassigns, sizeof(int));
+            aov_exp   = calloc((size_t)nassigns, sizeof(int));
+        }
         for (int i = 0; i < nassigns; i++) {
             const char *eq = strchr(assigns[i], '=');
             if (!eq) { anames[i] = NULL; avals[i] = NULL; continue; }

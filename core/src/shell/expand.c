@@ -2776,7 +2776,42 @@ char *expand_word_assign(shell_ctx_t *sh, const char *word)
      * while the identical expansion worked as a command argument, in a for
      * list, and in a case word. PREFIX=${PREFIX:-$(pwd)} is a ubiquitous idiom;
      * this is what stopped modernish from bootstrapping.
+     *
+     * Two shortcuts before the segment machinery, because an RHS that is one
+     * segment is the overwhelmingly common case and the loop below charges it
+     * for a split it does not need -- a strndup of the whole word, a second
+     * strbuf, and a copy of the expansion from one buffer into the other:
+     *
+     *   - No `~` anywhere means no segment can begin with one (expand_tilde only
+     *     fires on a leading `~`), so the colons are not delimiters and the word
+     *     is a single segment. That is `x=$y`, `x=${v#a}`, `x=$(cmd)`, and also
+     *     PATH=/usr/bin:/bin.
+     *   - If on top of that the word holds none of `'` `"` `\` `$` or backtick,
+     *     nothing below can alter a byte of it -- see the matching argument in
+     *     expand_word_full -- so it expands to itself. There is no field
+     *     splitting or globbing on an assignment RHS, so unlike a command word
+     *     `*` and `[` are ordinary characters here and need no rejecting.
      */
+    if (!strchr(word, '~')) {
+        int plain = 1;
+        for (const char *q = word; *q; q++) {
+            if (*q == '\'' || *q == '"' || *q == '\\' ||
+                *q == '$'  || *q == '`') { plain = 0; break; }
+        }
+        if (plain)
+            return arena_strdup(sh->scratch, word);
+
+        int saved_ia = sh->in_assign;
+        sh->in_assign = 1;
+        strbuf_t sb;
+        sb_init(&sb, 128);
+        expand_into(sh, word, &sb, 0);
+        sh->in_assign = saved_ia;
+        char *r = arena_strdup(sh->scratch, sb_str(&sb));
+        sb_free(&sb);
+        return r;
+    }
+
     strbuf_t result_sb;
     sb_init(&result_sb, 128);
 
@@ -2841,6 +2876,49 @@ expand_result_t expand_word_full(shell_ctx_t *sh, const char *word)
      * \x01 field boundary, so the splitter below can tell a boundary from a
      * literal 0x01 byte in the data. See shell.h. */
     sh->at_field_boundary = 0;
+
+    /* Fast path: a word with no expansion, quoting, tilde or glob syntax in it
+     * expands to itself, as one field.
+     *
+     * Every operator, keyword-adjacent literal and numeric argument in a script
+     * is such a word -- `[`, `-lt`, `1000000`, `]` are four of the five words in
+     * `[ $i -lt 1000000 ]` -- and each of them was walking the whole machinery
+     * below: two quote-aware scans of the text, a 128-byte strbuf, a
+     * byte-at-a-time copy through emit_literal_char, then arena_strdup, a malloc
+     * for the one-element field list, a realloc for the final list, a SECOND
+     * arena_strdup of the identical bytes, and three frees. Roughly four
+     * malloc/free pairs and two copies to hand back the string it was given.
+     *
+     * The reject set is every byte the code below can act on: `'` `"` `\` `$`
+     * and backtick are the only characters expand_into() branches on (all others
+     * fall through to a verbatim emit_literal_char, and emit_guards is 0 here
+     * because a word with no `$`/backtick never IFS-splits); `~` is the only
+     * character expand_tilde() acts on; and `*` `?` `[` are the only ones
+     * has_unquoted_glob() reports. So for a word holding none of them the slow
+     * path provably yields arena_strdup(word) as a single field -- including for
+     * the empty word, which likewise stays one empty field.
+     */
+    {
+        const char *q = word;
+        for (; *q; q++) {
+            switch (*q) {
+            case '\'': case '"': case '\\': case '$': case '`':
+            case '~':  case '*': case '?':  case '[':
+                goto not_plain;
+            default:
+                break;
+            }
+        }
+        char **arr = arena_alloc(sh->scratch, 2 * sizeof(char *));
+        arr[0] = arena_strdup(sh->scratch, word);
+        arr[1] = NULL;
+        sh->emit_guards = 0;
+        res.words = arr;
+        res.count = 1;
+        return res;
+    }
+not_plain:
+    ;   /* a label must precede a statement, not a declaration */
 
     /* Determine whether this word contains unquoted expansions / globs.
      * These checks must be done on the original token text (before expansion),
