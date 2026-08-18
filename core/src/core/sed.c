@@ -31,6 +31,7 @@
 #endif
 
 #include "../util/error.h"
+#include "../util/noreturn.h"
 #include "../util/path.h"
 #include "../util/strbuf.h"
 
@@ -58,7 +59,7 @@ static void sb_truncate(strbuf_t *sb, size_t len)
     }
 }
 
-static void sed_panic(int code, const char *fmt, ...);
+SILEX_NORETURN static void sed_panic(int code, const char *fmt, ...);
 
 /* Drop CR from CR-LF pairs in sb starting at `from` (GNU tolerates DOS
  * line endings in -f script files; subst-options' prog4 ends "\r\n"). */
@@ -113,7 +114,7 @@ static sed_opts_t O;
 /* Error unwinding: script/usage errors longjmp here with the exit code. */
 static jmp_buf sed_jmp;
 
-static void sed_panic(int code, const char *fmt, ...)
+SILEX_NORETURN static void sed_panic(int code, const char *fmt, ...)
 {
     va_list ap;
     fputs("sed: ", stderr);
@@ -162,7 +163,7 @@ static void loc_prefix(const parser_t *ps, size_t off, char *buf, size_t bufsz)
 }
 
 /* Script error at the current parse position; exits 1 (GNU). */
-static void perr(parser_t *ps, const char *fmt, ...)
+SILEX_NORETURN static void perr(parser_t *ps, const char *fmt, ...)
 {
     char where[512], msg[512];
     va_list ap;
@@ -443,7 +444,7 @@ static regex_t *compile_re(parser_t *ps, const char *pre, int icase, int mline)
         char ebuf[256];
         regerror(rc, re, ebuf, sizeof(ebuf));
         free(re);
-        perr(ps, "%s", ebuf);
+        perr(ps, "%s", ebuf);   /* longjmps; nothing below runs */
     }
     return re;
 }
@@ -2597,6 +2598,18 @@ int applet_sed(int argc, char **argv)
         }
 
         /* short options, possibly clustered */
+        /* Sentinel, compared by pointer identity below. Its CONTENTS never
+         * matter; only that no character of `arg` shares its address. */
+        static const char opt_consumed_rest[] = "";
+
+        /* An option that takes an argument swallows the rest of this argv
+         * element, so the cluster scan must stop. It said so by pointing `f` at
+         * a literal "x" and testing `*f == 'x' && f != arg + 1 && f[-1] == 0`
+         * -- which reads the byte BEFORE a string literal, out of bounds, on
+         * every such option (cppcheck: negativeIndex). Nothing needed the read:
+         * sed has no -x, so the test could only ever be reached with `f` on the
+         * sentinel. A named sentinel compared by IDENTITY says the same thing
+         * and cannot be confused with an option letter. */
         for (const char *f = arg + 1; *f; f++) {
             switch (*f) {
             case 'n': O.quiet = 1; break;
@@ -2615,7 +2628,7 @@ int applet_sed(int argc, char **argv)
                 ADD_SEG(0, NULL);
                 sb_append(&script, val);
                 have_script = 1;
-                f = "x";   /* consume rest of this argv element */
+                f = opt_consumed_rest;
                 break;
             }
             case 'f': {
@@ -2639,7 +2652,7 @@ int applet_sed(int argc, char **argv)
                 if (sfp != stdin) fclose(sfp);
                 strip_crlf_from(&script, seg_from);
                 have_script = 1;
-                f = "x";
+                f = opt_consumed_rest;
                 break;
             }
             case 'i': {
@@ -2648,7 +2661,7 @@ int applet_sed(int argc, char **argv)
                 if (f[1]) {
                     free(O.in_suffix);
                     O.in_suffix = strdup(f + 1);
-                    f = "x";
+                    f = opt_consumed_rest;
                 }
                 break;
             }
@@ -2660,7 +2673,7 @@ int applet_sed(int argc, char **argv)
                     val = argv[i];
                 }
                 O.line_len = strtol(val, NULL, 10);
-                f = "x";
+                f = opt_consumed_rest;
                 break;
             }
             default:
@@ -2670,8 +2683,7 @@ int applet_sed(int argc, char **argv)
                 free(O.in_suffix);
                 return 1;
             }
-            if (*f == 'x' && f != arg + 1 && f[-1] == '\0') break;
-            if (strcmp(f, "x") == 0) break;   /* consumed rest */
+            if (f == opt_consumed_rest) break;
         }
     }
 

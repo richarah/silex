@@ -4,6 +4,7 @@
 #define _POSIX_C_SOURCE 200809L
 #endif
 #include "../util/arena.h"
+#include "../util/noreturn.h"
 #include "vars.h"
 #include "job.h"
 #include <signal.h>
@@ -266,7 +267,11 @@ void shell_free(shell_ctx_t *sh);
  * the reason, so the error paths that kill a non-interactive shell (a special
  * builtin's usage error, a readonly assignment, an expansion error under
  * `set -u`) go through it exactly as `exit` does. Never returns. */
-void sh_exit_with_trap(shell_ctx_t *sh, int code);
+/* Never returns: it ends in exit(). Declared so, because the callers that
+ * use it as an error exit (division by zero, a readonly assignment) have no
+ * code after the call, and an analyser that cannot see that reports the
+ * following line as reachable with the bad value still live. */
+SILEX_NORETURN void sh_exit_with_trap(shell_ctx_t *sh, int code);
 
 /* Signal handler installed by trap built-in */
 void shell_signal_handler(int sig);

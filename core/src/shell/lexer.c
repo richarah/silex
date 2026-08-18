@@ -850,12 +850,18 @@ static int is_assignment(const char *s)
  * Token construction helpers
  * ------------------------------------------------------------------------- */
 
+/* lexer_read() stamps blank_before on every token it returns, so these two
+ * leave it unset -- but they hand out a token_t with an indeterminate field in
+ * it, which is only safe for as long as nobody calls lexer_read_raw() directly.
+ * Initialise it: the cost is a store, and the alternative is a field whose
+ * value depends on which function you went through. */
 static token_t make_tok(lexer_t *l, tok_type_t type)
 {
     token_t t;
-    t.type   = type;
-    t.text   = NULL;
-    t.lineno = l->lineno;
+    t.type         = type;
+    t.text         = NULL;
+    t.lineno       = l->lineno;
+    t.blank_before = 0;
     return t;
 }
 
@@ -874,8 +880,9 @@ static token_t make_word_tok(lexer_t *l, int quoted, int has_unquoted_assign)
     } else {
         t.type = TOK_WORD;
     }
-    t.text   = arena_strdup(l->arena, l->wordbuf);
-    t.lineno = l->lineno;
+    t.text         = arena_strdup(l->arena, l->wordbuf);
+    t.lineno       = l->lineno;
+    t.blank_before = 0;
     return t;
 }
 

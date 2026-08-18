@@ -2556,7 +2556,7 @@ static int exec_builtin_false(shell_ctx_t *sh, int argc, char **argv)
  * traps[0] is cleared before the action runs, so an error inside the action
  * cannot re-enter. $? is published first: POSIX says the trap sees the status
  * the shell is exiting with. */
-void sh_exit_with_trap(shell_ctx_t *sh, int code)
+SILEX_NORETURN void sh_exit_with_trap(shell_ctx_t *sh, int code)
 {
     code &= 0xff;
     const char *action = sh->traps[0].action;
