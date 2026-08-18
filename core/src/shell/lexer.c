@@ -431,31 +431,72 @@ static void scan_cmd_subst(lexer_t *l)
 }
 
 /*
- * Collect characters inside ${...} — track nesting depth.
+ * Collect characters inside `...` — the backquote form of command substitution.
+ * Called after the opening '`' has been consumed.
+ * Appends everything including the closing '`' to wordbuf.
+ */
+static void scan_backquote(lexer_t *l)
+{
+    wordbuf_append(l, '`');
+    for (;;) {
+        int q = lexer_getc(l);
+        if (q == EOF) { lex_unterminated(l, "EOF in backquote substitution"); break; }
+        if (q == '`') {
+            wordbuf_append(l, '`');
+            break;
+        }
+        if (q == '\\') {
+            int e = lexer_getc(l);
+            wordbuf_append(l, '\\');
+            if (e != EOF) {
+                if (e == '\n') l->lineno++;
+                wordbuf_append(l, (char)e);
+            }
+        } else {
+            if (q == '\n') l->lineno++;
+            wordbuf_append(l, (char)q);
+        }
+    }
+}
+
+static void scan_arith(lexer_t *l);
+static int is_special_param_char(int c);
+
+/*
+ * Collect characters inside ${...} — find the matching '}'.
  * Called after the opening '{' has been consumed.
  * Appends everything including the final '}' to wordbuf.
  */
 static void scan_param_expand(lexer_t *l, int outer_dq)
 {
-    /* Find the matching '}' that closes this ${...}. The scan must be QUOTE-
-     * and BACKSLASH-aware, not a naive brace count:
-     *   - a `{`/`}` inside a "..." region is literal data, not a nesting brace;
-     *   - a `'` is a quoting character ONLY when not within double quotes -- the
-     *     enclosing "..." (outer_dq) counts, so `"${x-'}"` has a literal `'`;
-     *   - a backslash-escaped `\}` is a literal brace.
-     * modernish relies on exactly this: it writes `${x:+'...{...'\}}` where the
-     * `{` sits inside single quotes and one brace is `\}`-escaped -- a naive
-     * counter only balanced it by luck (the miscounted quoted `{` and the `\}`
-     * cancelled out), which breaks the moment either is handled correctly in
-     * isolation. Everything is kept verbatim in the token; expand.c does the
-     * actual quote/backslash removal (with the same rule). Note: the outer "..."
-     * does NOT suppress the closing '}', only an INNER "..." opened here does. */
-    int depth = 1;
+    /* Finding the closing '}' is a SCAN, not a brace count. A bare `{` inside an
+     * expansion is ordinary data in every POSIX shell -- `${x:+a{b}` ends at the
+     * first `}` -- so only a nested `${` opens a level, and it is consumed by
+     * recursing rather than by a counter. Counting bare braces made `${x:+a{b}`
+     * an unterminated-expansion error, and only ever "worked" where the stray
+     * braces happened to balance: modernish's `${x:+'...{...'\}}` survived
+     * because the miscounted quoted `{` and the `\}` cancelled out.
+     *
+     * The other constructs that can hide a `}` are handed to the same scanners
+     * the rest of the lexer uses: $(...), $((...)) and `...`. Without that,
+     * `${x:+$(echo })}` ended the token inside the substitution.
+     *
+     * Quoting: a `\}` is literal; an INNER `"` opened here protects a `}`, while
+     * the enclosing "..." (outer_dq) does not. A `'` quotes only outside double
+     * quotes -- `"${x-'}"` has a literal `'` -- EXCEPT in the word of a pattern
+     * operator (`#` `##` `%` `%%` `/`), where dash and bash agree that it quotes
+     * even within "...", making `"${x%d'}"` an unterminated-quote error.
+     *
+     * Everything is kept verbatim in the token; expand.c does the actual quote
+     * and backslash removal (with the same rule). */
     int in_squote = 0, inner_dq = 0;
+    int squote_quotes = !outer_dq;  /* is `'` a quoting character here? */
+    int in_header = 1;              /* still scanning ${name, before the operator */
+    int at_start = 1;
     wordbuf_append(l, '{');
-    while (depth > 0) {
+    for (;;) {
         int c = lexer_getc(l);
-        if (c == EOF) { lex_unterminated(l, "unexpected EOF in ${ (missing `}')"); break; }
+        if (c == EOF) { lex_unterminated(l, "unexpected EOF in ${ (missing `}')"); return; }
         if (in_squote) {
             /* Single quotes: everything literal (backslash included) until '. */
             wordbuf_append(l, (char)c);
@@ -467,12 +508,37 @@ static void scan_param_expand(lexer_t *l, int outer_dq)
             /* Escapes the next byte; the `}` in `\}` does not close the word. */
             int n = lexer_getc(l);
             wordbuf_append(l, '\\');
-            if (n == EOF) { lex_unterminated(l, "unexpected EOF in ${ (missing `}')"); break; }
+            if (n == EOF) { lex_unterminated(l, "unexpected EOF in ${ (missing `}')"); return; }
             if (n == '\n') l->lineno++;
             wordbuf_append(l, (char)n);
+            in_header = at_start = 0;
             continue;
         }
-        if (c == '\'' && !outer_dq && !inner_dq) {
+        if (in_header) {
+            /* The parameter name: name characters, or a one-character special
+             * param (`@ * # ? - $ ! 0`), which is only a name at the very front.
+             * A leading `#` is the length PREFIX of `${#name}`, not an operator,
+             * and does not make `'` quote (dash reads `"${#x'}"` as the bad name
+             * `x'`). The first character that cannot continue the name IS the
+             * operator, and decides -- so the `#` of `${x#pat}`, which is not at
+             * the front, must not be mistaken for the special param `$#`. */
+            if ((at_start && (c == '#' || is_special_param_char(c))) ||
+                is_name_char((unsigned char)c)) {
+                at_start = 0;
+                wordbuf_append(l, (char)c);
+                continue;
+            }
+            in_header = at_start = 0;
+            if (c == ':') {
+                /* `:-` `:+` `:=` `:?` (and the substring forms): the operator is
+                 * the next character, and none of them is a pattern operator. */
+                wordbuf_append(l, ':');
+                continue;
+            }
+            if (c == '#' || c == '%' || c == '/') squote_quotes = 1;
+            /* fall through: the operator itself is ordinary data */
+        }
+        if (c == '\'' && squote_quotes && !inner_dq) {
             in_squote = 1;
             wordbuf_append(l, '\'');
             continue;
@@ -482,16 +548,40 @@ static void scan_param_expand(lexer_t *l, int outer_dq)
             wordbuf_append(l, '"');
             continue;
         }
-        if (c == '{' && !inner_dq) {
-            depth++;
-            wordbuf_append(l, '{');
-        } else if (c == '}' && !inner_dq) {
-            depth--;
-            wordbuf_append(l, '}');
-        } else {
-            if (c == '\n') l->lineno++;
-            wordbuf_append(l, (char)c);
+        if (c == '$') {
+            int n = lexer_getc(l);
+            if (n == '{') {
+                wordbuf_append(l, '$');
+                scan_param_expand(l, outer_dq || inner_dq);
+                continue;
+            }
+            if (n == '(') {
+                int n2 = lexer_getc(l);
+                wordbuf_append(l, '$');
+                if (n2 == '(') {
+                    scan_arith(l);
+                } else {
+                    lexer_ungetc(l, n2);
+                    scan_cmd_subst(l);
+                }
+                continue;
+            }
+            /* Not an expansion: the `$` is literal and the next character keeps
+             * its own meaning (it may well be the closing `}`). */
+            wordbuf_append(l, '$');
+            if (n != EOF) lexer_ungetc(l, n);
+            continue;
         }
+        if (c == '`') {
+            scan_backquote(l);
+            continue;
+        }
+        if (c == '}' && !inner_dq) {
+            wordbuf_append(l, '}');
+            return;
+        }
+        if (c == '\n') l->lineno++;
+        wordbuf_append(l, (char)c);
     }
 }
 
@@ -613,27 +703,7 @@ static void scan_double_quote(lexer_t *l)
             continue;
         }
         if (c == '`') {
-            wordbuf_append(l, '`');
-            /* backtick command substitution */
-            for (;;) {
-                int q = lexer_getc(l);
-                if (q == EOF) { lex_unterminated(l, "EOF in backquote substitution"); break; }
-                if (q == '`') {
-                    wordbuf_append(l, '`');
-                    break;
-                }
-                if (q == '\\') {
-                    int e = lexer_getc(l);
-                    wordbuf_append(l, '\\');
-                    if (e != EOF) {
-                        if (e == '\n') l->lineno++;
-                        wordbuf_append(l, (char)e);
-                    }
-                } else {
-                    if (q == '\n') l->lineno++;
-                    wordbuf_append(l, (char)q);
-                }
-            }
+            scan_backquote(l);
             continue;
         }
         wordbuf_append(l, (char)c);
@@ -915,26 +985,7 @@ restart:
                 }
             }
         } else if (c == '`') {
-            wordbuf_append(l, '`');
-            for (;;) {
-                int q = lexer_getc(l);
-                if (q == EOF) { lex_unterminated(l, "EOF in backquote substitution"); break; }
-                if (q == '`') {
-                    wordbuf_append(l, '`');
-                    break;
-                }
-                if (q == '\\') {
-                    int e = lexer_getc(l);
-                    wordbuf_append(l, '\\');
-                    if (e != EOF) {
-                        if (e == '\n') l->lineno++;
-                        wordbuf_append(l, (char)e);
-                    }
-                } else {
-                    if (q == '\n') l->lineno++;
-                    wordbuf_append(l, (char)q);
-                }
-            }
+            scan_backquote(l);
         } else {
             /* Check for word-terminating characters via LUT (one table lookup
                  * EOF is handled by the loop tail; here c is always a real byte). */

@@ -2229,8 +2229,13 @@ static void expand_into(shell_ctx_t *sh, const char *word, strbuf_t *out,
                 /* Inside "...", backslash only escapes $, `, ", \, newline.
                  * A here-doc body is expanded with in_dquote=1, but there `"`
                  * is ordinary text and is NOT escapable, so `\"` must stay
-                 * both characters (POSIX 2.7.4). */
+                 * both characters (POSIX 2.7.4).
+                 * In the WORD of a `"${v-...}"` (pp_word_dq), `}` joins the set:
+                 * that `\}` is how the word carries a brace past the expansion's
+                 * own terminator, so it is an escape here even though a bare
+                 * `"a\}b"` keeps both bytes. dash and bash agree. */
                 if (*p == '$' || *p == '`' || *p == '\\' || *p == '\n' ||
+                    (*p == '}' && sh->pp_word_dq) ||
                     (*p == '"' && !sh->in_heredoc)) {
                     if (*p != '\n') sb_appendc(out, *p);
                 } else {
