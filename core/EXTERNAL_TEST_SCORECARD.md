@@ -5,8 +5,8 @@
 (**0 failures**, the previous 27 were drvfs's no-op chmod), and the Oils
 suite is used as a gap finder rather than a score, via a per-case
 silex-vs-dash differential (**198 -> 167 -> 107 -> 86 -> 71 -> 59 -> 35 ->
-33 -> 31 -> 25** real POSIX gaps as the queue was worked; silex now passes
-**1090** of the 2802 cases to dash's 957).
+33 -> 31 -> 25 -> 24** real POSIX gaps as the queue was worked; silex now
+passes **1091** of the 2802 cases to dash's 957).
 
 Before trusting any number here, read why an earlier version of this file was
 meaningless.
@@ -47,7 +47,7 @@ failure, not a pass.
 | **GNU grep** | **66 pass / 0 fail** (60 skipped) | No failures among executed tests. |
 | **modernish** | **all 18 files pass; 0 unexpected failures** | `bin/modernish --test`: 372 succeeded, **0 unexpected** (371 before the 2026-08-18 `${...}` scan rewrite, which cleared BUG_PSUBBKSL1 -- "quoted param expansion handles escaped }" -- from expected-failure to pass; unchanged by the 2026-08-17 queue run; 370 before the 2026-08-15 one, 369 before the 2026-08-13 one). ($LINENO support unlocked four previously-skipped capability tests.) Improved from 363 on 2026-08-10 (BUG_CASEPAREN is fixed for real — case-aware command-substitution scanners — and one capability skip became a pass); 2 behaviors moved to tolerated-xfail because modernish now detects silex's POSIX-permitted special-builtin assignment persistence. |
 | mksh | 169 / 583 (29%) | mksh's suite targets the **ksh superset** (arrays, `[[ ]]`, coprocesses, `${|...}`, etc.), not POSIX `sh`. The bulk of the 414 failures are ksh-only features silex does not implement by design. Not a POSIX-conformance figure. |
-| Oils / OSH | **1090 pass / 2802 run, all 139 files measured** (dash, same runner: 957 pass) | Was 907 on 2026-08-12, 972 then 1017 on 2026-08-13, 1037 then 1053 on 2026-08-14, 1056 on 2026-08-15, 1080 on 2026-08-17. The suite is used as a GAP FINDER rather than a score: running sh_spec.py with silex AND dash in one invocation and diffing per case isolates the cases where **dash passes and silex fails** -- real POSIX gaps -- from the bash/ksh extension cases neither shell passes (the bulk of the failures). That differential went **198 -> 167 -> 107** over 2026-08-13, **107 -> 86 -> 71** over 2026-08-14, **71 -> 59** on 2026-08-15, **59 -> 35** on 2026-08-17, and **35 -> 34 -> 33 -> 31 -> 25** on 2026-08-18 (142 cases fixed since 167, the first figure measured over all 139 files; none regressed -- each figure was re-measured over all 139 files, and `comm` on consecutive case lists shows every survivor was already in the previous list). The remainder is the honest POSIX to-do list (after the 31 -> 25 run, the files with more than one are: var-num 3, builtin-trap 2, builtin-meta 2, blog-other1 2, ble-unset 2 -- builtin-cd and vars-special went to zero and one respectively). The `alias` file went to zero on 2026-08-18: an alias value is now spliced into the lexer's CHARACTER stream rather than lexed apart and handed over as tokens, so a value may leave a quote open for the text after it (case 25) and a here-doc opened inside a value is collected by the same lexer (case 39). Roughly half are unwinnable by construction or deliberate: five want a shell whose `$0` ends in "sh"; three follow from applets outranking PATH by design; two want dash's read-ahead over a piped script, which POSIX forbids. Reproduce with `core/tests/external/run-oils-differential.sh` (see below). |
+| Oils / OSH | **1091 pass / 2802 run, all 139 files measured** (dash, same runner: 957 pass) | Was 907 on 2026-08-12, 972 then 1017 on 2026-08-13, 1037 then 1053 on 2026-08-14, 1056 on 2026-08-15, 1080 on 2026-08-17. The suite is used as a GAP FINDER rather than a score: running sh_spec.py with silex AND dash in one invocation and diffing per case isolates the cases where **dash passes and silex fails** -- real POSIX gaps -- from the bash/ksh extension cases neither shell passes (the bulk of the failures). That differential went **198 -> 167 -> 107** over 2026-08-13, **107 -> 86 -> 71** over 2026-08-14, **71 -> 59** on 2026-08-15, **59 -> 35** on 2026-08-17, and **35 -> 34 -> 33 -> 31 -> 25 -> 24** on 2026-08-18 (143 cases fixed since 167, the first figure measured over all 139 files; none regressed -- each figure was re-measured over all 139 files, and `comm` on consecutive case lists shows every survivor was already in the previous list). The remainder is the honest POSIX to-do list (after the 31 -> 25 run, the files with more than one are: var-num 3, builtin-trap 2, builtin-meta 2, blog-other1 2, ble-unset 2 -- builtin-cd and vars-special went to zero and one respectively). The `alias` file went to zero on 2026-08-18: an alias value is now spliced into the lexer's CHARACTER stream rather than lexed apart and handed over as tokens, so a value may leave a quote open for the text after it (case 25) and a here-doc opened inside a value is collected by the same lexer (case 39). Roughly half are unwinnable by construction or deliberate: five want a shell whose `$0` ends in "sh"; three follow from applets outranking PATH by design; two want dash's read-ahead over a piped script, which POSIX forbids. Reproduce with `core/tests/external/run-oils-differential.sh` (see below). |
 | **ShellSpec** | **1696 examples, 0 failures** (58 skips) | ShellSpec's own core suite, run with silex as both runner and target shell — **byte-identical to dash on the same runner**. Was "fails to launch" earlier on 2026-08-10; fixing it surfaced and fixed 8 real silex bugs: 3-arg-max `test`/`[` (now full POSIX + XSI grammar), mid-word `#` starting comments, quote-blind word classifiers eating empty quoted fields, `${@:-}` gluing positionals, builtins beating functions in command search, errexit killing loops on exempt AND-lists, FLOW sentinels leaking as exit 234 through pipes/`&`, and recursive functions reusing the outer call's expanded redirect target. |
 | **GNU sed** | **50 pass / 1 fail** (17 skip, 70 run) | sed applet rewritten GNU-compatible (was 6/45 on 2026-08-11; the old mini-sed had broken `N`/`D`/`P`, approximated regex ranges, and none of the GNU option/error surface). Now implements the full command set (D P Q R T W F e v z), GNU addressing (`0,/re/`, `0r` prepend, `+N`/`~N`), s-flags with exact GNU error strings and flag ordering, case conversion and `\cX`/`\dNNN`/`\oNNN`/`\xHH` escapes, `-s -z -u -l -i[SUFFIX] --posix --sandbox --follow-symlinks`, missing-final-newline preservation via delayed delimiters, per-filename shared R/w streams, and GNU exit codes (1/2/4). Behaviors were validated against the vendored GNU binary as an oracle. The single remaining failure is nulldata's dot-matches-NUL subtest: glibc's regex never lets `.` match a NUL byte (GNU sed ships its own engine); everything else in that test passes. |
 | **GNU coreutils** | **243 pass / 0 fail** (43 skip, 286 run) | Measured on a NATIVE filesystem (2026-08-13). The previous 190/27 was measured on WSL2 drvfs (`/mnt/c`), where **chmod is a no-op** — `chmod 0 f` leaves the file readable — so every permission-semantics test failed for the filesystem's reasons, not silex's. Copying the configured checkout to ext4 and rerunning gives **zero failures**. Three real applet gaps were found and fixed along the way by testing the failures on ext4 against the GNU binaries as oracle: chmod lacked GNU argv permutation (`chmod f -w`) and multi-op symbolic clauses (`u+r-w`, who-only `ug`), mkdir `-m` rejected symbolic modes (`u=rwx,g=rx,o=w,-s,+t` → 1752), and ln lacked `-i`/`-L`/`-P`. Reproduce with `core/tests/external/run-gnu-coreutils-native.sh` (copies the checkout to /tmp once and runs against a snapshot of the binary — rebuilding mid-run otherwise fails every tool symlink with ETXTBSY). |
@@ -463,14 +463,14 @@ containing `$( )` (`here-doc` 6), tilde expansion in a `${v-word}`
 That is 19 unwinnable-or-deliberate and 14 open, which is the whole 33: the
 list above is the sweep's `gaps.txt` in full, not a selection from it.
 
-### 31 -> 25, later on 2026-08-18
+### 31 -> 25 -> 24, later on 2026-08-18
 
-A second sweep the same day took the differential to **25** (raw 1090/2802
-against dash's 957). Six cases went, and the same `comm`-on-consecutive-lists
-check applies: every one of the 25 survivors appears in the previous 31, so
-none regressed.
+Two further sweeps the same day took the differential to **25** and then
+**24** (raw 1091/2802 against dash's 957). Seven cases went, and the same
+`comm`-on-consecutive-lists check applies at each step: every survivor appears
+in the previous list, so none regressed.
 
-Two fixes account for all six.
+Three fixes account for all seven.
 
 **PWD and OLDPWD are exported, not merely set** (`builtin-cd` 5, `builtin-cd`
 14, `builtin-cd` 26, `vars-special` 1 -- four cases from one line each in
@@ -498,15 +498,46 @@ silex read the body. dash rejects specifically `$(`: `<<$X`, `<<${X}`,
 ``<<`a` ``, `<<'$(a)'` and `<<"$(a)"` are all fine there, and all stay fine
 here.
 
-All three are pinned by `tests/unit/shell/test_posix_gaps2.sh` (17 assertions),
-including the guards -- that the prefix value still persists, that the
-temporary export still reaches the command it prefixes, and that every
-here-doc delimiter form dash accepts still parses.
+**A tilde in the WORD of a `${var-word}` expands in an assignment** (`tilde`
+11). An assignment RHS expands a tilde at the start and after every unquoted
+colon (`PATH=~/bin:~/sbin`), and POSIX applies that to the whole RHS --
+including text a `${...-word}` contributes. `x=${undef-~:~}` gave `~:~` where
+dash gives `/home/bar:/home/bar`.
 
-That leaves **12 unwinnable-or-deliberate, 7 judgment calls, and 6 genuinely
+Both tildes were lost for one reason: `expand_tilde()` was called with
+`in_assignment=0`, so the colon was not a delimiter, the "username" became
+`:~`, no such user exists, and the whole word came back unexpanded -- taking
+the LEADING tilde with it, though that one needed no colon handling.
+`expand_word_assign()` cannot do this itself: it steps over a `${...}` whole
+via `skip_construct()`, precisely so `V=${u:-x}` is not cut into `${u` and
+`-x}`, so the colons inside are invisible to it. A new `expand_tilde_word()`
+segments the word when `sh->in_assign` is set, and the four `${var-word}` call
+sites share it.
+
+All four are pinned by `tests/unit/shell/test_posix_gaps2.sh` (25 assertions),
+including the guards -- that the prefix value still persists, that the
+temporary export still reaches the command it prefixes, that every here-doc
+delimiter form dash accepts still parses, and that OUTSIDE an assignment
+`${undef-~:~}` still yields the literal `~:~` (dash agrees), so the tilde
+change is scoped to assignment context.
+
+That leaves **12 unwinnable-or-deliberate, 8 judgment calls, and 4 genuinely
 open**: `ble-unset` 3/4 (bash tempenv layering, an architectural change rather
-than a bug fix), `builtin-read` 24, `builtin-set` 5, `tilde` 11 and
-`toysh-posix` 18.
+than a bug fix), `builtin-read` 24 and `toysh-posix` 18.
+
+**`builtin-set` 5 moves to the judgment-call list, with the conflict now
+measured directly.** It wants `sh -i -c 'set -u; echo before; echo $x; echo
+after'` to abandon the whole command string. smoosh's
+`semantics.interactive.expansion.exit` runs `sh -i -c 'echo ${x?alas}; echo
+hello; exit'` and requires the shell to abort only the offending command and
+print `hello`. Both are `-i -c`; both are expansion errors; there is no
+feature distinguishing them. dash and bash abandon the string in BOTH, so they
+pass the Oils case and fail the smoosh one. silex does the opposite, which is
+the deliberate choice recorded at `expansion_abort()` in `expand.c`.
+
+Taking dash's side here would move `builtin-set` 5 from FAIL to pass and take
+smoosh from 185/186 to 184/186. It is a one-for-one trade, not a fix, so it
+stays where it is.
 
 One inconsistency inside the `builtin-trap` 0 divergence was worth fixing on
 its own terms, whichever side is taken: silex listed inherited traps in

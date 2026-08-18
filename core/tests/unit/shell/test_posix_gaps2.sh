@@ -172,6 +172,58 @@ EOF')" \
       "0|[ok]"
 
 # -----------------------------------------------------------------------
+# 4. Tilde expansion inside a ${var-word} in an ASSIGNMENT
+# -----------------------------------------------------------------------
+#
+# An assignment RHS expands a tilde at the start and after every unquoted
+# colon (PATH=~/bin:~/sbin), and POSIX applies that to the whole RHS --
+# including text a ${...-word} contributes. silex expanded neither tilde in
+# `x=${undef-~:~}` and printed `~:~`. (Oils tilde 11.)
+#
+# Both were lost together: expand_tilde() was called with in_assignment=0, so
+# the colon was not a delimiter, the "username" became `:~`, no such user
+# exists, and the word came back untouched -- taking the LEADING tilde with it.
+
+check "tilde: a \${v-word} in an assignment expands after a colon" \
+      "$(HOME=/home/bar "$MB" -c 'x=~:${undef-~:~}; echo $x' 2>/dev/null)" \
+      "/home/bar:/home/bar:/home/bar"
+
+check "tilde: the leading one alone still works" \
+      "$(HOME=/home/bar "$MB" -c 'x=${undef-~}; echo $x' 2>/dev/null)" \
+      "/home/bar"
+
+# OUTSIDE an assignment a colon is NOT a delimiter, so only a leading tilde
+# expands and `~:~` stays literal. dash agrees; this is the guard that the fix
+# is scoped to assignment context.
+check "tilde: outside an assignment the colon is not a delimiter" \
+      "$(HOME=/home/bar "$MB" -c 'echo ${undef-~:~}' 2>/dev/null)" \
+      "~:~"
+
+check "tilde: a quoted word is still literal" \
+      "$(HOME=/home/bar "$MB" -c 'echo "${undef-~}"' 2>/dev/null)" \
+      "~"
+
+# The plain assignment forms must be untouched.
+check "tilde: PATH-style assignment still expands each segment" \
+      "$(HOME=/home/bar "$MB" -c 'x=~/bin:~/sbin; echo $x' 2>/dev/null)" \
+      "/home/bar/bin:/home/bar/sbin"
+
+# A colon inside an expansion is still not a segment delimiter for the RHS
+# split itself -- the reason expand_word_assign skips ${...} whole.
+check "tilde: \${u:-x} in an assignment is not cut at its colon" \
+      "$(HOME=/home/bar "$MB" -c 'V=${u:-x}; echo $V' 2>/dev/null)" \
+      "x"
+
+check "tilde: a non-tilde word with a colon is unchanged" \
+      "$(HOME=/home/bar "$MB" -c 'x=${undef-a:b}; echo $x' 2>/dev/null)" \
+      "a:b"
+
+# smoosh semantics.var.format.tilde -- := assigns $HOME.
+check "tilde: \${x:=~} assigns HOME" \
+      "$(HOME=/home/bar "$MB" -c ': ${x:=~}; echo $x' 2>/dev/null)" \
+      "/home/bar"
+
+# -----------------------------------------------------------------------
 
 echo ""
 echo "posix gap tests (2): $PASS passed, $FAIL failed"
