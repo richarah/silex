@@ -885,11 +885,18 @@ $(OBJDIR)/util/error.o:     $(SRCDIR)/util/error.c     $(SRCDIR)/util/error.h
 $(OBJDIR)/util/arena.o:     $(SRCDIR)/util/arena.c     $(SRCDIR)/util/arena.h
 $(OBJDIR)/util/platform.o:  $(SRCDIR)/util/platform.c  $(SRCDIR)/util/platform.h
 $(OBJDIR)/util/charclass.o:      $(SRCDIR)/util/charclass.c $(SRCDIR)/util/charclass.h
-$(OBJDIR)/util/linescan_avx2.o: $(SRCDIR)/util/linescan_avx2.c $(SRCDIR)/util/linescan.h
+# $(BUILD_STAMP) is NOT optional here. This is the one object with its own
+# recipe, so it does not inherit the pattern rule's dependency on the flavour
+# stamp -- which means it alone survived a flavour change. After a `make
+# coverage`, `make all` rebuilt all 58 other objects and kept this one, and the
+# link died with "undefined reference to __gcov_exit" from a --coverage object
+# in a non-coverage build. That is the same footgun the stamp was added to
+# close (see the BUILD_STAMP block above); it was simply still open here.
+$(OBJDIR)/util/linescan_avx2.o: $(SRCDIR)/util/linescan_avx2.c $(SRCDIR)/util/linescan.h $(BUILD_STAMP)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(CFLAGS_LINESCAN) $(PERFILE_OPT) -I$(SRCDIR) -c $< -o $@
-$(OBJDIR)/util/linescan_neon.o:   $(SRCDIR)/util/linescan_neon.c   $(SRCDIR)/util/linescan.h
-$(OBJDIR)/util/linescan_scalar.o: $(SRCDIR)/util/linescan_scalar.c $(SRCDIR)/util/linescan.h
+$(OBJDIR)/util/linescan_neon.o:   $(SRCDIR)/util/linescan_neon.c   $(SRCDIR)/util/linescan.h $(BUILD_STAMP)
+$(OBJDIR)/util/linescan_scalar.o: $(SRCDIR)/util/linescan_scalar.c $(SRCDIR)/util/linescan.h $(BUILD_STAMP)
 
 UTIL_HDRS = $(SRCDIR)/util/error.h $(SRCDIR)/util/path.h $(SRCDIR)/util/strbuf.h
 

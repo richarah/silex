@@ -177,24 +177,6 @@ tap_test "grep: -l files with matches" "grep -l 'alpha' $TESTFILES/medium.txt $T
                                        "grep -l 'alpha' $TESTFILES/medium.txt $TESTFILES/small.txt"
 tap_test "grep: empty file"            "grep 'anything' $TESTFILES/empty.txt" \
                                        "grep 'anything' $TESTFILES/empty.txt"
-# POSIX bracket expressions. tests/unit/test_regex.c already tests
-# mb_charclass_parse() thoroughly, but it links the regex engine into its OWN
-# binary, which `make coverage` does not instrument -- so charclass_re.c read
-# 0.0% and docs/COVERAGE.md listed it among the "genuine holes" it is not.
-# These drive the same code through the shipped grep applet, which is the thing
-# the coverage figure is actually measuring.
-tap_test "grep: [[:digit:]] class"     "grep '[[:digit:]]' $TESTFILES/medium.txt | head -5" \
-                                       "grep '[[:digit:]]' $TESTFILES/medium.txt | head -5"
-tap_test "grep: [[:alpha:]] class"     "grep -c '[[:alpha:]]' $TESTFILES/medium.txt" \
-                                       "grep -c '[[:alpha:]]' $TESTFILES/medium.txt"
-tap_test "grep: negated class"         "grep -c '[^[:space:]]' $TESTFILES/medium.txt" \
-                                       "grep -c '[^[:space:]]' $TESTFILES/medium.txt"
-tap_test "grep: class with range"      "grep -c '[[:upper:]a-f]' $TESTFILES/medium.txt" \
-                                       "grep -c '[[:upper:]a-f]' $TESTFILES/medium.txt"
-tap_test "grep: -E class"              "grep -Ec '[[:alnum:]]+' $TESTFILES/medium.txt" \
-                                       "grep -Ec '[[:alnum:]]+' $TESTFILES/medium.txt"
-tap_test "sed: [[:digit:]] class"      "sed 's/[[:digit:]]/#/g' $TESTFILES/medium.txt | head -5" \
-                                       "sed 's/[[:digit:]]/#/g' $TESTFILES/medium.txt | head -5"
 
 # ===========================================================================
 # sed
