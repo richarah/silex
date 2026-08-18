@@ -868,7 +868,7 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
             for (int i = 0; i < nassigns; i++) free(anames[i]);
             free(anames); free(avals);
             if (!sh->interactive)
-                exit(2);
+                sh_exit_with_trap(sh, 2);
             if (arctx_active) redirect_restore(&arctx);
             return 2;
         }
@@ -1060,7 +1060,7 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
             if (!sh->interactive && !sh->in_command_builtin && !sh->in_trap &&
                 is_special_builtin(cmd)) {
                 /* Exit immediately with error status */
-                exit(1);
+                sh_exit_with_trap(sh, 1);
             }
         } else {
             cmd_rc = sfn(sh, argc, expanded);
@@ -1074,7 +1074,7 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
             if (cmd_rc != 0 && !sh->interactive && !sh->in_command_builtin &&
                 !sh->in_trap && special_builtin_error_exits(cmd)) {
                 fflush(stdout);
-                exit(2);
+                sh_exit_with_trap(sh, 2);
             }
 
             /* A builtin whose output could not be written has not succeeded.
@@ -2542,6 +2542,36 @@ static int exec_builtin_false(shell_ctx_t *sh, int argc, char **argv)
     return 1;
 }
 
+/* Fire the EXIT trap (traps[0]) and terminate the shell with `code`.
+ *
+ * EVERY path that ends the shell has to come through here. POSIX runs the EXIT
+ * trap when the shell exits and does not care why, so a shell error that kills
+ * a non-interactive shell -- a usage error in a special builtin, an assignment
+ * to a readonly variable, an expansion error under `set -u` -- runs it just as
+ * `exit` does. dash and bash agree on that for every one of those, even where
+ * they disagree about whether the error is fatal at all and what status it
+ * carries. Calling exit() directly skipped the trap on all of them:
+ * `trap 'echo bye' EXIT; trap -1 EXIT` printed only the diagnostic.
+ *
+ * traps[0] is cleared before the action runs, so an error inside the action
+ * cannot re-enter. $? is published first: POSIX says the trap sees the status
+ * the shell is exiting with. */
+void sh_exit_with_trap(shell_ctx_t *sh, int code)
+{
+    code &= 0xff;
+    const char *action = sh->traps[0].action;
+    if (action != SHELL_TRAP_DEFAULT && action[0] != '\0' &&
+        !sh->traps[0].inherited) {
+        sh->traps[0].action = SHELL_TRAP_DEFAULT;
+        sh->last_exit = code;
+        sh->in_trap++;
+        sh->trap_entry_status = code;
+        shell_run_string(sh, action);
+        sh->in_trap--;
+    }
+    exit(code);
+}
+
 static int exec_builtin_exit(shell_ctx_t *sh, int argc, char **argv)
 {
     int code = sh->last_exit;
@@ -2554,26 +2584,11 @@ static int exec_builtin_exit(shell_ctx_t *sh, int argc, char **argv)
         }
         code &= 0xff;
     }
-    /* Fire EXIT trap (traps[0]) before exiting; clear first to prevent re-entry.
-     * POSIX: $? inside the EXIT trap is the status exit was called with, so
-     * publish `code` before running the action (`trap 'echo $?' 0; exit 42`
-     * must print 42, not the previous command's status). The trap may then
-     * change $?, but the shell still exits with the original `code`. */
     /* A naked `exit` inside a trap action exits with the status the shell
      * had when the trap action started (POSIX). */
     if (argc < 2 && sh->in_trap)
         code = sh->trap_entry_status & 0xff;
-    const char *exit_action = sh->traps[0].action;
-    if (exit_action != SHELL_TRAP_DEFAULT && exit_action[0] != '\0' &&
-        !sh->traps[0].inherited) {
-        sh->traps[0].action = SHELL_TRAP_DEFAULT;
-        sh->last_exit = code;
-        sh->in_trap++;
-        sh->trap_entry_status = code;
-        shell_run_string(sh, exit_action);
-        sh->in_trap--;
-    }
-    exit(code);
+    sh_exit_with_trap(sh, code);
     return code; /* unreachable */
 }
 
@@ -2923,7 +2938,7 @@ static int exec_builtin_export(shell_ctx_t *sh, int argc, char **argv)
         if (!valid_var_name(argv[i], vn)) {
             fprintf(stderr, "silex: export: %s: bad variable name\n", argv[i]);
             rc = 1;
-            if (!sh->interactive && !sh->in_command_builtin && !sh->in_trap) exit(1);
+            if (!sh->interactive && !sh->in_command_builtin && !sh->in_trap) sh_exit_with_trap(sh, 1);
             continue;
         }
         if (eq) {
@@ -2936,7 +2951,7 @@ static int exec_builtin_export(shell_ctx_t *sh, int argc, char **argv)
                      * EXCEPT when invoked via 'command' prefix */
                     if (!sh->interactive && !sh->in_command_builtin && !sh->in_trap) {
                         free(name);
-                        exit(1);
+                        sh_exit_with_trap(sh, 1);
                     }
                 } else {
                     vars_export(&sh->vars, name);
@@ -2967,7 +2982,7 @@ static int exec_builtin_unset(shell_ctx_t *sh, int argc, char **argv)
                 else if (*p == 'v') func_mode = 0;
                 else {
                     fprintf(stderr, "silex: unset: -%c: bad option\n", *p);
-                    if (!sh->interactive && !sh->in_command_builtin && !sh->in_trap) exit(1);
+                    if (!sh->interactive && !sh->in_command_builtin && !sh->in_trap) sh_exit_with_trap(sh, 1);
                     return 1;
                 }
             }
@@ -2983,7 +2998,7 @@ static int exec_builtin_unset(shell_ctx_t *sh, int argc, char **argv)
             if (!valid_var_name(argv[i], strlen(argv[i]))) {
                 fprintf(stderr, "silex: unset: %s: bad variable name\n", argv[i]);
                 rc = 1;
-                if (!sh->interactive && !sh->in_command_builtin && !sh->in_trap) exit(1);
+                if (!sh->interactive && !sh->in_command_builtin && !sh->in_trap) sh_exit_with_trap(sh, 1);
                 continue;
             }
             if (vars_unset_context(&sh->vars, argv[i], "unset") != 0) {
@@ -2995,7 +3010,7 @@ static int exec_builtin_unset(shell_ctx_t *sh, int argc, char **argv)
                  * shell, failing modernish's FTL_CMDSPEXIT init check. Matches
                  * the export and readonly builtins above. */
                 if (!sh->interactive && !sh->in_command_builtin && !sh->in_trap) {
-                    exit(1);
+                    sh_exit_with_trap(sh, 1);
                 }
             }
         }
@@ -3022,7 +3037,7 @@ static int exec_builtin_readonly(shell_ctx_t *sh, int argc, char **argv)
         if (!valid_var_name(argv[i], vn)) {
             fprintf(stderr, "silex: readonly: %s: bad variable name\n", argv[i]);
             rc = 1;
-            if (!sh->interactive && !sh->in_command_builtin && !sh->in_trap) exit(1);
+            if (!sh->interactive && !sh->in_command_builtin && !sh->in_trap) sh_exit_with_trap(sh, 1);
             continue;
         }
         if (eq) {
@@ -3035,7 +3050,7 @@ static int exec_builtin_readonly(shell_ctx_t *sh, int argc, char **argv)
                      * EXCEPT when invoked via 'command' prefix */
                     if (!sh->interactive && !sh->in_command_builtin && !sh->in_trap) {
                         free(name);
-                        exit(1);
+                        sh_exit_with_trap(sh, 1);
                     }
                 } else {
                     vars_readonly(&sh->vars, name);
@@ -3327,7 +3342,7 @@ static int exec_builtin_eval(shell_ctx_t *sh, int argc, char **argv)
     if (sh->run_string_parse_error) {
         sh->run_string_parse_error = 0;
         if (!sh->interactive && !saved_icb && !sh->in_trap)
-            exit(2);
+            sh_exit_with_trap(sh, 2);
     }
     return rc;
 }
@@ -3400,10 +3415,11 @@ static int exec_builtin_trap(shell_ctx_t *sh, int argc, char **argv)
         fprintf(stderr, "silex: trap: Illegal option %s\n", argv[1]);
         /* A USAGE error in a special builtin ends a non-interactive shell
          * (2.8.1) -- and dash does exit here, though it merely diagnoses an
-         * unknown SIGNAL name below and carries on. The EXIT trap still runs,
-         * because this is a normal shell exit. */
+         * unknown SIGNAL name below and carries on. It is still a shell exit,
+         * so the EXIT trap runs (sh_exit_with_trap); calling exit() here meant
+         * `trap 'echo bye' EXIT; trap -1 EXIT` printed only the diagnostic. */
         if (!sh->interactive && !sh->in_command_builtin && !sh->in_trap)
-            exit(2);
+            sh_exit_with_trap(sh, 2);
         return 2;
     }
 
@@ -4284,7 +4300,7 @@ static int exec_builtin_source(shell_ctx_t *sh, int argc, char **argv)
                     sh->last_exit = 1;
                     /* POSIX: source/. is a special builtin; exit non-interactive shell on error */
                     if (!sh->interactive && !sh->in_trap) {
-                        exit(1);
+                        sh_exit_with_trap(sh, 1);
                     }
                     return 1;
                 }
@@ -4296,7 +4312,7 @@ static int exec_builtin_source(shell_ctx_t *sh, int argc, char **argv)
             sh->last_exit = 1;
             /* POSIX: source/. is a special builtin; exit non-interactive shell on error */
             if (!sh->interactive) {
-                exit(1);
+                sh_exit_with_trap(sh, 1);
             }
             return 1;
         }
@@ -4320,7 +4336,7 @@ static int exec_builtin_source(shell_ctx_t *sh, int argc, char **argv)
         sh->last_exit = 1;
         /* POSIX: source/. is a special builtin; exit non-interactive shell on error */
         if (!sh->interactive) {
-            exit(1);
+            sh_exit_with_trap(sh, 1);
         }
         return 1;
     }
@@ -4356,7 +4372,7 @@ static int exec_builtin_break(shell_ctx_t *sh, int argc, char **argv)
          * non-interactive shell (dash exits 2). Returning 1 here would
          * leave `while true; do break $bad; done` spinning forever. */
         if (!sh->interactive && !sh->in_command_builtin && !sh->in_trap)
-            exit(2);
+            sh_exit_with_trap(sh, 2);
         return 1;
     }
     if (n < 1) n = 1;
@@ -4373,7 +4389,7 @@ static int exec_builtin_continue(shell_ctx_t *sh, int argc, char **argv)
         fprintf(stderr, "silex: continue: %s: numeric argument required\n", argv[1]);
         /* Same special-builtin abort rule as break above. */
         if (!sh->interactive && !sh->in_command_builtin && !sh->in_trap)
-            exit(2);
+            sh_exit_with_trap(sh, 2);
         return 1;
     }
     if (n < 1) n = 1;

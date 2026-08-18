@@ -261,6 +261,13 @@ int shell_run_file(shell_ctx_t *sh, const char *path);
 int shell_run_stdin(shell_ctx_t *sh);
 void shell_free(shell_ctx_t *sh);
 
+/* Run the EXIT trap, then terminate the shell with `code`. The ONLY way the
+ * shell should end: POSIX runs the EXIT trap whenever the shell exits, whatever
+ * the reason, so the error paths that kill a non-interactive shell (a special
+ * builtin's usage error, a readonly assignment, an expansion error under
+ * `set -u`) go through it exactly as `exit` does. Never returns. */
+void sh_exit_with_trap(shell_ctx_t *sh, int code);
+
 /* Signal handler installed by trap built-in */
 void shell_signal_handler(int sig);
 /* Record one command in the interactive history (no-op when not interactive

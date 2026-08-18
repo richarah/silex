@@ -38,7 +38,7 @@ static const char *cmdsubst_body_end(const char *p);
 static void expansion_abort(shell_ctx_t *sh, int code)
 {
     if (!sh->interactive)
-        exit(code);
+        sh_exit_with_trap(sh, code);   /* a shell exit: the EXIT trap runs */
     sh->expansion_abort = code;
 }
 
@@ -1439,10 +1439,10 @@ static long arith_primary(arith_ctx_t *ac)
             case 2:  result = cur_val - rhs; break;
             case 3:  result = cur_val * rhs; break;
             case 4:
-                if (!rhs) { fprintf(stderr, "silex: sh: arithmetic expression: division by zero\n"); exit(2); }
+                if (!rhs) { fprintf(stderr, "silex: sh: arithmetic expression: division by zero\n"); sh_exit_with_trap(ac->sh, 2); }
                 result = cur_val / rhs; break;
             case 5:
-                if (!rhs) { fprintf(stderr, "silex: sh: arithmetic expression: division by zero\n"); exit(2); }
+                if (!rhs) { fprintf(stderr, "silex: sh: arithmetic expression: division by zero\n"); sh_exit_with_trap(ac->sh, 2); }
                 result = cur_val % rhs; break;
             case 6:  result = cur_val << rhs; break;
             case 7:  result = cur_val >> rhs; break;
@@ -1485,13 +1485,13 @@ static long arith_mul(arith_ctx_t *ac)
         else if (op == '/') {
             if (!right) {
                 fprintf(stderr, "silex: sh: arithmetic expression: division by zero\n");
-                exit(2);
+                sh_exit_with_trap(ac->sh, 2);
             }
             left /= right;
         } else {
             if (!right) {
                 fprintf(stderr, "silex: sh: arithmetic expression: division by zero\n");
-                exit(2);
+                sh_exit_with_trap(ac->sh, 2);
             }
             left %= right;
         }
@@ -1810,9 +1810,7 @@ long expand_arith(shell_ctx_t *sh, const char *expr)
     arith_skip_ws(&ac);
     if (src[ac.pos] != '\0') {
         fprintf(stderr, "silex: arithmetic expression: expecting EOF: \"%s\"\n", src);
-        if (!sh->interactive)
-            exit(2);
-        expansion_abort(sh, 2);
+        expansion_abort(sh, 2);   /* exits a non-interactive shell, EXIT trap and all */
     }
     return val;
 }
