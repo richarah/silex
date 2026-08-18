@@ -105,7 +105,26 @@ static const char *sh_getvar(shell_ctx_t *sh, const char *name)
              * is set but EMPTY joins with nothing; only an UNSET IFS falls
              * back to a space. Treating the two alike made
              * `set -- "" ""; IFS=` yield " " rather than "", so `${*:-word}`
-             * saw a non-null value and skipped the default. */
+             * saw a non-null value and skipped the default.
+             *
+             * DELIBERATE DIVERGENCE FROM DASH (Oils toysh-posix 18). Joining
+             * here and letting ordinary field splitting run over the result is
+             * POSIX 2.5.2 taken literally, and it makes an unquoted $* split
+             * exactly as a variable holding the joined string does:
+             *
+             *     IFS=x; set -- "" "a"
+             *     v="$*"   # x-a, i.e. "xa"
+             *     f $v     # 2 fields: "" and "a"   -- all shells agree
+             *     f $*     # 2 fields in silex and bash; ONE in dash
+             *
+             * dash drops the null field only when it came from a positional,
+             * so its own `$v` and `$*` disagree about the identical string.
+             * bash agrees with silex on every case measured (empty/non-empty
+             * mixes, 1-3 positionals, whitespace and non-whitespace IFS), and
+             * Oils' own file marks bash's output as `## BUG bash`. Matching
+             * dash would mean special-casing positionals to delete null fields
+             * and giving up that invariant, so silex keeps it. The invariant
+             * is pinned in test_posix_gaps2.sh. */
             char sep     = ' ';
             int  has_sep = 1;
             if (name[0] == '*') {

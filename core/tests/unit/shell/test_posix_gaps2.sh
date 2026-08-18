@@ -282,6 +282,43 @@ printf "[%s|%s|%s|%s]" "$a" "$b" "$c" "$d"' 2>/dev/null)" \
       "[  \\a |b: c|d  e|]"
 
 # -----------------------------------------------------------------------
+# 5. Unquoted $* splits like the string it joins to (deliberate, not a gap)
+# -----------------------------------------------------------------------
+# Oils toysh-posix 18 wants dash's answer, where a null positional yields no
+# field at all. silex declines: it joins with IFS[0] and field-splits the
+# result, per POSIX 2.5.2, which keeps `$*` and a variable holding "$*" in
+# agreement. dash special-cases positionals and so disagrees with itself.
+# These tests pin the invariant, not the Oils case -- they pass under bash
+# and fail under dash, which is the divergence stated plainly.
+
+# The invariant: splitting $* == splitting a variable holding "$*".
+star_vs_var() {
+    "$MB" -c 'n() { printf "%s" "$#"; for a in "$@"; do printf "[%s]" "$a"; done; }
+              IFS=x; set -- '"$1"'
+              v="$*"; n $v; printf "/"; n $*' 2>/dev/null
+}
+
+check "\$*: two null positionals split as the joined string does" \
+      "$(star_vs_var '"" ""')" "1[]/1[]"
+
+check "\$*: a null then a non-null positional keeps the null field" \
+      "$(star_vs_var '"" "a"')" "2[][a]/2[][a]"
+
+check "\$*: an interior null positional keeps its field" \
+      "$(star_vs_var '"a" "" "b"')" "3[a][][b]/3[a][][b]"
+
+check "\$*: a trailing null positional adds no field" \
+      "$(star_vs_var '"a" ""')" "1[a]/1[a]"
+
+# A word with literal text around $* keeps both fields -- this part silex,
+# dash and bash have always agreed on, and it is the control: if the join
+# stopped happening at all, this would break too.
+check "\$*: literals around \$* still bracket the split (control)" \
+      "$("$MB" -c 'n() { printf "%s" "$#"; for a in "$@"; do printf "[%s]" "$a"; done; }
+                   IFS=x; set -- "" ""; n /$*/' 2>/dev/null)" \
+      "2[/][/]"
+
+# -----------------------------------------------------------------------
 
 echo ""
 echo "posix gap tests (2): $PASS passed, $FAIL failed"
