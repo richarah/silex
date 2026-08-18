@@ -1,12 +1,12 @@
 # External Test Suite Scorecard
 
-**Measured:** 2026-08-17, monorepo `core/`, glibc x86_64. Supersedes the
+**Measured:** 2026-08-18, monorepo `core/`, glibc x86_64. Supersedes the
 2026-08-10/11/12 figures. coreutils is measured on a native filesystem
 (**0 failures**, the previous 27 were drvfs's no-op chmod), and the Oils
 suite is used as a gap finder rather than a score, via a per-case
-silex-vs-dash differential (**198 -> 167 -> 107 -> 86 -> 71 -> 59 -> 35**
-real POSIX gaps as the queue was worked; silex now passes **1080** of the
-2802 cases to dash's 957).
+silex-vs-dash differential (**198 -> 167 -> 107 -> 86 -> 71 -> 59 -> 35 ->
+33** real POSIX gaps as the queue was worked; silex now passes **1082** of
+the 2802 cases to dash's 957).
 
 Before trusting any number here, read why an earlier version of this file was
 meaningless.
@@ -47,7 +47,7 @@ failure, not a pass.
 | **GNU grep** | **66 pass / 0 fail** (60 skipped) | No failures among executed tests. |
 | **modernish** | **all 18 files pass; 0 unexpected failures** | `bin/modernish --test`: 372 succeeded, **0 unexpected** (371 before the 2026-08-18 `${...}` scan rewrite, which cleared BUG_PSUBBKSL1 -- "quoted param expansion handles escaped }" -- from expected-failure to pass; unchanged by the 2026-08-17 queue run; 370 before the 2026-08-15 one, 369 before the 2026-08-13 one). ($LINENO support unlocked four previously-skipped capability tests.) Improved from 363 on 2026-08-10 (BUG_CASEPAREN is fixed for real — case-aware command-substitution scanners — and one capability skip became a pass); 2 behaviors moved to tolerated-xfail because modernish now detects silex's POSIX-permitted special-builtin assignment persistence. |
 | mksh | 169 / 583 (29%) | mksh's suite targets the **ksh superset** (arrays, `[[ ]]`, coprocesses, `${|...}`, etc.), not POSIX `sh`. The bulk of the 414 failures are ksh-only features silex does not implement by design. Not a POSIX-conformance figure. |
-| Oils / OSH | **1081 pass / 2802 run, all 139 files measured** (dash, same runner: 957 pass) | Was 907 on 2026-08-12, 972 then 1017 on 2026-08-13, 1037 then 1053 on 2026-08-14, 1056 on 2026-08-15, 1080 on 2026-08-17. The suite is used as a GAP FINDER rather than a score: running sh_spec.py with silex AND dash in one invocation and diffing per case isolates the cases where **dash passes and silex fails** -- real POSIX gaps -- from the bash/ksh extension cases neither shell passes (the bulk of the failures). That differential went **198 -> 167 -> 107** over 2026-08-13, **107 -> 86 -> 71** over 2026-08-14, **71 -> 59** on 2026-08-15, **59 -> 35** on 2026-08-17, and **35 -> 34** on 2026-08-18 (133 cases fixed since 167, the first figure measured over all 139 files; none regressed -- each figure was re-measured over all 139 files, and `comm` on consecutive case lists shows every survivor was already in the previous list). The remainder is the honest POSIX to-do list (files with more than one: var-num 3, builtin-trap 3, builtin-cd 3, vars-special 2, builtin-meta 2, blog-other1 2, ble-unset 2, alias 2). Roughly half are unwinnable by construction or deliberate: five want a shell whose `$0` ends in "sh"; three follow from applets outranking PATH by design; two want dash's read-ahead over a piped script, which POSIX forbids. Reproduce with `core/tests/external/run-oils-differential.sh` (see below). |
+| Oils / OSH | **1082 pass / 2802 run, all 139 files measured** (dash, same runner: 957 pass) | Was 907 on 2026-08-12, 972 then 1017 on 2026-08-13, 1037 then 1053 on 2026-08-14, 1056 on 2026-08-15, 1080 on 2026-08-17. The suite is used as a GAP FINDER rather than a score: running sh_spec.py with silex AND dash in one invocation and diffing per case isolates the cases where **dash passes and silex fails** -- real POSIX gaps -- from the bash/ksh extension cases neither shell passes (the bulk of the failures). That differential went **198 -> 167 -> 107** over 2026-08-13, **107 -> 86 -> 71** over 2026-08-14, **71 -> 59** on 2026-08-15, **59 -> 35** on 2026-08-17, and **35 -> 34 -> 33** on 2026-08-18 (134 cases fixed since 167, the first figure measured over all 139 files; none regressed -- each figure was re-measured over all 139 files, and `comm` on consecutive case lists shows every survivor was already in the previous list). The remainder is the honest POSIX to-do list (files with more than one: var-num 3, builtin-cd 3, vars-special 2, builtin-trap 2, builtin-meta 2, blog-other1 2, ble-unset 2, alias 2). Roughly half are unwinnable by construction or deliberate: five want a shell whose `$0` ends in "sh"; three follow from applets outranking PATH by design; two want dash's read-ahead over a piped script, which POSIX forbids. Reproduce with `core/tests/external/run-oils-differential.sh` (see below). |
 | **ShellSpec** | **1696 examples, 0 failures** (58 skips) | ShellSpec's own core suite, run with silex as both runner and target shell — **byte-identical to dash on the same runner**. Was "fails to launch" earlier on 2026-08-10; fixing it surfaced and fixed 8 real silex bugs: 3-arg-max `test`/`[` (now full POSIX + XSI grammar), mid-word `#` starting comments, quote-blind word classifiers eating empty quoted fields, `${@:-}` gluing positionals, builtins beating functions in command search, errexit killing loops on exempt AND-lists, FLOW sentinels leaking as exit 234 through pipes/`&`, and recursive functions reusing the outer call's expanded redirect target. |
 | **GNU sed** | **50 pass / 1 fail** (17 skip, 70 run) | sed applet rewritten GNU-compatible (was 6/45 on 2026-08-11; the old mini-sed had broken `N`/`D`/`P`, approximated regex ranges, and none of the GNU option/error surface). Now implements the full command set (D P Q R T W F e v z), GNU addressing (`0,/re/`, `0r` prepend, `+N`/`~N`), s-flags with exact GNU error strings and flag ordering, case conversion and `\cX`/`\dNNN`/`\oNNN`/`\xHH` escapes, `-s -z -u -l -i[SUFFIX] --posix --sandbox --follow-symlinks`, missing-final-newline preservation via delayed delimiters, per-filename shared R/w streams, and GNU exit codes (1/2/4). Behaviors were validated against the vendored GNU binary as an oracle. The single remaining failure is nulldata's dot-matches-NUL subtest: glibc's regex never lets `.` match a NUL byte (GNU sed ships its own engine); everything else in that test passes. |
 | **GNU coreutils** | **243 pass / 0 fail** (43 skip, 286 run) | Measured on a NATIVE filesystem (2026-08-13). The previous 190/27 was measured on WSL2 drvfs (`/mnt/c`), where **chmod is a no-op** — `chmod 0 f` leaves the file readable — so every permission-semantics test failed for the filesystem's reasons, not silex's. Copying the configured checkout to ext4 and rerunning gives **zero failures**. Three real applet gaps were found and fixed along the way by testing the failures on ext4 against the GNU binaries as oracle: chmod lacked GNU argv permutation (`chmod f -w`) and multi-op symbolic clauses (`u+r-w`, who-only `ug`), mkdir `-m` rejected symbolic modes (`u=rwx,g=rx,o=w,-s,+t` → 1752), and ln lacked `-i`/`-L`/`-P`. Reproduce with `core/tests/external/run-gnu-coreutils-native.sh` (copies the checkout to /tmp once and runs against a snapshot of the binary — rebuilding mid-run otherwise fails every tool symlink with ETXTBSY). |
@@ -400,7 +400,21 @@ level. The lexer now scans, `'` quotes inside `"..."` in a pattern operand
 `\}` loses its backslash in a `"${v-...}"` word -- which cleared modernish's
 BUG_PSUBBKSL1 as a side effect.
 
-### What remains, and why (34 cases)
+### What the 2026-08-18 EXIT-trap run fixed (34 -> 33)
+
+`builtin-trap` 29 reads as a case about numeric trap operands, and silex
+already handled those (`trap 0 EXIT`, `trap 07 EXIT`). What it failed was
+the last line, `trap -1 EXIT` under `-e`, which exposed something much
+wider: silex never ran the EXIT trap when the shell died of a shell
+ERROR. A readonly assignment, `set -u` on an unset variable, `shift 3`,
+`set -o bogus`, `$((1/0))` -- dash and bash run the trap on every one of
+them, and silex ran none, because the trap firing lived inside the `exit`
+builtin while fifteen other paths called exit() directly. A script's
+cleanup was skipped exactly when it was most needed. All of them now go
+through `sh_exit_with_trap()`; the exit STATUSES are unchanged, since the
+1-vs-2 split is pinned by smoosh in some places and dash in others.
+
+### What remains, and why (33 cases)
 
 About half of the remainder is not winnable without giving something up:
 
@@ -417,11 +431,16 @@ About half of the remainder is not winnable without giving something up:
 - **One** (`redirect` 32) wants dash's single-digit limit on a redirection's
   fd prefix; `exec 10>file` is useful and silex's own machinery parks
   descriptors at 10 and above.
-- **Six** are judgment calls left open on purpose, each recorded where the
+- **Seven** are judgment calls left open on purpose, each recorded where the
   code makes the choice: whether an EXIT trap's status becomes the shell's on
   normal termination (`builtin-trap` 18 -- dash and bash say no, smoosh's
   `builtin.trap.subshell.false.exit` says yes, and silex currently follows
-  smoosh); whether `printf -v` is an illegal option (`builtin-printf` 4);
+  smoosh); whether a subshell's `trap` with no operands lists the traps it
+  inherited (`builtin-trap` 0 -- dash and osh say no, but smoosh's
+  `builtin.trap.supershell` and bash both say yes, and `exec.c`'s
+  `subshell_reset_traps` keeps the action strings for exactly that test, so
+  taking dash's side here trades one passing test for another); whether
+  `printf -v` is an illegal option (`builtin-printf` 4);
   whether `local` is a special builtin (`command-parsing` 0 -- dash says yes,
   bash no); whether a symbolic umask permcopy reads the original or the
   running value (`builtin-umask` 22); dash's `''}` for `"${var-'}'}"`
@@ -432,14 +451,18 @@ The rest are real and open: here-docs and unterminated quotes inside alias
 values (`alias` 25, 39), tempenv unset nesting (`ble-unset` 3, 4), three
 `builtin-cd` cases, `read` with backslash continuation and a non-default IFS
 (`builtin-read` 24), `set -u` exit status under `-i` (`builtin-set` 5), an
-assignment prefix on `exec` (`builtin-special` 3), trap
-listings inside subshells (`builtin-trap` 0, 29), a here-doc delimiter
+assignment prefix on `exec` (`builtin-special` 3), a here-doc delimiter
 containing `$( )` (`here-doc` 6), tilde expansion in a `${v-word}`
 (`tilde` 11), an all-empty `$*` under a non-whitespace IFS
 (`toysh-posix` 18), and `$PWD` export (`vars-special` 1).
 
-That is 18 unwinnable-or-deliberate and 16 open, which is the whole 34: the
+That is 19 unwinnable-or-deliberate and 14 open, which is the whole 33: the
 list above is the sweep's `gaps.txt` in full, not a selection from it.
+
+One inconsistency inside the `builtin-trap` 0 divergence is worth fixing on
+its own terms, whichever side is taken: silex lists inherited traps in
+`( trap )` and in `trap | cat`, but not in `$(trap)`. The three should
+agree.
 
 ## Finding real gaps: the silex-vs-dash differential
 
