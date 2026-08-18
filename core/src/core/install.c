@@ -289,6 +289,18 @@ int applet_install(int argc, char **argv)
         if (arg[0] != '-' || arg[1] == '\0')
             break;
 
+        /* Long options get their own module lookup, for the same reason cp's
+         * does: falling through to the short-flag loop reads `--foo` as the
+         * short flag `-` and looks the module up under "--". */
+        if (arg[1] == '-') {
+            silex_module_t *mod = registry_lookup("install", arg);
+            if (mod)
+                return mod->handler(argc, argv, i);
+            err_msg("install", "unrecognized option '%s'", arg);
+            err_usage("install", "[-dvps] [-m MODE] [-o OWNER] [-g GROUP] SRC... DST");
+            return 1;
+        }
+
         const char *p = arg + 1;
         int stop = 0;
         while (*p && !stop) {
@@ -373,7 +385,8 @@ int applet_install(int argc, char **argv)
                     char flag_str[3] = {'-', *p, '\0'};
                     silex_module_t *mod = registry_lookup("install", flag_str);
                     if (mod) {
-                        return mod->handler(argc, argv, 1);
+                        /* `i`, not 1 -- see the same fix in cp.c. */
+                        return mod->handler(argc, argv, i);
                     }
                 }
                 err_msg("install", "unrecognized option '-%c'", *p);

@@ -423,6 +423,26 @@ int applet_cp(int argc, char **argv)
         if (arg[0] != '-' || arg[1] == '\0')
             break;
 
+        /* An unrecognised LONG option gets a module lookup, as grep, sort,
+         * find and xargs already do for theirs.
+         *
+         * Without this it fell through to the short-flag loop below, which
+         * starts at arg+1 -- so `--reflink=always` was read as the short flag
+         * `-` and looked up under the two-character name "--", reporting
+         * "unrecognized option '--'". Every flag modules/cp_reflink.c
+         * advertises is a long one (--reflink, --reflink=auto/always/never),
+         * so the module that ships in this repo could not be reached by any
+         * invocation at all. */
+        if (arg[1] == '-') {
+            silex_module_t *mod = registry_lookup("cp", arg);
+            if (mod)
+                return mod->handler(argc, argv, i);
+            fprintf(stderr, "silex: cp: unrecognized option '%s'\n", arg);
+            fprintf(stderr, "silex: cp: unsupported flag %s. "
+                    "Install silex-gnu-cp module or GNU coreutils.\n", arg);
+            return 1;
+        }
+
         /* Short flags */
         const char *p = arg + 1;
         int unknown_flag = 0;
@@ -457,7 +477,12 @@ int applet_cp(int argc, char **argv)
                     char flag_str[3] = {'-', *p, '\0'};
                     silex_module_t *mod = registry_lookup("cp", flag_str);
                     if (mod) {
-                        return mod->handler(argc, argv, 1);
+                        /* `i`, not 1: flag_index is documented as the argv slot
+                         * the unrecognised flag was found in, and modules index
+                         * argv with it (cp_reflink reads argv[flag_index] to
+                         * pick its mode). A hardcoded 1 was right only when the
+                         * flag happened to be the first argument. */
+                        return mod->handler(argc, argv, i);
                     }
                 }
                 /* Unknown flag */
