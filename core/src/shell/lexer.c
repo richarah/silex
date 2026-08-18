@@ -150,6 +150,98 @@ void lexer_free(lexer_t *l)
     l->wordbuf     = NULL;
     l->wordbuf_len = 0;
     l->wordbuf_cap = 0;
+    while (l->pushed) {
+        alias_push_t *p = l->pushed;
+        l->pushed = p->next;
+        free(p->text);
+        free(p->name);
+        free(p);
+    }
+    l->pushed_depth = 0;
+}
+
+/* -------------------------------------------------------------------------
+ * Alias push-back
+ * ------------------------------------------------------------------------- */
+
+/* A chain this deep is a runaway, not a program. The per-name guard already
+ * stops direct and mutual recursion; this only bounds the pathological case
+ * of very many distinct aliases each expanding into the next. */
+#define ALIAS_PUSH_MAX 64
+
+static int push_text(lexer_t *l, const char *text, size_t len, const char *name,
+                     int ends_blank)
+{
+    alias_push_t *ap = malloc(sizeof(*ap));
+    char         *tx = malloc(len + 1);
+    char         *nm = NULL;
+    if (name) {
+        nm = malloc(strlen(name) + 1);
+        if (!nm) { free(ap); free(tx); return 0; }
+        strcpy(nm, name);
+    }
+    if (!ap || !tx) { free(ap); free(tx); free(nm); return 0; }
+    memcpy(tx, text, len);
+    tx[len] = '\0';
+    ap->text       = tx;
+    ap->pos        = 0;
+    ap->name       = nm;
+    ap->ends_blank = ends_blank;
+    ap->spent      = 0;
+    ap->next       = l->pushed;
+    l->pushed      = ap;
+    l->pushed_depth++;
+    return 1;
+}
+
+int lexer_push_alias(lexer_t *l, const char *value, const char *name)
+{
+    if (l->pushed_depth >= ALIAS_PUSH_MAX)
+        return 0;
+
+    size_t len = strlen(value);
+    int ends_blank = (len > 0 && (value[len - 1] == ' ' || value[len - 1] == '\t'));
+
+    /* An outstanding one-character pushback was read BEFORE this alias name was
+     * recognised (the word scanner ungetc's whatever terminated the word), so it
+     * belongs after the value, not before it. Sink it underneath as its own
+     * pushed text. `alias a='b;'` with b an alias got `; echo hi` without this.
+     * A pushed-back EOF is simply dropped: once the value runs out the real
+     * input is at end of file again anyway. */
+    if (l->has_pushback) {
+        int c = l->pushback;
+        l->has_pushback = 0;
+        if (c != EOF) {
+            char ch = (char)c;
+            if (!push_text(l, &ch, 1, NULL, 0)) {
+                l->pushback = c;      /* nothing changed; restore and refuse */
+                l->has_pushback = 1;
+                return 0;
+            }
+        }
+    }
+
+    if (!push_text(l, value, len, name, ends_blank))
+        return 0;
+    /* The value's own text is what we are about to read, so any pending
+     * continuation from an earlier value is superseded. */
+    l->alias_blank = 0;
+    return 1;
+}
+
+int lexer_alias_active(const lexer_t *l, const char *name)
+{
+    for (const alias_push_t *p = l->pushed; p; p = p->next)
+        if (p->name && strcmp(p->name, name) == 0)
+            return 1;
+    return 0;
+}
+
+int lexer_take_alias_blank(lexer_t *l)
+{
+    int v = l->alias_blank;
+    l->alias_blank = 0;
+    return v;
 }
 
 /* -------------------------------------------------------------------------
@@ -161,6 +253,32 @@ static int lexer_getc(lexer_t *l)
     if (l->has_pushback) {
         l->has_pushback = 0;
         return l->pushback;
+    }
+    /* Alias text comes before the real input. Running out is what releases the
+     * value's recursion guard (one read later — see `spent`) and, when the
+     * value ended in a <blank>, what tells the parser to check the next word
+     * too. Not echoed under `set -v`: the alias text was never the shell's
+     * input. */
+    alias_push_t **link = &l->pushed;
+    while (*link) {
+        alias_push_t *ap = *link;
+        int pc = (unsigned char)ap->text[ap->pos];
+        if (pc != '\0') {
+            ap->pos++;
+            return pc;
+        }
+        if (!ap->spent) {
+            ap->spent = 1;
+            if (ap->name)
+                l->alias_blank = ap->ends_blank;
+            link = &ap->next;   /* read on past it, but leave it guarding */
+            continue;
+        }
+        *link = ap->next;       /* the grace read has happened; drop it */
+        l->pushed_depth--;
+        free(ap->text);
+        free(ap->name);
+        free(ap);
     }
     int c;
     if (l->input) {

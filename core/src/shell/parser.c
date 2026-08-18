@@ -45,10 +45,6 @@ void parser_init(parser_t *p, lexer_t *l, arena_t *a)
     p->error        = 0;
     p->alias_lookup = NULL;
     p->alias_ctx    = NULL;
-    p->pend         = NULL;
-    p->pend_head    = 0;
-    p->pend_count   = 0;
-    p->pend_cap     = 0;
 }
 
 void parser_set_aliases(parser_t *p,
@@ -271,163 +267,84 @@ static void wl_free(word_list_t *wl)
  * Token-peeking helpers
  * ------------------------------------------------------------------------- */
 
-/* Peek at next token (skips nothing). Tokens injected by alias expansion in
- * `pend` are served before the lexer's. */
+static int expand_command_aliases(parser_t *p);
+
+/* Peek at next token (skips nothing).
+ *
+ * POSIX 2.3.1: when an alias value ends in a <blank>, the word FOLLOWING it is
+ * itself checked for alias substitution -- that is what lets `alias e_='echo '`
+ * chain into a second alias. The lexer raises the flag as the value's text runs
+ * out, which is exactly the read this peek has just done, so the check belongs
+ * here and nowhere else: the following word can land in ANY grammar position,
+ * and the Oils case that builds `for i in 1 2 3` out of five blank-ended
+ * aliases puts one at the loop variable, one at the `in`, and one in the word
+ * list. Applying it per-position instead means missing the positions nobody
+ * thought of. */
 static token_t peek(parser_t *p)
 {
-    if (p->pend_head < p->pend_count)
-        return p->pend[p->pend_head];
-    return lexer_peek(p->lexer);
+    token_t t = lexer_peek(p->lexer);
+    if (p->alias_lookup && lexer_take_alias_blank(p->lexer) &&
+        expand_command_aliases(p))
+        t = lexer_peek(p->lexer);
+    return t;
 }
 
-/* Consume next token */
+/* Consume next token. Routed through peek() so a token taken without a
+ * preceding lookahead still gets the continuation check above; the lexer caches
+ * the lookahead, so this costs nothing. */
 static token_t consume(parser_t *p)
 {
-    if (p->pend_head < p->pend_count)
-        return p->pend[p->pend_head++];
+    peek(p);
     return lexer_next(p->lexer);
 }
 
-/* Prepend `n` tokens ahead of the remaining pending/lexer input. */
-static void pend_prepend(parser_t *p, const token_t *toks, int n)
-{
-    int rem  = p->pend_count - p->pend_head;
-    int need = n + rem;
-    token_t *nt = arena_alloc(p->arena, (size_t)need * sizeof(token_t));
-    for (int i = 0; i < n; i++)   nt[i]     = toks[i];
-    for (int i = 0; i < rem; i++) nt[n + i] = p->pend[p->pend_head + i];
-    p->pend       = nt;
-    p->pend_count = need;
-    p->pend_head  = 0;
-    p->pend_cap   = need;
-}
-
-/* POSIX parse-time alias substitution at a command-word position. While the next
- * token is a plain word that names an alias (and is not already being expanded,
- * which stops `alias ls='ls -la'` and mutual loops), replace it with the tokens
- * of its value. The first token of the value becomes the new command word, so an
- * alias chain expands and an alias to a keyword/operator (`not='! '` -> TOK_BANG)
- * reshapes the parse. Call only where a command word is expected. */
-/* Returns 1 when at least one alias name was consumed (so the caller can
- * recognize a command that vanished entirely, e.g. `alias empty=''; empty`). */
-/* Sentinel queued after the tokens of an alias value that ended in a blank.
- * POSIX: when an alias value ends in a <blank>, the word FOLLOWING it is
- * itself checked for alias substitution. Recognised by POINTER identity, so
- * no real word token can be mistaken for it. */
-static char alias_blank_marker[] = "";
-
+/* POSIX parse-time alias substitution (2.3.1) at a command-word position. While
+ * the next token is a plain word naming an alias that is not already being
+ * read, drop the word and splice the alias VALUE into the lexer's character
+ * stream. Everything follows from that splice: the value's first word is again
+ * a command word, so chains expand; an alias to a keyword or operator
+ * (`not='! '` -> TOK_BANG) reshapes the parse; and a value may leave a quote
+ * open or start a here-doc that the real input finishes.
+ *
+ * This used to lex the value with a SEPARATE lexer and hand the parser the
+ * resulting tokens. That could not express either of the last two: a value
+ * ending in an unterminated quote had nothing to swallow, and a here-doc opened
+ * inside a value was never registered with the lexer that would have collected
+ * its body. Both are alias.test.sh cases (25, 39) that dash passes.
+ *
+ * Call only where a command word is expected. Returns 1 when at least one alias
+ * name was consumed, so the caller can recognise a command that vanished
+ * entirely (`alias empty=''; empty`). */
 static int expand_command_aliases(parser_t *p)
 {
     int consumed = 0;
     if (!p->alias_lookup)
         return 0;
-    const char *active[64];
-    int nactive = 0;
-    /* Words already scanned past (the tokens of an expanded value, and any
-     * word that turned out not to be an alias). They are pushed back in
-     * front of the stream when we finish. */
-    token_t prefix[512];
-    int np      = 0;
-    int markers = 0;   /* blank-continuation sentinels still ahead */
-    int eligible = 1;  /* is the token at the head in an alias-checked position? */
-    int guard   = 0;
 
-    while (guard++ < 1000) {
-        token_t t = peek(p);
-
-        /* End of a value that ended in a blank: the next word becomes
-         * eligible, and the recursion guard resets -- `echo-x echo-x` must
-         * expand BOTH words, which a command-wide guard would prevent. */
-        if (t.type == TOK_WORD && t.text == alias_blank_marker) {
-            consume(p);
-            markers--;
-            nactive  = 0;
-            eligible = 1;
-            continue;
-        }
-
-        const char *val = NULL;
-        if (eligible && t.type == TOK_WORD && t.text) {
-            int seen = 0;
-            for (int i = 0; i < nactive; i++)
-                if (strcmp(active[i], t.text) == 0) { seen = 1; break; }
-            if (!seen)
-                val = p->alias_lookup(p->alias_ctx, t.text);
-        }
-
-        if (!val) {
-            /* Not expandable here. Step over it only to reach a pending
-             * sentinel; with none ahead there is nothing left to do. Words
-             * stepped over are NOT eligible, so an alias name sitting inside
-             * a value (`alias e_='echo one '` with `one` also an alias) stays
-             * literal, as POSIX requires. */
-            if (markers > 0 && t.type != TOK_EOF && np < 512) {
-                prefix[np++] = consume(p);
-                eligible = 0;
-                continue;
-            }
+    /* Goes to the lexer directly: peek() calls back into this function, and the
+     * head is in alias-checked position by construction anyway -- on entry it is
+     * the command word, and after a splice it is the value's first word. A
+     * continuation flag raised by these reads is therefore already accounted
+     * for and must not fire a second time later. */
+    for (int guard = 0; guard < 1000; guard++) {
+        token_t t = lexer_peek(p->lexer);
+        lexer_take_alias_blank(p->lexer);
+        if (t.type != TOK_WORD || !t.text)
             break;
-        }
+        if (lexer_alias_active(p->lexer, t.text))
+            break;
+        const char *val = p->alias_lookup(p->alias_ctx, t.text);
+        if (!val)
+            break;
 
-        if (nactive < 64)
-            active[nactive++] = t.text;   /* arena-owned; outlives the parse */
-        consume(p);                       /* drop the alias name */
-        if (np == 0 && markers == 0)
-            consumed = 1;                 /* an actual command word vanished */
-
-        size_t vlen = strlen(val);
-        int ends_blank = (vlen > 0 &&
-                          (val[vlen - 1] == ' ' || val[vlen - 1] == '\t'));
-
-        /* Re-lex the alias value; its token text is arena-allocated (p->arena),
-         * so it survives lexer_free. */
-        lexer_t sub;
-        lexer_init_str(&sub, val, p->arena);
-        token_t buf[257];
-        int n = 0;
-        for (;;) {
-            token_t tk = lexer_next(&sub);
-            if (tk.type == TOK_EOF)
-                break;
-            if (n < 256)
-                buf[n++] = tk;
-        }
-        lexer_free(&sub);
-
-        if (ends_blank) {
-            token_t m;
-            memset(&m, 0, sizeof(m));
-            m.type = TOK_WORD;
-            m.text = alias_blank_marker;
-            buf[n++] = m;
-            markers++;
-        }
-        if (n > 0)
-            pend_prepend(p, buf, n);
-        /* The value's own first token is still a command word, so it stays
-         * eligible: `alias hi='e_ hello'` with `alias e_='echo __'` chains. */
-        eligible = 1;
+        lexer_next(p->lexer);   /* the alias name goes away */
+        consumed = 1;
+        if (!lexer_push_alias(p->lexer, val, t.text))
+            break;
+        /* Keep going even when the value is empty: whatever follows has just
+         * become the command word, and a command word is checked. `alias n=''`
+         * in front of another alias expands both, as it does in dash and bash. */
     }
-
-    /* A sentinel must never reach the parser (it would look like an empty
-     * word). Only reachable if the guard above ran out. */
-    while (markers > 0) {
-        token_t t = peek(p);
-        if (t.type == TOK_EOF)
-            break;
-        token_t got = consume(p);
-        if (got.type == TOK_WORD && got.text == alias_blank_marker) {
-            markers--;
-            continue;
-        }
-        if (np < 512)
-            prefix[np++] = got;
-        else
-            break;
-    }
-
-    if (np > 0)
-        pend_prepend(p, prefix, np);
     return consumed;
 }
 

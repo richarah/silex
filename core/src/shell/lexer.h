@@ -60,6 +60,35 @@ typedef struct heredoc_pending {
     struct heredoc_pending *next;
 } heredoc_pending_t;
 
+/* Text spliced into the CHARACTER stream ahead of the real input, so an alias
+ * value lexes exactly as if it had been typed in place.
+ *
+ * The alternative — lexing the value with a separate lexer and handing the
+ * parser the resulting tokens — cannot express the two things POSIX allows an
+ * alias value to do: leave a quote open for the text that follows it
+ * (`alias e_='echo "'`), and start a here-doc whose body is part of the value.
+ * A token that begins in the value and ends in the real input is one token
+ * here, and a here-doc started inside the value is collected by the same lexer
+ * that is collecting every other here-doc, in the same order.
+ *
+ * `name` is the alias this text came from. It stays on the stack until the
+ * text runs out, and an alias on the stack is not substituted again — that is
+ * the whole of the recursion guard, and it is why `alias ls='ls -la'` expands
+ * once rather than forever while `alias a=b; alias b=a` terminates. */
+typedef struct alias_push {
+    char              *text;       /* malloc'd copy; the alias table may change */
+    size_t             pos;
+    char              *name;       /* malloc'd; NULL for a re-pushed character */
+    int                ends_blank; /* value ended in <blank>: see alias_blank */
+    /* The text has run out but the entry is still here. An exhausted value is
+     * kept for one more character read so that the alias stays guarded until
+     * the token whose last character came from it has been handed to the
+     * parser. Without that grace `alias e_=e_` re-expands: the guard would be
+     * gone by the time the parser looked at the e_ the value produced. */
+    int                spent;
+    struct alias_push *next;
+} alias_push_t;
+
 typedef struct {
     const char        *input;    /* NULL if reading from FILE */
     size_t             pos;      /* position in input string */
@@ -92,6 +121,15 @@ typedef struct {
      * `echo 'abc` printed abc and exited 0, silently swallowing the rest of
      * the script into the runaway quote. First error wins. */
     const char        *error;
+    /* Alias text still being read, innermost first. */
+    alias_push_t      *pushed;
+    int                pushed_depth;
+    /* Raised when the text of an alias whose value ended in a <blank> runs
+     * out. POSIX 2.3.1: the word FOLLOWING such a value is itself checked for
+     * alias substitution, which is what makes `alias e_='echo '` chain into a
+     * second alias. The parser reads it with lexer_take_alias_blank() right
+     * after the peek that crossed the boundary. */
+    int                alias_blank;
 } lexer_t;
 
 void    lexer_init_str(lexer_t *l, const char *input, arena_t *a);
@@ -102,5 +140,15 @@ void    lexer_free(lexer_t *l);
 token_t lexer_next(lexer_t *l);
 token_t lexer_peek(lexer_t *l);
 void    lexer_consume(lexer_t *l);
+
+/* Splice an alias value into the character stream. `name` guards against
+ * re-substituting the same alias while its text is being read. Returns 0 if
+ * the stack is full (a pathological alias chain), in which case nothing was
+ * pushed and the caller must treat the word as an ordinary command. */
+int     lexer_push_alias(lexer_t *l, const char *value, const char *name);
+/* 1 while `name`'s value is still being read — do not substitute it again. */
+int     lexer_alias_active(const lexer_t *l, const char *name);
+/* Read and clear the blank-continuation flag described above. */
+int     lexer_take_alias_blank(lexer_t *l);
 
 #endif /* SILEX_LEXER_H */

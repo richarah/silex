@@ -85,13 +85,11 @@ typedef struct {
      * value is a keyword/operator (e.g. modernish's `alias not='! '`) changes
      * the grammar (`not { ...; }` parses as `! { ...; }`). Set by the shell via
      * parser_set_aliases(); when alias_lookup is NULL no expansion is done.
-     * The re-lexed tokens are queued in `pend` and consumed before the lexer. */
+     * The value is spliced into the lexer's CHARACTER stream (lexer_push_alias),
+     * not pre-lexed, so a value may leave a quote open for the text after it or
+     * open a here-doc the real input finishes. */
     const char *(*alias_lookup)(void *ctx, const char *name);
     void       *alias_ctx;
-    token_t    *pend;
-    int         pend_head;
-    int         pend_count;
-    int         pend_cap;
 } parser_t;
 
 void    parser_init(parser_t *p, lexer_t *l, arena_t *a);
