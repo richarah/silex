@@ -1038,13 +1038,30 @@ static char *cmd_subst(shell_ctx_t *sh, const char *cmd)
          * was "command not found". Safe across fork: the child only reads these
          * pointers and _exit()s. */
         memcpy(sub.aliases, sh->aliases, sizeof(sh->aliases));
-        /* Clear set_in_this_shell for inherited traps. NOTE: a command
-         * substitution does NOT inherit the parent's signal trap actions -- dash
-         * resets them to default in the `$(...)` subshell, and matching that is
-         * what modernish expects (a PIPE trap does not fire for a SIGPIPE taken
-         * by a pipeline stage inside a command substitution). */
-        for (int i = 0; i < NSIG; i++)
+        /* Traps. A command substitution does NOT inherit the parent's signal
+         * trap ACTIONS -- they are reset to the default disposition in the
+         * `$(...)` child, which is what modernish expects (a PIPE trap does not
+         * fire for a SIGPIPE taken by a pipeline stage inside a command
+         * substitution). `sub` is a fresh shell_init, so that reset is already
+         * done; nothing here installs a handler.
+         *
+         * What it DOES carry is the parent's action strings, marked
+         * `inherited`: display-only entries so that `saved=$(trap)` -- the
+         * standard idiom for saving and restoring a trap set -- reports the
+         * traps that are actually in effect. Without them `$(trap)` was empty
+         * while `( trap )` and `trap | cat` both listed, since those go through
+         * subshell_reset_traps(), which keeps the strings for exactly this
+         * reason (smoosh builtin.trap.supershell). Same policy as there: an
+         * ignored signal (action "") is NOT display-only -- SIG_IGN really does
+         * survive the fork, so it keeps its live entry. */
+        for (int i = 0; i < NSIG; i++) {
+            const char *act = sh->traps[i].action;
             sub.traps[i].set_in_this_shell = 0;
+            if (act == SHELL_TRAP_DEFAULT)
+                continue;
+            sub.traps[i].action    = (char *)act;
+            sub.traps[i].inherited = (act[0] != '\0');
+        }
         sub.disposable = 1;   /* the final command may tail-exec */
         shell_run_string(&sub, cmd);
         if (sub.run_string_parse_error && errfd[1] >= 0) {
