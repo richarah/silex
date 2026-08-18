@@ -1,95 +1,73 @@
 # GNU Flag Implementation Status
 
-Generated: 2026-03-31
+Last verified: 2026-08-18 (previous: 2026-03-31)
+
+Reproduce every figure on this page with:
+
+```sh
+bash tests/conformance/new_flags_test.sh build/bin/silex
+```
 
 ## Summary
 
-- **Test infrastructure**: ✓ Created (`tests/conformance/new_flags_test.sh`)
-- **Module dispatch**: ✓ Wired into all core tools
-- **Tests passing**: 22/30 (73%)
-- **Critical path items**: 4/5 passing
+- **Test infrastructure**: `tests/conformance/new_flags_test.sh`
+- **Tests passing**: **28/28 (100%)** — was 22/30 (73%) on 2026-03-31
+- **Critical path items**: 5/5 passing
+- **Module dispatch**: wired into `grep`, `sort`, `xargs`, `cp` and `install`;
+  `find` has the lookup but cannot yet integrate a module into its predicate
+  tree (see below)
 
-## Test Results
+## What changed since the March snapshot
 
-### PASSING (22 tests)
+Every flag the March run listed as FAILING is implemented and tested:
 
-**grep (8/12):**
-- ✓ -A N (after-context)
-- ✓ -B N (before-context)
-- ✓ -C N (context)
-- ✓ -o (only-matching)
-- ✓ -m N (max-count)
-- ✓ -L (files-without-match)
-- ✓ -H (always print filename)
-- ✓ -Z (NUL-terminated filenames) - partial
+| Flag | March | Now |
+|------|-------|-----|
+| `grep -h` (never print filename) | ✗ | ✓ |
+| `grep -x` (match whole line) | ✗ | ✓ |
+| `grep -b` (byte offset) | ✗ | ✓ |
+| `grep -Z` (NUL-terminated filenames) | partial | ✓ |
+| `install -D` (create leading dirs) | ✗ **CRITICAL** | ✓ |
+| `sort -c` (check sorted) | ✗ | ✓ |
+| `sort -R` (random sort) | ✗ | ✓ |
+| `xargs -t` (trace commands) | ✗ | ✓ |
 
-**find (3/3):**
-- ✓ -print0 (NUL-terminated) **CRITICAL**
-- ✓ -newer FILE (modification time)
-- ✓ -size N[cwbkMG]
+The March page also carried a "Priority Implementation Order" and a "Next
+Steps" list, both of which are now entirely done; they have been removed rather
+than left to read as outstanding work.
 
-**xargs (4/5):**
-- ✓ -L N (max-lines) **CRITICAL**
-- ✓ -a FILE (read from file)
-- ✓ -s N (max command line)
-- ✓ (general functionality)
+## Module dispatch: what the March page claimed, and what was true
 
-**sed (1/1):**
-- ✓ -f FILE (script from file) **CRITICAL**
+The March page recorded "Module dispatch: ✓ Wired into all core tools". The
+lookup call was indeed present in every tool, but in `cp` and `install` it was
+reachable only from the SHORT-flag loop. An unrecognised long option fell into
+that loop, was read as the short flag `-`, and was looked up under the
+two-character name `"--"`. Since `modules/cp_reflink.c` advertises nothing but
+long flags (`--reflink`, `--reflink=auto|always|never`), the module shipped in
+this repository could not be reached by any invocation at all.
 
-**sort (1/3):**
-- ✓ -M (month sort)
+Separately, `module_load()` closed the descriptor it had dlopened through
+`/proc/self/fd/N`, so every module reused the same path string and `dlopen`'s
+pathname cache returned the FIRST module for all of them: at most one module
+could load per process, chosen by `readdir` order.
 
-**install (2/4):**
-- ✓ -v (verbose)
-- ✓ -t DIR (target directory)
+Both are fixed as of 2026-08-18, and `cp --reflink=auto` now works end to end
+against the shipped module. The general lesson is the one this page is an
+instance of: a tick in a status document is not a test. The behaviour is now
+pinned by `tests/unit/test_module.sh` and
+`tests/security/test_module_security.sh`.
 
-### FAILING (8 tests)
+## Known limitation
 
-**grep (4 flags):**
-- ✗ -h (never print filename) - ~10 lines
-- ✗ -x (match whole line) - ~15 lines
-- ✗ -b (byte offset) - ~20 lines
-- ✗ -Z (NUL-terminated) - needs fix ~5 lines
+`find` calls `registry_lookup()` for an unknown predicate but cannot act on a
+hit: find evaluates a predicate TREE, and the module API's
+`handler(argc, argv, flag_index)` has no way to inject a node into it. The call
+site says so. Extending the module API for predicate injection is the fix, and
+is not scheduled.
 
-**install (2 flags):**
-- ✗ -D (create leading dirs) **CRITICAL** - ~80 lines
-- ✗ (exit code issue with -D)
+## Where the remaining gaps are recorded
 
-**sort (2 flags):**
-- ✗ -c (check sorted) - ~40 lines
-- ✗ -R (random sort) - ~30 lines
-
-**xargs (1 flag):**
-- ✗ -t (trace commands) - ~15 lines
-
-**Total new code needed: ~215 lines** (much less than the ~5800 estimated!)
-
-## Priority Implementation Order
-
-### P0 - Critical Path (1 item, ~80 lines)
-1. **install -D** - Makefiles depend on this
-
-### P1 - High Usage (4 items, ~60 lines)
-2. grep -h (never print filename)
-3. grep -x (match whole line)
-4. grep -b (byte offset)
-5. xargs -t (trace)
-
-### P2 - Nice to Have (2 items, ~70 lines)
-6. sort -c (check sorted)
-7. sort -R (random sort)
-
-### P3 - Polish (1 item, ~5 lines)
-8. grep -Z fix (NUL-terminated filenames)
-
-## Next Steps
-
-1. ✓ Create test infrastructure
-2. → Implement install -D (~80 lines)
-3. → Implement 4 grep flags (~50 lines)
-4. → Implement xargs -t (~15 lines)
-5. → Implement 2 sort flags (~70 lines)
-6. → Fix grep -Z edge case (~5 lines)
-7. Run full test suite
-8. Update FLAG_GAPS.md with actual status
+Flags that are still absent, with the reason and an implementation estimate for
+each, are in [FLAG_GAPS.md](FLAG_GAPS.md). That document is a triage of GNU's
+full flag surface, not a to-do list — most entries are deliberately
+unimplemented.

@@ -58,16 +58,43 @@ external suite covering for them:
 
 | File | Lines | Why |
 |------|-------|-----|
-| `module/registry.c` | 159 | Module loading needs `.so` files under `SILEX_MODULE_PATH`; no test builds one |
-| `module/loader.c` | 98 | as above |
 | `cache/hashmap.c` | 73 | Reached only through fscache, which is itself at 6.5% |
-| `util/regex/charclass_re.c` | 97 | POSIX bracket expressions via the charclass module — same missing module infrastructure |
 | `util/platform.c` | 16 | io_uring / inotify detection; the coverage run is rootless |
 | `cache/fscache.c` | 139 (6.5%) | Basic stat caching only; TTL and mtime invalidation never triggered |
 
-Worth fixing in that order. The module system is ~257 lines of entirely
-untested code that ships in every binary, and building one throwaway `.so` in a
-test would cover it along with `charclass_re.c`.
+### Two entries removed from this list on 2026-08-18
+
+**`module/loader.c` (98) and `module/registry.c` (159)** were the real thing —
+~257 lines of untested code shipping in every binary — and are now covered by
+`tests/unit/test_module.sh` (22 assertions) and a rewritten
+`tests/security/test_module_security.sh` (18). Writing them turned up three
+bugs, including one that meant at most a single module could load per process.
+
+Note what the 0.0% sat next to: `make security-test` reported "module security
+tests: 4 passed" the whole time. Every one of those assertions ran
+`silex --load-module FILE` and checked for a non-zero exit — and there is no
+`--load-module` flag, so silex rejected the unknown option without opening the
+file. The suite was green regardless of its fixtures and would have stayed green
+with `loader.c` deleted from the build. **A passing suite next to a 0% figure
+means the suite is not reaching the code; believe the coverage number.**
+
+**`util/regex/charclass_re.c` (97)** was never a hole, and the reason given for
+it here — "via the charclass module — same missing module infrastructure" — was
+wrong twice over: the file implements POSIX bracket expressions
+(`[[:alpha:]]`), it has nothing to do with the module system, and
+`tests/unit/test_regex.c` has covered it since it was written (`BRE: [:alpha:]
+match` and twenty more). It read 0.0% because the C unit-test binaries are
+built with `CFLAGS_COMMON` and are **not** part of the instrumented build, so
+only what the instrumented `silex` executes is counted. That is a gap in the
+measurement, not in the testing. `tests/compat/generate.sh` now also drives
+bracket expressions through the `grep` and `sed` applets, so the figure reflects
+the coverage that was already there.
+
+The general point, since this file exists to be quoted: a 0.0% row means "the
+instrumented binary never ran these lines during those three suites". It does
+not by itself mean untested — check whether a C unit test or an external suite
+reaches the code first. `sed.c` at 29.7% while passing 50 GNU sed tests is the
+same effect in a milder form.
 
 ## How to regenerate
 
