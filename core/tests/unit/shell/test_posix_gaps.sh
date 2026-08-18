@@ -31,6 +31,11 @@
 #      down with it.
 #  17. An alias is substituted for the command word even when redirections
 #      precede it.
+#  18. An alias value is spliced into the CHARACTER stream, not lexed apart and
+#      handed over as tokens: it may leave a quote open for the text after it,
+#      open a here-doc the real input finishes, and -- when it ends in a blank --
+#      make the following word a candidate for substitution in any grammar
+#      position.
 #
 # Usage: ./test_posix_gaps.sh [path/to/silex]
 
@@ -354,6 +359,97 @@ check "a fatal error inside the EXIT trap does not re-enter it" \
     "$(runc 'trap "echo bye; shift 9" EXIT; exit 5')" "5|bye"
 
 # -----------------------------------------------------------------------
+# 18. An alias value joins the text around it
+#
+# The value is pushed onto the lexer's character stream, so a token may begin
+# in the value and end in the script (or the other way round). Each of these
+# is checked against dash, which does the same thing.
+# -----------------------------------------------------------------------
+check "a value's unterminated quote swallows the text after it" \
+    "$(run 'alias e_="echo \""
+var=x
+e_ "${var}\""')" "2|"
+check "an unterminated quote in a value alone is still an error" \
+    "$(run 'alias e_="echo \""
+e_')" "2|"
+check "a here-doc opened inside a value is collected by the same lexer" \
+    "$(run 'alias c="cat <<EOF
+\$(echo hi)
+EOF
+"
+c')" "0|hi"
+check "an alias used inside a here-doc body still expands" \
+    "$(run 'alias e_="echo [ "
+cat <<EOF
+$(e_ ])
+EOF')" "0|[ ]"
+check "a trailing operator in a value applies to the text after it" \
+    "$(run 'alias a="b;"
+alias b="echo hi"
+a
+echo after')" "0|hi
+after"
+check "a value that ends in a blank makes the next word a candidate" \
+    "$(run 'alias e_="echo "
+alias one=1
+e_ one')" "0|1"
+check "the candidate word may itself be a command word" \
+    "$(run 'alias e_="echo "
+alias one=echo
+e_ one hi')" "0|echo hi"
+check "a value with no trailing blank leaves the next word literal" \
+    "$(run 'alias e_="echo"
+alias one=1
+e_ one')" "0|one"
+check "blank-ended values chain through three aliases" \
+    "$(run 'alias a="b "
+alias b="c "
+alias c=echo
+a hi')" "0|hi"
+check "a for loop assembled out of five blank-ended aliases" \
+    "$(run 'alias FOR1="for "
+alias FOR2="FOR1 "
+alias eye1="i "
+alias eye2="eye1 "
+alias IN="in "
+alias onetwo="\$one \"2\" "
+one=1
+FOR2 eye2 IN onetwo 3; do echo $i; done')" "0|1
+2
+3"
+check "an empty value leaves the next word as the command word" \
+    "$(run 'alias n=""
+alias echo_=echo
+n echo_ hi; echo rc=$?')" "0|hi
+rc=0"
+check "a blank-only value does make it one" \
+    "$(run 'alias n=" "
+alias one=echo
+n one hi')" "0|hi"
+check "an alias whose value is its own name runs once and stands" \
+    "$(run 'alias e_=e_
+e_
+echo rc=$?')" "0|rc=127"
+check "two aliases naming each other terminate" \
+    "$(run 'alias a=b
+alias b=a
+a
+echo rc=$?')" "0|rc=127"
+check "a value naming the alias itself expands once" \
+    "$(run 'alias ec="ec ho"
+ec 2>/dev/null; echo rc=$?')" "0|rc=127"
+check "an alias is substituted again on the next command" \
+    "$(run 'alias e_=echo
+e_ one; e_ two')" "0|one
+two"
+check "a value spanning two lines runs both commands" \
+    "$(run 'alias two="echo one
+echo two"
+two')" "0|one
+two"
+
+# -----------------------------------------------------------------------
+
 echo ""
 echo "posix gap tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
