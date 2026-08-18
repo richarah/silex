@@ -461,15 +461,73 @@ test: $(TARGET) $(TEST_CHARCLASS) $(TEST_LINESCAN) $(TEST_REGEX) $(TEST_ARENA)
 # the shell strips one layer of the \" escaping, so the compiler saw a bare
 # -DSILEX_VERSION=0.3.0 and main.c failed with "invalid suffix '.0' on floating
 # constant". A target-specific variable is expanded once, inside this make.
+# A suite that fails to RUN must say so. This drove the unit suite and
+# `tests/compat/run_compat.sh` — a file that does not exist, and has not for as
+# long as git remembers. `|| true` swallowed the "No such file" and the figure
+# was quoted as covering the compat suite. It now names the scripts that are
+# actually there, adds the shell conformance suite (the largest driver of shell
+# coverage by far, and the one docs/COVERAGE.md already credited), and reports
+# any suite that did not run instead of hiding it.
 coverage:
 	@$(MAKE) clean
 	@$(MAKE) coverage-build
-	@bash tests/unit/run_tests.sh $(abspath $(TARGET)) >/dev/null 2>&1 || true
-	@sh tests/compat/run_compat.sh $(abspath $(TARGET)) >/dev/null 2>&1 || true
+	@fail=0; \
+	bash tests/unit/run_tests.sh $(abspath $(TARGET)) >/dev/null 2>&1 || \
+	    { echo "coverage: WARNING unit suite did not run clean"; fail=1; }; \
+	bash tests/compat/run.sh $(abspath $(TARGET)) >/dev/null 2>&1 || \
+	    { echo "coverage: WARNING compat suite did not run clean"; fail=1; }; \
+	for f in tests/unit/shell/test_*.sh; do \
+	    bash $$f $(abspath $(TARGET)) >/dev/null 2>&1 || \
+	        { echo "coverage: WARNING $$f did not run clean"; fail=1; }; \
+	done; \
+	[ $$fail -eq 0 ] || echo "coverage: the figure below is from an INCOMPLETE run"
 	@command -v gcovr >/dev/null 2>&1 && \
 	    gcovr -r . --exclude tests --print-summary || \
-	    { echo "coverage: gcovr not installed; raw .gcda written under $(OBJDIR)"; \
-	      gcov -o $(OBJDIR)/shell $(SRCDIR)/shell/*.c 2>/dev/null | tail -20; }
+	    $(MAKE) --no-print-directory coverage-gcov-summary
+
+# gcovr is the nicer report, but it is not always installed and a coverage
+# target that prints nothing without it is a coverage target nobody runs.
+# gcov itself is part of gcc: total the per-file line counts by hand.
+# gcov must MATCH the compiler: /usr/bin/gcov is whatever gcc the distribution
+# defaults to, and reading gcc 15's notes with gcc 13's gcov prints
+# "version 'B52*', prefer 'B33*'" and cannot be trusted.
+GCC_VER := $(shell $(CC) -dumpversion 2>/dev/null)
+GCOV    := $(shell command -v gcov-$(GCC_VER) 2>/dev/null || command -v gcov 2>/dev/null || echo gcov)
+
+# Reads gcov's per-line ANNOTATION (-t) rather than its prose summary. Parsing
+# the prose looked easier and was wrong: gcov emits a "File ..." record per
+# included header as well as per source, so a stale filename carried onto the
+# next count -- the report claimed a 7034-line vars.c, listed several files
+# twice, and dropped parser.c and expand.c entirely. The annotation is
+# unambiguous: each line is `count:lineno:text`, ##### means
+# executable-but-never-run, - means not executable, and a `0:Source:` line
+# names the file the following lines belong to.
+coverage-gcov-summary:
+	@echo "coverage: gcovr not installed -- summarising with $(GCOV)"
+	@find $(OBJDIR) -name '*.gcda' -print0 \
+	  | xargs -0 -r -n1 $(GCOV) -t 2>/dev/null \
+	  | awk ' \
+	      /^ *-: *0:Source:/ { f=$$0; sub(/.*Source:/,"",f); next } \
+	      f == "" || f !~ /^src\// { next } \
+	      /^ *#####: *[0-9]+:/ { miss[f]++; next } \
+	      /^ *-: *[0-9]+:/     { next } \
+	      /^ *[0-9][0-9]*\*?: *[0-9]+:/ { hit[f]++ } \
+	      END { \
+	        for (k in hit) seen[k]=1; for (k in miss) seen[k]=1; \
+	        for (k in seen) { \
+	            h=hit[k]+0; m=miss[k]+0; n=h+m; if (!n) continue; \
+	            printf "%6.2f%%  %-30s (%d lines)\n", 100*h/n, k, n; \
+	            th+=h; tn+=n; \
+	        } \
+	        if (tn) printf "TOTAL: %d of %d executable lines run (%.1f%%)\n", \
+	                       th, tn, 100*th/tn; \
+	        else print "no gcov data -- was the coverage build run?"; \
+	      }' > build/.coverage.txt
+	@grep -v '^TOTAL:\|^no gcov' build/.coverage.txt | sort -rn
+	@echo ""
+	@grep '^TOTAL:\|^no gcov' build/.coverage.txt
+	@echo "(unit + compat + shell conformance only -- the external suites, which"
+	@echo " are what exercise the applets, are NOT part of this figure)"
 
 # Instrumented build for `coverage`. CFLAGS_COMMON (with the correctly-escaped
 # version define) is expanded here as a target-specific variable, so the \"
