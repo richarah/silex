@@ -271,6 +271,55 @@ echo done=$?')" "0|done=127"
 rm -f "$tmpf"
 
 # -----------------------------------------------------------------------
+# 18. Finding a ${...}'s closing brace is a scan, not a brace count
+#
+# A bare `{` inside an expansion is data in every POSIX shell; only `${` opens
+# a level. Counting braces made `${x:+a{b}` an unterminated-expansion error and
+# only ever agreed with dash where the stray braces happened to balance. The
+# other things that can hide a `}` -- $(...), `...` -- have to be skipped whole.
+# -----------------------------------------------------------------------
+X='x=xval; y=Y; '
+check "a bare { inside an expansion does not nest" \
+    "$(runc "${X}printf '[%s]' \${x:+a{b}")" "0|[a{b]"
+check "a bare { inside a quoted expansion does not nest" \
+    "$(runc "${X}printf '[%s]' \"\${x:+a{b}\"")" "0|[a{b]"
+check "a } inside \$( ) does not close the expansion" \
+    "$(runc "${X}printf '[%s]' \${x:+\$(echo })}")" "0|[}]"
+check "a } inside backquotes does not close the expansion" \
+    "$(runc "${X}printf '[%s]' \${x:+\`echo }\`}")" "0|[}]"
+check "a nested \${ } is skipped as a unit" \
+    "$(runc "${X}printf '[%s]' \"\${x:+\${y}}\"")" "0|[Y]"
+check "an inner \" protects a } from closing the expansion" \
+    "$(runc "${X}printf '[%s]' \"\${x:+\"}\"}\"")" "0|[}]"
+
+# Quoting inside ${...}: a `'` quotes outside "..." always, and inside "..."
+# only in the word of a pattern operator -- where dash and bash agree that an
+# unterminated one is a syntax error. The `-` form keeps dash's literal `'`.
+check "an unterminated ' in a % operand is a syntax error" \
+    "$(runc "${X}printf '[%s]' \"\${x%'}\"")" "2|"
+check "an unterminated ' in a # operand is a syntax error" \
+    "$(runc "${X}printf '[%s]' \"\${x#pat'}\"")" "2|"
+check "the # of \${x#pat} is an operator, not the special param \$#" \
+    "$(runc "${X}printf '[%s]' \"\${x#xv}\"")" "0|[al]"
+check "a ' in a - operand inside \"...\" stays literal" \
+    "$(runc "${X}printf '[%s]' \"\${x-'}\"")" "0|[xval]"
+check "the leading # of \${#name} is a length prefix, not an operator" \
+    "$(runc "${X}printf '[%s]' \"\${#x}\"")" "0|[4]"
+check "a special parameter is still a name" \
+    "$(runc "set -- p q; printf '[%s]' \"\${#}\"")" "0|[2]"
+
+# `\}` is how a word carries a brace past the expansion's terminator, so the
+# backslash goes even inside "..." -- but a plain "a\}b" keeps both bytes.
+check "\\} in a quoted expansion word loses its backslash" \
+    "$(runc "${X}printf '[%s]' \"\${x:+a\\}b}\"")" "0|[a}b]"
+check "\\} in a plain double-quoted word keeps its backslash" \
+    "$(runc "${X}printf '[%s]' \"a\\}b\"")" "0|[a\\}b]"
+check "quoted braces and an escaped brace in one word (modernish)" \
+    "$(runc "${X}printf '[%s]' \"\${x:+'{'\\}}\"")" "0|['{'}]"
+check "the same word unquoted removes the quotes" \
+    "$(runc "${X}printf '[%s]' \${x:+'{'\\}}")" "0|[{}]"
+
+# -----------------------------------------------------------------------
 echo ""
 echo "posix gap tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
