@@ -320,6 +320,40 @@ check "the same word unquoted removes the quotes" \
     "$(runc "${X}printf '[%s]' \${x:+'{'\\}}")" "0|[{}]"
 
 # -----------------------------------------------------------------------
+# 19. The EXIT trap runs however the shell exits
+#
+# POSIX runs the EXIT trap when the shell exits and does not care why, so the
+# errors that kill a non-interactive shell run it too. dash and bash agree on
+# every case below, even where they disagree about whether the error is fatal
+# at all. silex called exit() directly on each of these paths, so the trap was
+# silently skipped -- a script's cleanup did not run when it was most needed.
+# The statuses stay as they were (1 vs 2 is pinned by smoosh in places and by
+# dash in others); only the trap is new.
+# -----------------------------------------------------------------------
+check "the EXIT trap runs after a special builtin's usage error" \
+    "$(runc 'trap "echo bye" EXIT; trap -1 EXIT; echo bad')" "2|bye"
+check "the EXIT trap runs after an assignment to a readonly variable" \
+    "$(runc 'trap "echo bye" EXIT; readonly x=1; x=2; echo bad')" "2|bye"
+check "the EXIT trap runs after a set -u expansion error" \
+    "$(runc 'trap "echo bye" EXIT; set -u; echo $nope; echo bad')" "1|bye"
+check "the EXIT trap runs after a bad option to export" \
+    "$(runc 'trap "echo bye" EXIT; export -Z; echo bad')" "1|bye"
+check "the EXIT trap runs after shift with too large a count" \
+    "$(runc 'trap "echo bye" EXIT; shift 3; echo bad')" "2|bye"
+check "the EXIT trap runs after an unknown set -o option" \
+    "$(runc 'trap "echo bye" EXIT; set -o bogus; echo bad')" "2|bye"
+check "the EXIT trap runs after a division by zero" \
+    "$(runc 'trap "echo bye" EXIT; echo $((1/0)); echo bad')" "2|bye"
+check "the EXIT trap runs after a malformed arithmetic expression" \
+    "$(runc 'trap "echo bye" EXIT; echo $((1 2)); echo bad')" "2|bye"
+check "a plain exit is unchanged" \
+    "$(runc 'trap "echo bye" EXIT; exit 3')" "3|bye"
+check "\$? in the EXIT trap is still the status being exited with" \
+    "$(runc 'trap "echo $?" EXIT; exit 42')" "42|0"
+check "a fatal error inside the EXIT trap does not re-enter it" \
+    "$(runc 'trap "echo bye; shift 9" EXIT; exit 5')" "5|bye"
+
+# -----------------------------------------------------------------------
 echo ""
 echo "posix gap tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
