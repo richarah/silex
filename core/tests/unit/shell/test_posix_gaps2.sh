@@ -224,6 +224,64 @@ check "tilde: \${x:=~} assigns HOME" \
       "/home/bar"
 
 # -----------------------------------------------------------------------
+# 4. `read` without -r resolves backslash escapes, and an escaped IFS
+#    delimiter stops delimiting
+# -----------------------------------------------------------------------
+# silex read the line keeping every `\` and its successor in the buffer, then
+# split that buffer without ever looking at the backslashes again. So the
+# escape did neither of the two things POSIX asks of it: the backslash stayed
+# in the value, and an escaped delimiter still cut the field in two.
+# (Oils builtin-read 24.)
+
+check "read: an escaped IFS delimiter neither splits nor keeps its backslash" \
+      "$("$MB" -c 'IFS=: read a b <<'"'"'EOF'"'"'
+x\:y:z
+EOF
+printf "[%s|%s]" "$a" "$b"' 2>/dev/null)" \
+      "[x:y|z]"
+
+check "read: a doubled backslash becomes one" \
+      "$("$MB" -c 'read p q <<'"'"'EOF'"'"'
+a\\b c
+EOF
+printf "[%s|%s]" "$p" "$q"' 2>/dev/null)" \
+      "[a\\b|c]"
+
+# -r is the control: it must do neither of the above.
+check "read -r: backslashes are literal and an escaped delimiter still splits" \
+      "$("$MB" -c 'IFS=: read -r a b <<'"'"'EOF'"'"'
+x\:y:z
+EOF
+printf "[%s|%s]" "$a" "$b"' 2>/dev/null)" \
+      "[x\\|y:z]"
+
+check "read: a backslash-newline continues the line" \
+      "$("$MB" -c 'read m n <<'"'"'EOF'"'"'
+one\
+two three
+EOF
+printf "[%s|%s]" "$m" "$n"' 2>/dev/null)" \
+      "[onetwo|three]"
+
+# A backslash with nothing after it escapes nothing, so it is dropped -- dash
+# and bash both leave t=trail. Status is 1 because the input hit EOF with no
+# newline.
+check "read: a trailing backslash at EOF is discarded" \
+      "$(printf 'trail\\' | "$MB" -c 'read t; printf "%s|%s" "$?" "$t"' \
+         2>/dev/null)" \
+      "1|trail"
+
+# The Oils case in full: leading spaces are NOT trimmed (space is not in IFS),
+# the escaped colon is literal, and the continuation glues `d` to `  e`.
+check "read: Oils builtin-read 24, escapes and IFS=: together" \
+      "$("$MB" -c 'IFS=: read a b c d <<'"'"'EOF'"'"'
+  \\a :b\: c:d\
+  e
+EOF
+printf "[%s|%s|%s|%s]" "$a" "$b" "$c" "$d"' 2>/dev/null)" \
+      "[  \\a |b: c|d  e|]"
+
+# -----------------------------------------------------------------------
 
 echo ""
 echo "posix gap tests (2): $PASS passed, $FAIL failed"

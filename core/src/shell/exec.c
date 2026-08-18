@@ -3585,6 +3585,18 @@ static int exec_builtin_read(shell_ctx_t *sh, int argc, char **argv)
 
     strbuf_t line;
     sb_init(&line, 256);
+    /* Parallel to `line`, one byte per character: '\1' where the character was
+     * backslash-escaped, ' ' where it stood for itself. Without -r, POSIX says
+     * a backslash "shall preserve the literal value of the next character" --
+     * which means the escaped character must ALSO stop being an IFS delimiter.
+     * The escape therefore cannot be resolved by the reader alone (it would
+     * lose which bytes were literal) nor by the splitter alone (the backslash
+     * would still be in the value), so the flag travels alongside the text and
+     * the splitter consults it. Before this, `read` kept the backslash in the
+     * buffer and never looked at it again: `IFS=: read a b <<< 'x\:y'` stored
+     * a=`x\` and split at the escaped colon. */
+    strbuf_t esc;
+    sb_init(&esc, 256);
 
     /* Read one byte at a time with read(2), NOT buffered fgetc(stdin): stdio
      * would slurp a whole block from the underlying fd, consuming past the
@@ -3611,12 +3623,17 @@ static int exec_builtin_read(shell_ctx_t *sh, int argc, char **argv)
         if (!raw && c == '\\') {
             unsigned char nch;
             ssize_t n2 = read(STDIN_FILENO, &nch, 1);
-            if (n2 <= 0) { sb_appendc(&line, '\\'); c = EOF; break; }
+            /* A backslash at end of input escapes nothing, so it is discarded:
+             * `printf 'trail\' | read t` leaves t=trail in both dash and bash.
+             * silex used to keep the backslash. */
+            if (n2 <= 0) { c = EOF; break; }
             if (nch == '\n') continue;  /* line continuation */
-            sb_appendc(&line, '\\');
+            if (nch == '\0') continue;  /* as for an unescaped NUL, above */
             sb_appendc(&line, (char)nch);
+            sb_appendc(&esc, '\1');
         } else {
             sb_appendc(&line, (char)c);
+            sb_appendc(&esc, ' ');
         }
     }
 
@@ -3625,21 +3642,32 @@ static int exec_builtin_read(shell_ctx_t *sh, int argc, char **argv)
     if (!ifs) ifs = " \t\n";
 
     int nvars = argc - opt_i;
+    size_t linelen = sb_len(&line);
     if (nvars == 0) {
-        /* No variable names: discard */
+        /* No variable names: discard. (linelen is captured BEFORE the free --
+         * sb_free zeroes the struct, so reading sb_len afterwards asked a freed
+         * buffer for its length and only gave the right answer by accident.) */
         sb_free(&line);
-        return (c == EOF && sb_len(&line) == 0) ? 1 : 0;
+        sb_free(&esc);
+        return (c == EOF && linelen == 0) ? 1 : 0;
     }
 
     char *linecopy = strdup(sb_str(&line));
+    char *esccopy  = strdup(sb_str(&esc));
     sb_free(&line);
-    if (!linecopy) return 1;
+    sb_free(&esc);
+    if (!linecopy || !esccopy) { free(linecopy); free(esccopy); return 1; }
+
+    /* A delimiter only delimits if it was not escaped. `q` indexes into
+     * linecopy; esccopy is the same length. */
+#define READ_IS_IFS(q) (esccopy[(q) - linecopy] != '\1' && \
+                        strchr(ifs, (unsigned char)*(q)) != NULL)
 
     char *p = linecopy;
     for (int vi = opt_i; vi < argc; vi++) {
         /* Trim leading IFS on all but last */
         if (vi < argc - 1) {
-            while (*p && strchr(ifs, (unsigned char)*p)) p++;
+            while (*p && READ_IS_IFS(p)) p++;
         }
         if (vi == argc - 1) {
             /* Last var gets the rest of the line. POSIX: read discards leading
@@ -3647,26 +3675,27 @@ static int exec_builtin_read(shell_ctx_t *sh, int argc, char **argv)
              * but keeps internal whitespace -- `IFS=' ' read x` on "  ab  cd  "
              * yields "ab  cd". (Only whitespace is trimmed; an IFS non-whitespace
              * delimiter is significant.) */
-            while (*p && strchr(ifs, (unsigned char)*p) &&
-                   isspace((unsigned char)*p)) p++;
+            while (*p && READ_IS_IFS(p) && isspace((unsigned char)*p)) p++;
             char *e = p + strlen(p);
-            while (e > p && strchr(ifs, (unsigned char)e[-1]) &&
-                   isspace((unsigned char)e[-1])) e--;
+            while (e > p && READ_IS_IFS(e - 1) && isspace((unsigned char)e[-1]))
+                e--;
             *e = '\0';
             vars_set(&sh->vars, argv[vi], p);
             break;
         }
         /* Find end of field */
         char *start = p;
-        while (*p && !strchr(ifs, (unsigned char)*p)) p++;
+        while (*p && !READ_IS_IFS(p)) p++;
         char saved = *p;
         *p = '\0';
         vars_set(&sh->vars, argv[vi], start);
         *p = saved;
         if (*p) p++;
     }
+#undef READ_IS_IFS
 
     free(linecopy);
+    free(esccopy);
     return (c == EOF) ? 1 : 0;
 }
 
