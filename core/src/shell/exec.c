@@ -1045,17 +1045,23 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
          * command: `PATH=$DEFPATH command awk ...` (modernish's `str ematch`)
          * must find awk via that PATH. Apply the assignments to the shell vars
          * (exported so a child exec inherits them) and restore afterwards. */
-        char **abuiltin_saved = NULL;
-        int   *abuiltin_had   = NULL;
+        char **abuiltin_saved  = NULL;
+        int   *abuiltin_had    = NULL;
+        int   *abuiltin_wasexp = NULL;
         if (nassigns > 0) {
-            abuiltin_saved = calloc((size_t)nassigns, sizeof(char *));
-            abuiltin_had   = calloc((size_t)nassigns, sizeof(int));
-            if (abuiltin_saved && abuiltin_had) {
+            abuiltin_saved  = calloc((size_t)nassigns, sizeof(char *));
+            abuiltin_had    = calloc((size_t)nassigns, sizeof(int));
+            abuiltin_wasexp = calloc((size_t)nassigns, sizeof(int));
+            if (abuiltin_saved && abuiltin_had && abuiltin_wasexp) {
                 for (int ai = 0; ai < nassigns; ai++) {
                     if (!anames[ai]) continue;
                     const char *ov = vars_get(&sh->vars, anames[ai]);
-                    abuiltin_had[ai]   = ov != NULL;
-                    abuiltin_saved[ai] = ov ? strdup(ov) : NULL;
+                    abuiltin_had[ai]    = ov != NULL;
+                    abuiltin_saved[ai]  = ov ? strdup(ov) : NULL;
+                    /* The export is TEMPORARY, so remember whether the name was
+                     * already exported -- the restore below has to put the flag
+                     * back even in the cases where the VALUE stays. */
+                    abuiltin_wasexp[ai] = vars_is_exported(&sh->vars, anames[ai]);
                     vars_set(&sh->vars, anames[ai], avals[ai] ? avals[ai] : "");
                     vars_export(&sh->vars, anames[ai]);
                 }
@@ -1135,10 +1141,33 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
                     vars_unset(&sh->vars, anames[ai]);
             }
         }
+        /* Undo the temporary EXPORT, even where the VALUE stays.
+         *
+         * POSIX 2.9.1: assignments preceding a special builtin persist as SHELL
+         * variables. They are not added to the environment -- an ordinary
+         * assignment does not export, and a prefix on a special builtin is an
+         * ordinary assignment that happens to be written in front of a command.
+         * The export above exists only so that a builtin which goes on to exec
+         * something (`PATH=$DEFPATH command awk ...`) is found through it.
+         *
+         * Leaving the flag set meant `pre1=pre1 readonly x=x` put pre1 into the
+         * environment of every later child. Oils builtin-special 3 catches it
+         * through the next command being `exec sh -c 'echo pre1=$pre1'`: silex
+         * printed pre1=pre1 where dash, bash and yash all print pre1= .
+         *
+         * `export` is exempt for the obvious reason -- `x=1 export x` asked for
+         * the flag, and from here that is indistinguishable from our own. */
+        if (nassigns > 0 && abuiltin_wasexp && strcmp(cmd, "export") != 0) {
+            for (int ai = 0; ai < nassigns; ai++) {
+                if (!anames[ai] || abuiltin_wasexp[ai]) continue;
+                vars_unexport(&sh->vars, anames[ai]);
+            }
+        }
         if (abuiltin_saved)
             for (int ai = 0; ai < nassigns; ai++) free(abuiltin_saved[ai]);
         free(abuiltin_saved);
         free(abuiltin_had);
+        free(abuiltin_wasexp);
 
         /* 'exec' with no command: redirections are permanent (not restored).
          * Also when it is reached through `command` (`command exec 8<file`). */
@@ -3204,6 +3233,13 @@ static int exec_builtin_cd(shell_ctx_t *sh, int argc, char **argv)
         }
     }
 
+    /* PWD and OLDPWD are EXPORTED, not merely set (POSIX 2.5.3 lists both among
+     * the variables the shell sets and exports; dash and bash both put them in
+     * the environment). silex only set them, so they reached a child solely
+     * when the parent's environment had happened to supply them -- and OLDPWD,
+     * which nothing inherits, never did. Oils builtin-cd 5 checks it directly
+     * with `env | grep OLDPWD  # It's EXPORTED too!`. Each store below is
+     * followed by its export. */
     /* The base for a relative path and the value stored as OLDPWD is the current
      * logical $PWD (falling back to getcwd() when PWD is unset or not absolute). */
     char cwdbuf[PATH_MAX];
@@ -3219,10 +3255,12 @@ static int exec_builtin_cd(shell_ctx_t *sh, int argc, char **argv)
             fprintf(stderr, "silex: cd: %s: %s\n", dir, strerror(errno));
             return 1;
         }
-        if (prev) vars_set(&sh->vars, "OLDPWD", prev);
+        if (prev) { vars_set(&sh->vars, "OLDPWD", prev);
+                    vars_export(&sh->vars, "OLDPWD"); }
         char pwd[PATH_MAX];
         if (getcwd(pwd, sizeof(pwd))) {
             vars_set(&sh->vars, "PWD", pwd);
+            vars_export(&sh->vars, "PWD");
             if (print_dir) printf("%s\n", pwd);
         }
         return 0;
@@ -3237,8 +3275,10 @@ static int exec_builtin_cd(shell_ctx_t *sh, int argc, char **argv)
             fprintf(stderr, "silex: cd: %s: %s\n", dir, strerror(errno));
             return 1;
         }
-        if (cur_pwd) vars_set(&sh->vars, "OLDPWD", cur_pwd);
+        if (cur_pwd) { vars_set(&sh->vars, "OLDPWD", cur_pwd);
+                       vars_export(&sh->vars, "OLDPWD"); }
         vars_set(&sh->vars, "PWD", canon);
+        vars_export(&sh->vars, "PWD");
         if (print_dir) printf("%s\n", canon);
         return 0;
     }
@@ -3248,10 +3288,12 @@ static int exec_builtin_cd(shell_ctx_t *sh, int argc, char **argv)
         fprintf(stderr, "silex: cd: %s: %s\n", dir, strerror(errno));
         return 1;
     }
-    if (cur_pwd) vars_set(&sh->vars, "OLDPWD", cur_pwd);
+    if (cur_pwd) { vars_set(&sh->vars, "OLDPWD", cur_pwd);
+                   vars_export(&sh->vars, "OLDPWD"); }
     char pwd[PATH_MAX];
     if (getcwd(pwd, sizeof(pwd))) {
         vars_set(&sh->vars, "PWD", pwd);
+        vars_export(&sh->vars, "PWD");
         if (print_dir) printf("%s\n", pwd);
     }
     return 0;
