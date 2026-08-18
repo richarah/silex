@@ -127,6 +127,50 @@ static int cmd_install(const char *dir)
     return ret;
 }
 
+/* Build description for --version.
+ *
+ * This used to be the literal string "glibc static-pie", printed by every
+ * binary whatever had actually been built. It is the one place a build's
+ * flavour is meant to be visible, and it agreed with reality only by accident:
+ * a dev build, an ASan build and a release all introduced themselves the same
+ * way, so a dev binary left in build/bin/ by an earlier target could be
+ * measured and reported as a release without anything looking wrong. Report
+ * what the compiler was actually told. */
+static const char *silex_libc(void)
+{
+#if defined(SILEX_LIBC_MUSL) && !defined(SILEX_LIBC_GLIBC)
+    return "musl";
+#elif defined(SILEX_LIBC_GLIBC) && !defined(SILEX_LIBC_MUSL)
+    return "glibc";
+#else
+    /* Neither, or both -- the Makefile's libc define and a target's override
+     * disagreeing is exactly the confusion this string exists to expose. */
+    return "libc?";
+#endif
+}
+
+static const char *silex_link(void)
+{
+#if defined(SILEX_BUILD_STATIC)
+    return "static-pie";
+#elif defined(SILEX_BUILD_DYNAMIC)
+    return "dynamic";
+#else
+    return "dev build";   /* `make all`: not a release, and says so */
+#endif
+}
+
+static const char *silex_cc(void)
+{
+#if defined(__clang__)
+    return "clang";
+#elif defined(__GNUC__)
+    return "gcc";
+#else
+    return "cc";
+#endif
+}
+
 /* Architecture string for --version */
 static const char *silex_arch(void)
 {
@@ -223,8 +267,9 @@ static int silex_main(int argc, char **argv)
 #ifndef SILEX_VERSION
 #define SILEX_VERSION "unknown"
 #endif
-            printf("silex %s (glibc static-pie, %s, gcc %s)\n",
-                   SILEX_VERSION, silex_arch(), __VERSION__);
+            printf("silex %s (%s %s, %s, %s %s)\n",
+                   SILEX_VERSION, silex_libc(), silex_link(),
+                   silex_arch(), silex_cc(), __VERSION__);
             return 0;
         }
         if (strcmp(argv[1], "--list") == 0)

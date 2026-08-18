@@ -292,8 +292,8 @@ TARGET = $(BINDIR)/silex
 all: RELEASE_OPT = 1
 all: $(TARGET)
 
-$(TARGET): $(OBJS) | $(BINDIR)
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+$(TARGET): $(OBJS) $(BUILD_STAMP) | $(BINDIR)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(OBJS) $(LDLIBS)
 	@echo "Built: $@"
 	@wc -c $@ | awk '{printf "Binary size: %s bytes (%.1fK)\n", $$1, $$1/1024}'
 
@@ -305,15 +305,27 @@ $(TARGET): $(OBJS) | $(BINDIR)
 # prerequisites. Without this, every EXTRA_CFLAGS caller is silently ignored --
 # which is why `make pgo` produced an "instrumented" build with no
 # -fprofile-generate in it, hence zero profiles and no PGO at all.
-release: CFLAGS = $(CFLAGS_RELEASE) -DSILEX_BUILD_STATIC=1 -DSILEX_LIBC_MUSL=1 $(EXTRA_CFLAGS)
+# The libc define comes from $(LIBC_DEFINE), which CFLAGS_RELEASE already
+# carries, and NOT from a hardcoded -DSILEX_LIBC_MUSL=1. Hardcoding it put both
+# libc defines on the command line of every release built without musl-gcc, so
+# the binary described itself by whichever the code tested first rather than by
+# what it had linked against.
+release: CFLAGS = $(CFLAGS_RELEASE) -DSILEX_BUILD_STATIC=1 $(EXTRA_CFLAGS)
 release: LDFLAGS = $(LDFLAGS_MUSL) $(EXTRA_LDFLAGS)
+release: LINK_TYPE = static-pie
 release: RELEASE_OPT = 1
 release: $(TARGET)
 	strip -s $(TARGET)
-	@echo "Release (musl static): $$(wc -c < $(TARGET)) bytes"
+	@if [ -z "$(MUSL_GCC)" ]; then \
+	    echo "WARNING: musl-gcc not found -- this is a $(CC) build, NOT musl."; \
+	    echo "         Install musl-dev/musl-tools, or use release-glibc, before"; \
+	    echo "         quoting this binary as a musl release."; \
+	fi
+	@echo "Release ($(if $(MUSL_GCC),musl,$(CC)) $(LINK_TYPE)): $$(wc -c < $(TARGET)) bytes"
 
-release-glibc: CFLAGS = $(CFLAGS_RELEASE) -DSILEX_BUILD_DYNAMIC=1 -DSILEX_LIBC_GLIBC=1 $(EXTRA_CFLAGS)
+release-glibc: CFLAGS = $(CFLAGS_RELEASE) -DSILEX_BUILD_DYNAMIC=1 $(EXTRA_CFLAGS)
 release-glibc: LDFLAGS = $(LDFLAGS_GLIBC) $(EXTRA_LDFLAGS)
+release-glibc: LINK_TYPE = dynamic
 release-glibc: RELEASE_OPT = 1
 release-glibc: $(TARGET)
 	strip -s $(TARGET)
@@ -332,12 +344,49 @@ debug: $(TARGET)
 # --- Legacy musl alias --------------------------------------------------------
 musl: release
 
+# --- Build-flavour stamp ------------------------------------------------------
+#
+# Compiler and linker FLAGS are not in make's dependency graph, only file
+# timestamps are. Objects built by one flavour therefore look up to date to the
+# next one, and the link output looks up to date to both:
+#
+#     make all && make release
+#
+# recompiled nothing, relinked nothing, stripped the dev binary and printed
+# "Release (musl static)". The result reported itself as `glibc static-pie` and
+# was dynamically linked -- a measurement of the dev build wearing the release
+# label. The same hole runs the other way: `make all` after `make test-asan` or
+# `make test-poison` kept the sanitiser/poison objects, so a suite could be run
+# against a binary nobody meant to build.
+#
+# Every object and the link now depend on a stamp whose CONTENTS are the flags.
+# It is rewritten only when they actually change, so switching flavour forces a
+# full rebuild while repeating one costs a `cmp`.
+BUILD_STAMP = build/.build-flavour
+
+.PHONY: build-stamp-check
+build-stamp-check:
+	@mkdir -p $(dir $(BUILD_STAMP))
+	@printf '%s\n' "CC=$(CC) RELEASE_OPT=$(RELEASE_OPT)" \
+	               "CFLAGS=$(CFLAGS)" \
+	               "LDFLAGS=$(LDFLAGS)" \
+	               "LDLIBS=$(LDLIBS)" > $(BUILD_STAMP).new
+	@if cmp -s $(BUILD_STAMP).new $(BUILD_STAMP); then \
+	    rm -f $(BUILD_STAMP).new; \
+	else \
+	    mv $(BUILD_STAMP).new $(BUILD_STAMP); \
+	    echo "build flavour changed -- rebuilding"; \
+	fi
+
+$(BUILD_STAMP): build-stamp-check
+	@:
+
 # --- Compile rule (with auto-generated header dependencies) ------------------
 DEPFLAGS = -MMD -MP
 DEPS     = $(OBJS:.o=.d)
 -include $(DEPS)
 
-$(OBJDIR)/%.o: $(SRCDIR)/%.c | $(OBJDIR)
+$(OBJDIR)/%.o: $(SRCDIR)/%.c $(BUILD_STAMP) | $(OBJDIR)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(PERFILE_OPT) $(DEPFLAGS) -I$(SRCDIR) -c $< -o $@
 
@@ -663,10 +712,16 @@ analyze: $(ALL_SRCS)
 # warning/performance/portability finds 23, and they are real: uninitialised
 # variables, realloc-into-self leaks, signed shift UB. Those are worth blocking a
 # merge over. Run `make cppcheck-all` for the style report.
+# -D__GNUC__: cppcheck predefines no compiler macro, so without this it
+# preprocesses the tree as if built by a compiler that has no
+# __attribute__((noreturn)) -- and it does not honour C11 `_Noreturn`. Every
+# fatal-error path (arithmetic division by zero, a sed script error) then looks
+# like it falls through, and the run is four false "division by zero" warnings
+# and a false use-after-free. It IS analysing a GCC build; say so.
 cppcheck: $(ALL_SRCS)
 	cppcheck --enable=warning,performance,portability --error-exitcode=1 \
 	    --suppress=missingIncludeSystem --inline-suppr \
-	    -I$(SRCDIR) $(ALL_SRCS)
+	    -D__GNUC__ -I$(SRCDIR) $(ALL_SRCS)
 
 cppcheck-all: $(ALL_SRCS)
 	cppcheck --enable=all --suppress=missingIncludeSystem --inline-suppr \
