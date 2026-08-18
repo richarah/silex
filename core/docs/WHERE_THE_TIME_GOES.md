@@ -73,7 +73,22 @@ was wrong. See below.)
 
 ## The interpreter is still slower than dash
 
-    5000-iteration shell loop:   silex 37 ms   dash 10 ms   -> silex 3.7x SLOWER
+Re-measured 2026-08-18 with `tests/bench/bench_interpreter.sh`, best-of-3,
+static-pie release against dash 0.5.12:
+
+    arithmetic while loop 100k     silex 118 ms   dash  76 ms   -> 1.55x slower
+    case dispatch 100k             silex 127 ms   dash  86 ms   -> 1.48x slower
+    test builtin 100k              silex 171 ms   dash 120 ms   -> 1.43x slower
+    function call 50k              silex  83 ms   dash  45 ms   -> 1.84x slower
+    parameter expansion 50k        silex 106 ms   dash  53 ms   -> 2.00x slower
+
+**1.4-2.0x slower, not 3.7x.** The 3.7x above came from a single ad-hoc
+5000-iteration loop in July; reproducing that exact shape today gives 1.4x. The
+interpreter got faster over the conformance work and nobody noticed, because
+nothing re-measured it. That is why the measurement now lives in a committed
+benchmark instead of a shell history: a number in a document with nothing
+re-running it is a number that rots, and this one rotted in silex's FAVOUR --
+which is how you end up unable to tell a real regression from a stale baseline.
 
 silex wins on builds because builds spend their shell time *dispatching commands*,
 not *interpreting control flow*. If a workload ever becomes interpretation-bound
@@ -83,6 +98,16 @@ optimisation effort should go next.
 (It used to be 56x slower: `has_unquoted_glob()` treated `[` as a glob
 metacharacter, so every `if [ ... ]` ran a full `glob()` over the working
 directory. Fixed.)
+
+### The dispatch side, same run
+
+    2000 x sed on a small file     silex  14 ms   dash 1448 ms  -> ~105x FASTER
+    2000 x `echo hi | cat`         silex 341 ms   dash 1844 ms  -> 3-5x FASTER
+    1000 x `echo hi | od -c`       silex 772 ms   dash  704 ms  -> 1.10x SLOWER
+
+The third row is the control, and it is the important one: `od` is not an
+applet, so the pipeline forks exactly as dash's does and the advantage is gone.
+The win is the builtins, not pipelines, not the shell in general.
 
 ## READ THIS BEFORE YOU BENCHMARK ANYTHING
 

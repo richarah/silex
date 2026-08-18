@@ -32,10 +32,21 @@ project used to claim numbers it could not support. See
 the measurements, and for the benchmark that reported 44%
 because the build under test was silently failing.
 
-silex is also **3.7x slower than dash at interpreting shell**.
-It wins on builds because builds spend their shell time
-dispatching commands, not interpreting control flow. That is
-the ceiling.
+silex is also **1.4-2.0x slower than dash at interpreting
+shell** (measured 2026-08-18 across seven control-flow
+workloads; it was 3.7x in July). It wins on builds because
+builds spend their shell time dispatching commands, not
+interpreting control flow. That is the ceiling.
+
+Both halves are reproducible:
+
+    tests/bench/bench_interpreter.sh    # dispatch vs interpretation
+    tests/bench/bench_shell.sh          # the end-to-end build
+
+Quote both or neither. The dispatch benchmark includes a
+non-applet control (`od`) precisely because the win is the
+builtins, not pipelines in general: pointed at a tool silex
+has no builtin for, it is 1.05x SLOWER.
 
 ## Usage
 

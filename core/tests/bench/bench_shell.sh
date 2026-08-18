@@ -86,20 +86,36 @@ run_once() {
 }
 
 # best_of <shell> <do_make> -> best ms, or FAILED if any rep failed
+# A sample must be a NON-NEGATIVE INTEGER. `date +%s%N` reads CLOCK_REALTIME,
+# which WSL2 slews and occasionally steps backwards; a sibling benchmark caught
+# a -1747ms reading. Since this takes the MINIMUM, one backwards sample would
+# win every comparison it appeared in, permanently and silently -- a third
+# instance of the failure this file's header exists to prevent. Drop the bad
+# sample, take another, and report FAILED rather than guess if none are usable.
 best_of() {
     _best=""
-    _i=0
-    while [ "$_i" -lt "$REPS" ]; do
+    _got=0
+    _tries=0
+    _cap=$((REPS * 3))
+    while [ "$_got" -lt "$REPS" ] && [ "$_tries" -lt "$_cap" ]; do
+        _tries=$((_tries + 1))
         _ms=$(run_once "$1" "$2")
         if [ "$_ms" = "FAILED" ]; then
             echo "FAILED"
             return 0
         fi
+        case "$_ms" in
+            ''|*[!0-9]*) continue ;;      # negative (leading -) or garbage
+        esac
+        _got=$((_got + 1))
         if [ -z "$_best" ] || [ "$_ms" -lt "$_best" ]; then
             _best=$_ms
         fi
-        _i=$((_i + 1))
     done
+    if [ -z "$_best" ]; then
+        echo "FAILED"
+        return 0
+    fi
     echo "$_best"
 }
 
