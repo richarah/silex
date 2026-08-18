@@ -75,6 +75,41 @@ else
     FAIL=$((FAIL + 1))
 fi
 
+# --- `trap` listing is the same in every subshell context ---
+# A subshell keeps the parent's action strings as display-only entries so that
+# `trap` with no operands reports the traps actually in effect. `( trap )` and
+# `trap | cat` did that; `$(trap)` did not, because the command-substitution
+# child starts from a fresh shell context. All four must agree.
+list_prog='trap "echo hi" USR1; trap "echo bye" EXIT'
+expected="$(printf "trap -- 'echo bye' EXIT\ntrap -- 'echo hi' USR1")"
+got=$("$MB" -c "$list_prog; trap; trap - EXIT; exit 0")
+check "trap listing: plain" "$got" "$expected"
+got=$("$MB" -c "$list_prog; echo \"\$(trap)\"; trap - EXIT; exit 0")
+check "trap listing: inside \$(trap)" "$got" "$expected"
+got=$("$MB" -c "$list_prog; ( trap ); trap - EXIT; exit 0")
+check "trap listing: inside ( trap )" "$got" "$expected"
+got=$("$MB" -c "$list_prog; trap | cat; trap - EXIT; exit 0")
+check "trap listing: inside trap | cat" "$got" "$expected"
+
+# --- save/restore round-trip through a command substitution ---
+# `saved=$(trap)` then `eval "$saved"` is THE portable idiom for saving a trap
+# set (modernish reconstructs its trap stack this way). It only works if the
+# listing survives the command substitution.
+got=$("$MB" -c 'trap "echo hi" USR1; saved=$(trap); trap - USR1; eval "$saved"; trap; exit 0')
+check "trap save/restore via \$(trap) round-trips" "$got" "$(printf "trap -- 'echo hi' USR1")"
+
+# --- the inherited entries are display-only, never executed ---
+# The parent's EXIT trap must not fire when the command substitution ends, and
+# the parent's signal traps take the DEFAULT action inside it.
+got=$("$MB" -c 'trap "echo EXITTRAP" EXIT; w=$(exit 3); echo "status=$?"')
+check "inherited EXIT trap does not fire in \$( )" "$got" "$(printf 'status=3\nEXITTRAP')"
+got=$("$MB" -c 'trap "echo PIPETRAP" PIPE; r=$(yes 2>/dev/null | head -1); echo "r=$r"; exit 0')
+check "inherited PIPE trap does not fire in \$( )" "$got" "r=y"
+
+# --- a trap set inside the substitution wipes the inherited listing ---
+got=$("$MB" -c 'trap "echo hi" USR1; echo "$(trap "echo mine" EXIT; trap)"; exit 0')
+check "trap set in \$( ) discards inherited entries" "$got" "$(printf "trap -- 'echo mine' EXIT\nmine")"
+
 # --- SIGPIPE: pipeline handling ---
 # A yes | head pipeline should produce output and exit 0 or 141, not crash.
 got=$(yes 2>/dev/null | "$MB" head -n 3 2>/dev/null)
