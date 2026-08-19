@@ -248,10 +248,19 @@ static const shell_builtin_t shell_builtins[] = {
     { NULL, NULL }
 };
 
+/* Every simple command asks this, and a command that is NOT a builtin -- the
+ * common case in a build -- used to run all 40 strcmp()s before answering no.
+ * `[` sits at entry 19, so each `[ x -lt y ]` paid 19 of them.
+ *
+ * Comparing the first byte first turns the misses into a single byte compare;
+ * only a genuine first-character match reaches strcmp, and that one starts at
+ * byte 1 because byte 0 is already known equal. An empty name matches nothing,
+ * exactly as before (no table entry has an empty name). */
 static shell_builtin_fn find_shell_builtin(const char *name)
 {
+    const char c0 = name[0];
     for (const shell_builtin_t *b = shell_builtins; b->name; b++) {
-        if (strcmp(b->name, name) == 0)
+        if (b->name[0] == c0 && strcmp(b->name + 1, name + 1) == 0)
             return b->fn;
     }
     return NULL;
@@ -352,23 +361,25 @@ static int special_builtin_error_exits(const char *name)
      * divergence rather than close one. `times` likewise. */
 }
 
+/* Same shape as find_shell_builtin: this is asked about every command name,
+ * and the answer is usually no. Switching on the first character answers most
+ * names without a single strcmp, instead of running up to fifteen of them.
+ * The set is POSIX 2.14 and unchanged. */
 static int is_special_builtin(const char *name)
 {
-    return (strcmp(name, ":") == 0 ||
-            strcmp(name, ".") == 0 ||
-            strcmp(name, "break") == 0 ||
-            strcmp(name, "continue") == 0 ||
-            strcmp(name, "eval") == 0 ||
-            strcmp(name, "exec") == 0 ||
-            strcmp(name, "exit") == 0 ||
-            strcmp(name, "export") == 0 ||
-            strcmp(name, "readonly") == 0 ||
-            strcmp(name, "return") == 0 ||
-            strcmp(name, "set") == 0 ||
-            strcmp(name, "shift") == 0 ||
-            strcmp(name, "times") == 0 ||
-            strcmp(name, "trap") == 0 ||
-            strcmp(name, "unset") == 0);
+    switch (name[0]) {
+    case ':': return name[1] == '\0';
+    case '.': return name[1] == '\0';
+    case 'b': return strcmp(name, "break") == 0;
+    case 'c': return strcmp(name, "continue") == 0;
+    case 'e': return strcmp(name, "eval") == 0 || strcmp(name, "exec") == 0 ||
+                     strcmp(name, "exit") == 0 || strcmp(name, "export") == 0;
+    case 'r': return strcmp(name, "readonly") == 0 || strcmp(name, "return") == 0;
+    case 's': return strcmp(name, "set") == 0 || strcmp(name, "shift") == 0;
+    case 't': return strcmp(name, "times") == 0 || strcmp(name, "trap") == 0;
+    case 'u': return strcmp(name, "unset") == 0;
+    default:  return 0;
+    }
 }
 
 /* -------------------------------------------------------------------------
