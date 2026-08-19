@@ -365,6 +365,38 @@ int vars_unset_context(vars_t *v, const char *name, const char *ctx)
                     readonly_error(ctx, name);
                     return 1;
                 }
+                if (s->parent != NULL) {
+                    /* A FUNCTION scope keeps the entry as a tombstone
+                     * (value == NULL) instead of unlinking it.
+                     *
+                     * Unlinking made the next scope out show through, so
+                     *
+                     *     a() { local v=loc; unset v; echo "${v-(unset)}"; }
+                     *     v=global; a
+                     *
+                     * printed `global` where dash and bash both print
+                     * `(unset)`. The variable must stay unset for the rest of
+                     * the function and be restored only when the scope pops --
+                     * which it now is, because vars_get returns the first
+                     * entry it finds by NAME and a NULL value already reads as
+                     * unset, so the tombstone shadows the outer value without
+                     * any new lookup rule. vars_pop_scope frees it with the
+                     * rest of the scope, restoring the outer variable.
+                     *
+                     * The tombstone lands in the scope where the entry was
+                     * FOUND, not the innermost one, so `unlocal() { unset -v
+                     * "$1"; }` unsets in its caller rather than in a scope
+                     * that is about to pop (Oils ble-unset 3 and 4).
+                     *
+                     * The global scope still unlinks: there is nothing below
+                     * it to reveal, and a stale declared-but-unset entry there
+                     * would outlive the shell's interest in it. */
+                    e->value     = NULL;
+                    e->value_cap = 0;
+                    e->exported  = 0;
+                    unsetenv(name);
+                    return 0;
+                }
                 *pp = e->next;
                 /* Also drop it from the process environment. An exported var
                  * lives in `environ` (via setenv); removing only the shell-table

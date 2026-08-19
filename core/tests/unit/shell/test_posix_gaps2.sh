@@ -319,6 +319,64 @@ check "\$*: literals around \$* still bracket the split (control)" \
       "2[/][/]"
 
 # -----------------------------------------------------------------------
+# 6. `unset` on a variable that is local to a function leaves it UNSET for
+#    the rest of that function; it does not reveal the outer variable the
+#    local was shadowing. The outer value comes back only when the scope
+#    pops. dash and bash agree on all of this, so it is not a divergence
+#    anyone gets to choose -- silex used to unlink the entry and let the
+#    global show through.
+#
+#    Also Oils ble-unset 3 and 4: `unlocal() { unset -v "$1"; }` has to unset
+#    in its CALLER, so the tombstone must land in the scope where the name
+#    was found rather than in the innermost scope (which is about to pop).
+#    That LAST case is where dash and bash part company: bash reveals the
+#    caller's local (`global` here) and dash reports it unset. silex follows
+#    dash, which is what Oils lists as the default expectation and what the
+#    rest of this shell's scoping already matches; bash's answer is its
+#    `## OK bash` block. Run this file against /bin/bash and only that one
+#    test fails.
+
+check "unset of a local does not reveal the global" \
+      "$("$MB" -c 'a() { local v=loc; unset v; echo "${v-(unset)}"; }
+                   v=global; a' 2>/dev/null)" \
+      "(unset)"
+
+check "unset of a local is undone when the function returns" \
+      "$("$MB" -c 'a() { local v=loc; unset v; }
+                   v=global; a; echo "${v-(unset)}"' 2>/dev/null)" \
+      "global"
+
+check "unset of an inner local does not reveal the outer local" \
+      "$("$MB" -c 'd2() { local v=inner; unset v; echo "${v-(unset)}"; }
+                   d1() { local v=outer; d2; echo "${v-(unset)}"; }
+                   v=global; d1' 2>/dev/null)" \
+      "(unset)
+outer"
+
+# The control: unset of a GLOBAL from inside a function still removes it
+# outright. If unset had been changed to tombstone unconditionally, the
+# global scope would keep a dead entry and this would still say (unset) --
+# so the discriminating half is the value AFTER the function returns.
+check "unset of a global inside a function removes it (control)" \
+      "$("$MB" -c 'f2() { unset v; echo "${v-(unset)}"; }
+                   v=global; f2; echo "${v-(unset)}"' 2>/dev/null)" \
+      "(unset)
+(unset)"
+
+check "assignment after unsetting a local stays local" \
+      "$("$MB" -c 'a() { local v=loc; unset v; v=reassigned; }
+                   v=global; a; echo "$v"' 2>/dev/null)" \
+      "global"
+
+# Oils ble-unset 3: unset through a helper function unsets in the caller,
+# and the nested tempenvs do not come back one at a time.
+check "unset via a helper function unsets in its caller" \
+      "$("$MB" -c 'unlocal() { unset -v "$1"; }
+                   f() { local v=loc; unlocal v; echo "${v-(unset)}"; }
+                   v=global; f' 2>/dev/null)" \
+      "(unset)"
+
+# -----------------------------------------------------------------------
 
 echo ""
 echo "posix gap tests (2): $PASS passed, $FAIL failed"

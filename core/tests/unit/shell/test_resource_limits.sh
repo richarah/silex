@@ -275,7 +275,15 @@ check "arena: eval in loop keeps enclosing function positionals" "$got" "keepme"
 
 # ${20000} is the 20000th positional, i.e. the last one appended -- checked
 # against dash, which prints exactly this.
-got=$(timeout 180 "$SILEX" -c '
+#
+# The timeout is generous because this test also runs under `make test-asan`,
+# where the same loop takes ~137 s on a WSL2 laptop and occasionally spikes
+# past 190. At the old budget of 180 s it failed perhaps one run in three --
+# always with empty output, which reads exactly like a crash rather than a
+# timeout, so it cost a bisect before anyone measured it. The test is here to
+# catch the append idiom going QUADRATIC (it once died at ~3k items); a wall
+# clock that only rules out a hang serves that just as well.
+got=$(timeout 600 "$SILEX" -c '
 set --
 i=0
 while [ $i -lt 20000 ]; do i=$((i+1)); set -- "$@" "item$i"; done
