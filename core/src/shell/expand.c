@@ -301,9 +301,34 @@ static char *expand_tilde_word(shell_ctx_t *sh, const char *word)
  * Pattern matching helpers for ${VAR#pat}, ${VAR%pat}, ${VAR/pat/repl}
  * ------------------------------------------------------------------------- */
 
+/*
+ * Length of `pat` if it is LITERAL text -- no fnmatch metacharacter, so exactly
+ * one substring can ever match it -- else -1.
+ *
+ * `\` counts as a metacharacter and takes the slow path: a quoted metacharacter
+ * arrives here escaped (pat_emit_literal), and unescaping it correctly is
+ * fnmatch's job, not this predicate's. The four matchers below otherwise walk
+ * every split point of the subject calling fnmatch, with a malloc per call --
+ * O(n) matches and an allocation to strip `a` off the front of a ten-byte
+ * string. `${v#a}` and `${v%j}` are the shape parameter expansion actually
+ * comes in; a literal pattern answers in one memcmp with no allocation.
+ */
+static int pattern_literal_len(const char *pat)
+{
+    const char *q = pat;
+    for (; *q; q++)
+        if (*q == '*' || *q == '?' || *q == '[' || *q == '\\')
+            return -1;
+    return (int)(q - pat);
+}
+
 /* Match pat anchored at the start of str; return length of match or -1 */
 static int match_prefix(const char *str, const char *pat)
 {
+    int lit = pattern_literal_len(pat);
+    if (lit >= 0)
+        return strncmp(str, pat, (size_t)lit) == 0 ? lit : -1;
+
     /* Try lengths from longest to shortest for ## */
     size_t slen = strlen(str);
     char *tmp = malloc(slen + 1);
@@ -324,6 +349,12 @@ static int match_prefix(const char *str, const char *pat)
 
 static int match_prefix_shortest(const char *str, const char *pat)
 {
+    /* Longest and shortest coincide for a literal pattern: only one length
+     * of prefix can match it at all. */
+    int lit = pattern_literal_len(pat);
+    if (lit >= 0)
+        return strncmp(str, pat, (size_t)lit) == 0 ? lit : -1;
+
     size_t slen = strlen(str);
     char *tmp = malloc(slen + 1);
     if (!tmp) return -1;
@@ -343,8 +374,14 @@ static int match_prefix_shortest(const char *str, const char *pat)
 /* Match pat anchored at the end of str; return start offset of match or -1 */
 static int match_suffix(const char *str, const char *pat)
 {
-    /* Longest: try from smallest start offset */
     size_t slen = strlen(str);
+    int lit = pattern_literal_len(pat);
+    if (lit >= 0)
+        return (slen >= (size_t)lit &&
+                memcmp(str + slen - (size_t)lit, pat, (size_t)lit) == 0)
+               ? (int)(slen - (size_t)lit) : -1;
+
+    /* Longest: try from smallest start offset */
     for (size_t off = 0; off <= slen; off++) {
         if (fnmatch(pat, str + off, 0) == 0)
             return (int)off;
@@ -354,8 +391,14 @@ static int match_suffix(const char *str, const char *pat)
 
 static int match_suffix_shortest(const char *str, const char *pat)
 {
-    /* Shortest: try from largest start offset */
     size_t slen = strlen(str);
+    int lit = pattern_literal_len(pat);
+    if (lit >= 0)
+        return (slen >= (size_t)lit &&
+                memcmp(str + slen - (size_t)lit, pat, (size_t)lit) == 0)
+               ? (int)(slen - (size_t)lit) : -1;
+
+    /* Shortest: try from largest start offset */
     for (size_t off = slen; ; off--) {
         if (fnmatch(pat, str + off, 0) == 0)
             return (int)off;
