@@ -250,7 +250,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Cache external test repositories
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: core/tests/external/repos
           key: external-repos-${{ hashFiles('core/tests/external/fetch-all.sh') }}
