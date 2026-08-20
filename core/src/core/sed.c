@@ -1695,6 +1695,51 @@ static FILE *get_rfile(sed_cmd_t *cmd)
 
 /* ---- runtime regex helpers ---- */
 
+/* Match re against the byte range [start,end) of s.
+ *
+ * REG_STARTEND is the BSD/glibc extension that expresses this directly: the
+ * subject is bounded by offsets rather than by a NUL, so embedded NULs in the
+ * pattern space are ordinary bytes, and the offsets handed back stay absolute
+ * (relative to s, not to start).  Anchoring is the caller's business via
+ * REG_NOTBOL, exactly as it is with REG_STARTEND.
+ *
+ * musl has no REG_STARTEND and no other length-taking regexec, so there it is
+ * emulated by matching a NUL-terminated copy of the range and shifting the
+ * offsets back.  The one thing the copy cannot reproduce is a NUL *inside* the
+ * range: musl's regexec stops there, so on a musl build a NUL truncates the
+ * subject.  glibc builds are unaffected -- this compiles to the plain
+ * REG_STARTEND call.
+ */
+static int sed_regexec_range(const regex_t *re, const char *s,
+                             size_t start, size_t end,
+                             size_t nmatch, regmatch_t *pmatch, int eflags)
+{
+#ifdef REG_STARTEND
+    pmatch[0].rm_so = (regoff_t)start;
+    pmatch[0].rm_eo = (regoff_t)end;
+    return regexec(re, s, nmatch, pmatch, eflags | REG_STARTEND);
+#else
+    size_t len = end - start;
+    char *tmp = malloc(len + 1);
+    if (!tmp) return REG_ESPACE;
+    memcpy(tmp, s + start, len);
+    tmp[len] = '\0';
+
+    int rc = regexec(re, tmp, nmatch, pmatch, eflags);
+    if (rc == 0) {
+        /* Re-base onto s so callers see absolute offsets either way. */
+        for (size_t i = 0; i < nmatch; i++) {
+            if (pmatch[i].rm_so >= 0) {
+                pmatch[i].rm_so += (regoff_t)start;
+                pmatch[i].rm_eo += (regoff_t)start;
+            }
+        }
+    }
+    free(tmp);
+    return rc;
+#endif
+}
+
 static regex_t *effective_re(exec_t *st, regex_t *re, size_t src_off,
                              const parser_t *ps)
 {
@@ -1734,12 +1779,11 @@ static int addr_match_one(exec_t *st, sed_addr_t *a, size_t src_off,
         return (st->linenum - a->line) % a->step == 0;
     case ADDR_REGEX: {
         regex_t *re = effective_re(st, a->re, src_off, psinfo);
-        /* REG_STARTEND: length-based matching so embedded NULs in the
-         * pattern space do not truncate the subject */
+        /* Length-based matching so embedded NULs in the pattern space do
+         * not truncate the subject (see sed_regexec_range). */
         regmatch_t m0;
-        m0.rm_so = 0;
-        m0.rm_eo = (regoff_t)sb_len(&st->ps);
-        int r = regexec(re, sb_str(&st->ps), 1, &m0, REG_STARTEND) == 0;
+        int r = sed_regexec_range(re, sb_str(&st->ps), 0, sb_len(&st->ps),
+                                  1, &m0, 0) == 0;
         g_exec_re = re;
         return r;
     }
@@ -1913,12 +1957,10 @@ static int do_subst(exec_t *st, sed_cmd_t *cmd, const parser_t *psinfo)
     size_t prev_end = (size_t)-1;   /* end of the previous match */
 
     while (pos <= slen) {
-        /* REG_STARTEND: match within [pos,slen) of the buffer itself so
-         * embedded NULs are ordinary bytes; offsets come back absolute */
-        int ef = REG_STARTEND | (pos > 0 ? REG_NOTBOL : 0);
-        m[0].rm_so = (regoff_t)pos;
-        m[0].rm_eo = (regoff_t)slen;
-        if (regexec(re, subject, 10, m, ef) != 0)
+        /* Match within [pos,slen) of the buffer itself so embedded NULs are
+         * ordinary bytes; offsets come back absolute (see sed_regexec_range). */
+        int ef = (pos > 0 ? REG_NOTBOL : 0);
+        if (sed_regexec_range(re, subject, pos, slen, 10, m, ef) != 0)
             break;
         size_t so = (size_t)m[0].rm_so;
         size_t eo = (size_t)m[0].rm_eo;
@@ -1949,7 +1991,7 @@ static int do_subst(exec_t *st, sed_cmd_t *cmd, const parser_t *psinfo)
                     break;
                 case RT_GROUP: {
                     int g = rt->grp;
-                    if (m[g].rm_so >= 0)   /* REG_STARTEND: absolute */
+                    if (m[g].rm_so >= 0)   /* offsets are absolute */
                         append_cased(&out, s + (size_t)m[g].rm_so,
                                      (size_t)(m[g].rm_eo - m[g].rm_so),
                                      &case_mode, &one_shot);
