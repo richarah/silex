@@ -297,20 +297,40 @@ remove the override.
 **`/bin/sh` is dash, not silex.** `[[ ]]`, arrays, process
 substitution are bash. Use POSIX sh or `#!/bin/bash`.
 
-The silex shell in `core/` is not yet the image's `/bin/sh`.
-It passes 125/186 of the Smoosh POSIX conformance suite
-(`make core-external-test`), and a build shell that gets
-exit codes wrong is worse than a slow one. It becomes
-`/bin/sh` when it reaches ≥95% there and a clean 5/5 on the
-Autoconf suite — not before.
+The silex shell in `core/` is not yet the image's `/bin/sh`,
+but the bar this file set for it has been cleared. The gate
+was ≥95% of the Smoosh POSIX conformance suite and a clean
+5/5 on the Autoconf suite. As of 2026-08-20 it is **185/186
+(99.5%)** on Smoosh — ahead of dash (143) and bash (152) on
+that same runner — and **5/5** on Autoconf (curl, cpython,
+openssl, sqlite, zlib). Also 1696/0 on ShellSpec, byte-identical
+to dash, and 0 fatal bugs on modernish.
+
+`make core-external-test` reproduces all of it, and the
+per-suite detail is in [core/EXTERNAL_TEST_SCORECARD.md](core/EXTERNAL_TEST_SCORECARD.md).
+(The 125/186 that stood here was measured on 2026-07-12 and
+was six weeks stale.)
+
+What remains is a decision, not a measurement: swapping the
+image's `/bin/sh` is a change every downstream build feels at
+once, so it wants its own change with its own before/after
+build matrix.
 
 **`python3` on PATH. `python` is not.** Per PEP 394.
 
 **No GPU in slim.** CPU only.
 
 **Coreutils are busybox, not silex.** `sort --parallel` works
-via GNU sort wrapper. Other GNU-only flags don't. Same gate as
-above applies to the silex builtins in `core/`.
+via GNU sort wrapper. Other GNU-only flags don't.
+
+The blocker here is coverage, not correctness. On correctness
+`core/`'s applets pass **243/0** of the GNU coreutils suite
+(on a native filesystem — see the scorecard for why measuring
+on `/mnt/c` invented 27 failures), 66/0 on GNU grep, 50/1 on
+GNU sed and 99/100 on toybox. But there are 32 of them, and an
+image needs more than 32: no `awk`, `tar`, `gzip`, `diff` or
+`patch`. Until that set is filled in, busybox stays and the
+silex applets are a faster subset rather than a replacement.
 
 **git not in slim.** `silex:dev` or `apk add git`.
 
