@@ -726,12 +726,32 @@ int exec_simple_cmd(shell_ctx_t *sh, char **words, char **assigns, redir_t *redi
     return rc;
 }
 
-static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
-                                 redir_t *redirs)
+/*
+ * What every dispatch arm of a simple command needs: the expanded words,
+ * the env-prefix assignments (already expanded; owned by the caller), and
+ * the command's redirections.  Bundled so each arm below reads as a
+ * function instead of a labelled region of one 900-line body.
+ *
+ * Each arm opens by aliasing these fields to the local names the code used
+ * when it was inline.  That is deliberate: it keeps every moved line BYTE
+ * IDENTICAL to what it replaced, so the split can be checked by diffing the
+ * bodies rather than by rereading 900 lines of shell semantics and hoping.
+ * Nothing here is written by an arm, hence the const pointer.
+ */
+typedef struct {
+    char   **expanded;   /* expanded words; expanded[0] is the command */
+    int      argc;
+    char   **anames;     /* assignment names (NULL where malformed) */
+    char   **avals;      /* expanded values, parallel to anames */
+    int      nassigns;
+    redir_t *redirs;
+} simple_cmd_t;
+
+/* POSIX: expand redirections BEFORE command arguments
+ * This ensures that variable assignments in redirect targets
+ * (like 2>${x=redir}) happen before argument expansions (like ${x=assign}) */
+static void simple_cmd_preexpand_redirs(shell_ctx_t *sh, redir_t *redirs)
 {
-    /* POSIX: expand redirections BEFORE command arguments
-     * This ensures that variable assignments in redirect targets
-     * (like 2>${x=redir}) happen before argument expansions (like ${x=assign}) */
     for (redir_t *r = redirs; r != NULL; r = r->next) {
         if (r->op != TOK_DLESS && r->op != TOK_DLESSDASH) {
             /* Pre-expand redirect target to trigger any variable assignments
@@ -747,6 +767,803 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
                 r->expanded_target = arena_strdup(sh->scratch, target);
         }
     }
+}
+
+/*
+ * Expand the env-prefix assignments and bank the exit status of their last
+ * command substitution into *cmdsub_exit / *cmdsub_seen.  On success the
+ * malloc'd anames/avals arrays (parallel; NULL entries where an assignment
+ * was malformed) become the caller's to free.  Returns -1 on out-of-memory
+ * (diagnostic printed, nothing to free) and 2 on a readonly violation --
+ * where a non-interactive shell has already exited; an interactive caller
+ * must undo any assignment-only redirections itself and report 2.
+ * All semantics comments live in the body, unchanged from when this was
+ * inline in exec_simple_cmd_inner().
+ */
+static int simple_cmd_expand_assigns(shell_ctx_t *sh, char **assigns,
+                                     int nassigns, char ***anames_out,
+                                     char ***avals_out, int *cmdsub_exit,
+                                     int *cmdsub_seen)
+{
+    *anames_out = NULL;
+    *avals_out  = NULL;
+    char **anames = malloc((size_t)nassigns * sizeof(char *));
+    char **avals  = malloc((size_t)nassigns * sizeof(char *));
+    if (!anames || !avals) {
+        free(anames); free(avals);
+        fprintf(stderr, "silex: out of memory\n");
+        return -1;
+    }
+    /* POSIX 2.8.1: assigning to a read-only variable is a VARIABLE
+     * ASSIGNMENT ERROR -- a non-interactive shell writes one diagnostic
+     * and exits (dash: status 2). Detected before anything is applied,
+     * because the machinery below assigns each value three times (overlay,
+     * restore, final apply) and each pass printed its own "readonly
+     * variable" line while the shell carried on regardless. The values are
+     * still expanded first, so a command substitution in the offending
+     * assignment runs, as it does in dash. */
+    const char *ro_name = NULL;
+    for (int i = 0; i < nassigns; i++) {
+        const char *eq = strchr(assigns[i], '=');
+        if (!eq) continue;
+        size_t nl = (size_t)(eq - assigns[i]);
+        char nbuf[256];
+        if (nl >= sizeof(nbuf)) continue;
+        memcpy(nbuf, assigns[i], nl);
+        nbuf[nl] = '\0';
+        if (vars_is_readonly(&sh->vars, nbuf)) { ro_name = assigns[i]; break; }
+    }
+    /* Assignments are expanded and applied LEFT TO RIGHT, each visible to
+     * the next (`x=5 y=$((x+2)) cmd` gives y=7 -- smoosh
+     * semantics.special.assign.visible). Apply each into the shell vars as
+     * an overlay while expanding, then restore; the per-path machinery
+     * below re-applies them where they belong.
+     *
+     * A SINGLE assignment has no "next" to be visible to, so the overlay is
+     * observable only to itself -- and its own RHS was already expanded
+     * before the store, so it cannot see it either. Leaving the arrays NULL
+     * skips the store and the matching restore below (both are already
+     * guarded on them), which takes three callocs, a strdup, two var-store
+     * writes and three frees off every `x=...`, `x=$y cmd` and `IFS=: cmd`
+     * -- by far the commonest shape an assignment comes in. Two or more
+     * assignments still get the full left-to-right overlay. */
+    char **aov_saved = NULL;
+    int   *aov_had   = NULL;
+    int   *aov_exp   = NULL;
+    if (nassigns > 1) {
+        aov_saved = calloc((size_t)nassigns, sizeof(char *));
+        aov_had   = calloc((size_t)nassigns, sizeof(int));
+        aov_exp   = calloc((size_t)nassigns, sizeof(int));
+    }
+    for (int i = 0; i < nassigns; i++) {
+        const char *eq = strchr(assigns[i], '=');
+        if (!eq) { anames[i] = NULL; avals[i] = NULL; continue; }
+        size_t nlen = (size_t)(eq - assigns[i]);
+        anames[i] = strndup(assigns[i], nlen);
+        /* Use expand_word_assign for assignment values - enables ~: expansion */
+        avals[i]  = expand_word_assign(sh, eq + 1);
+        if (!ro_name && anames[i] && aov_saved && aov_had && aov_exp) {
+            const char *ov = vars_get(&sh->vars, anames[i]);
+            aov_had[i]   = ov != NULL;
+            aov_saved[i] = ov ? strdup(ov) : NULL;
+            aov_exp[i]   = vars_is_exported(&sh->vars, anames[i]);
+            vars_set(&sh->vars, anames[i], avals[i] ? avals[i] : "");
+        }
+    }
+    /* Restore the overlay (reverse order handles duplicate names). The
+     * word/command paths apply the values again through their own
+     * save/restore; special builtins get persistence there. */
+    if (!ro_name && aov_saved && aov_had && aov_exp) {
+        for (int i = nassigns - 1; i >= 0; i--) {
+            if (!anames[i]) continue;
+            if (aov_had[i])
+                vars_set(&sh->vars, anames[i], aov_saved[i] ? aov_saved[i] : "");
+            else {
+                vars_unset(&sh->vars, anames[i]);
+                /* A declared-but-unset EXPORTED var must stay declared:
+                 * vars_unset killed the entry, recreate the declaration. */
+                if (aov_exp[i])
+                    vars_export(&sh->vars, anames[i]);
+            }
+            free(aov_saved[i]);
+        }
+    }
+    free(aov_saved);
+    free(aov_had);
+    free(aov_exp);
+    *cmdsub_exit = sh->last_cmdsub_exit;
+    *cmdsub_seen = sh->last_cmdsub_seen;
+
+    if (ro_name) {
+        const char *eq = strchr(ro_name, '=');
+        fprintf(stderr, "silex: %.*s: readonly variable\n",
+                (int)(eq ? eq - ro_name : (ptrdiff_t)strlen(ro_name)), ro_name);
+        for (int i = 0; i < nassigns; i++) free(anames[i]);
+        free(anames); free(avals);
+        if (!sh->interactive)
+            sh_exit_with_trap(sh, 2);
+        return 2;
+    }
+    *anames_out = anames;
+    *avals_out  = avals;
+    return 0;
+}
+
+/* xtrace (set -x) and the SILEX_TRACE debug env both print the command,
+ * post-expansion, to stderr before it runs -- this is POSIX `set -x`.
+ * opt_x was previously set but never consulted, so `set -x` traced nothing.
+ * PS4 supplies the prefix (POSIX; default "+ "). */
+static void simple_cmd_trace(shell_ctx_t *sh, char **expanded, int argc)
+{
+    const char *ps4 = vars_get(&sh->vars, "PS4");
+    /* PS4 is expanded before it is printed (POSIX), so `PS4='[last=$?] '`
+     * shows the status of the PREVIOUS command -- which means the
+     * expansion itself must not disturb $?, and a command substitution
+     * inside PS4 would. Printing it raw made every trace line literally
+     * read "[last=$?]". */
+    if (ps4) {
+        int saved_status = sh->last_exit;
+        /* Tracing is OFF while PS4 itself is expanded. A `$(...)` in PS4
+         * runs in a forked subshell that INHERITS opt_x, so with tracing
+         * still on that subshell traced its own command, expanded PS4
+         * again, forked again -- `PS4='$(date)'; set -x` was a fork bomb.
+         * Clearing the flag (rather than a local guard) is what the child
+         * inherits, and matches bash: the PS4 expansion is not traced. */
+        int saved_x = sh->opt_x, saved_tl = sh->trace_level;
+        sh->opt_x = 0; sh->trace_level = 0;
+        sh->in_ps4 = 1;
+        const char *x = expand_word(sh, ps4);
+        sh->in_ps4 = 0;
+        sh->opt_x = saved_x; sh->trace_level = saved_tl;
+        sh->last_exit = saved_status;
+        fputs(x ? x : ps4, stderr);
+    } else {
+        fputs("+ ", stderr);
+    }
+    for (int ti = 0; ti < argc; ti++) {
+        if (ti) fputc(' ', stderr);
+        fputs(expanded[ti], stderr);
+    }
+    fputc('\n', stderr);
+}
+
+/*
+ * execv(exec_path), falling back to running the file as a shell script when
+ * the kernel refuses with ENOEXEC (no shebang, plain text) -- POSIX; smoosh
+ * semantics.simple.link runs `cmd.sh` (no #!) via PATH=. /proc/self/exe is
+ * exact; the argv[0]-less "sh" fallback covers non-Linux.  Never returns:
+ * on failure the process exits 126 when the command was FOUND but could not
+ * be executed (not executable, a directory, a bad interpreter) and 127 only
+ * when it could not be found -- reporting 127 for both meant a script could
+ * not tell a typo in the name from a missing `chmod +x`.
+ */
+SILEX_NORETURN static void exec_or_die(const char *exec_path, char **expanded)
+{
+    execv(exec_path, expanded);
+    if (errno == ENOEXEC) {
+        int xargc = 0;
+        while (expanded[xargc]) xargc++;
+        char **sargv = malloc((size_t)(xargc + 2) * sizeof(char *));
+        if (sargv) {
+            sargv[0] = (char *)"sh";
+            sargv[1] = (char *)exec_path;
+            for (int xi = 1; xi <= xargc; xi++)
+                sargv[xi + 1] = expanded[xi];
+            execv("/proc/self/exe", sargv);
+            execvp("sh", sargv);
+        }
+    }
+    int exec_errno = errno;
+    perror(exec_path);
+    _exit(exec_errno == ENOENT || exec_errno == ENOTDIR ? 127 : 126);
+}
+
+/* A shell-internal builtin, run in-process.  sfn is the builtin the
+ * dispatcher resolved (function-override already applied). */
+static int simple_cmd_builtin(shell_ctx_t *sh, const simple_cmd_t *c, shell_builtin_fn sfn)
+{
+    char       **expanded = c->expanded;
+    const char  *cmd      = expanded[0];
+    int          argc     = c->argc;
+    char       **anames   = c->anames;
+    char       **avals    = c->avals;
+    int          nassigns = c->nassigns;
+    redir_t     *redirs   = c->redirs;
+    int          cmd_rc   = 0;
+
+    if (sh->trace_level >= 2)
+        fprintf(stderr, "+ [builtin] %s\n", cmd);
+
+    /* A `VAR=val builtin` prefix applies to the builtin's environment for its
+     * duration. This matters when the builtin resolves or execs another
+     * command: `PATH=$DEFPATH command awk ...` (modernish's `str ematch`)
+     * must find awk via that PATH. Apply the assignments to the shell vars
+     * (exported so a child exec inherits them) and restore afterwards. */
+    char **abuiltin_saved  = NULL;
+    int   *abuiltin_had    = NULL;
+    int   *abuiltin_wasexp = NULL;
+    if (nassigns > 0) {
+        abuiltin_saved  = calloc((size_t)nassigns, sizeof(char *));
+        abuiltin_had    = calloc((size_t)nassigns, sizeof(int));
+        abuiltin_wasexp = calloc((size_t)nassigns, sizeof(int));
+        if (abuiltin_saved && abuiltin_had && abuiltin_wasexp) {
+            for (int ai = 0; ai < nassigns; ai++) {
+                if (!anames[ai]) continue;
+                const char *ov = vars_get(&sh->vars, anames[ai]);
+                abuiltin_had[ai]    = ov != NULL;
+                abuiltin_saved[ai]  = ov ? strdup(ov) : NULL;
+                /* The export is TEMPORARY, so remember whether the name was
+                 * already exported -- the restore below has to put the flag
+                 * back even in the cases where the VALUE stays. */
+                abuiltin_wasexp[ai] = vars_is_exported(&sh->vars, anames[ai]);
+                vars_set(&sh->vars, anames[ai], avals[ai] ? avals[ai] : "");
+                vars_export(&sh->vars, anames[ai]);
+            }
+        }
+    }
+
+    redirect_ctx_t rctx;
+    rctx.saved = NULL;
+    rctx.error = 0;
+    if (redirs) redirect_apply(sh, redirs, &rctx);
+    /* If redirect failed, don't execute the command */
+    if (rctx.error) {
+        cmd_rc = 1;
+        /* POSIX: Special builtins must cause non-interactive shell to exit on redirect error
+         * EXCEPT when invoked via 'command' prefix */
+        if (!sh->interactive && !sh->in_command_builtin && !sh->in_trap &&
+            is_special_builtin(cmd)) {
+            /* Exit immediately with error status */
+            sh_exit_with_trap(sh, 1);
+        }
+    } else {
+        cmd_rc = sfn(sh, argc, expanded);
+
+        /* A failed special builtin ends a non-interactive shell (2.8.1).
+         * `command shift 3` is exempt (the `command` prefix removes the
+         * special-builtin properties), as is a trap action, which must
+         * return to whatever it interrupted -- the same exemptions the
+         * redirect-error path above uses. dash reports 2 for this class of
+         * shell error whatever the builtin's own status was. */
+        if (cmd_rc != 0 && !sh->interactive && !sh->in_command_builtin &&
+            !sh->in_trap && special_builtin_error_exits(cmd)) {
+            fflush(stdout);
+            sh_exit_with_trap(sh, 2);
+        }
+
+        /* A builtin whose output could not be written has not succeeded.
+         *
+         * stdio buffers, so a failing write() is not seen by the builtin's
+         * printf -- it surfaces at the flush, which for a builtin never
+         * happens before the redirection is torn down. So `times >/dev/full`,
+         * `export -p >/dev/full`, `type echo >/dev/full` and friends all
+         * reported success while writing nothing. smoosh calls this class
+         * "silently failing commands" and tests for it directly.
+         *
+         * Flush while the redirection is still applied -- after
+         * redirect_restore() below, stdout points somewhere else and the
+         * error is lost. EPIPE stays silent (`yes | head` is not an error).
+         */
+        if (fflush(stdout) != 0 || ferror(stdout)) {
+            if (errno != EPIPE) {
+                fprintf(stderr, "silex: %s: write error: %s\n",
+                        cmd, strerror(errno));
+                if (cmd_rc == 0)
+                    cmd_rc = 1;
+            }
+            clearerr(stdout);
+        }
+    }
+    /* Restore variables the env-prefix temporarily overrode. `exec` with no
+     * command keeps its assignments (they become permanent, like its
+     * redirections), so skip the restore in that case. */
+    int abuiltin_keep = (strcmp(cmd, "exec") == 0 && argc == 1) ||
+                        reduces_to_bare_exec(expanded, argc);
+    /* POSIX: variable assignments preceding a SPECIAL builtin remain in
+     * effect after it completes (smoosh semantics.special.assign.visible).
+     * Only the ASSIGNMENTS persist -- redirects are still restored (only
+     * `exec` keeps those; abuiltin_keep above). */
+    int assigns_persist = is_special_builtin(cmd);
+    if (nassigns > 0 && abuiltin_saved && abuiltin_had && !abuiltin_keep &&
+        !assigns_persist) {
+        for (int ai = 0; ai < nassigns; ai++) {
+            if (!anames[ai]) continue;
+            if (abuiltin_had[ai])
+                vars_set(&sh->vars, anames[ai],
+                         abuiltin_saved[ai] ? abuiltin_saved[ai] : "");
+            else
+                vars_unset(&sh->vars, anames[ai]);
+        }
+    }
+    /* Undo the temporary EXPORT, even where the VALUE stays.
+     *
+     * POSIX 2.9.1: assignments preceding a special builtin persist as SHELL
+     * variables. They are not added to the environment -- an ordinary
+     * assignment does not export, and a prefix on a special builtin is an
+     * ordinary assignment that happens to be written in front of a command.
+     * The export above exists only so that a builtin which goes on to exec
+     * something (`PATH=$DEFPATH command awk ...`) is found through it.
+     *
+     * Leaving the flag set meant `pre1=pre1 readonly x=x` put pre1 into the
+     * environment of every later child. Oils builtin-special 3 catches it
+     * through the next command being `exec sh -c 'echo pre1=$pre1'`: silex
+     * printed pre1=pre1 where dash, bash and yash all print pre1= .
+     *
+     * `export` is exempt for the obvious reason -- `x=1 export x` asked for
+     * the flag, and from here that is indistinguishable from our own. */
+    if (nassigns > 0 && abuiltin_wasexp && strcmp(cmd, "export") != 0) {
+        for (int ai = 0; ai < nassigns; ai++) {
+            if (!anames[ai] || abuiltin_wasexp[ai]) continue;
+            vars_unexport(&sh->vars, anames[ai]);
+        }
+    }
+    if (abuiltin_saved)
+        for (int ai = 0; ai < nassigns; ai++) free(abuiltin_saved[ai]);
+    free(abuiltin_saved);
+    free(abuiltin_had);
+    free(abuiltin_wasexp);
+
+    /* 'exec' with no command: redirections are permanent (not restored).
+     * Also when it is reached through `command` (`command exec 8<file`). */
+    if (abuiltin_keep)
+        redirect_commit(&rctx);
+    else if (redirs)
+        redirect_restore(&rctx);
+    return cmd_rc;
+}
+
+/* A user-defined shell function: new positional frame, new local scope,
+ * env-prefix assignments imported as locals. */
+static int simple_cmd_function(shell_ctx_t *sh, const simple_cmd_t *c, node_t *fnbody)
+{
+    char       **expanded = c->expanded;
+    const char  *cmd      = expanded[0];
+    int          argc     = c->argc;
+    char       **anames   = c->anames;
+    char       **avals    = c->avals;
+    int          nassigns = c->nassigns;
+    redir_t     *redirs   = c->redirs;
+    int          cmd_rc   = 0;
+
+    if (sh->call_depth >= SHELL_MAX_CALL_DEPTH) {
+        fprintf(stderr, "silex: sh: %s: maximum call depth (%d) exceeded\n",
+                cmd, SHELL_MAX_CALL_DEPTH);
+        cmd_rc = 1;
+        return cmd_rc;
+    }
+
+    redirect_ctx_t rctx;
+    rctx.saved = NULL;
+    rctx.error = 0;
+    if (redirs) redirect_apply(sh, redirs, &rctx);
+    /* A failed redirection means the command (here, the function) does not
+     * run; report failure (POSIX). */
+    if (rctx.error) {
+        cmd_rc = 1;
+        if (redirs) redirect_restore(&rctx);
+        return cmd_rc;
+    }
+
+    /* Set positional parameters for function */
+    char **old_pos   = sh->positional;
+    int old_n        = sh->positional_n;
+    char **old_base  = sh->positional_base;
+    int old_base_n   = sh->positional_base_n;
+    int old_break    = sh->break_level;
+    int old_loop     = sh->loop_depth;
+
+    sh->positional_n = argc - 1;
+    sh->positional   = expanded + 1;
+    /* The arguments live in the caller's expansion, so this frame owns
+     * nothing yet. Clearing the base is what stops a `set --` inside the
+     * function from freeing the CALLER's list, which old_pos still needs. */
+    sh->positional_base   = NULL;
+    sh->positional_base_n = 0;
+    /* break/continue scoping: LEXICAL by default (a function body is its
+     * own loop context; smoosh builtin.break.lexical), DYNAMIC under
+     * `set -o nonlexicalctrl` (the caller's loops stay visible; smoosh
+     * builtin.break.nonlexical). Process boundaries always clamp -- see
+     * subshell_reset_traps. */
+    if (!sh->opt_nonlexicalctrl) {
+        sh->break_level = 0;
+        sh->loop_depth  = 0;
+    }
+
+    vars_push_scope(&sh->vars);
+    /* Import environment-prefix variables into function scope */
+    for (int i = 0; i < nassigns; i++) {
+        if (anames[i])
+            vars_set_local(&sh->vars, anames[i], avals[i] ? avals[i] : "");
+    }
+    sh->call_depth++;
+    cmd_rc = exec_node(sh, fnbody);
+    sh->call_depth--;
+    vars_pop_scope(&sh->vars);
+
+    /* Release anything a `set --` inside the function allocated; it dies
+     * with the frame. No-op if the function never ran one. */
+    positional_free(sh);
+    sh->positional        = old_pos;
+    sh->positional_n      = old_n;
+    sh->positional_base   = old_base;
+    sh->positional_base_n = old_base_n;
+    if (!sh->opt_nonlexicalctrl) {
+        sh->break_level = old_break;
+        sh->loop_depth  = old_loop;
+    }
+
+    if (redirs) redirect_restore(&rctx);
+
+    /* Absorb `return` at the function boundary. break/continue are
+     * absorbed too under the default LEXICAL scoping; with
+     * `set -o nonlexicalctrl` they propagate to the caller's loops. */
+    if (cmd_rc == FLOW_RETURN) cmd_rc = sh->last_exit;
+    if (!sh->opt_nonlexicalctrl &&
+        (cmd_rc == FLOW_BREAK || cmd_rc == FLOW_CONTINUE))
+        cmd_rc = 0;
+    return cmd_rc;
+}
+
+/* A builtin coreutil (applet), run in-process -- except `sh` and `env`,
+ * which never return to their caller and must fork (see below). */
+static int simple_cmd_applet(shell_ctx_t *sh, const simple_cmd_t *c, const applet_t *ap)
+{
+    char       **expanded = c->expanded;
+    const char  *cmd      = expanded[0];
+    int          argc     = c->argc;
+    char       **anames   = c->anames;
+    char       **avals    = c->avals;
+    int          nassigns = c->nassigns;
+    redir_t     *redirs   = c->redirs;
+    int          cmd_rc   = 0;
+
+    /*
+     * B-8: XC-02 Dead command elimination.
+     * Skip `mkdir -p PATH...` when all PATH arguments are already
+     * confirmed existing directories with written_by_silex=1
+     * in fscache (i.e. we created them in this run).
+     * Only safe when there are no redirections.
+     */
+    if (!redirs && strcmp(cmd, "mkdir") == 0 && argc >= 2) {
+        int has_p = 0;
+        for (int i = 1; i < argc; i++) {
+            const char *a = expanded[i];
+            if (!a) break;
+            if (strcmp(a, "--") == 0) break;
+            if (a[0] == '-') {
+                for (const char *f = a + 1; *f && *f != '-'; f++)
+                    if (*f == 'p') { has_p = 1; break; }
+            }
+        }
+        if (has_p) {
+            int all_done = 1;
+            for (int i = 1; i < argc && all_done; i++) {
+                const char *a = expanded[i];
+                if (!a) break;
+                if (a[0] == '-' || strcmp(a, "--") == 0) continue;
+                struct stat st;
+                if (!fscache_written_by_silex(a) ||
+                    fscache_stat(a, &st) != 0 || !S_ISDIR(st.st_mode))
+                    all_done = 0;
+            }
+            if (all_done) { cmd_rc = 0; return cmd_rc; }
+        }
+    }
+    /* Applets that never return to their caller must run in a fork, or
+     * they take the whole shell with them:
+     *   sh    may call exit();
+     *   env   EXECS the command it is given -- correct for a standalone
+     *         /usr/bin/env, fatal in-process. `echo a; env echo b; echo c`
+     *         printed a and b and then the shell was simply gone, exit 0,
+     *         with `c` never reached. Applets are dispatched ahead of PATH
+     *         by design, so this hit every `env CMD` in every script.
+     * Both also need the shell's exported vars and the VAR=val prefix
+     * pushed into the child's environment. */
+    if (strcmp(cmd, "sh") == 0 || strcmp(cmd, "env") == 0) {
+        fflush(NULL);
+        pid_t apid = fork();
+        if (apid < 0) { perror("fork"); cmd_rc = 1; return cmd_rc; }
+        if (apid == 0) {
+            redirect_ctx_t rctx2 = {NULL, 0};
+            if (redirs) redirect_apply(sh, redirs, &rctx2);
+            vars_export_env(&sh->vars);
+            /* Apply env-prefix assignments AFTER exporting shell vars */
+            for (int i = 0; i < nassigns; i++) {
+                if (anames[i])
+                    setenv(anames[i], avals[i] ? avals[i] : "", 1);
+            }
+            int aret = ap->fn(argc, expanded);
+            fflush(NULL);
+            _exit(aret);
+        }
+        int astatus;
+        while (waitpid(apid, &astatus, 0) < 0 && errno == EINTR) {}
+        if (WIFEXITED(astatus)) cmd_rc = WEXITSTATUS(astatus);
+        else if (WIFSIGNALED(astatus)) cmd_rc = 128 + WTERMSIG(astatus);
+        else cmd_rc = 1;
+        return cmd_rc;
+    }
+    redirect_ctx_t rctx;
+    rctx.saved = NULL;
+    rctx.error = 0;
+    if (redirs) redirect_apply(sh, redirs, &rctx);
+    if (rctx.error) {
+        /* Failed redirection: don't run the applet (POSIX). */
+        cmd_rc = 1;
+        if (redirs) redirect_restore(&rctx);
+        return cmd_rc;
+    }
+    /* Remember the applet for `hash` output (smoosh builtin.hash.nonposix
+     * expects `touch hi` to make `hash | grep touch` succeed). */
+    {
+        int seen_i;
+        for (seen_i = 0; seen_i < sh->applets_seen_n; seen_i++)
+            if (strcmp(sh->applets_seen[seen_i], ap->name) == 0) break;
+        if (seen_i == sh->applets_seen_n &&
+            sh->applets_seen_n < (int)(sizeof(sh->applets_seen) / sizeof(sh->applets_seen[0])))
+            sh->applets_seen[sh->applets_seen_n++] = ap->name;
+    }
+
+    /* A `VAR=val applet` prefix has to reach the applet's ENVIRONMENT.
+     * An external utility gets this for free from the exec; an applet
+     * runs in-process and reads getenv(), so without this the binding is
+     * simply invisible -- `TZ=UTC date` printed local time, and
+     * `LC_ALL=C sort` sorted in the caller's locale. The shell-builtin
+     * path above already does this; the applet path never did.
+     *
+     * vars_export() calls setenv(), so the value lands in `environ`
+     * immediately. Restore covers the export FLAG too: a var that existed
+     * unexported must not stay exported afterwards. */
+    char **aapp_saved = NULL;
+    int   *aapp_had   = NULL;
+    int   *aapp_exp   = NULL;
+    if (nassigns > 0) {
+        aapp_saved = calloc((size_t)nassigns, sizeof(char *));
+        aapp_had   = calloc((size_t)nassigns, sizeof(int));
+        aapp_exp   = calloc((size_t)nassigns, sizeof(int));
+        if (aapp_saved && aapp_had && aapp_exp) {
+            for (int ai = 0; ai < nassigns; ai++) {
+                if (!anames[ai]) continue;
+                const char *ov = vars_get(&sh->vars, anames[ai]);
+                aapp_had[ai]   = ov != NULL;
+                aapp_saved[ai] = ov ? strdup(ov) : NULL;
+                aapp_exp[ai]   = vars_is_exported(&sh->vars, anames[ai]);
+                vars_set(&sh->vars, anames[ai], avals[ai] ? avals[ai] : "");
+                vars_export(&sh->vars, anames[ai]);
+            }
+        }
+    }
+
+    struct sigaction sa_pipe, sa_pipe_prev;
+    sa_pipe.sa_handler = applet_sigpipe_handler;
+    sigemptyset(&sa_pipe.sa_mask);
+    sa_pipe.sa_flags = 0;
+    applet_got_sigpipe = 0;
+    int pipe_hooked = (sigaction(SIGPIPE, &sa_pipe, &sa_pipe_prev) == 0);
+
+    cmd_rc = ap->fn(argc, expanded);
+
+    if (pipe_hooked) {
+        sigaction(SIGPIPE, &sa_pipe_prev, NULL);
+        if (applet_got_sigpipe) cmd_rc = 128 + SIGPIPE;
+    }
+
+    if (nassigns > 0 && aapp_saved && aapp_had && aapp_exp) {
+        for (int ai = nassigns - 1; ai >= 0; ai--) {
+            if (!anames[ai]) continue;
+            if (aapp_had[ai]) {
+                vars_set(&sh->vars, anames[ai],
+                         aapp_saved[ai] ? aapp_saved[ai] : "");
+                if (!aapp_exp[ai])
+                    vars_unexport(&sh->vars, anames[ai]);
+            } else {
+                vars_unset(&sh->vars, anames[ai]);
+            }
+        }
+    }
+    if (aapp_saved)
+        for (int ai = 0; ai < nassigns; ai++) free(aapp_saved[ai]);
+    free(aapp_saved);
+    free(aapp_had);
+    free(aapp_exp);
+    /* Same deal as the shell-builtin path above: flush while the
+     * redirection is still applied so a full/broken target is charged to
+     * THIS command, and clear the sticky stdio error flag so it cannot
+     * leak into later commands or the shell's exit status. Applets that
+     * check their own flush (echo, printf) already returned non-zero;
+     * stay silent here -- smoosh expects no extra shell diagnostic. */
+    if (fflush(stdout) != 0 || ferror(stdout)) {
+        if (errno != EPIPE && cmd_rc == 0)
+            cmd_rc = 1;
+        clearerr(stdout);
+    }
+    if (redirs) redirect_restore(&rctx);
+    return cmd_rc;
+}
+
+/* An external command: resolve PATH in the parent, then fork + exec --
+ * or, when in_place is set (a subshell's disposable tail call), exec
+ * without the fork. */
+static int simple_cmd_external(shell_ctx_t *sh, const simple_cmd_t *c,
+                               int in_place)
+{
+    char       **expanded = c->expanded;
+    const char  *cmd      = expanded[0];
+    int          argc     = c->argc;
+    char       **anames   = c->anames;
+    char       **avals    = c->avals;
+    int          nassigns = c->nassigns;
+    redir_t     *redirs   = c->redirs;
+    int          cmd_rc   = 0;
+
+    /* Resolve the command to an absolute path using the cache (F-03).
+     * Commands containing '/' bypass the cache and are used as-is. */
+    const char *exec_path;
+    char path_buf[PATH_MAX];
+
+    /* A `PATH=...` command-prefix assignment overrides the PATH used to find the
+     * command. Resolve against it directly and DON'T touch the path cache, which
+     * is keyed on the shell's normal PATH. */
+    const char *path_prefix = NULL;
+    for (int ai = 0; ai < nassigns; ai++)
+        if (anames[ai] && strcmp(anames[ai], "PATH") == 0)
+            path_prefix = avals[ai] ? avals[ai] : "";
+
+    if (strchr(cmd, '/')) {
+        exec_path = cmd;
+    } else if (path_prefix) {
+        exec_path = path_resolve_with(sh, cmd, path_buf, sizeof(path_buf), path_prefix);
+    } else {
+        path_cache_entry_t *ce = path_cache_get(sh, cmd);
+        if (ce) {
+            exec_path = ce->found ? ce->path : NULL;
+        } else {
+            char *rp = path_resolve(sh, cmd, path_buf, sizeof(path_buf));
+            path_cache_put(sh, cmd, rp);
+            exec_path = rp;  /* path_buf is valid for this scope */
+        }
+    }
+
+    if (!exec_path) {
+        /* Report "command not found" through any redirections on this command:
+         * `nosuchcmd 2>/dev/null` must swallow the message. We resolve the
+         * command in the parent (before the fork that would apply redirects),
+         * so apply them here around the message and restore afterwards. */
+        redirect_ctx_t rctx = {NULL, 0};
+        if (redirs) redirect_apply(sh, redirs, &rctx);
+        /* A redirection that could not be performed already reported itself,
+         * and the command never runs -- so there is nothing to call "not
+         * found". `[[ -f < ]]` printed BOTH errors and exited 127, claiming a
+         * missing command when the real failure was the redirect. */
+        if (rctx.error) {
+            if (redirs) redirect_restore(&rctx);
+            sh->last_exit = 1;
+            cmd_rc = 1;
+            return cmd_rc;
+        }
+        fprintf(stderr, "silex: %s: command not found\n", cmd);
+        fflush(stderr);
+        if (redirs) redirect_restore(&rctx);
+        sh->last_exit = 127;
+        cmd_rc = 127;
+        return cmd_rc;
+    }
+
+    /* Disposable tail call: exec in place, no fork. Only set by subshell-type
+     * children (async, cmdsub, pipeline stages) for their final command. */
+    if (in_place) {
+        redirect_ctx_t rctx = {NULL, 0};
+        if (redirs) {
+            redirect_apply(sh, redirs, &rctx);
+            if (rctx.error) _exit(1);
+        }
+        vars_export_env(&sh->vars);
+        for (int i = 0; i < nassigns; i++) {
+            if (anames[i])
+                setenv(anames[i], avals[i] ? avals[i] : "", 1);
+        }
+        signal(SIGPIPE, SIG_DFL);
+        fflush(NULL);
+        exec_or_die(exec_path, expanded);
+    }
+
+    pid_t pid = fork();
+    if (unlikely(pid < 0)) {
+        perror("fork");
+        cmd_rc = 1;
+        return cmd_rc;
+    }
+
+    if (pid == 0) {
+        /* Child: restore SIGPIPE to default (shell set it to SIG_IGN) */
+        signal(SIGPIPE, SIG_DFL);
+
+        /* Under job control, become a new foreground process group with the
+         * job-control signals back at their default, so ^Z/^C reach the command
+         * rather than the shell (which ignores them). */
+        if (sh->job_control) {
+            setpgid(0, 0);
+            if (sh->tty_fd >= 0)
+                tcsetpgrp(sh->tty_fd, getpid());
+            signal(SIGINT,  SIG_DFL);
+            signal(SIGQUIT, SIG_DFL);
+            signal(SIGTSTP, SIG_DFL);
+            signal(SIGTTIN, SIG_DFL);
+            signal(SIGTTOU, SIG_DFL);
+        }
+
+        redirect_ctx_t rctx;
+        rctx.saved = NULL;
+        rctx.error = 0;
+        if (redirs) redirect_apply(sh, redirs, &rctx);
+        /* A failed redirection means the command is not run; exit the child
+         * with a nonzero status instead of exec'ing (POSIX). */
+        if (rctx.error)
+            _exit(1);
+
+        /* Export all exported vars */
+        vars_export_env(&sh->vars);
+
+        /* Apply env-prefix assignments AFTER exporting shell vars */
+        for (int i = 0; i < nassigns; i++) {
+            if (anames[i])
+                setenv(anames[i], avals[i] ? avals[i] : "", 1);
+        }
+
+        exec_or_die(exec_path, expanded);
+    }
+
+    /* Parent */
+    {
+    int status;
+    int jc = sh->job_control;
+    if (jc) {
+        setpgid(pid, pid);                       /* mirror the child's setpgid */
+        if (sh->tty_fd >= 0)
+            tcsetpgrp(sh->tty_fd, pid);          /* hand the terminal to the job */
+    }
+    while (waitpid(pid, &status, jc ? WUNTRACED : 0) < 0 && errno == EINTR) {}
+    if (jc && sh->tty_fd >= 0)
+        tcsetpgrp(sh->tty_fd, sh->shell_pgid);   /* take the terminal back */
+    if (WIFEXITED(status))
+        cmd_rc = WEXITSTATUS(status);
+    else if (WIFSIGNALED(status))
+        cmd_rc = 128 + WTERMSIG(status);
+    else if (WIFSTOPPED(status)) {
+        /* ^Z: the foreground command stopped. Record it as a stopped job so it
+         * can be resumed with fg/bg, and report it like `[1]+ Stopped cmd`. */
+        char *lbl = NULL;
+        size_t len = 0;
+        for (int a = 0; a < argc && expanded[a]; a++) len += strlen(expanded[a]) + 1;
+        if (len && (lbl = malloc(len + 1))) {
+            lbl[0] = '\0';
+            for (int a = 0; a < argc && expanded[a]; a++) {
+                if (a) strcat(lbl, " ");
+                strcat(lbl, expanded[a]);
+            }
+        }
+        job_t *j = job_register(&sh->jobs, pid, pid, lbl);
+        free(lbl);
+        if (j) {
+            j->state  = JOB_STOPPED;
+            j->status = status;
+            fprintf(stderr, "\n[%d]+ Stopped  %s\n", j->id, j->command ? j->command : "");
+        }
+        cmd_rc = 128 + WSTOPSIG(status);
+    }
+    else
+        cmd_rc = 1;
+    sh->last_exit = cmd_rc;
+    /* B-1: external command may have changed filesystem state — invalidate all */
+    fscache_invalidate_all();
+    }
+    return cmd_rc;
+}
+
+static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
+                                 redir_t *redirs)
+{
+    simple_cmd_preexpand_redirs(sh, redirs);
 
     /* 1. Expand + apply variable assignments.
      * When no command follows, set in shell scope (normal assignment).
@@ -799,103 +1616,14 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
     sh->last_cmdsub_exit = 0;
     sh->last_cmdsub_seen = 0;
     if (nassigns > 0) {
-        anames = malloc((size_t)nassigns * sizeof(char *));
-        avals  = malloc((size_t)nassigns * sizeof(char *));
-        if (!anames || !avals) {
-            free(anames); free(avals);
-            fprintf(stderr, "silex: out of memory\n");
-            return 1;
-        }
-        /* POSIX 2.8.1: assigning to a read-only variable is a VARIABLE
-         * ASSIGNMENT ERROR -- a non-interactive shell writes one diagnostic
-         * and exits (dash: status 2). Detected before anything is applied,
-         * because the machinery below assigns each value three times (overlay,
-         * restore, final apply) and each pass printed its own "readonly
-         * variable" line while the shell carried on regardless. The values are
-         * still expanded first, so a command substitution in the offending
-         * assignment runs, as it does in dash. */
-        const char *ro_name = NULL;
-        for (int i = 0; i < nassigns; i++) {
-            const char *eq = strchr(assigns[i], '=');
-            if (!eq) continue;
-            size_t nl = (size_t)(eq - assigns[i]);
-            char nbuf[256];
-            if (nl >= sizeof(nbuf)) continue;
-            memcpy(nbuf, assigns[i], nl);
-            nbuf[nl] = '\0';
-            if (vars_is_readonly(&sh->vars, nbuf)) { ro_name = assigns[i]; break; }
-        }
-        /* Assignments are expanded and applied LEFT TO RIGHT, each visible to
-         * the next (`x=5 y=$((x+2)) cmd` gives y=7 -- smoosh
-         * semantics.special.assign.visible). Apply each into the shell vars as
-         * an overlay while expanding, then restore; the per-path machinery
-         * below re-applies them where they belong.
-         *
-         * A SINGLE assignment has no "next" to be visible to, so the overlay is
-         * observable only to itself -- and its own RHS was already expanded
-         * before the store, so it cannot see it either. Leaving the arrays NULL
-         * skips the store and the matching restore below (both are already
-         * guarded on them), which takes three callocs, a strdup, two var-store
-         * writes and three frees off every `x=...`, `x=$y cmd` and `IFS=: cmd`
-         * -- by far the commonest shape an assignment comes in. Two or more
-         * assignments still get the full left-to-right overlay. */
-        char **aov_saved = NULL;
-        int   *aov_had   = NULL;
-        int   *aov_exp   = NULL;
-        if (nassigns > 1) {
-            aov_saved = calloc((size_t)nassigns, sizeof(char *));
-            aov_had   = calloc((size_t)nassigns, sizeof(int));
-            aov_exp   = calloc((size_t)nassigns, sizeof(int));
-        }
-        for (int i = 0; i < nassigns; i++) {
-            const char *eq = strchr(assigns[i], '=');
-            if (!eq) { anames[i] = NULL; avals[i] = NULL; continue; }
-            size_t nlen = (size_t)(eq - assigns[i]);
-            anames[i] = strndup(assigns[i], nlen);
-            /* Use expand_word_assign for assignment values - enables ~: expansion */
-            avals[i]  = expand_word_assign(sh, eq + 1);
-            if (!ro_name && anames[i] && aov_saved && aov_had && aov_exp) {
-                const char *ov = vars_get(&sh->vars, anames[i]);
-                aov_had[i]   = ov != NULL;
-                aov_saved[i] = ov ? strdup(ov) : NULL;
-                aov_exp[i]   = vars_is_exported(&sh->vars, anames[i]);
-                vars_set(&sh->vars, anames[i], avals[i] ? avals[i] : "");
-            }
-        }
-        /* Restore the overlay (reverse order handles duplicate names). The
-         * word/command paths apply the values again through their own
-         * save/restore; special builtins get persistence there. */
-        if (!ro_name && aov_saved && aov_had && aov_exp) {
-            for (int i = nassigns - 1; i >= 0; i--) {
-                if (!anames[i]) continue;
-                if (aov_had[i])
-                    vars_set(&sh->vars, anames[i], aov_saved[i] ? aov_saved[i] : "");
-                else {
-                    vars_unset(&sh->vars, anames[i]);
-                    /* A declared-but-unset EXPORTED var must stay declared:
-                     * vars_unset killed the entry, recreate the declaration. */
-                    if (aov_exp[i])
-                        vars_export(&sh->vars, anames[i]);
-                }
-                free(aov_saved[i]);
-            }
-        }
-        free(aov_saved);
-        free(aov_had);
-        free(aov_exp);
-        cmdsub_exit = sh->last_cmdsub_exit;
-        assign_cmdsub_seen = sh->last_cmdsub_seen;
-
-        if (ro_name) {
-            const char *eq = strchr(ro_name, '=');
-            fprintf(stderr, "silex: %.*s: readonly variable\n",
-                    (int)(eq ? eq - ro_name : (ptrdiff_t)strlen(ro_name)), ro_name);
-            for (int i = 0; i < nassigns; i++) free(anames[i]);
-            free(anames); free(avals);
-            if (!sh->interactive)
-                sh_exit_with_trap(sh, 2);
+        int arc = simple_cmd_expand_assigns(sh, assigns, nassigns,
+                                            &anames, &avals,
+                                            &cmdsub_exit, &assign_cmdsub_seen);
+        if (arc < 0)
+            return 1;                    /* out of memory */
+        if (arc > 0) {                   /* readonly violation, interactive */
             if (arctx_active) redirect_restore(&arctx);
-            return 2;
+            return arc;
         }
     }
 
@@ -996,46 +1724,13 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
      * nothing to expand here -- and `not { ...; }`, an alias to a keyword, works
      * because the parser saw the substituted tokens. See parser.c. */
 
-    /* Count argc */
     int argc = 0;
     while (expanded[argc]) argc++;
 
-    /* xtrace (set -x) and the SILEX_TRACE debug env both print the command,
-     * post-expansion, to stderr before it runs -- this is POSIX `set -x`.
-     * opt_x was previously set but never consulted, so `set -x` traced nothing.
-     * PS4 supplies the prefix (POSIX; default "+ "). */
-    if ((sh->opt_x || sh->trace_level >= 1) && !sh->in_ps4) {
-        const char *ps4 = vars_get(&sh->vars, "PS4");
-        /* PS4 is expanded before it is printed (POSIX), so `PS4='[last=$?] '`
-         * shows the status of the PREVIOUS command -- which means the
-         * expansion itself must not disturb $?, and a command substitution
-         * inside PS4 would. Printing it raw made every trace line literally
-         * read "[last=$?]". */
-        if (ps4) {
-            int saved_status = sh->last_exit;
-            /* Tracing is OFF while PS4 itself is expanded. A `$(...)` in PS4
-             * runs in a forked subshell that INHERITS opt_x, so with tracing
-             * still on that subshell traced its own command, expanded PS4
-             * again, forked again -- `PS4='$(date)'; set -x` was a fork bomb.
-             * Clearing the flag (rather than a local guard) is what the child
-             * inherits, and matches bash: the PS4 expansion is not traced. */
-            int saved_x = sh->opt_x, saved_tl = sh->trace_level;
-            sh->opt_x = 0; sh->trace_level = 0;
-            sh->in_ps4 = 1;
-            const char *x = expand_word(sh, ps4);
-            sh->in_ps4 = 0;
-            sh->opt_x = saved_x; sh->trace_level = saved_tl;
-            sh->last_exit = saved_status;
-            fputs(x ? x : ps4, stderr);
-        } else {
-            fputs("+ ", stderr);
-        }
-        for (int ti = 0; ti < argc; ti++) {
-            if (ti) fputc(' ', stderr);
-            fputs(expanded[ti], stderr);
-        }
-        fputc('\n', stderr);
-    }
+    if ((sh->opt_x || sh->trace_level >= 1) && !sh->in_ps4)
+        simple_cmd_trace(sh, expanded, argc);
+
+    simple_cmd_t c = { expanded, argc, anames, avals, nassigns, redirs };
 
     /* 3. Check for shell-internal builtin (high priority — run in-process).
      * POSIX command search order: special builtins are found before functions,
@@ -1048,144 +1743,7 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
         func_lookup(sh, cmd))
         sfn = NULL;
     if (sfn) {
-        if (sh->trace_level >= 2)
-            fprintf(stderr, "+ [builtin] %s\n", cmd);
-
-        /* A `VAR=val builtin` prefix applies to the builtin's environment for its
-         * duration. This matters when the builtin resolves or execs another
-         * command: `PATH=$DEFPATH command awk ...` (modernish's `str ematch`)
-         * must find awk via that PATH. Apply the assignments to the shell vars
-         * (exported so a child exec inherits them) and restore afterwards. */
-        char **abuiltin_saved  = NULL;
-        int   *abuiltin_had    = NULL;
-        int   *abuiltin_wasexp = NULL;
-        if (nassigns > 0) {
-            abuiltin_saved  = calloc((size_t)nassigns, sizeof(char *));
-            abuiltin_had    = calloc((size_t)nassigns, sizeof(int));
-            abuiltin_wasexp = calloc((size_t)nassigns, sizeof(int));
-            if (abuiltin_saved && abuiltin_had && abuiltin_wasexp) {
-                for (int ai = 0; ai < nassigns; ai++) {
-                    if (!anames[ai]) continue;
-                    const char *ov = vars_get(&sh->vars, anames[ai]);
-                    abuiltin_had[ai]    = ov != NULL;
-                    abuiltin_saved[ai]  = ov ? strdup(ov) : NULL;
-                    /* The export is TEMPORARY, so remember whether the name was
-                     * already exported -- the restore below has to put the flag
-                     * back even in the cases where the VALUE stays. */
-                    abuiltin_wasexp[ai] = vars_is_exported(&sh->vars, anames[ai]);
-                    vars_set(&sh->vars, anames[ai], avals[ai] ? avals[ai] : "");
-                    vars_export(&sh->vars, anames[ai]);
-                }
-            }
-        }
-
-        redirect_ctx_t rctx;
-        rctx.saved = NULL;
-        rctx.error = 0;
-        if (redirs) redirect_apply(sh, redirs, &rctx);
-        /* If redirect failed, don't execute the command */
-        if (rctx.error) {
-            cmd_rc = 1;
-            /* POSIX: Special builtins must cause non-interactive shell to exit on redirect error
-             * EXCEPT when invoked via 'command' prefix */
-            if (!sh->interactive && !sh->in_command_builtin && !sh->in_trap &&
-                is_special_builtin(cmd)) {
-                /* Exit immediately with error status */
-                sh_exit_with_trap(sh, 1);
-            }
-        } else {
-            cmd_rc = sfn(sh, argc, expanded);
-
-            /* A failed special builtin ends a non-interactive shell (2.8.1).
-             * `command shift 3` is exempt (the `command` prefix removes the
-             * special-builtin properties), as is a trap action, which must
-             * return to whatever it interrupted -- the same exemptions the
-             * redirect-error path above uses. dash reports 2 for this class of
-             * shell error whatever the builtin's own status was. */
-            if (cmd_rc != 0 && !sh->interactive && !sh->in_command_builtin &&
-                !sh->in_trap && special_builtin_error_exits(cmd)) {
-                fflush(stdout);
-                sh_exit_with_trap(sh, 2);
-            }
-
-            /* A builtin whose output could not be written has not succeeded.
-             *
-             * stdio buffers, so a failing write() is not seen by the builtin's
-             * printf -- it surfaces at the flush, which for a builtin never
-             * happens before the redirection is torn down. So `times >/dev/full`,
-             * `export -p >/dev/full`, `type echo >/dev/full` and friends all
-             * reported success while writing nothing. smoosh calls this class
-             * "silently failing commands" and tests for it directly.
-             *
-             * Flush while the redirection is still applied -- after
-             * redirect_restore() below, stdout points somewhere else and the
-             * error is lost. EPIPE stays silent (`yes | head` is not an error).
-             */
-            if (fflush(stdout) != 0 || ferror(stdout)) {
-                if (errno != EPIPE) {
-                    fprintf(stderr, "silex: %s: write error: %s\n",
-                            cmd, strerror(errno));
-                    if (cmd_rc == 0)
-                        cmd_rc = 1;
-                }
-                clearerr(stdout);
-            }
-        }
-        /* Restore variables the env-prefix temporarily overrode. `exec` with no
-         * command keeps its assignments (they become permanent, like its
-         * redirections), so skip the restore in that case. */
-        int abuiltin_keep = (strcmp(cmd, "exec") == 0 && argc == 1) ||
-                            reduces_to_bare_exec(expanded, argc);
-        /* POSIX: variable assignments preceding a SPECIAL builtin remain in
-         * effect after it completes (smoosh semantics.special.assign.visible).
-         * Only the ASSIGNMENTS persist -- redirects are still restored (only
-         * `exec` keeps those; abuiltin_keep above). */
-        int assigns_persist = is_special_builtin(cmd);
-        if (nassigns > 0 && abuiltin_saved && abuiltin_had && !abuiltin_keep &&
-            !assigns_persist) {
-            for (int ai = 0; ai < nassigns; ai++) {
-                if (!anames[ai]) continue;
-                if (abuiltin_had[ai])
-                    vars_set(&sh->vars, anames[ai],
-                             abuiltin_saved[ai] ? abuiltin_saved[ai] : "");
-                else
-                    vars_unset(&sh->vars, anames[ai]);
-            }
-        }
-        /* Undo the temporary EXPORT, even where the VALUE stays.
-         *
-         * POSIX 2.9.1: assignments preceding a special builtin persist as SHELL
-         * variables. They are not added to the environment -- an ordinary
-         * assignment does not export, and a prefix on a special builtin is an
-         * ordinary assignment that happens to be written in front of a command.
-         * The export above exists only so that a builtin which goes on to exec
-         * something (`PATH=$DEFPATH command awk ...`) is found through it.
-         *
-         * Leaving the flag set meant `pre1=pre1 readonly x=x` put pre1 into the
-         * environment of every later child. Oils builtin-special 3 catches it
-         * through the next command being `exec sh -c 'echo pre1=$pre1'`: silex
-         * printed pre1=pre1 where dash, bash and yash all print pre1= .
-         *
-         * `export` is exempt for the obvious reason -- `x=1 export x` asked for
-         * the flag, and from here that is indistinguishable from our own. */
-        if (nassigns > 0 && abuiltin_wasexp && strcmp(cmd, "export") != 0) {
-            for (int ai = 0; ai < nassigns; ai++) {
-                if (!anames[ai] || abuiltin_wasexp[ai]) continue;
-                vars_unexport(&sh->vars, anames[ai]);
-            }
-        }
-        if (abuiltin_saved)
-            for (int ai = 0; ai < nassigns; ai++) free(abuiltin_saved[ai]);
-        free(abuiltin_saved);
-        free(abuiltin_had);
-        free(abuiltin_wasexp);
-
-        /* 'exec' with no command: redirections are permanent (not restored).
-         * Also when it is reached through `command` (`command exec 8<file`). */
-        if (abuiltin_keep)
-            redirect_commit(&rctx);
-        else if (redirs)
-            redirect_restore(&rctx);
+        cmd_rc = simple_cmd_builtin(sh, &c, sfn);
         goto cmd_done;
     }
 
@@ -1193,459 +1751,19 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
      * `command NAME` bypasses functions (POSIX), so skip the lookup then. */
     node_t *fnbody = sh->in_command_builtin ? NULL : func_lookup(sh, cmd);
     if (fnbody) {
-        if (sh->call_depth >= SHELL_MAX_CALL_DEPTH) {
-            fprintf(stderr, "silex: sh: %s: maximum call depth (%d) exceeded\n",
-                    cmd, SHELL_MAX_CALL_DEPTH);
-            cmd_rc = 1;
-            goto cmd_done;
-        }
-
-        redirect_ctx_t rctx;
-        rctx.saved = NULL;
-        rctx.error = 0;
-        if (redirs) redirect_apply(sh, redirs, &rctx);
-        /* A failed redirection means the command (here, the function) does not
-         * run; report failure (POSIX). */
-        if (rctx.error) {
-            cmd_rc = 1;
-            if (redirs) redirect_restore(&rctx);
-            goto cmd_done;
-        }
-
-        /* Set positional parameters for function */
-        char **old_pos   = sh->positional;
-        int old_n        = sh->positional_n;
-        char **old_base  = sh->positional_base;
-        int old_base_n   = sh->positional_base_n;
-        int old_break    = sh->break_level;
-        int old_loop     = sh->loop_depth;
-
-        sh->positional_n = argc - 1;
-        sh->positional   = expanded + 1;
-        /* The arguments live in the caller's expansion, so this frame owns
-         * nothing yet. Clearing the base is what stops a `set --` inside the
-         * function from freeing the CALLER's list, which old_pos still needs. */
-        sh->positional_base   = NULL;
-        sh->positional_base_n = 0;
-        /* break/continue scoping: LEXICAL by default (a function body is its
-         * own loop context; smoosh builtin.break.lexical), DYNAMIC under
-         * `set -o nonlexicalctrl` (the caller's loops stay visible; smoosh
-         * builtin.break.nonlexical). Process boundaries always clamp -- see
-         * subshell_reset_traps. */
-        if (!sh->opt_nonlexicalctrl) {
-            sh->break_level = 0;
-            sh->loop_depth  = 0;
-        }
-
-        vars_push_scope(&sh->vars);
-        /* Import environment-prefix variables into function scope */
-        for (int i = 0; i < nassigns; i++) {
-            if (anames[i])
-                vars_set_local(&sh->vars, anames[i], avals[i] ? avals[i] : "");
-        }
-        sh->call_depth++;
-        cmd_rc = exec_node(sh, fnbody);
-        sh->call_depth--;
-        vars_pop_scope(&sh->vars);
-
-        /* Release anything a `set --` inside the function allocated; it dies
-         * with the frame. No-op if the function never ran one. */
-        positional_free(sh);
-        sh->positional        = old_pos;
-        sh->positional_n      = old_n;
-        sh->positional_base   = old_base;
-        sh->positional_base_n = old_base_n;
-        if (!sh->opt_nonlexicalctrl) {
-            sh->break_level = old_break;
-            sh->loop_depth  = old_loop;
-        }
-
-        if (redirs) redirect_restore(&rctx);
-
-        /* Absorb `return` at the function boundary. break/continue are
-         * absorbed too under the default LEXICAL scoping; with
-         * `set -o nonlexicalctrl` they propagate to the caller's loops. */
-        if (cmd_rc == FLOW_RETURN) cmd_rc = sh->last_exit;
-        if (!sh->opt_nonlexicalctrl &&
-            (cmd_rc == FLOW_BREAK || cmd_rc == FLOW_CONTINUE))
-            cmd_rc = 0;
+        cmd_rc = simple_cmd_function(sh, &c, fnbody);
         goto cmd_done;
     }
 
     /* 5. Check for applet (run in-process, apply redirects) */
     const applet_t *ap = find_applet_by_name(cmd);
     if (ap) {
-        /*
-         * B-8: XC-02 Dead command elimination.
-         * Skip `mkdir -p PATH...` when all PATH arguments are already
-         * confirmed existing directories with written_by_silex=1
-         * in fscache (i.e. we created them in this run).
-         * Only safe when there are no redirections.
-         */
-        if (!redirs && strcmp(cmd, "mkdir") == 0 && argc >= 2) {
-            int has_p = 0;
-            for (int i = 1; i < argc; i++) {
-                const char *a = expanded[i];
-                if (!a) break;
-                if (strcmp(a, "--") == 0) break;
-                if (a[0] == '-') {
-                    for (const char *f = a + 1; *f && *f != '-'; f++)
-                        if (*f == 'p') { has_p = 1; break; }
-                }
-            }
-            if (has_p) {
-                int all_done = 1;
-                for (int i = 1; i < argc && all_done; i++) {
-                    const char *a = expanded[i];
-                    if (!a) break;
-                    if (a[0] == '-' || strcmp(a, "--") == 0) continue;
-                    struct stat st;
-                    if (!fscache_written_by_silex(a) ||
-                        fscache_stat(a, &st) != 0 || !S_ISDIR(st.st_mode))
-                        all_done = 0;
-                }
-                if (all_done) { cmd_rc = 0; goto cmd_done; }
-            }
-        }
-        /* Applets that never return to their caller must run in a fork, or
-         * they take the whole shell with them:
-         *   sh    may call exit();
-         *   env   EXECS the command it is given -- correct for a standalone
-         *         /usr/bin/env, fatal in-process. `echo a; env echo b; echo c`
-         *         printed a and b and then the shell was simply gone, exit 0,
-         *         with `c` never reached. Applets are dispatched ahead of PATH
-         *         by design, so this hit every `env CMD` in every script.
-         * Both also need the shell's exported vars and the VAR=val prefix
-         * pushed into the child's environment. */
-        if (strcmp(cmd, "sh") == 0 || strcmp(cmd, "env") == 0) {
-            fflush(NULL);
-            pid_t apid = fork();
-            if (apid < 0) { perror("fork"); cmd_rc = 1; goto cmd_done; }
-            if (apid == 0) {
-                redirect_ctx_t rctx2 = {NULL, 0};
-                if (redirs) redirect_apply(sh, redirs, &rctx2);
-                vars_export_env(&sh->vars);
-                /* Apply env-prefix assignments AFTER exporting shell vars */
-                for (int i = 0; i < nassigns; i++) {
-                    if (anames[i])
-                        setenv(anames[i], avals[i] ? avals[i] : "", 1);
-                }
-                int aret = ap->fn(argc, expanded);
-                fflush(NULL);
-                _exit(aret);
-            }
-            int astatus;
-            while (waitpid(apid, &astatus, 0) < 0 && errno == EINTR) {}
-            if (WIFEXITED(astatus)) cmd_rc = WEXITSTATUS(astatus);
-            else if (WIFSIGNALED(astatus)) cmd_rc = 128 + WTERMSIG(astatus);
-            else cmd_rc = 1;
-            goto cmd_done;
-        }
-        redirect_ctx_t rctx;
-        rctx.saved = NULL;
-        rctx.error = 0;
-        if (redirs) redirect_apply(sh, redirs, &rctx);
-        if (rctx.error) {
-            /* Failed redirection: don't run the applet (POSIX). */
-            cmd_rc = 1;
-            if (redirs) redirect_restore(&rctx);
-            goto cmd_done;
-        }
-        /* Remember the applet for `hash` output (smoosh builtin.hash.nonposix
-         * expects `touch hi` to make `hash | grep touch` succeed). */
-        {
-            int seen_i;
-            for (seen_i = 0; seen_i < sh->applets_seen_n; seen_i++)
-                if (strcmp(sh->applets_seen[seen_i], ap->name) == 0) break;
-            if (seen_i == sh->applets_seen_n &&
-                sh->applets_seen_n < (int)(sizeof(sh->applets_seen) / sizeof(sh->applets_seen[0])))
-                sh->applets_seen[sh->applets_seen_n++] = ap->name;
-        }
-
-        /* A `VAR=val applet` prefix has to reach the applet's ENVIRONMENT.
-         * An external utility gets this for free from the exec; an applet
-         * runs in-process and reads getenv(), so without this the binding is
-         * simply invisible -- `TZ=UTC date` printed local time, and
-         * `LC_ALL=C sort` sorted in the caller's locale. The shell-builtin
-         * path above already does this; the applet path never did.
-         *
-         * vars_export() calls setenv(), so the value lands in `environ`
-         * immediately. Restore covers the export FLAG too: a var that existed
-         * unexported must not stay exported afterwards. */
-        char **aapp_saved = NULL;
-        int   *aapp_had   = NULL;
-        int   *aapp_exp   = NULL;
-        if (nassigns > 0) {
-            aapp_saved = calloc((size_t)nassigns, sizeof(char *));
-            aapp_had   = calloc((size_t)nassigns, sizeof(int));
-            aapp_exp   = calloc((size_t)nassigns, sizeof(int));
-            if (aapp_saved && aapp_had && aapp_exp) {
-                for (int ai = 0; ai < nassigns; ai++) {
-                    if (!anames[ai]) continue;
-                    const char *ov = vars_get(&sh->vars, anames[ai]);
-                    aapp_had[ai]   = ov != NULL;
-                    aapp_saved[ai] = ov ? strdup(ov) : NULL;
-                    aapp_exp[ai]   = vars_is_exported(&sh->vars, anames[ai]);
-                    vars_set(&sh->vars, anames[ai], avals[ai] ? avals[ai] : "");
-                    vars_export(&sh->vars, anames[ai]);
-                }
-            }
-        }
-
-        struct sigaction sa_pipe, sa_pipe_prev;
-        sa_pipe.sa_handler = applet_sigpipe_handler;
-        sigemptyset(&sa_pipe.sa_mask);
-        sa_pipe.sa_flags = 0;
-        applet_got_sigpipe = 0;
-        int pipe_hooked = (sigaction(SIGPIPE, &sa_pipe, &sa_pipe_prev) == 0);
-
-        cmd_rc = ap->fn(argc, expanded);
-
-        if (pipe_hooked) {
-            sigaction(SIGPIPE, &sa_pipe_prev, NULL);
-            if (applet_got_sigpipe) cmd_rc = 128 + SIGPIPE;
-        }
-
-        if (nassigns > 0 && aapp_saved && aapp_had && aapp_exp) {
-            for (int ai = nassigns - 1; ai >= 0; ai--) {
-                if (!anames[ai]) continue;
-                if (aapp_had[ai]) {
-                    vars_set(&sh->vars, anames[ai],
-                             aapp_saved[ai] ? aapp_saved[ai] : "");
-                    if (!aapp_exp[ai])
-                        vars_unexport(&sh->vars, anames[ai]);
-                } else {
-                    vars_unset(&sh->vars, anames[ai]);
-                }
-            }
-        }
-        if (aapp_saved)
-            for (int ai = 0; ai < nassigns; ai++) free(aapp_saved[ai]);
-        free(aapp_saved);
-        free(aapp_had);
-        free(aapp_exp);
-        /* Same deal as the shell-builtin path above: flush while the
-         * redirection is still applied so a full/broken target is charged to
-         * THIS command, and clear the sticky stdio error flag so it cannot
-         * leak into later commands or the shell's exit status. Applets that
-         * check their own flush (echo, printf) already returned non-zero;
-         * stay silent here -- smoosh expects no extra shell diagnostic. */
-        if (fflush(stdout) != 0 || ferror(stdout)) {
-            if (errno != EPIPE && cmd_rc == 0)
-                cmd_rc = 1;
-            clearerr(stdout);
-        }
-        if (redirs) redirect_restore(&rctx);
+        cmd_rc = simple_cmd_applet(sh, &c, ap);
         goto cmd_done;
     }
 
-    /* 6. External command: resolve PATH in parent, fork + execv */
-
-    /* Resolve the command to an absolute path using the cache (F-03).
-     * Commands containing '/' bypass the cache and are used as-is. */
-    const char *exec_path;
-    char path_buf[PATH_MAX];
-
-    /* A `PATH=...` command-prefix assignment overrides the PATH used to find the
-     * command. Resolve against it directly and DON'T touch the path cache, which
-     * is keyed on the shell's normal PATH. */
-    const char *path_prefix = NULL;
-    for (int ai = 0; ai < nassigns; ai++)
-        if (anames[ai] && strcmp(anames[ai], "PATH") == 0)
-            path_prefix = avals[ai] ? avals[ai] : "";
-
-    if (strchr(cmd, '/')) {
-        exec_path = cmd;
-    } else if (path_prefix) {
-        exec_path = path_resolve_with(sh, cmd, path_buf, sizeof(path_buf), path_prefix);
-    } else {
-        path_cache_entry_t *ce = path_cache_get(sh, cmd);
-        if (ce) {
-            exec_path = ce->found ? ce->path : NULL;
-        } else {
-            char *rp = path_resolve(sh, cmd, path_buf, sizeof(path_buf));
-            path_cache_put(sh, cmd, rp);
-            exec_path = rp;  /* path_buf is valid for this scope */
-        }
-    }
-
-    if (!exec_path) {
-        /* Report "command not found" through any redirections on this command:
-         * `nosuchcmd 2>/dev/null` must swallow the message. We resolve the
-         * command in the parent (before the fork that would apply redirects),
-         * so apply them here around the message and restore afterwards. */
-        redirect_ctx_t rctx = {NULL, 0};
-        if (redirs) redirect_apply(sh, redirs, &rctx);
-        /* A redirection that could not be performed already reported itself,
-         * and the command never runs -- so there is nothing to call "not
-         * found". `[[ -f < ]]` printed BOTH errors and exited 127, claiming a
-         * missing command when the real failure was the redirect. */
-        if (rctx.error) {
-            if (redirs) redirect_restore(&rctx);
-            sh->last_exit = 1;
-            cmd_rc = 1;
-            goto cmd_done;
-        }
-        fprintf(stderr, "silex: %s: command not found\n", cmd);
-        fflush(stderr);
-        if (redirs) redirect_restore(&rctx);
-        sh->last_exit = 127;
-        cmd_rc = 127;
-        goto cmd_done;
-    }
-
-    /* Disposable tail call: exec in place, no fork. Only set by subshell-type
-     * children (async, cmdsub, pipeline stages) for their final command. */
-    if (in_place) {
-        redirect_ctx_t rctx = {NULL, 0};
-        if (redirs) {
-            redirect_apply(sh, redirs, &rctx);
-            if (rctx.error) _exit(1);
-        }
-        vars_export_env(&sh->vars);
-        for (int i = 0; i < nassigns; i++) {
-            if (anames[i])
-                setenv(anames[i], avals[i] ? avals[i] : "", 1);
-        }
-        signal(SIGPIPE, SIG_DFL);
-        fflush(NULL);
-        execv(exec_path, expanded);
-        if (errno == ENOEXEC) {
-            int xargc = 0;
-            while (expanded[xargc]) xargc++;
-            char **sargv = malloc((size_t)(xargc + 2) * sizeof(char *));
-            if (sargv) {
-                sargv[0] = (char *)"sh";
-                sargv[1] = (char *)exec_path;
-                for (int xi = 1; xi <= xargc; xi++)
-                    sargv[xi + 1] = expanded[xi];
-                execv("/proc/self/exe", sargv);
-                execvp("sh", sargv);
-            }
-        }
-        /* POSIX: 126 when the command was FOUND but could not be executed
-         * (not executable, a directory, a bad interpreter); 127 only when it
-         * could not be found. Reporting 127 for both meant a script could not
-         * tell a typo in the name from a missing `chmod +x`. */
-        int exec_errno = errno;
-        perror(exec_path);
-        _exit(exec_errno == ENOENT || exec_errno == ENOTDIR ? 127 : 126);
-    }
-
-    pid_t pid = fork();
-    if (unlikely(pid < 0)) {
-        perror("fork");
-        cmd_rc = 1;
-        goto cmd_done;
-    }
-
-    if (pid == 0) {
-        /* Child: restore SIGPIPE to default (shell set it to SIG_IGN) */
-        signal(SIGPIPE, SIG_DFL);
-
-        /* Under job control, become a new foreground process group with the
-         * job-control signals back at their default, so ^Z/^C reach the command
-         * rather than the shell (which ignores them). */
-        if (sh->job_control) {
-            setpgid(0, 0);
-            if (sh->tty_fd >= 0)
-                tcsetpgrp(sh->tty_fd, getpid());
-            signal(SIGINT,  SIG_DFL);
-            signal(SIGQUIT, SIG_DFL);
-            signal(SIGTSTP, SIG_DFL);
-            signal(SIGTTIN, SIG_DFL);
-            signal(SIGTTOU, SIG_DFL);
-        }
-
-        redirect_ctx_t rctx;
-        rctx.saved = NULL;
-        rctx.error = 0;
-        if (redirs) redirect_apply(sh, redirs, &rctx);
-        /* A failed redirection means the command is not run; exit the child
-         * with a nonzero status instead of exec'ing (POSIX). */
-        if (rctx.error)
-            _exit(1);
-
-        /* Export all exported vars */
-        vars_export_env(&sh->vars);
-
-        /* Apply env-prefix assignments AFTER exporting shell vars */
-        for (int i = 0; i < nassigns; i++) {
-            if (anames[i])
-                setenv(anames[i], avals[i] ? avals[i] : "", 1);
-        }
-
-        execv(exec_path, expanded);
-        if (errno == ENOEXEC) {
-            /* POSIX: a file the kernel refuses (no shebang, plain text) is run
-             * as a shell script -- re-exec ourselves on it. /proc/self/exe is
-             * exact; argv[0]-less fallback "sh" covers non-Linux. smoosh
-             * semantics.simple.link runs `cmd.sh` (no #!) via PATH=. */
-            int xargc = 0;
-            while (expanded[xargc]) xargc++;
-            char **sargv = malloc((size_t)(xargc + 2) * sizeof(char *));
-            if (sargv) {
-                sargv[0] = (char *)"sh";
-                sargv[1] = (char *)exec_path;
-                for (int xi = 1; xi <= xargc; xi++)
-                    sargv[xi + 1] = expanded[xi];
-                execv("/proc/self/exe", sargv);
-                execvp("sh", sargv);
-            }
-        }
-        /* POSIX: 126 when the command was FOUND but could not be executed
-         * (not executable, a directory, a bad interpreter); 127 only when it
-         * could not be found. Reporting 127 for both meant a script could not
-         * tell a typo in the name from a missing `chmod +x`. */
-        int exec_errno = errno;
-        perror(exec_path);
-        _exit(exec_errno == ENOENT || exec_errno == ENOTDIR ? 127 : 126);
-    }
-
-    /* Parent */
-    {
-    int status;
-    int jc = sh->job_control;
-    if (jc) {
-        setpgid(pid, pid);                       /* mirror the child's setpgid */
-        if (sh->tty_fd >= 0)
-            tcsetpgrp(sh->tty_fd, pid);          /* hand the terminal to the job */
-    }
-    while (waitpid(pid, &status, jc ? WUNTRACED : 0) < 0 && errno == EINTR) {}
-    if (jc && sh->tty_fd >= 0)
-        tcsetpgrp(sh->tty_fd, sh->shell_pgid);   /* take the terminal back */
-    if (WIFEXITED(status))
-        cmd_rc = WEXITSTATUS(status);
-    else if (WIFSIGNALED(status))
-        cmd_rc = 128 + WTERMSIG(status);
-    else if (WIFSTOPPED(status)) {
-        /* ^Z: the foreground command stopped. Record it as a stopped job so it
-         * can be resumed with fg/bg, and report it like `[1]+ Stopped cmd`. */
-        char *lbl = NULL;
-        size_t len = 0;
-        for (int a = 0; a < argc && expanded[a]; a++) len += strlen(expanded[a]) + 1;
-        if (len && (lbl = malloc(len + 1))) {
-            lbl[0] = '\0';
-            for (int a = 0; a < argc && expanded[a]; a++) {
-                if (a) strcat(lbl, " ");
-                strcat(lbl, expanded[a]);
-            }
-        }
-        job_t *j = job_register(&sh->jobs, pid, pid, lbl);
-        free(lbl);
-        if (j) {
-            j->state  = JOB_STOPPED;
-            j->status = status;
-            fprintf(stderr, "\n[%d]+ Stopped  %s\n", j->id, j->command ? j->command : "");
-        }
-        cmd_rc = 128 + WSTOPSIG(status);
-    }
-    else
-        cmd_rc = 1;
-    sh->last_exit = cmd_rc;
-    /* B-1: external command may have changed filesystem state — invalidate all */
-    fscache_invalidate_all();
-    }
+    /* 6. External command: resolve PATH in parent, fork + execv. */
+    cmd_rc = simple_cmd_external(sh, &c, in_place);
     } /* end command dispatch block */
 
 cmd_done:
