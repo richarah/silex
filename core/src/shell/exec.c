@@ -769,6 +769,139 @@ static void simple_cmd_preexpand_redirs(shell_ctx_t *sh, redir_t *redirs)
     }
 }
 
+/* ---------------------------------------------------------------------------
+ * env-prefix overlay
+ *
+ * `VAR=val cmd` binds VAR for the duration of cmd and no longer.  Three paths
+ * need that binding and each needs it slightly differently, so for a long time
+ * there were three hand-written copies of save-set-restore here.  They had
+ * drifted, and every difference between them was a bug fixed in whichever copy
+ * happened to expose it.  This is the one implementation; the differences that
+ * were real survive as explicit flags, named after the test that found them:
+ *
+ *   simple_cmd_expand_assigns  no export, ENV_OV_REDECLARE_EXPORT
+ *       Left-to-right visibility while EXPANDING (`x=5 y=$((x+2)) cmd`), then
+ *       undone -- the per-path machinery below applies the values where they
+ *       actually belong.  Nothing is exported because nothing runs under this
+ *       overlay but the expander.  vars_unset() destroys a declared-but-unset
+ *       EXPORTED name outright, so this path alone recreates the declaration.
+ *
+ *   simple_cmd_builtin         export, deferred unexport, may skip the restore
+ *       A builtin that goes on to exec (`PATH=$DEFPATH command awk ...`) must
+ *       find the utility through the overlaid PATH, so the value is exported.
+ *       Assignments before a SPECIAL builtin PERSIST (POSIX 2.9.1), and `exec`
+ *       keeps both assignments and redirections -- so the value restore is
+ *       skipped in those cases while the EXPORT is still undone, which is why
+ *       the unexport is its own pass rather than a flag on the restore.
+ *
+ *   simple_cmd_applet          export, ENV_OV_UNEXPORT_ON_RESTORE
+ *       An applet runs in-process and reads getenv(), so without the export
+ *       the binding is invisible (`TZ=UTC date` printed local time).  Nothing
+ *       persists, so value and flag are put back together.
+ *
+ * The one difference that was NOT a deliberate one is gone: the builtin path
+ * restored values in FORWARD order, which is wrong when a name is assigned
+ * twice.  `x=orig; x=1 x=2 true; echo $x` printed 1 where dash and bash print
+ * orig -- the i=1 save had already captured the i=0 overlay, so replaying the
+ * saves forwards left the intermediate value standing.  Restoring in reverse
+ * unwinds the pushes in the order they were made, and is what the other two
+ * paths always did.
+ *
+ * A change here is a change to all three paths at once.  Re-run the Oils
+ * differential, smoosh and ShellSpec -- those three suites are what
+ * distinguishes the cases above from each other.
+ */
+typedef struct {
+    char **saved;   /* the value the name had before the overlay (strdup'd) */
+    int   *had;     /* ... and whether it had one at all */
+    int   *wasexp;  /* whether the name was exported before the overlay */
+    int    n;
+} env_overlay_t;
+
+/* Restore flags.  Both describe what to do about the EXPORT flag, on the two
+ * arms of the restore; the value itself always goes back. */
+#define ENV_OV_UNEXPORT_ON_RESTORE 0x1  /* name still exists: drop an export
+                                         * this overlay added */
+#define ENV_OV_REDECLARE_EXPORT    0x2  /* name is going away: vars_unset also
+                                         * destroys a declared-but-unset
+                                         * export, so put the declaration back */
+
+/* Returns 1 when the overlay is usable.  A failed allocation leaves it
+ * unusable-but-safe: push and restore become no-ops, exactly as the old
+ * `if (saved && had && exp)` guards made them. */
+static int env_overlay_init(env_overlay_t *ov, int n)
+{
+    ov->n      = n;
+    ov->saved  = calloc((size_t)n, sizeof(char *));
+    ov->had    = calloc((size_t)n, sizeof(int));
+    ov->wasexp = calloc((size_t)n, sizeof(int));
+    return ov->saved && ov->had && ov->wasexp;
+}
+
+static int env_overlay_live(const env_overlay_t *ov)
+{
+    return ov->saved && ov->had && ov->wasexp;
+}
+
+/* Save slot i's current binding and install name=val over it. */
+static void env_overlay_push(shell_ctx_t *sh, env_overlay_t *ov, int i,
+                             const char *name, const char *val, int do_export)
+{
+    if (!env_overlay_live(ov) || !name) return;
+    const char *ov_val = vars_get(&sh->vars, name);
+    ov->had[i]    = ov_val != NULL;
+    ov->saved[i]  = ov_val ? strdup(ov_val) : NULL;
+    /* The export is TEMPORARY, so remember whether the name was already
+     * exported -- the restore has to put the flag back even in the cases
+     * where the VALUE stays. */
+    ov->wasexp[i] = vars_is_exported(&sh->vars, name);
+    vars_set(&sh->vars, name, val ? val : "");
+    if (do_export) vars_export(&sh->vars, name);
+}
+
+/* Unwind the pushes, last first: with a name assigned twice, slot i's save
+ * already contains slot i-1's overlay, so only reverse order gets back to
+ * what was there before slot 0. */
+static void env_overlay_restore(shell_ctx_t *sh, env_overlay_t *ov,
+                                char **names, unsigned flags)
+{
+    if (!env_overlay_live(ov)) return;
+    for (int i = ov->n - 1; i >= 0; i--) {
+        if (!names[i]) continue;
+        if (ov->had[i]) {
+            vars_set(&sh->vars, names[i], ov->saved[i] ? ov->saved[i] : "");
+            if ((flags & ENV_OV_UNEXPORT_ON_RESTORE) && !ov->wasexp[i])
+                vars_unexport(&sh->vars, names[i]);
+        } else {
+            vars_unset(&sh->vars, names[i]);
+            if ((flags & ENV_OV_REDECLARE_EXPORT) && ov->wasexp[i])
+                vars_export(&sh->vars, names[i]);
+        }
+    }
+}
+
+/* Undo the temporary export without touching the values -- for the paths
+ * where the value is allowed to outlive the command but the export is not. */
+static void env_overlay_unexport(shell_ctx_t *sh, env_overlay_t *ov,
+                                 char **names)
+{
+    if (!ov->wasexp) return;
+    for (int i = 0; i < ov->n; i++) {
+        if (!names[i] || ov->wasexp[i]) continue;
+        vars_unexport(&sh->vars, names[i]);
+    }
+}
+
+static void env_overlay_free(env_overlay_t *ov)
+{
+    if (ov->saved)
+        for (int i = 0; i < ov->n; i++) free(ov->saved[i]);
+    free(ov->saved);
+    free(ov->had);
+    free(ov->wasexp);
+    ov->saved = NULL; ov->had = NULL; ov->wasexp = NULL;
+}
+
 /*
  * Expand the env-prefix assignments and bank the exit status of their last
  * command substitution into *cmdsub_exit / *cmdsub_seen.
@@ -837,14 +970,8 @@ static int simple_cmd_expand_assigns(shell_ctx_t *sh, char **assigns,
      * writes and three frees off every `x=...`, `x=$y cmd` and `IFS=: cmd`
      * -- by far the commonest shape an assignment comes in. Two or more
      * assignments still get the full left-to-right overlay. */
-    char **aov_saved = NULL;
-    int   *aov_had   = NULL;
-    int   *aov_exp   = NULL;
-    if (nassigns > 1) {
-        aov_saved = calloc((size_t)nassigns, sizeof(char *));
-        aov_had   = calloc((size_t)nassigns, sizeof(int));
-        aov_exp   = calloc((size_t)nassigns, sizeof(int));
-    }
+    env_overlay_t aov = { NULL, NULL, NULL, nassigns };
+    int aov_on = nassigns > 1 && env_overlay_init(&aov, nassigns);
     for (int i = 0; i < nassigns; i++) {
         const char *eq = strchr(assigns[i], '=');
         if (!eq) { anames[i] = NULL; avals[i] = NULL; continue; }
@@ -852,38 +979,15 @@ static int simple_cmd_expand_assigns(shell_ctx_t *sh, char **assigns,
         anames[i] = strndup(assigns[i], nlen);
         /* Use expand_word_assign for assignment values - enables ~: expansion */
         avals[i]  = expand_word_assign(sh, eq + 1);
-        if (!ro_name && anames[i] && aov_saved && aov_had && aov_exp) {
-            const char *ov = vars_get(&sh->vars, anames[i]);
-            aov_had[i]   = ov != NULL;
-            aov_saved[i] = ov ? strdup(ov) : NULL;
-            aov_exp[i]   = vars_is_exported(&sh->vars, anames[i]);
-            vars_set(&sh->vars, anames[i], avals[i] ? avals[i] : "");
-        }
+        if (!ro_name && aov_on)
+            env_overlay_push(sh, &aov, i, anames[i], avals[i], 0);
     }
-    /* Restore the overlay (reverse order handles duplicate names). The third
-     * of the three env-prefix overlays -- see the note in simple_cmd_builtin.
-     * This one alone re-exports a declared-but-unset name, because vars_unset
-     * destroys the declaration. The
-     * word/command paths apply the values again through their own
-     * save/restore; special builtins get persistence there. */
-    if (!ro_name && aov_saved && aov_had && aov_exp) {
-        for (int i = nassigns - 1; i >= 0; i--) {
-            if (!anames[i]) continue;
-            if (aov_had[i])
-                vars_set(&sh->vars, anames[i], aov_saved[i] ? aov_saved[i] : "");
-            else {
-                vars_unset(&sh->vars, anames[i]);
-                /* A declared-but-unset EXPORTED var must stay declared:
-                 * vars_unset killed the entry, recreate the declaration. */
-                if (aov_exp[i])
-                    vars_export(&sh->vars, anames[i]);
-            }
-            free(aov_saved[i]);
-        }
-    }
-    free(aov_saved);
-    free(aov_had);
-    free(aov_exp);
+    /* Take the overlay back down. The word/command paths apply the values
+     * again through their own save/restore; special builtins get persistence
+     * there. */
+    if (!ro_name && aov_on)
+        env_overlay_restore(sh, &aov, anames, ENV_OV_REDECLARE_EXPORT);
+    env_overlay_free(&aov);
     *cmdsub_exit = sh->last_cmdsub_exit;
     *cmdsub_seen = sh->last_cmdsub_seen;
 
@@ -993,40 +1097,12 @@ static int simple_cmd_builtin(shell_ctx_t *sh, const simple_cmd_t *c, shell_buil
      * must find awk via that PATH. Apply the assignments to the shell vars
      * (exported so a child exec inherits them) and restore afterwards.
      *
-     * THREE COPIES OF THIS OVERLAY EXIST, and they are deliberately NOT
-     * identical -- save value/had/exported, set, export, restore in reverse:
-     *   here (abuiltin_*)  -- assignments PERSIST for a special builtin (POSIX
-     *                         2.9.1), the unexport is deferred to its own loop
-     *                         and exempts `export`, and `exec` keeps both;
-     *   simple_cmd_applet (aapp_*) -- unexports inline, never persists;
-     *   simple_cmd_expand_assigns (aov_*) -- re-exports a declared-but-unset
-     *                         name that vars_unset would have destroyed.
-     * Each difference is a bug that was fixed in one copy only: Oils
-     * builtin-special 3, `TZ=UTC date`, and declared-but-unset export
-     * respectively. So a change to one is a question about the other two --
-     * check all three, and do not unify them without re-running the Oils
-     * differential, smoosh and ShellSpec, which is what distinguishes them. */
-    char **abuiltin_saved  = NULL;
-    int   *abuiltin_had    = NULL;
-    int   *abuiltin_wasexp = NULL;
-    if (nassigns > 0) {
-        abuiltin_saved  = calloc((size_t)nassigns, sizeof(char *));
-        abuiltin_had    = calloc((size_t)nassigns, sizeof(int));
-        abuiltin_wasexp = calloc((size_t)nassigns, sizeof(int));
-        if (abuiltin_saved && abuiltin_had && abuiltin_wasexp) {
-            for (int ai = 0; ai < nassigns; ai++) {
-                if (!anames[ai]) continue;
-                const char *ov = vars_get(&sh->vars, anames[ai]);
-                abuiltin_had[ai]    = ov != NULL;
-                abuiltin_saved[ai]  = ov ? strdup(ov) : NULL;
-                /* The export is TEMPORARY, so remember whether the name was
-                 * already exported -- the restore below has to put the flag
-                 * back even in the cases where the VALUE stays. */
-                abuiltin_wasexp[ai] = vars_is_exported(&sh->vars, anames[ai]);
-                vars_set(&sh->vars, anames[ai], avals[ai] ? avals[ai] : "");
-                vars_export(&sh->vars, anames[ai]);
-            }
-        }
+     * One of the three env-prefix overlay users -- see env_overlay_push for
+     * how the three differ and why a change here is a change to all of them. */
+    env_overlay_t abuiltin = { NULL, NULL, NULL, nassigns };
+    if (nassigns > 0 && env_overlay_init(&abuiltin, nassigns)) {
+        for (int ai = 0; ai < nassigns; ai++)
+            env_overlay_push(sh, &abuiltin, ai, anames[ai], avals[ai], 1);
     }
 
     redirect_ctx_t rctx;
@@ -1091,17 +1167,8 @@ static int simple_cmd_builtin(shell_ctx_t *sh, const simple_cmd_t *c, shell_buil
      * Only the ASSIGNMENTS persist -- redirects are still restored (only
      * `exec` keeps those; abuiltin_keep above). */
     int assigns_persist = is_special_builtin(cmd);
-    if (nassigns > 0 && abuiltin_saved && abuiltin_had && !abuiltin_keep &&
-        !assigns_persist) {
-        for (int ai = 0; ai < nassigns; ai++) {
-            if (!anames[ai]) continue;
-            if (abuiltin_had[ai])
-                vars_set(&sh->vars, anames[ai],
-                         abuiltin_saved[ai] ? abuiltin_saved[ai] : "");
-            else
-                vars_unset(&sh->vars, anames[ai]);
-        }
-    }
+    if (!abuiltin_keep && !assigns_persist)
+        env_overlay_restore(sh, &abuiltin, anames, 0);
     /* Undo the temporary EXPORT, even where the VALUE stays.
      *
      * POSIX 2.9.1: assignments preceding a special builtin persist as SHELL
@@ -1118,17 +1185,9 @@ static int simple_cmd_builtin(shell_ctx_t *sh, const simple_cmd_t *c, shell_buil
      *
      * `export` is exempt for the obvious reason -- `x=1 export x` asked for
      * the flag, and from here that is indistinguishable from our own. */
-    if (nassigns > 0 && abuiltin_wasexp && strcmp(cmd, "export") != 0) {
-        for (int ai = 0; ai < nassigns; ai++) {
-            if (!anames[ai] || abuiltin_wasexp[ai]) continue;
-            vars_unexport(&sh->vars, anames[ai]);
-        }
-    }
-    if (abuiltin_saved)
-        for (int ai = 0; ai < nassigns; ai++) free(abuiltin_saved[ai]);
-    free(abuiltin_saved);
-    free(abuiltin_had);
-    free(abuiltin_wasexp);
+    if (strcmp(cmd, "export") != 0)
+        env_overlay_unexport(sh, &abuiltin, anames);
+    env_overlay_free(&abuiltin);
 
     /* 'exec' with no command: redirections are permanent (not restored).
      * Also when it is reached through `command` (`command exec 8<file`). */
@@ -1333,9 +1392,8 @@ static int simple_cmd_applet(shell_ctx_t *sh, const simple_cmd_t *c, const apple
 
     /* A `VAR=val applet` prefix has to reach the applet's ENVIRONMENT.
      *
-     * One of the three env-prefix overlays -- see the note in
-     * simple_cmd_builtin for how the three differ and why a change here is a
-     * question about the other two.
+     * One of the three env-prefix overlay users -- see env_overlay_push for
+     * how the three differ and why a change here is a change to all of them.
      * An external utility gets this for free from the exec; an applet
      * runs in-process and reads getenv(), so without this the binding is
      * simply invisible -- `TZ=UTC date` printed local time, and
@@ -1345,24 +1403,10 @@ static int simple_cmd_applet(shell_ctx_t *sh, const simple_cmd_t *c, const apple
      * vars_export() calls setenv(), so the value lands in `environ`
      * immediately. Restore covers the export FLAG too: a var that existed
      * unexported must not stay exported afterwards. */
-    char **aapp_saved = NULL;
-    int   *aapp_had   = NULL;
-    int   *aapp_exp   = NULL;
-    if (nassigns > 0) {
-        aapp_saved = calloc((size_t)nassigns, sizeof(char *));
-        aapp_had   = calloc((size_t)nassigns, sizeof(int));
-        aapp_exp   = calloc((size_t)nassigns, sizeof(int));
-        if (aapp_saved && aapp_had && aapp_exp) {
-            for (int ai = 0; ai < nassigns; ai++) {
-                if (!anames[ai]) continue;
-                const char *ov = vars_get(&sh->vars, anames[ai]);
-                aapp_had[ai]   = ov != NULL;
-                aapp_saved[ai] = ov ? strdup(ov) : NULL;
-                aapp_exp[ai]   = vars_is_exported(&sh->vars, anames[ai]);
-                vars_set(&sh->vars, anames[ai], avals[ai] ? avals[ai] : "");
-                vars_export(&sh->vars, anames[ai]);
-            }
-        }
+    env_overlay_t aapp = { NULL, NULL, NULL, nassigns };
+    if (nassigns > 0 && env_overlay_init(&aapp, nassigns)) {
+        for (int ai = 0; ai < nassigns; ai++)
+            env_overlay_push(sh, &aapp, ai, anames[ai], avals[ai], 1);
     }
 
     struct sigaction sa_pipe, sa_pipe_prev;
@@ -1379,24 +1423,8 @@ static int simple_cmd_applet(shell_ctx_t *sh, const simple_cmd_t *c, const apple
         if (applet_got_sigpipe) cmd_rc = 128 + SIGPIPE;
     }
 
-    if (nassigns > 0 && aapp_saved && aapp_had && aapp_exp) {
-        for (int ai = nassigns - 1; ai >= 0; ai--) {
-            if (!anames[ai]) continue;
-            if (aapp_had[ai]) {
-                vars_set(&sh->vars, anames[ai],
-                         aapp_saved[ai] ? aapp_saved[ai] : "");
-                if (!aapp_exp[ai])
-                    vars_unexport(&sh->vars, anames[ai]);
-            } else {
-                vars_unset(&sh->vars, anames[ai]);
-            }
-        }
-    }
-    if (aapp_saved)
-        for (int ai = 0; ai < nassigns; ai++) free(aapp_saved[ai]);
-    free(aapp_saved);
-    free(aapp_had);
-    free(aapp_exp);
+    env_overlay_restore(sh, &aapp, anames, ENV_OV_UNEXPORT_ON_RESTORE);
+    env_overlay_free(&aapp);
     /* Same deal as the shell-builtin path above: flush while the
      * redirection is still applied so a full/broken target is charged to
      * THIS command, and clear the sticky stdio error flag so it cannot
