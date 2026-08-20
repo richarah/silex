@@ -1468,7 +1468,7 @@ whole string and worked down, so a miss cost a full quadratic scan.
 — all pairs up to length 3 over an alphabet containing every metacharacter and
 every character `pat_emit_literal` escapes, plus longer literal cases — with 0
 disagreements against the original brute force. 5,293,934 of them took the fast
-path. `tests/unit/shell/test_pattern_strip.sh` (36 cases) keeps the shell-level
+path. `tests/unit/shell/test_pattern_strip.sh` (51 cases) keeps the shell-level
 behaviour pinned, and three deliberate sabotages of the predicate were each
 checked to fail it.
 
@@ -1488,6 +1488,22 @@ blowup, which no benchmark in the tree was looking at — a 4000-byte subject an
 a two-byte pattern that does not match took **a full second**, and now takes
 ten milliseconds. The glob cases are unchanged, as they must be: they still
 take the `fnmatch` path.
+
+**The same loop, one operator away: `${v/pat/repl}`.** The substitution
+operator had its own copy of the brute force — at every position, try every
+length, `memcpy` plus `fnmatch` — and the fast path was first applied only to
+the four strip matchers, leaving the blowup intact next door. A code review
+caught it. `${v//ab/X}` over a 2000-byte subject, 200 times:
+
+| | base | new | bash |
+|---|---|---|---|
+| literal substitution 200x2k | 3715 ms | **7 ms** | 129 ms |
+
+530x against the old code and 18x against bash, from the same one-`memcmp`
+argument. Proved the same way: 17,200,008 (subject, pattern, replacement,
+global) cases against the original loop, 0 disagreements. The lesson is the
+one in the fix, not the numbers — a fast path added at four call sites rather
+than at the shared question leaves the fifth caller behind.
 
 ### I-07: `exec_simple_cmd_inner` split into its dispatch arms
 

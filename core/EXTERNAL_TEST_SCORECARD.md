@@ -624,12 +624,22 @@ with a ten-byte subject the old code made two `fnmatch` calls; the win is a
 blowup no benchmark in the tree was pointed at. Glob patterns still take the
 `fnmatch` path unchanged.
 
+**And the same loop one operator away.** A code review of the above found
+`${v/pat/repl}` still running the identical brute force: the fast path had gone
+in at the four strip matchers rather than at the shared question, leaving the
+blowup intact next door. `${v//ab/X}` over a 2000-byte subject, 200 times:
+**3715 ms -> 7 ms**, which is also 18x faster than bash (129 ms). Equivalence
+proved over 17,200,008 (subject, pattern, replacement, global) cases against
+the original loop, 0 disagreements. ShellSpec is the canary for any patsub
+change (its fast `replace_all` path depends on the replacement being
+word-expanded) and stays at 1696/0.
+
 Equivalence was proved rather than eyeballed, as with the builtin lookup:
 13,075,566 (subject, pattern) pairs — every pair up to length 3 over an
 alphabet holding every metacharacter and every character `pat_emit_literal`
 escapes, plus longer literal cases — 0 disagreements with the brute force,
 5,293,934 of them on the fast path. `tests/unit/shell/test_pattern_strip.sh`
-adds 36 shell-level cases, and three deliberate sabotages of the predicate
+adds 51 shell-level cases (36 strip, 15 substitution), and three deliberate sabotages of the predicate
 were each confirmed to fail it. One of the three does **not** fail it: deleting
 the suffix matchers' length guard is an out-of-bounds read that every shell
 test still passes, and that ASan misses at ordinary sizes because the stray

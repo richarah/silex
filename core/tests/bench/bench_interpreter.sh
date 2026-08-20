@@ -55,6 +55,9 @@ esac
 REF=$(command -v dash || command -v sh)
 [ -n "$REF" ] && [ -x "$REF" ] || { echo "bench: no reference shell" >&2; exit 1; }
 
+BENCH_DIR="$(cd "$(dirname "$0")" && pwd)"
+. "$BENCH_DIR/cases.sh"
+
 echo "=== interpreter / dispatch benchmark ==="
 echo "silex:     $SILEX"
 echo "reference: $REF"
@@ -137,16 +140,20 @@ case_row "2000 x sed on a small file" \
 
 echo ""
 echo "  INTERPRETATION -- the ceiling"
-case_row "arithmetic while loop 100k" \
-    'i=0; while [ $i -lt 100000 ]; do i=$((i+1)); done'
-case_row "case dispatch 100k" \
-    'i=0; while [ $i -lt 100000 ]; do case $i in *7) ;; *) ;; esac; i=$((i+1)); done'
-case_row "test builtin 100k" \
-    'i=0; while [ $i -lt 100000 ]; do [ "$i" != "zzz" ] && i=$((i+1)); done'
-case_row "function call 50k" \
-    'f(){ :; }; i=0; while [ $i -lt 50000 ]; do f; i=$((i+1)); done'
-case_row "parameter expansion 50k" \
-    'v=abcdefghij; i=0; while [ $i -lt 50000 ]; do x=${v#a}; x=${v%j}; i=$((i+1)); done'
+# The five programs come from tests/bench/cases.sh, which bench_compare.sh also
+# sources. They used to be written out here and again there, agreeing only by a
+# comment -- so a change to one would have silently made the two scripts
+# measure different work under the same label.
+OLDIFS=$IFS
+IFS='
+'
+for _label in $BENCH_CASE_LABELS; do
+    IFS=$OLDIFS
+    case_row "$_label" "$(bench_case_prog "$_label")"
+    IFS='
+'
+done
+IFS=$OLDIFS
 
 echo ""
 if [ "$STATUS" -ne 0 ]; then
