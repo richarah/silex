@@ -1,3 +1,5 @@
+# shellcheck shell=sh
+# shellcheck disable=SC2034  # the LABELS vars are consumed by the sourcing script
 # cases.sh — the interpretation workloads, defined once.
 #
 # NOT named bench_*.sh on purpose: `make bench` runs every tests/bench/bench_*.sh
