@@ -1477,9 +1477,9 @@ checked to fail it.
 | Case | base | new | dash | new vs base | new vs dash |
 |------|------|-----|------|-------------|-------------|
 | parameter expansion 50k | 48 ms | 47 ms | 51 ms | 1.02x | 1.09x FASTER |
-| glob-pattern strip 50k | 51 ms | 50 ms | 54 ms | 1.02x | 1.08x FASTER |
-| greedy literal strip 20k | 371 ms | 23 ms | 106 ms | **16.1x** | 4.6x FASTER |
-| greedy literal miss 5k | 1059 ms | 10 ms | 95 ms | **105.9x** | 9.5x FASTER |
+| glob-pattern strip 50k | 50 ms | 51 ms | 52 ms | 1.02x slower | 1.02x FASTER |
+| greedy literal strip 20k | 371 ms | 23 ms | 103 ms | **16.1x** | 4.5x FASTER |
+| greedy literal miss 5k | 1070 ms | 9 ms | 94 ms | **118.9x** | 10.4x FASTER |
 
 The benchmark's own parameter-expansion case barely moves, and that is the
 honest headline: with a ten-byte subject and a one-byte pattern the old code
@@ -1497,19 +1497,36 @@ caught it. `${v//ab/X}` over a 2000-byte subject, 200 times:
 
 | | base | new | bash |
 |---|---|---|---|
-| literal substitution 200x2k | 3715 ms | **7 ms** | 129 ms |
+| literal substitution 200x2k | 3687 ms | **3 ms** | 129 ms |
 
-530x against the old code and 18x against bash, from the same one-`memcmp`
-argument. Proved the same way: 17,200,008 (subject, pattern, replacement,
-global) cases against the original loop, 0 disagreements. The lesson is the
-one in the fix, not the numbers — a fast path added at four call sites rather
-than at the shared question leaves the fifth caller behind.
+Three digits of speedup, and 40x faster than bash, from the same one-`memcmp`
+argument. (The `new` figure is near the benchmark's ~1 ms grain, so read it as
+"immeasurably fast" rather than as three significant figures.) Proved the same
+way: 17,200,008 (subject, pattern, replacement, global) cases against the
+original loop, 0 disagreements. The lesson is the one in the fix, not the
+numbers — a fast path added at four call sites rather than at the shared
+question leaves the fifth caller behind.
 
 ### I-07: `exec_simple_cmd_inner` split into its dispatch arms
 
 Not an optimisation — the profiling in I-01..I-04 found its cost to be
-allocation rather than structure, and this change is measured at ±2%, which is
-this machine's noise. It is here because I-04 left a note promising it.
+allocation rather than structure. Measured against master with two
+verified-clean release builds, interleaved best-of-15: **1.00x, 1.01x, 1.00x,
+1.00x, 1.02x** across the five interpretation cases. It is here because I-04
+left a note promising it.
+
+**How that figure was nearly wrong**, because the story is worth more than the
+figure. A first attempt measured the finished branch 5-8% *slower* on all five
+— including `arithmetic while loop`, which runs no pattern code and touches
+nothing the branch changed. Five cases moving together in a direction the diff
+cannot explain is a sign to distrust the binary, not the code. It was a
+`make test-poison` build: that target leaves its output in `build/bin/silex`,
+and a poison build overwrites every arena block with 0xDD on reset. Both it and
+a plain `make all` called themselves "glibc dev build", so nothing on the
+binary said so. A five-way rotation across master, this commit and its three
+successors put all five within 3% of each other, which is what identified the
+outlier as the binary. `--version` now names `ARENA_POISON` and `ASAN` and adds
+"NOT FOR MEASUREMENT", and `bench_compare.sh` refuses such a binary outright.
 
 The 932-line function is now 285 lines: a preamble that expands redirections
 and assignments, then a dispatch that hands off to one function per arm —

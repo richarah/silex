@@ -605,7 +605,12 @@ test — which is the point, and was checked rather than assumed.
 
 **`exec_simple_cmd_inner` was split into its dispatch arms.** 932 lines became
 285 plus one function per arm (builtin, function, applet, external) and four
-extracted helpers. Every moved line is byte-identical to the line it replaced,
+extracted helpers. Cost, interleaved best-of-15 against master: 1.00x, 1.01x,
+1.00x, 1.00x, 1.02x — nothing, which is what the I-01..I-04 profiling predicted
+(the function's cost was allocation, not structure). A first attempt made it
+look 5-8% slower on all five, including cases the branch cannot touch; that was
+a `make test-poison` binary left in `build/bin/` and benchmarked, and it is why
+`--version` now says "NOT FOR MEASUREMENT" when the build is instrumented. Every moved line is byte-identical to the line it replaced,
 which is what let the split be *verified*: diffing the extracted bodies against
 the originals gives builtin 134 lines identical, function 70 identical, applet
 157 identical, and the external arm differing only where its two duplicate
@@ -628,7 +633,8 @@ blowup no benchmark in the tree was pointed at. Glob patterns still take the
 `${v/pat/repl}` still running the identical brute force: the fast path had gone
 in at the four strip matchers rather than at the shared question, leaving the
 blowup intact next door. `${v//ab/X}` over a 2000-byte subject, 200 times:
-**3715 ms -> 7 ms**, which is also 18x faster than bash (129 ms). Equivalence
+**3687 ms -> 3 ms** (at the benchmark's ~1 ms grain, so: immeasurably fast),
+against bash's 129 ms. Equivalence
 proved over 17,200,008 (subject, pattern, replacement, global) cases against
 the original loop, 0 disagreements. ShellSpec is the canary for any patsub
 change (its fast `replace_all` path depends on the replacement being
