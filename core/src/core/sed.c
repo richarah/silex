@@ -1505,10 +1505,18 @@ static const char *resolve_symlinks(const char *name, char *buf, size_t bufsz)
         } else {
             char dir[PATH_MAX];
             path_dirname(buf, dir);
-            if (strcmp(dir, ".") == 0)
+            if (strcmp(dir, ".") == 0) {
                 snprintf(buf, bufsz, "%s", target);
-            else
-                snprintf(buf, bufsz, "%s/%s", dir, target);
+            } else {
+                /* dir and target are each up to PATH_MAX, so joining them can
+                 * overrun buf. snprintf truncates rather than overflows, but a
+                 * truncated path is a WRONG path -- silently editing the wrong
+                 * file under -i is worse than stopping. Same check the temp
+                 * file name gets below. */
+                int r = snprintf(buf, bufsz, "%s/%s", dir, target);
+                if (r < 0 || (size_t)r >= bufsz)
+                    sed_panic(4, "couldn't resolve %s: path too long", name);
+            }
         }
     }
     return buf;
@@ -2760,8 +2768,13 @@ int applet_sed(int argc, char **argv)
     head = parse_script(&ps, NULL);
 
     /* ---------- execute ---------- */
-    int nfiles = argc - i;
-    char **files = argv + i;
+    /* volatile: these are live across the nested setjmp below (and out_fp is
+     * read by its error handler), so C leaves their values indeterminate after
+     * a longjmp unless they are volatile.  gcc says so as -Wclobbered, which
+     * is -Werror under scan-build; clang has no such warning, which is why an
+     * ordinary build never mentioned it. */
+    volatile int nfiles = argc - i;
+    char ** volatile files = argv + i;
     char *dash = (char *)"-";
     if (nfiles == 0) {
         files = &dash;
@@ -2784,7 +2797,7 @@ int applet_sed(int argc, char **argv)
         if (c->a1.type == ADDR_LAST || (c->has_a2 && c->a2.type == ADDR_LAST))
             st->need_lookahead = 1;
 
-    int exit_code = 0;
+    volatile int exit_code = 0;
 
     if (!O.separate && !O.inplace) {
         /* one continuous stream */
@@ -2802,10 +2815,10 @@ int applet_sed(int argc, char **argv)
         if (st->input_open_failed && exit_code == 0)
             exit_code = 2;
     } else {
-        for (int fi = 0; fi < nfiles; fi++) {
+        for (volatile int fi = 0; fi < nfiles; fi++) {
             char *one[1];
             char realbuf[PATH_MAX];
-            const char *fname = files[fi];
+            const char * volatile fname = files[fi];
 
             if (O.inplace && strcmp(fname, "-") != 0 && O.follow_syms) {
                 if (realpath(fname, realbuf))
@@ -2833,7 +2846,7 @@ int applet_sed(int argc, char **argv)
                 break;
 
             char tmp_path[PATH_MAX];
-            FILE *out_fp = stdout;
+            FILE * volatile out_fp = stdout;
             if (O.inplace) {
                 if (strcmp(fname, "-") == 0) {
                     /* GNU treats a literal "-" operand as a FILE named "-"

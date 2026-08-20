@@ -933,7 +933,11 @@ static void env_overlay_restore(shell_ctx_t *sh, env_overlay_t *ov,
 static void env_overlay_unexport(shell_ctx_t *sh, env_overlay_t *ov,
                                  char **names)
 {
-    if (!ov->wasexp) return;
+    /* names is NULL whenever there were no assignments; ov->n is 0 to match,
+     * so the loop never ran -- but nothing here said so, and the analyzer
+     * reads it as a NULL deref. Stating the precondition is cheaper than
+     * arguing with it. */
+    if (!ov->wasexp || !names) return;
     for (int i = 0; i < ov->n; i++) {
         if (!names[i] || ov->wasexp[i]) continue;
         vars_unexport(&sh->vars, names[i]);
