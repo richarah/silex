@@ -21,6 +21,8 @@ ARG XXHASH_VERSION=0.8.2
 ARG XXHASH_SHA256=baee0c6afd4f03165de7a4e67988d16f0f2b257b51d0e3cb91909302a26a79c4
 ARG MIMALLOC_VERSION=2.1.7
 ARG MIMALLOC_SHA256=0eed39319f139afde8515010ff59baf24de9e47ea316a315398e8027d198202d
+ARG JEMALLOC_VERSION=5.3.0
+ARG JEMALLOC_SHA256=2db82d1e7119df3e71b7640219b6dfe84789bc0537983c3b7ac4f7189aecfeaa
 ARG APK_VERSION=3.0.5
 ARG APK_SHA256=e9d7398d5f70badea596903599bfa1e05b64d67d13c929da9f0eee85828260c6
 ARG BUSYBOX_VERSION=1.37.0
@@ -72,6 +74,7 @@ ARG NINJA_VERSION NINJA_SHA256
 ARG ZSTD_VERSION ZSTD_SHA256
 ARG XXHASH_VERSION XXHASH_SHA256
 ARG MIMALLOC_VERSION MIMALLOC_SHA256
+ARG JEMALLOC_VERSION JEMALLOC_SHA256
 ARG APK_VERSION APK_SHA256
 ARG BUSYBOX_VERSION BUSYBOX_SHA256
 ARG DASH_VERSION DASH_SHA256
@@ -86,7 +89,13 @@ RUN mkdir -p /src /build /out/bin /out/lib /out/share
 
 # curl is not pre-installed in silex:slim; install via apk.
 # LD_LIBRARY_PATH ensures Wolfi's /usr/lib/libcurl.so.4 is found first.
-RUN apk update && apk add curl
+#
+# make/autoconf/automake/m4 are not in silex:slim either -- it ships cmake and
+# ninja only. Every autotools build below (dash, busybox, pigz, coreutils,
+# jemalloc) needs make, so this stage could not have run without them. The
+# bootstrap Dockerfile gets them from debian's build-essential; here they come
+# from apk.
+RUN apk update && apk add curl make autoconf automake m4
 ENV LD_LIBRARY_PATH="/usr/lib"
 
 # ============================================================================
@@ -201,6 +210,10 @@ RUN set -ex \
         -o /src/mimalloc.tar.gz \
     && echo "${MIMALLOC_SHA256}  /src/mimalloc.tar.gz" | sha256sum -c - \
     \
+    && curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 30 "https://github.com/jemalloc/jemalloc/releases/download/${JEMALLOC_VERSION}/jemalloc-${JEMALLOC_VERSION}.tar.bz2" \
+        -o /src/jemalloc.tar.bz2 \
+    && echo "${JEMALLOC_SHA256}  /src/jemalloc.tar.bz2" | sha256sum -c - \
+    \
     && curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 30 "https://gitlab.alpinelinux.org/alpine/apk-tools/-/archive/v${APK_VERSION}/apk-tools-v${APK_VERSION}.tar.gz" \
         -o /src/apk-tools.tar.gz \
     && echo "${APK_SHA256}  /src/apk-tools.tar.gz" | sha256sum -c - \
@@ -256,11 +269,12 @@ RUN set -ex \
         -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX=/out \
-        -DZSTD_BUILD_STATIC=OFF \
+        -DZSTD_BUILD_STATIC=ON \
         -DZSTD_BUILD_PROGRAMS=ON \
         -DZSTD_BUILD_TESTS=OFF \
     && ninja -C _build -j$(nproc) \
     && ninja -C _build install \
+    && rm -f /out/lib/libzstd.a \
     && strip --strip-unneeded /out/bin/zstd \
     && rm -rf /build/zstd-${ZSTD_VERSION}
 
@@ -293,6 +307,25 @@ RUN set -ex \
     && rm -rf /build/mimalloc-${MIMALLOC_VERSION}
 
 # ============================================================================
+# Build jemalloc (shared library only, for LD_PRELOAD via SILEX_MALLOC=jemalloc).
+# ============================================================================
+RUN set -ex \
+    && tar xf /src/jemalloc.tar.bz2 --no-same-owner -C /build \
+    && cd /build/jemalloc-${JEMALLOC_VERSION} \
+    && ./autogen.sh \
+    && ./configure \
+        --prefix=/out \
+        --enable-shared \
+        --disable-static \
+        CC="${CC}" \
+        CFLAGS="${CFLAGS}" \
+        LDFLAGS="${LDFLAGS}" \
+    && make -j$(nproc) \
+    && make install_lib_shared \
+    && strip --strip-unneeded /out/lib/libjemalloc.so* 2>/dev/null || true \
+    && rm -rf /build/jemalloc-${JEMALLOC_VERSION} /src/jemalloc.tar.bz2
+
+# ============================================================================
 # Build tini (PID 1 reaper).
 # ============================================================================
 RUN set -ex \
@@ -302,6 +335,8 @@ RUN set -ex \
         -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX=/out \
+        -DCMAKE_C_FLAGS="${CFLAGS} -Wno-strict-prototypes" \
+        -DCMAKE_EXE_LINKER_FLAGS="-Wno-unused-command-line-argument" \
     && ninja -C _build -j$(nproc) \
     && install -m755 _build/tini /out/bin/tini \
     && strip --strip-unneeded /out/bin/tini \
@@ -314,7 +349,6 @@ RUN set -ex \
     && tar xf /src/dash.tar.gz -C /build \
     && cd /build/dash-${DASH_VERSION} \
     && ./configure \
-        --bindir=/bin \
         --prefix=/out \
         CC="${CC}" \
         CFLAGS="${CFLAGS}" \
@@ -331,10 +365,14 @@ RUN set -ex \
     && tar xf /src/busybox.tar.bz2 -C /build \
     && cd /build/busybox-${BUSYBOX_VERSION} \
     && make defconfig \
+    # busybox links incrementally (ld -r into built-in.o). mold cannot read a
+    # thin-LTO object during that partial link without the plugin, so the LTO
+    # in the inherited CFLAGS/LDFLAGS has to come back off for this build only.
+    # -fno-lto trails -flto=thin, and the last of the pair wins.
     && make -j$(nproc) \
         CC="${CC}" \
-        EXTRA_CFLAGS="${CFLAGS}" \
-        EXTRA_LDFLAGS="${LDFLAGS}" \
+        EXTRA_CFLAGS="${CFLAGS} -fno-lto" \
+        EXTRA_LDFLAGS="${LDFLAGS} -fno-lto" \
     && install -m755 busybox /out/bin/busybox \
     && strip --strip-unneeded /out/bin/busybox \
     && rm -rf /build/busybox-${BUSYBOX_VERSION}
@@ -396,15 +434,19 @@ RUN set -ex \
                           make \
     && tar xf /src/apk-tools.tar.gz -C /build \
     && cd /build/apk-tools-v${APK_VERSION} \
+    # strlcpy is a BSD extension absent from glibc < 2.38 (Debian bookworm = 2.36). \
+    # Provide an inline compat via -include so every TU sees it. \
+    && printf '#pragma once\n#include <string.h>\n#ifndef strlcpy\nstatic inline size_t strlcpy(char*d,const char*s,size_t n){size_t l=strlen(s);if(n){size_t c=l<n-1?l:n-1;__builtin_memcpy(d,s,c);d[c]=0;}return l;}\n#endif\n' \
+        > /build/strlcpy_compat.h \
     && make -j$(nproc) \
         CC="${CC}" \
-        CFLAGS="${CFLAGS}" \
+        CFLAGS="${CFLAGS} -include /build/strlcpy_compat.h" \
         LDFLAGS="${LDFLAGS}" \
         STATIC=y \
         LUA=no \
     && install -m755 src/apk.static /out/bin/apk \
     && strip --strip-unneeded /out/bin/apk \
-    && rm -rf /build/apk-tools-v${APK_VERSION}
+    && rm -rf /build/apk-tools-v${APK_VERSION} /build/strlcpy_compat.h
 
 # ============================================================================
 # Build silex-nosync.so.
@@ -644,6 +686,9 @@ COPY --from=build-c /out/lib/silex-nosync.so /usr/local/silex/lib/silex-nosync.s
 
 # mimalloc shared library.
 COPY --from=build-c /out/lib/libmimalloc* /usr/lib/
+
+# jemalloc shared library (for SILEX_MALLOC=jemalloc).
+COPY --from=build-c /out/lib/libjemalloc* /usr/lib/
 
 # Silex-internal binaries.
 RUN mkdir -p /usr/local/silex/bin
