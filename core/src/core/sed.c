@@ -1528,8 +1528,17 @@ static FILE *open_input(exec_t *st, const char *name)
      * real file called "-" (GNU in-place-hyphen). */
     if (strcmp(name, "-") == 0 && !O.inplace) {
         st->cur_name = "-";
-        if (O.unbuffered)
-            setvbuf(stdin, NULL, _IONBF, 0);
+        /* setvbuf has to happen before any I/O on the stream, and "-" may
+         * appear more than once in the operand list -- `sed -u p - -` came
+         * back through here and called it again on a stream already read
+         * from, which is undefined. Once per process is the whole intent. */
+        if (O.unbuffered) {
+            static int stdin_unbuffered = 0;
+            if (!stdin_unbuffered) {
+                setvbuf(stdin, NULL, _IONBF, 0);
+                stdin_unbuffered = 1;
+            }
+        }
         return stdin;
     }
     static char linkbuf[PATH_MAX];
@@ -2239,7 +2248,11 @@ static void run_stream(sed_cmd_t *head, exec_t *st, const parser_t *psinfo)
                                st->ps_had_delim);
                 flush_appends(st);
                 if (!next_record(st)) {
-                    cycle_print = 0;
+                    /* Out of input: GNU sed stops without running any further
+                     * command, and the pattern space was already auto-printed
+                     * just above. stream_end only flushes appends -- it never
+                     * reads cycle_print -- so clearing the flag here achieved
+                     * nothing; the goto is what skips the second print. */
                     goto stream_end;
                 }
                 break;
