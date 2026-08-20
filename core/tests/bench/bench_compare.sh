@@ -65,6 +65,25 @@ for b in "$BASE" "$NEW"; do
     esac
 done
 
+# Refuse a deliberately-slowed binary.
+#
+# `make test-poison` and `make test-asan` leave their build in build/bin/silex,
+# and copying it out of there is a natural thing to do between suite runs. A
+# poison build overwrites every arena block with 0xDD on reset, which on
+# 2026-08-20 read as a 5-8% interpreter regression across five cases that the
+# change under test could not possibly have touched -- and cost a five-way
+# bisect to unmask. --version now names the instrumentation; this checks it, so
+# the mistake costs a message instead of a wrong conclusion.
+for b in "$BASE" "$NEW"; do
+    if "$b" --version 2>/dev/null | grep -q "NOT FOR MEASUREMENT"; then
+        echo "bench: refusing to measure an instrumented build:" >&2
+        echo "       $b" >&2
+        echo "       $("$b" --version 2>/dev/null)" >&2
+        echo "       rebuild it with \`make\` (test-poison/test-asan leave theirs in build/bin/)" >&2
+        exit 1
+    fi
+done
+
 # The case list comes from tests/bench/cases.sh, which bench_interpreter.sh
 # also sources: the five interpretation workloads it reports, plus the
 # strip/substitute cases. Defining them in one place is what stops the two

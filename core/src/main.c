@@ -160,6 +160,34 @@ static const char *silex_link(void)
 #endif
 }
 
+/* Instrumentation that makes the binary SLOWER, named so a measurement cannot
+ * be taken from it by accident.
+ *
+ * silex_link() above reports how the binary was linked, and both a `make all`
+ * build and the one `make test-poison` leaves behind call themselves
+ * "glibc dev build" -- identical strings for binaries that differ by every
+ * arena block being overwritten with 0xDD on reset. On 2026-08-20 that cost a
+ * false regression: a poison build was copied out of build/bin/ and
+ * benchmarked, and reported the interpreter 5-8% slower across five unrelated
+ * cases. Nothing on the binary said otherwise. The Makefile's flavour stamp
+ * forces the REBUILD correctly; this is the other half, so that whatever is
+ * sitting in build/bin/ can be asked what it is.
+ *
+ * ASan is included for the same reason -- it is the other way to end up
+ * holding a deliberately slow binary. */
+static const char *silex_instrumentation(void)
+{
+#if defined(ARENA_POISON) && defined(__SANITIZE_ADDRESS__)
+    return ", ARENA_POISON+ASAN -- NOT FOR MEASUREMENT";
+#elif defined(ARENA_POISON)
+    return ", ARENA_POISON -- NOT FOR MEASUREMENT";
+#elif defined(__SANITIZE_ADDRESS__)
+    return ", ASAN -- NOT FOR MEASUREMENT";
+#else
+    return "";
+#endif
+}
+
 static const char *silex_cc(void)
 {
 #if defined(__clang__)
@@ -267,9 +295,10 @@ static int silex_main(int argc, char **argv)
 #ifndef SILEX_VERSION
 #define SILEX_VERSION "unknown"
 #endif
-            printf("silex %s (%s %s, %s, %s %s)\n",
+            printf("silex %s (%s %s, %s, %s %s%s)\n",
                    SILEX_VERSION, silex_libc(), silex_link(),
-                   silex_arch(), silex_cc(), __VERSION__);
+                   silex_arch(), silex_cc(), __VERSION__,
+                   silex_instrumentation());
             return 0;
         }
         if (strcmp(argv[1], "--list") == 0)
