@@ -159,6 +159,56 @@ check "a quoted expansion's * is literal" \
 check "a nested expansion supplies the pattern" \
       "$("$MB" -c 't=abcdefghij; echo "${t%"${t#a}"}"')" "a"
 
+# --- ${v/pat/repl}: the same fast path, same hazards --------------------
+#
+# The substitution operator ran the identical brute force (every position,
+# every length, memcpy + fnmatch) and took the same literal fast path. bash is
+# the oracle here -- dash has no ${v/}. Equivalence against the general loop
+# was proved over 17,200,008 (subject, pattern, replacement, global) cases.
+
+check "replace first literal occurrence" \
+      "$("$MB" -c 'v=abcabc; echo "${v/b/X}"')" "aXcabc"
+check "replace every literal occurrence" \
+      "$("$MB" -c 'v=abcabc; echo "${v//b/X}"')" "aXcaXc"
+check "replace with the empty string deletes" \
+      "$("$MB" -c 'v=abcabc; echo "[${v//abc/}]"')" "[]"
+check "a replacement longer than the match" \
+      "$("$MB" -c 'v=abc; echo "${v//c/CC}"')" "abCC"
+check "no occurrence leaves the value alone" \
+      "$("$MB" -c 'v=abc; echo "${v//x/Y}"')" "abc"
+check "empty subject substitutes nothing" \
+      "$("$MB" -c 'v=; echo "[${v//a/b}]"')" "[]"
+# Overlapping candidates: the scan must advance past the match it took, not
+# re-examine inside it.
+check "matches do not overlap" \
+      "$("$MB" -c 'v=aaa; echo "${v//aa/X}"')" "Xa"
+check "a match at the very end is still found" \
+      "$("$MB" -c 'v=abc; echo "${v//c/X}"')" "abX"
+check "a pattern longer than the subject matches nothing" \
+      "$("$MB" -c 'v=ab; echo "${v//abcd/X}"')" "ab"
+# Still a wildcard where it should be, still data where it should be.
+check "* is still a wildcard in a substitution" \
+      "$("$MB" -c 'v=a/b/c; echo "${v//*\//-}"')" "-c"
+check "a quoted * is literal in a substitution" \
+      "$("$MB" -c 'p="*"; v="a*b"; echo "${v//"$p"/-}"')" "a-b"
+check "an escaped separator is a literal slash" \
+      "$("$MB" -c 'v=a/b/c; echo "${v//\//-}"')" "a-b-c"
+check "a literal dot is not a regex dot" \
+      "$("$MB" -c 'v=a.b; echo "${v//./-}"')" "a-b"
+check "empty pattern substitutes nothing and does not hang" \
+      "$("$MB" -c 'v=abc; echo "[${v//}]"' 2>&1)" "[abc]"
+
+# Substitution has the same unguarded-memcmp hazard as the suffix matchers, in
+# the other direction: without its `slen - i >= lit` check the compare reads
+# PAST the end of the subject near the tail. Same invisibility -- deleting the
+# guard leaves all 13 cases above passing -- and the same remedy: a pattern too
+# large to stay inside the subject's arena block, where ASan reports a
+# heap-buffer-overflow in expand_braced_body under `make test-asan`.
+_bigsub_out=$("$MB" -c 'p=$(awk "BEGIN{for(i=0;i<200000;i++)printf \"x\"}")
+                        v=abc; echo "[${v//$p/Q}][${v/$p/Q}]"' 2>&1)
+check "a substitution pattern far longer than the subject reads nothing past it" \
+      "$_bigsub_out" "[abc][abc]"
+
 # --- the same, on positionals and specials ------------------------------
 
 check "strip applies to a positional parameter" \

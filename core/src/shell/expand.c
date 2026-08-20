@@ -307,7 +307,21 @@ static char *expand_tilde_word(shell_ctx_t *sh, const char *word)
  *
  * `\` counts as a metacharacter and takes the slow path: a quoted metacharacter
  * arrives here escaped (pat_emit_literal), and unescaping it correctly is
- * fnmatch's job, not this predicate's. The four matchers below otherwise walk
+ * fnmatch's job, not this predicate's.
+ *
+ * KEEP IN STEP WITH pat_emit_literal() (below, near expand_word_pattern). That
+ * function decides which characters have to be escaped to be literal; this one
+ * decides which characters mean "not literal". The soundness argument is that
+ * anything pat_emit_literal escapes arrives here behind a `\`, which this
+ * rejects -- so a character added to the pattern language there and not here
+ * would be compared as data by memcmp instead of interpreted. That is silent
+ * wrong output, not a crash, and no existing test would fail. (charclass.h's
+ * CC_GLOB bit is a third spelling of nearly this set, used for the hot-path
+ * "does this word need globbing at all" check; it is deliberately not reused
+ * here, because that set answers a different question -- it does not treat `\`
+ * as disqualifying.)
+ *
+ * The four matchers below otherwise walk
  * every split point of the subject calling fnmatch, with a malloc per call --
  * O(n) matches and an allocation to strip `a` off the front of a ten-byte
  * string. `${v#a}` and `${v%j}` are the shape parameter expansion actually
@@ -349,11 +363,13 @@ static int match_prefix(const char *str, const char *pat)
 
 static int match_prefix_shortest(const char *str, const char *pat)
 {
-    /* Longest and shortest coincide for a literal pattern: only one length
-     * of prefix can match it at all. */
-    int lit = pattern_literal_len(pat);
-    if (lit >= 0)
-        return strncmp(str, pat, (size_t)lit) == 0 ? lit : -1;
+    /* Longest and shortest coincide for a literal pattern -- only one length of
+     * prefix can match it at all -- so delegate rather than repeat the test.
+     * One copy of each fast path, not two: the suffix pair's version carries a
+     * length guard whose absence is invisible to the shell tests and to ASan
+     * (see match_suffix), and a second copy would be a second place to lose it. */
+    if (pattern_literal_len(pat) >= 0)
+        return match_prefix(str, pat);
 
     size_t slen = strlen(str);
     char *tmp = malloc(slen + 1);
@@ -391,13 +407,12 @@ static int match_suffix(const char *str, const char *pat)
 
 static int match_suffix_shortest(const char *str, const char *pat)
 {
-    size_t slen = strlen(str);
-    int lit = pattern_literal_len(pat);
-    if (lit >= 0)
-        return (slen >= (size_t)lit &&
-                memcmp(str + slen - (size_t)lit, pat, (size_t)lit) == 0)
-               ? (int)(slen - (size_t)lit) : -1;
+    /* Same delegation as match_prefix_shortest: one literal fast path per
+     * anchor, so the length guard in match_suffix stays the only copy. */
+    if (pattern_literal_len(pat) >= 0)
+        return match_suffix(str, pat);
 
+    size_t slen = strlen(str);
     /* Shortest: try from largest start offset */
     for (size_t off = slen; ; off--) {
         if (fnmatch(pat, str + off, 0) == 0)
@@ -982,6 +997,48 @@ static char *expand_braced_body(shell_ctx_t *sh, const char *body, int in_dquote
 
         strbuf_t sb;
         sb_init(&sb, 128);
+
+        /* A literal pattern reduces this to ordinary substring replacement.
+         *
+         * The general loop below is the same brute force the '#' and '%'
+         * matchers used to be -- at every position, try every match length,
+         * with a memcpy and an fnmatch per candidate -- so `${v//abc/x}` over a
+         * long subject was quadratic for the same reason and with the same
+         * remedy: a pattern with no metacharacter matches at position i or it
+         * does not, and one memcmp settles it. pattern_literal_len() is the
+         * same predicate the strip operators use, including its treatment of
+         * `\` (see its header). An empty pattern was rejected above, so `lit`
+         * is at least 1 here and the scan always advances -- which is what
+         * stopped `${v//}` hanging the shell.
+         *
+         * The `slen - i >= lit` guard is not decoration: without it the memcmp
+         * reads past the end of the subject near the tail. */
+        int lit = pattern_literal_len(pat);
+        if (lit > 0) {
+            size_t i = 0;
+            int replaced = 0;
+            while (i <= slen) {
+                if (slen - i >= (size_t)lit &&
+                    memcmp(s + i, pat, (size_t)lit) == 0) {
+                    sb_append(&sb, repl);
+                    i += (size_t)lit;
+                    replaced = 1;
+                    if (!global) {
+                        sb_append(&sb, s + i);
+                        break;
+                    }
+                    continue;
+                }
+                if (i < slen)
+                    sb_appendc(&sb, s[i]);
+                i++;
+            }
+            (void)replaced;
+            char *r = arena_strdup(sh->scratch, sb_str(&sb));
+            sb_free(&sb);
+            sb_free(&rsb);
+            return r;
+        }
 
         /* This used to declare `char tmp[mlen + 1]` inside the inner loop -- a
          * variable-length array sized by the remaining length of the subject.
