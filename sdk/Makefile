@@ -18,6 +18,16 @@ FULL_TAG    = $(REGISTRY)/$(IMAGE):$(TAG)
 DOCKER     ?= docker
 DOCKER_FLAGS ?= --progress=plain
 
+# The image's /bin/sh is the silex binary, and its source is core/ -- a sibling
+# of this directory, outside the build context. BuildKit named contexts are how
+# it gets in; the Dockerfiles refer to it as `--from=core`. core/.dockerignore
+# prunes the 1.4 GB of vendored test checkouts down to the 3.8 MB that compiles.
+#
+# Override to build the image against a different core tree:
+#     make build CORE_DIR=/path/to/other/core
+CORE_DIR     ?= ../core
+CORE_CONTEXT  = --build-context core=$(CORE_DIR)
+
 .PHONY: all verify-sources verify-drift bootstrap build release cache test clean
 
 all: build
@@ -46,6 +56,7 @@ bootstrap:
 	    -f dockerfiles/Dockerfile.bootstrap \
 	    -t $(FULL_TAG) \
 	    --build-arg TARGETARCH=$(shell uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') \
+	    $(CORE_CONTEXT) \
 	    .
 
 # ---------------------------------------------------------------------------
@@ -57,6 +68,7 @@ build:
 	    -f dockerfiles/Dockerfile \
 	    -t $(FULL_TAG) \
 	    --build-arg TARGETARCH=$(shell uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') \
+	    $(CORE_CONTEXT) \
 	    .
 
 # ---------------------------------------------------------------------------
@@ -71,6 +83,7 @@ release:
 	    -f dockerfiles/Dockerfile \
 	    -t $(FULL_TAG) \
 	    --build-arg TARGETARCH=$(shell uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') \
+	    $(CORE_CONTEXT) \
 	    .
 
 # ---------------------------------------------------------------------------

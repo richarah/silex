@@ -194,10 +194,58 @@ fi
 # holds that address next. The resolver already caches. Let it.
 
 # ============================================================================
+# Shell selection.
+#
+# /bin/sh is the silex binary. SILEX_SH=dash (or busybox) puts the old shell
+# back for one container without rebuilding the image -- the Dockerfile SHELL
+# directive is ["/usr/local/bin/silex-entrypoint", "/bin/sh", "-c"], so
+# rewriting a leading /bin/sh here covers every RUN step as well as an
+# interactive `docker run`.
+#
+# Anything else is passed through untouched, including an explicit /bin/dash.
+# ============================================================================
+SH_IMPL="${SILEX_SH:-silex}"
+case "$SH_IMPL" in
+    silex) ;;
+    dash|busybox)
+        _alt="/bin/$SH_IMPL"
+        if [ -x "$_alt" ]; then
+            if [ "${1:-}" = "/bin/sh" ] || [ "${1:-}" = "sh" ]; then
+                shift
+                set -- "$_alt" "$@"
+            fi
+        else
+            echo "silex: warning: SILEX_SH=$SH_IMPL but $_alt is not present; using /bin/sh" >&2
+        fi
+        ;;
+    *)
+        echo "silex: warning: unknown SILEX_SH='$SH_IMPL' (silex|dash|busybox), using silex" >&2
+        ;;
+esac
+
+# ============================================================================
+# Applet suppression.
+#
+# silex runs its own applets IN-PROCESS, ahead of PATH, which is most of why
+# it is fast -- no fork, no exec. SILEX_NO_APPLETS names the ones that must
+# resolve through PATH instead, because something there is genuinely better.
+#
+# cp is the standing example and the reason this defaults to non-empty:
+# /usr/local/silex/bin/cp adds --reflink=auto for copy-on-write filesystems,
+# and silex's own cp rejects that flag (it is in the optional silex-gnu-cp
+# module). An in-process cp does not skip the wrapper, it makes the wrapper
+# unreachable.
+#
+# Set SILEX_NO_APPLETS=all to route every applet through PATH, or to the empty
+# string to let silex handle all of them including cp.
+# ============================================================================
+export SILEX_NO_APPLETS="${SILEX_NO_APPLETS-cp}"
+
+# ============================================================================
 # Print configuration summary (unless SILEX_QUIET=on)
 # ============================================================================
 if [ "${SILEX_QUIET:-off}" != "on" ]; then
-    echo "silex: CC=$CC CXX=$CXX linker=$LINKER generator=$GENERATOR parallel=$PARALLEL cache=$CACHE malloc=$MALLOC" >&2
+    echo "silex: CC=$CC CXX=$CXX linker=$LINKER generator=$GENERATOR parallel=$PARALLEL cache=$CACHE malloc=$MALLOC sh=$SH_IMPL no-applets=${SILEX_NO_APPLETS:-none}" >&2
 fi
 
 # ============================================================================

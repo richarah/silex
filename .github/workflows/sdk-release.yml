@@ -87,6 +87,7 @@ jobs:
           docker buildx build \
             -f dockerfiles/Dockerfile.bootstrap \
             --build-arg TARGETARCH=amd64 \
+            --build-context core=../core \
             --progress=plain \
             -t "${IMG}:slim" \
             -t "${IMG}:slim-${VER}" \

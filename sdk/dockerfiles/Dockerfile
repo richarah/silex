@@ -185,23 +185,23 @@ ENV CXX="sccache clang++"
 # ============================================================================
 RUN set -ex \
     \
-    && curl -fsSL "https://github.com/ninja-build/ninja/archive/refs/tags/v${NINJA_VERSION}.tar.gz" \
+    && curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 30 "https://github.com/ninja-build/ninja/archive/refs/tags/v${NINJA_VERSION}.tar.gz" \
         -o /src/ninja.tar.gz \
     && echo "${NINJA_SHA256}  /src/ninja.tar.gz" | sha256sum -c - \
     \
-    && curl -fsSL "https://github.com/facebook/zstd/releases/download/v${ZSTD_VERSION}/zstd-${ZSTD_VERSION}.tar.gz" \
+    && curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 30 "https://github.com/facebook/zstd/releases/download/v${ZSTD_VERSION}/zstd-${ZSTD_VERSION}.tar.gz" \
         -o /src/zstd.tar.gz \
     && echo "${ZSTD_SHA256}  /src/zstd.tar.gz" | sha256sum -c - \
     \
-    && curl -fsSL "https://github.com/Cyan4973/xxHash/archive/refs/tags/v${XXHASH_VERSION}.tar.gz" \
+    && curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 30 "https://github.com/Cyan4973/xxHash/archive/refs/tags/v${XXHASH_VERSION}.tar.gz" \
         -o /src/xxhash.tar.gz \
     && echo "${XXHASH_SHA256}  /src/xxhash.tar.gz" | sha256sum -c - \
     \
-    && curl -fsSL "https://github.com/microsoft/mimalloc/archive/refs/tags/v${MIMALLOC_VERSION}.tar.gz" \
+    && curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 30 "https://github.com/microsoft/mimalloc/archive/refs/tags/v${MIMALLOC_VERSION}.tar.gz" \
         -o /src/mimalloc.tar.gz \
     && echo "${MIMALLOC_SHA256}  /src/mimalloc.tar.gz" | sha256sum -c - \
     \
-    && curl -fsSL "https://gitlab.alpinelinux.org/alpine/apk-tools/-/archive/v${APK_VERSION}/apk-tools-v${APK_VERSION}.tar.gz" \
+    && curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 30 "https://gitlab.alpinelinux.org/alpine/apk-tools/-/archive/v${APK_VERSION}/apk-tools-v${APK_VERSION}.tar.gz" \
         -o /src/apk-tools.tar.gz \
     && echo "${APK_SHA256}  /src/apk-tools.tar.gz" | sha256sum -c - \
     \
@@ -213,7 +213,7 @@ RUN set -ex \
         -o /src/dash.tar.gz \
     && echo "${DASH_SHA256}  /src/dash.tar.gz" | sha256sum -c - \
     \
-    && curl -fsSL "https://github.com/krallin/tini/archive/refs/tags/v${TINI_VERSION}.tar.gz" \
+    && curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 30 "https://github.com/krallin/tini/archive/refs/tags/v${TINI_VERSION}.tar.gz" \
         -o /src/tini.tar.gz \
     && echo "${TINI_SHA256}  /src/tini.tar.gz" | sha256sum -c - \
     \
@@ -221,11 +221,11 @@ RUN set -ex \
         -o /src/pigz.tar.gz \
     && echo "${PIGZ_SHA256}  /src/pigz.tar.gz" | sha256sum -c - \
     \
-    && curl -fsSL "https://github.com/vasi/pixz/releases/download/v${PIXZ_VERSION}/pixz-${PIXZ_VERSION}.tar.xz" \
+    && curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 30 "https://github.com/vasi/pixz/releases/download/v${PIXZ_VERSION}/pixz-${PIXZ_VERSION}.tar.xz" \
         -o /src/pixz.tar.xz \
     && echo "${PIXZ_SHA256}  /src/pixz.tar.xz" | sha256sum -c - \
     \
-    && curl -fsSL "https://ftp.gnu.org/gnu/coreutils/coreutils-${COREUTILS_VERSION}.tar.xz" \
+    && curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 30 "https://ftp.gnu.org/gnu/coreutils/coreutils-${COREUTILS_VERSION}.tar.xz" \
         -o /src/coreutils.tar.xz \
     && echo "${COREUTILS_SHA256}  /src/coreutils.tar.xz" | sha256sum -c -
 
@@ -416,6 +416,30 @@ RUN clang -O2 -shared -fPIC -nostartfiles \
     && strip /out/lib/silex-nosync.so
 
 # ============================================================================
+# Build the silex core binary -- the image's /bin/sh.
+#
+# core/ is a sibling of sdk/ in the monorepo and therefore OUTSIDE this build
+# context, which is sdk/. It arrives as a BuildKit named context instead:
+#
+#     docker build --build-context core=../core ...
+#
+# (the Makefile passes it; a build without it fails at this COPY rather than
+# silently producing an image with the old /bin/sh). core/.dockerignore prunes
+# tests/, build/ and *.gcov from that context -- tests/external/repos alone is
+# 1.4 GB of vendored checkouts, versus 3.8 MB for everything that is needed.
+#
+# `make release` here, not `make all`: `all` produces a DEV build, and the two
+# share object paths, so the flavour stamp -- not timestamps -- is what forces
+# the rebuild. See core/docs and the build-flavour note in core/Makefile.
+# ============================================================================
+COPY --from=core . /src/silex-core
+RUN cd /src/silex-core \
+    && make release -j"$(nproc)" \
+    && install -m755 build/bin/silex /out/bin/silex \
+    && rm -rf /src/silex-core \
+    && /out/bin/silex --version
+
+# ============================================================================
 # Stage: build-rust
 # Uses silex:slim for build tools. Downloads fresh Rust toolchain.
 # Uses mold (from silex:slim) instead of lld for faster link.
@@ -441,7 +465,7 @@ RUN mkdir -p /src /out/bin
 RUN set -ex \
     && ARCH=$([ "${TARGETARCH}" = "arm64" ] && echo "aarch64" || echo "x86_64") \
     && RUST_SHA256=$([ "${TARGETARCH}" = "arm64" ] && echo "${RUST_SHA256_AARCH64}" || echo "${RUST_SHA256_X86_64}") \
-    && curl -fsSL "https://static.rust-lang.org/dist/rust-${RUST_VERSION}-${ARCH}-unknown-linux-gnu.tar.xz" \
+    && curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 30 "https://static.rust-lang.org/dist/rust-${RUST_VERSION}-${ARCH}-unknown-linux-gnu.tar.xz" \
         -o /src/rust.tar.xz \
     && echo "${RUST_SHA256}  /src/rust.tar.xz" | sha256sum -c - \
     && tar xf /src/rust.tar.xz -C /src \
@@ -452,23 +476,70 @@ RUN set -ex \
 
 ENV PATH="/opt/rust/bin:${PATH}"
 # Use mold for Rust linking — available in silex:slim.
-ENV RUSTFLAGS="-C target-cpu=x86-64-v3 -C lto=thin -C link-arg=-fuse-ld=/opt/mold/bin/mold"
+#
+# LTO is requested through CARGO_PROFILE_RELEASE_LTO, NOT through RUSTFLAGS.
+# `-C lto=thin` in RUSTFLAGS applies to every rustc invocation including build
+# scripts and proc-macros, and cargo compiles those with `-C embed-bitcode=no`,
+# which rustc rejects outright:
+#
+#     error: options `-C embed-bitcode=no` and `-C lto` are incompatible
+#     error: could not compile `libc` (build script)
+#
+# That killed the whole build-rust stage on the first crate with a build
+# script, which is to say immediately: no sccache, no fd, no rg, no uv. The
+# profile variable is the supported route -- cargo then applies LTO to the
+# final artefacts and leaves build scripts alone.
+ENV RUSTFLAGS="-C target-cpu=x86-64-v3 -C link-arg=-fuse-ld=/opt/mold/bin/mold"
+ENV CARGO_PROFILE_RELEASE_LTO=thin
+
+# sccache depends on openssl-sys, whose build script shells out to pkg-config
+# and then reads OpenSSL's headers. This stage is FROM silex:slim, which ships
+# libssl.so.3 but no headers and no pkg-config at all, so the build script
+# panicked:
+#
+#     The pkg-config command could not be found.
+#     Could not find directory of OpenSSL installation
+#
+# Dockerfile.bootstrap builds this same stage FROM debian:bookworm-slim and
+# apt-gets `libssl-dev pkg-config` for exactly this reason. The self-hosted
+# path never got the equivalent -- which, with the RUSTFLAGS bug above, is why
+# `make build` could not reach the end of build-rust.
+#
+# Only libssl-dev is installed, because pkg-config CANNOT BE INSTALLED from
+# silex-packages today:
+#
+#     ERROR: unable to select packages:
+#       libpkgconf3 (no such package):
+#         required by: pkgconf-bin-1.8.1-1-r0[libpkgconf3]
+#
+# pkgconf-bin is published without its own library. That is a silex-packages
+# bug, not one this Dockerfile can fix; until it is fixed, openssl-sys is
+# pointed straight at the headers and libraries instead, which is what
+# pkg-config would have told it anyway. OPENSSL_NO_PKG_CONFIG makes the build
+# script skip the probe rather than fail on it.
+#
+# The library path is Debian multiarch, so it names x86_64 -- as does RUSTFLAGS
+# two lines above. This stage is x86-64 either way.
+RUN apk add --no-cache libssl-dev
+ENV OPENSSL_NO_PKG_CONFIG=1
+ENV OPENSSL_INCLUDE_DIR=/usr/include
+ENV OPENSSL_LIB_DIR=/usr/lib/x86_64-linux-gnu
 
 # Download and verify Rust tool sources.
 RUN set -ex \
-    && curl -fsSL "https://github.com/mozilla/sccache/archive/refs/tags/v${SCCACHE_VERSION}.tar.gz" \
+    && curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 30 "https://github.com/mozilla/sccache/archive/refs/tags/v${SCCACHE_VERSION}.tar.gz" \
         -o /src/sccache.tar.gz \
     && echo "${SCCACHE_SHA256}  /src/sccache.tar.gz" | sha256sum -c - \
     \
-    && curl -fsSL "https://github.com/sharkdp/fd/archive/refs/tags/v${FD_VERSION}.tar.gz" \
+    && curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 30 "https://github.com/sharkdp/fd/archive/refs/tags/v${FD_VERSION}.tar.gz" \
         -o /src/fd.tar.gz \
     && echo "${FD_SHA256}  /src/fd.tar.gz" | sha256sum -c - \
     \
-    && curl -fsSL "https://github.com/BurntSushi/ripgrep/archive/refs/tags/${RG_VERSION}.tar.gz" \
+    && curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 30 "https://github.com/BurntSushi/ripgrep/archive/refs/tags/${RG_VERSION}.tar.gz" \
         -o /src/ripgrep.tar.gz \
     && echo "${RG_SHA256}  /src/ripgrep.tar.gz" | sha256sum -c - \
     \
-    && curl -fsSL "https://github.com/astral-sh/uv/archive/refs/tags/${UV_VERSION}.tar.gz" \
+    && curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 30 "https://github.com/astral-sh/uv/archive/refs/tags/${UV_VERSION}.tar.gz" \
         -o /src/uv.tar.gz \
     && echo "${UV_SHA256}  /src/uv.tar.gz" | sha256sum -c -
 
@@ -560,6 +631,7 @@ COPY --from=silex:slim /opt/mold/ /opt/mold/
 # Core tools.
 COPY --from=build-c /out/bin/busybox    /bin/busybox
 COPY --from=build-c /out/bin/dash       /bin/dash
+COPY --from=build-c /out/bin/silex      /bin/silex
 COPY --from=build-c /out/bin/tini       /usr/bin/tini
 COPY --from=build-c /out/bin/zstd       /usr/bin/zstd
 COPY --from=build-c /out/bin/xxhsum     /usr/bin/xxhsum
@@ -590,9 +662,26 @@ COPY --from=build-rust /out/bin/uv  /usr/bin/uv
 
 # ============================================================================
 # Configure busybox: install applets as symlinks.
+#
+# /bin/sh is silex, not dash. The gate the README set for this -- >=95% of the
+# Smoosh POSIX conformance suite and a clean 5/5 on Autoconf -- is met: 185/186
+# (99.5%, against dash's 143 and bash's 152 on that same runner), 5/5 on curl,
+# cpython, openssl, sqlite and zlib, 1696/0 on ShellSpec and 0 fatal bugs on
+# modernish. See core/EXTERNAL_TEST_SCORECARD.md.
+#
+# silex dispatches on argv[0], so the symlink is the whole mechanism: invoked
+# as `sh` it runs the sh applet. dash stays at /bin/dash as the escape hatch --
+# `ln -sf /bin/dash /bin/sh` puts the old behaviour back without a rebuild, and
+# SILEX_SH=dash in the entrypoint does it for one container.
+#
+# Note this also changes what a build script's `sed`, `grep`, `find`, `cp` and
+# friends resolve to: silex runs its own applets IN-PROCESS, ahead of PATH, so
+# they no longer reach GNU coreutils in /usr/bin. That is the point (no fork,
+# no exec) but it is the part with the blast radius -- SILEX_NO_APPLETS names
+# the exceptions, and the entrypoint sets it.
 # ============================================================================
 RUN /bin/busybox --install -s /bin \
-    && ln -sf /bin/dash /bin/sh \
+    && ln -sf /bin/silex /bin/sh \
     && ln -sf /bin/busybox /usr/bin/which \
     && ln -sf /bin/busybox /usr/bin/find \
     && ln -sf /bin/busybox /usr/bin/awk \
@@ -683,7 +772,17 @@ COPY scripts/wrappers/         /usr/local/silex/bin/
 # the git code path on the strength of it.
 #
 # Only ship a wrapper for a tool that actually exists.
+#
+# The loop must skip anything in this directory that is NOT a wrapper, and
+# sort-parallel is the one such thing: it is GNU sort itself, copied in above
+# as the sort wrapper's implementation. It has no /usr/bin/sort-parallel to
+# check against, so the loop deleted it -- and the wrapper, finding no
+# implementation, silently fell through to plain `sort` with no --parallel at
+# all. The published silex:slim has no /usr/local/silex/bin/sort-parallel for
+# exactly this reason, which is to say the image's advertised parallel sort has
+# never once run.
 RUN for _w in /usr/local/silex/bin/*; do \
+        case "$(basename "$_w")" in sort-parallel) continue ;; esac; \
         _t="/usr/bin/$(basename "$_w")"; \
         [ -x "$_t" ] || { echo "silex: no $_t, dropping wrapper $(basename "$_w")"; rm -f "$_w"; }; \
     done

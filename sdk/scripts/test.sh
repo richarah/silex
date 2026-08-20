@@ -247,6 +247,33 @@ echo "--- POSIX shell ---"
 _run "dash present" 'dash --version 2>&1 || true; command -v dash'
 _run "/bin/dash exists" 'test -x /bin/dash'
 
+# /bin/sh is silex as of 2026-08-20. Assert it by BEHAVIOUR, not by reading the
+# symlink -- the symlink says where /bin/sh points, only running it says what
+# answers. `type sed` naming an in-process applet is something no other shell
+# in this image can say: dash and busybox both report a path under /usr/bin.
+# (There is no `sh --version` to ask; dash has none either.)
+_run_with_output "/bin/sh is silex" "silex builtin" '/bin/sh -c "type sed"'
+_run "/bin/silex exists" 'test -x /bin/silex'
+_run_with_output "/bin/silex reports itself" "silex" '/bin/silex --version'
+
+# The escape hatch has to work, or the swap is one-way. Under SILEX_SH=dash the
+# same probe must name a PATH instead of an in-process applet.
+_run_with_output "SILEX_SH=dash falls back to dash" "/sed" \
+    'SILEX_SH=dash SILEX_QUIET=on /usr/local/bin/silex-entrypoint /bin/sh -c "type sed" 2>&1'
+
+# Applets are dispatched in-process ahead of PATH, except the ones
+# SILEX_NO_APPLETS names, which must resolve through PATH.
+# cp is on that list because the cp wrapper adds --reflink=auto and the applet
+# rejects the flag; if this regresses, every cp in the image loses reflink.
+_run_with_output "cp is exempted and resolves through PATH" "/cp" \
+    '/bin/sh -c "command -v cp"'
+_run "exempted cp still accepts --reflink=auto" \
+    'cd /tmp && echo x > _rf && cp --reflink=auto _rf _rf2 && rm -f _rf _rf2'
+
+# The sort wrapper's implementation must actually be present. It was deleted
+# by the wrapper-pruning loop for months, which made --parallel a silent no-op.
+_run "sort-parallel present" 'test -x /usr/local/silex/bin/sort-parallel'
+
 # --------------------------------------------------------------------------
 echo "--- Debian shims ---"
 

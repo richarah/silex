@@ -5,11 +5,15 @@ on:
     branches: [master]
     paths:
       - 'sdk/**'
+      - 'core/src/**'
+      - 'core/Makefile'
       - '.github/workflows/sdk-ci.yml'
   pull_request:
     branches: [master]
     paths:
       - 'sdk/**'
+      - 'core/src/**'
+      - 'core/Makefile'
       - '.github/workflows/sdk-ci.yml'
   workflow_dispatch:
     inputs:
@@ -22,8 +26,15 @@ on:
           - self-hosted
           - ubuntu-latest
 
-# A cold image build is 90-120 minutes. Without the paths: filter above, every
-# one-line change to core/ would trigger one.
+# A cold image build is 90-120 minutes, so the paths: filter above keeps most
+# changes from starting one.
+#
+# core/src/ and core/Makefile ARE in that filter, and have to be: since
+# 2026-08-20 the image's /bin/sh is the silex binary, compiled from core/ during
+# the image build. A change to the shell now changes the image, and CI that
+# skipped it would be testing the previous binary. Documentation, tests and
+# scorecards under core/ are deliberately still excluded -- they cannot change
+# what gets compiled.
 concurrency:
   group: sdk-ci-${{ github.ref }}
   cancel-in-progress: true
