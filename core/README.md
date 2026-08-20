@@ -32,11 +32,18 @@ project used to claim numbers it could not support. See
 the measurements, and for the benchmark that reported 44%
 because the build under test was silently failing.
 
-silex is also **1.4-2.0x slower than dash at interpreting
-shell** (measured 2026-08-18 across seven control-flow
-workloads; it was 3.7x in July). It wins on builds because
-builds spend their shell time dispatching commands, not
-interpreting control flow. That is the ceiling.
+silex used to be **1.4-2.0x slower than dash at interpreting
+shell**, and that was described here as the ceiling. It is no
+longer true: as of 2026-08-20 silex is **1.09-1.19x faster**
+than dash on all five interpretation workloads (it was 3.7x
+slower in July, 1.4-2.0x on 2026-08-18). The gap closed from
+both ends — fast paths through the expander and the variable
+table, then a builtin lookup that stopped running 40 `strcmp`s
+to say "not a builtin".
+
+Builds are still dispatch-bound, so this does not change the
+end-to-end figure above. Quote it as what it is: the ceiling
+moved, not the build.
 
 Both halves are reproducible:
 

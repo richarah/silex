@@ -1423,5 +1423,124 @@ splitting nor pathname expansion, so `*` and `[` are ordinary characters there.
 **Not attempted**: `exec_simple_cmd_inner` is now the largest single entry in
 the profile (14.7% self time on a literal-assignment loop). It is an 888-line
 function whose per-command setup is the cost; taking it apart is a refactor, not
-an optimisation, and is tracked separately.
+an optimisation, and is tracked separately. *(Done on 2026-08-20 — see I-07.)*
+
+### I-05: the builtin lookup, 2026-08-20
+
+**Every command name was compared against the whole builtin table.**
+`find_shell_builtin()` walked 40 entries running a whole-string `strcmp` on
+each, and `is_special_builtin()` added up to 15 more — for every command the
+shell ran, whether or not it was a builtin at all. `[` sits at entry 19 of the
+table, so the `test builtin 100k` case paid 19 string comparisons per
+iteration to find it and 15 more to decide it was not special.
+
+Both now reject on the first byte: a `switch` on `name[0]` reaches the handful
+of names that can possibly match, and most names answer without a single
+`strcmp`. The set of builtins is unchanged; this is a lookup, not a policy.
+
+**Equivalence was proved, not eyeballed**: the old and new lookups were
+compiled side by side and run over 16,330 names — every builtin, every name in
+`PATH`, and every 1- and 2-character ASCII string — with 0 disagreements.
+
+**Measured**: 9 of 9 alternating rounds faster, median 150 ms → 137 ms (~8%) on
+the interpreter benchmark, and all 2802 Oils spec cases scored identically.
+
+### I-06: `${v#pat}` / `${v%pat}` were quadratic on a literal pattern
+
+**The four prefix/suffix matchers answered every question by brute force.**
+`match_prefix`, `match_prefix_shortest`, `match_suffix` and
+`match_suffix_shortest` each walked every split point of the subject, copied
+the candidate into a `malloc`'d buffer, and asked `fnmatch`. That is O(n)
+`fnmatch` calls, each scanning O(n) bytes, plus an allocation — to take one
+character off the front of a ten-byte string.
+
+A pattern with no metacharacter can match exactly one substring, so there is
+nothing to search: `pattern_literal_len()` (expand.c) checks for `*`, `?`, `[`
+and `\`, and a pattern free of them is answered with one `strncmp` or `memcmp`
+and no allocation. `\` is treated as a metacharacter deliberately — a quoted
+metacharacter arrives here escaped (`pat_emit_literal`), and unescaping it is
+`fnmatch`'s job, not this predicate's.
+
+The greedy operators are where the old shape hurt: `${v##a}` started from the
+whole string and worked down, so a miss cost a full quadratic scan.
+
+**Equivalence was proved, not eyeballed**: 13,075,566 (subject, pattern) pairs
+— all pairs up to length 3 over an alphabet containing every metacharacter and
+every character `pat_emit_literal` escapes, plus longer literal cases — with 0
+disagreements against the original brute force. 5,293,934 of them took the fast
+path. `tests/unit/shell/test_pattern_strip.sh` (51 cases) keeps the shell-level
+behaviour pinned, and three deliberate sabotages of the predicate were each
+checked to fail it.
+
+**Measured** (interleaved, best of 11, `tests/bench/bench_compare.sh`):
+
+| Case | base | new | dash | new vs base | new vs dash |
+|------|------|-----|------|-------------|-------------|
+| parameter expansion 50k | 48 ms | 47 ms | 51 ms | 1.02x | 1.09x FASTER |
+| glob-pattern strip 50k | 50 ms | 51 ms | 52 ms | 1.02x slower | 1.02x FASTER |
+| greedy literal strip 20k | 371 ms | 23 ms | 103 ms | **16.1x** | 4.5x FASTER |
+| greedy literal miss 5k | 1070 ms | 9 ms | 94 ms | **118.9x** | 10.4x FASTER |
+
+The benchmark's own parameter-expansion case barely moves, and that is the
+honest headline: with a ten-byte subject and a one-byte pattern the old code
+made two `fnmatch` calls, so there was little to save. The win is the removed
+blowup, which no benchmark in the tree was looking at — a 4000-byte subject and
+a two-byte pattern that does not match took **a full second**, and now takes
+ten milliseconds. The glob cases are unchanged, as they must be: they still
+take the `fnmatch` path.
+
+**The same loop, one operator away: `${v/pat/repl}`.** The substitution
+operator had its own copy of the brute force — at every position, try every
+length, `memcpy` plus `fnmatch` — and the fast path was first applied only to
+the four strip matchers, leaving the blowup intact next door. A code review
+caught it. `${v//ab/X}` over a 2000-byte subject, 200 times:
+
+| | base | new | bash |
+|---|---|---|---|
+| literal substitution 200x2k | 3687 ms | **3 ms** | 129 ms |
+
+Three digits of speedup, and 40x faster than bash, from the same one-`memcmp`
+argument. (The `new` figure is near the benchmark's ~1 ms grain, so read it as
+"immeasurably fast" rather than as three significant figures.) Proved the same
+way: 17,200,008 (subject, pattern, replacement, global) cases against the
+original loop, 0 disagreements. The lesson is the one in the fix, not the
+numbers — a fast path added at four call sites rather than at the shared
+question leaves the fifth caller behind.
+
+### I-07: `exec_simple_cmd_inner` split into its dispatch arms
+
+Not an optimisation — the profiling in I-01..I-04 found its cost to be
+allocation rather than structure. Measured against master with two
+verified-clean release builds, interleaved best-of-15: **1.00x, 1.01x, 1.00x,
+1.00x, 1.02x** across the five interpretation cases. It is here because I-04
+left a note promising it.
+
+**How that figure was nearly wrong**, because the story is worth more than the
+figure. A first attempt measured the finished branch 5-8% *slower* on all five
+— including `arithmetic while loop`, which runs no pattern code and touches
+nothing the branch changed. Five cases moving together in a direction the diff
+cannot explain is a sign to distrust the binary, not the code. It was a
+`make test-poison` build: that target leaves its output in `build/bin/silex`,
+and a poison build overwrites every arena block with 0xDD on reset. Both it and
+a plain `make all` called themselves "glibc dev build", so nothing on the
+binary said so. A five-way rotation across master, this commit and its three
+successors put all five within 3% of each other, which is what identified the
+outlier as the binary. `--version` now names `ARENA_POISON` and `ASAN` and adds
+"NOT FOR MEASUREMENT", and `bench_compare.sh` refuses such a binary outright.
+
+The 932-line function is now 285 lines: a preamble that expands redirections
+and assignments, then a dispatch that hands off to one function per arm —
+`simple_cmd_builtin`, `simple_cmd_function`, `simple_cmd_applet`,
+`simple_cmd_external` — with `simple_cmd_preexpand_redirs`,
+`simple_cmd_expand_assigns`, `simple_cmd_trace` and `exec_or_die` extracted
+alongside. The two `execv`-then-ENOEXEC-fallback tails, which were byte
+duplicates, became the one `exec_or_die`.
+
+Each arm opens by aliasing the fields of a `simple_cmd_t` back to the local
+names the code used inline. That is what makes the change checkable: every
+moved line is byte-identical to the line it replaced, so the split was verified
+by diffing the extracted bodies against the originals — builtin 134 lines,
+function 70, applet 157, all identical; the external arm differs only where the
+two duplicate exec tails collapsed. The Oils differential was re-measured over
+all 139 files and the gap list is character-for-character the same 21 cases.
 

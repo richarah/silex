@@ -598,6 +598,68 @@ output, which reads like a crash rather than a timeout. Measured pre-fix
 136.4/137.1 s against post-fix 193.2/137.0 s: same median, a budget sitting
 in the noise. Raised to 600 s.
 
+### The dispatch split and the quadratic strip (2026-08-20, later)
+
+Two changes on top of the above, neither of which moves a single external
+test — which is the point, and was checked rather than assumed.
+
+**`exec_simple_cmd_inner` was split into its dispatch arms.** 932 lines became
+285 plus one function per arm (builtin, function, applet, external) and four
+extracted helpers. Cost, interleaved best-of-15 against master: 1.00x, 1.01x,
+1.00x, 1.00x, 1.02x — nothing, which is what the I-01..I-04 profiling predicted
+(the function's cost was allocation, not structure). A first attempt made it
+look 5-8% slower on all five, including cases the branch cannot touch; that was
+a `make test-poison` binary left in `build/bin/` and benchmarked, and it is why
+`--version` now says "NOT FOR MEASUREMENT" when the build is instrumented. Every moved line is byte-identical to the line it replaced,
+which is what let the split be *verified*: diffing the extracted bodies against
+the originals gives builtin 134 lines identical, function 70 identical, applet
+157 identical, and the external arm differing only where its two duplicate
+`execv`-then-ENOEXEC tails collapsed into one `exec_or_die`. The Oils
+differential was then re-measured over all 139 files and `diff` on the gap
+lists is empty: the same 21 cases, character for character.
+
+**`${v##pat}` and `${v%%pat}` were quadratic on a literal pattern.** The four
+matchers walked every split point of the subject, `malloc`'d a copy and asked
+`fnmatch`, so a greedy strip that did not match cost a full O(n²) scan: a
+4000-byte subject and a two-byte pattern took **1059 ms**. A pattern with no
+metacharacter can match exactly one substring, so it is now one `memcmp` and
+no allocation — **10 ms**, and 9.5x ahead of dash on the same case. The
+benchmark's own parameter-expansion case barely moves (48 → 47 ms), because
+with a ten-byte subject the old code made two `fnmatch` calls; the win is a
+blowup no benchmark in the tree was pointed at. Glob patterns still take the
+`fnmatch` path unchanged.
+
+**And the same loop one operator away.** A code review of the above found
+`${v/pat/repl}` still running the identical brute force: the fast path had gone
+in at the four strip matchers rather than at the shared question, leaving the
+blowup intact next door. `${v//ab/X}` over a 2000-byte subject, 200 times:
+**3687 ms -> 3 ms** (at the benchmark's ~1 ms grain, so: immeasurably fast),
+against bash's 129 ms. Equivalence
+proved over 17,200,008 (subject, pattern, replacement, global) cases against
+the original loop, 0 disagreements. ShellSpec is the canary for any patsub
+change (its fast `replace_all` path depends on the replacement being
+word-expanded) and stays at 1696/0.
+
+Equivalence was proved rather than eyeballed, as with the builtin lookup:
+13,075,566 (subject, pattern) pairs — every pair up to length 3 over an
+alphabet holding every metacharacter and every character `pat_emit_literal`
+escapes, plus longer literal cases — 0 disagreements with the brute force,
+5,293,934 of them on the fast path. `tests/unit/shell/test_pattern_strip.sh`
+adds 51 shell-level cases (36 strip, 15 substitution), and three deliberate sabotages of the predicate
+were each confirmed to fail it. One of the three does **not** fail it: deleting
+the suffix matchers' length guard is an out-of-bounds read that every shell
+test still passes, and that ASan misses at ordinary sizes because the stray
+bytes are still inside the subject's arena block — the same blindness
+`make test-poison` exists for. The test therefore includes a 200,000-byte
+pattern, which is large enough to put the read outside the block where ASan
+does catch it.
+
+Verified over the whole tree, on the final binary: core `make test` 0
+failures, `make test-asan` 0 sanitizer errors, `make test-poison` 172/172,
+Oils differential **21 gaps, identical list**, modernish **0 unexpected
+failures** (the `posparam` field-splitting canary ran), smoosh 185/186,
+ShellSpec 1696/0.
+
 ### The builtin lookup, and the interpretation ceiling (2026-08-20)
 
 `find_shell_builtin()` walked all 40 table entries comparing whole strings and
@@ -615,12 +677,21 @@ behaviourally inert.
 
 That tips the second half of `bench_interpreter.sh`. The long-standing claim
 that "silex interprets shell slower than dash — that is the ceiling" no
-longer holds as written: silex is now ahead on four of its five
-interpretation cases (test builtin 1.17x, case dispatch 1.14x, arithmetic
-1.13x, function call level), with parameter expansion the last one behind at
-1.02x slower. Dispatch is unchanged and still the big win (applet pipe 3.5x,
-sed 90x). The benchmark's own narrative has been corrected — it was still
-telling readers silex loses where it interprets.
+longer holds as written: silex is now ahead of dash on **all five** of its
+interpretation cases, by 1.09x to 1.19x. Dispatch is unchanged and still the
+big win (applet pipe 3.5x, sed 90x). The benchmark's own narrative has been
+corrected — it was still telling readers silex loses where it interprets.
+
+*(Amended later the same day.* This section first said "four of five", with
+parameter expansion behind at 1.02x slower. That did not reproduce. Measured
+again interleaved, best of 11, every sample validated, parameter expansion is
+1.09x **faster** — and so is the binary the 1.02x was taken from, so what
+changed is the measurement, not the code. The 1.02x came from two *sequential*
+runs of `bench_interpreter.sh` at its default 3 reps, which is precisely the
+comparison that script cannot make: on this machine two sequential runs of the
+same pair of binaries disagreed with an interleaved run by 10% and got the
+sign wrong. `tests/bench/bench_compare.sh` was added to do A/B properly, and
+carries that worked example in its header.)
 
 ### 24 -> 23, and `toysh-posix` 18 reclassified (2026-08-18)
 

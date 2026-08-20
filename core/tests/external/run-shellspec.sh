@@ -13,7 +13,18 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPOS_DIR="$SCRIPT_DIR/repos"
 SHELLSPEC_DIR="$REPOS_DIR/shellspec"
-SILEX="${SILEX:-$SCRIPT_DIR/../../build/bin/silex}"
+# The binary under test: first positional argument, else $SILEX, else the
+# in-tree build.
+#
+# The positional used to be IGNORED. Every runner here took only the env var,
+# so `run-smoosh.sh /path/to/pinned/silex` silently measured build/bin/silex
+# instead -- and on 2026-08-20 that turned a foreground rebuild during a run
+# into "36/186 tests passed" (the relink made the in-tree binary briefly
+# unexecutable: "Text file busy"), which reads as a catastrophic regression
+# rather than as the wrong binary. A runner that quietly measures something
+# other than what it was handed is the same class of hazard as a suite that
+# cannot fail.
+SILEX="${1:-${SILEX:-$SCRIPT_DIR/../../build/bin/silex}}"
 
 echo "=== ShellSpec Meta-Test ==="
 echo "Suite: ShellSpec (BDD framework in POSIX sh)"
@@ -34,6 +45,13 @@ if [ ! -x "$SILEX" ]; then
     echo "ERROR: silex binary not found or not executable: $SILEX"
     exit 1
 fi
+
+# Say WHICH binary, and what it thinks it is. --version names ARENA_POISON and
+# ASAN builds ("NOT FOR MEASUREMENT"), so an instrumented binary that wandered
+# in from `make test-poison`/`make test-asan` is visible in the log rather than
+# showing up as a mysterious slowdown or a wall of failures.
+echo "silex:   $SILEX"
+echo "version: $("$SILEX" --version 2>/dev/null || echo '(--version failed)')"
 
 cd "$SHELLSPEC_DIR"
 
