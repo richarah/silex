@@ -230,16 +230,27 @@ esac
 # it is fast -- no fork, no exec. SILEX_NO_APPLETS names the ones that must
 # resolve through PATH instead, because something there is genuinely better.
 #
-# cp is the standing example and the reason this defaults to non-empty:
-# /usr/local/silex/bin/cp adds --reflink=auto for copy-on-write filesystems,
-# and silex's own cp rejects that flag (it is in the optional silex-gnu-cp
-# module). An in-process cp does not skip the wrapper, it makes the wrapper
-# unreachable.
+# The default is the two names that have a PATH wrapper silex's applet would
+# make unreachable. Both were established by RUNNING the image, not by reading
+# the wrapper directory:
+#
+#   cp    /usr/local/silex/bin/cp adds --reflink=auto for copy-on-write
+#         filesystems, and silex's cp rejects that flag (it is in the optional
+#         silex-gnu-cp module).
+#
+#   sort  /usr/local/silex/bin/sort adds --parallel=$(nproc) via GNU sort.
+#         silex's sort has no --parallel, so with the applet in front,
+#         `sort --parallel=2` fails outright -- it worked before /bin/sh
+#         became silex, because dash resolved sort through PATH.
+#
+# tar has a wrapper too and is deliberately NOT here: silex has no tar applet,
+# so nothing preempts it. The rule is "the applet rejects flags real builds
+# use", not "there is a wrapper".
 #
 # Set SILEX_NO_APPLETS=all to route every applet through PATH, or to the empty
-# string to let silex handle all of them including cp.
+# string to let silex handle all of them.
 # ============================================================================
-export SILEX_NO_APPLETS="${SILEX_NO_APPLETS-cp}"
+export SILEX_NO_APPLETS="${SILEX_NO_APPLETS-cp:sort}"
 
 # ============================================================================
 # Print configuration summary (unless SILEX_QUIET=on)

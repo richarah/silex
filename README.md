@@ -9,8 +9,10 @@ A considered Docker base image.
 > **`core/`** — the silex binary: a POSIX `sh` plus 32 coreutils implemented as
 > builtins in a single process. Usable on its own; see [core/README.md](core/README.md).
 >
-> They are independent today: the image ships dash and busybox, **not** the core
-> binary. See [Known issues](#known-issues).
+> As of 2026-08-20 they are no longer independent: the image's `/bin/sh` **is**
+> the core binary, compiled from `core/` during the image build. dash remains at
+> `/bin/dash`, and busybox still provides what silex has no applet for. See
+> [Known issues](#known-issues).
 
 ```diff
 - FROM ubuntu:24.04
@@ -54,8 +56,8 @@ distros can't ship. Here's what Silex ships instead:
 | ccache | sccache 0.8.2 | ~2x warm rebuilds (needs a cache mount). Remote backends. |
 | glibc malloc | mimalloc 2.1.7 | 9% under threaded builds. LD_PRELOAD. |
 | gzip | zstd 1.5.6 | Parallel |
-| GNU coreutils | busybox 1.37.0 | Single binary. Fastest in benchmark. |
-| bash | dash 0.5.12 | /bin/sh. 4x startup. |
+| GNU coreutils | silex (31 applets) + busybox 1.37.0 | In-process, no fork/exec. busybox covers the rest. |
+| bash | silex 0.3.0 | /bin/sh. 185/186 on Smoosh, vs dash 143, bash 152. dash still at /bin/dash. |
 | apt / dpkg | apk + compat layer | Debian pkgs, Debian names. Sub-second. |
 | (nothing) | tini 0.19.0 | Signal reaping, zombie prevention |
 
@@ -121,6 +123,8 @@ Override in Dockerfile or at runtime.
 | `SILEX_MALLOC` | mimalloc | mimalloc, jemalloc, system |
 | `SILEX_WRAPPERS` | on | on, off |
 | `SILEX_QUIET` | off | on, off |
+| `SILEX_SH` | silex | silex, dash, busybox |
+| `SILEX_NO_APPLETS` | `cp:sort` | applet names, or `all` |
 
 ## Debian compatibility
 
@@ -294,43 +298,79 @@ than gcc on very large TUs. `CC=gcc`.
 **GCC hardcoded in CMakeLists.** `apk add gcc` or
 remove the override.
 
-**`/bin/sh` is dash, not silex.** `[[ ]]`, arrays, process
+**`/bin/sh` is silex, not bash.** `[[ ]]`, arrays, process
 substitution are bash. Use POSIX sh or `#!/bin/bash`.
 
-The silex shell in `core/` is not yet the image's `/bin/sh`,
-but the bar this file set for it has been cleared. The gate
-was ≥95% of the Smoosh POSIX conformance suite and a clean
-5/5 on the Autoconf suite. As of 2026-08-20 it is **185/186
-(99.5%)** on Smoosh — ahead of dash (143) and bash (152) on
-that same runner — and **5/5** on Autoconf (curl, cpython,
-openssl, sqlite, zlib). Also 1696/0 on ShellSpec, byte-identical
-to dash, and 0 fatal bugs on modernish.
+`/bin/sh` was dash until 2026-08-20. The gate this file set
+for the swap was ≥95% of the Smoosh POSIX conformance suite
+and a clean 5/5 on Autoconf; silex is at **185/186 (99.5%)**
+on Smoosh — ahead of dash (143) and bash (152) on that same
+runner — **5/5** on Autoconf (curl, cpython, openssl, sqlite,
+zlib), 1696/0 on ShellSpec byte-identical to dash, and 0 fatal
+bugs on modernish. `make core-external-test` reproduces it;
+per-suite detail is in
+[core/EXTERNAL_TEST_SCORECARD.md](core/EXTERNAL_TEST_SCORECARD.md).
 
-`make core-external-test` reproduces all of it, and the
-per-suite detail is in [core/EXTERNAL_TEST_SCORECARD.md](core/EXTERNAL_TEST_SCORECARD.md).
-(The 125/186 that stood here was measured on 2026-07-12 and
-was six weeks stale.)
+**dash is still there**, at `/bin/dash`. To put it back for one
+container without rebuilding:
 
-What remains is a decision, not a measurement: swapping the
-image's `/bin/sh` is a change every downstream build feels at
-once, so it wants its own change with its own before/after
-build matrix.
+```dockerfile
+ENV SILEX_SH=dash
+```
+
+The part with the blast radius is not the shell, it is what
+the shell does with `cp`, `sed`, `grep` and `find`: silex runs
+its own applets **in-process, ahead of PATH**, so those names
+no longer reach GNU coreutils in `/usr/bin`. That is where the
+speed comes from — no fork, no exec — and it is also the change
+most likely to surprise you. `SILEX_NO_APPLETS` names the
+exceptions:
+
+```dockerfile
+ENV SILEX_NO_APPLETS=cp:sort   # these resolve through PATH
+ENV SILEX_NO_APPLETS=all       # every applet does
+```
+
+The image ships `SILEX_NO_APPLETS=cp:sort` — the two names
+with a PATH wrapper the applet would make unreachable. `cp`'s
+wrapper adds `--reflink=auto`; `sort`'s adds `--parallel`.
+silex's applets support neither, so with them in front those
+flags fail outright. `tar` has a wrapper too and is not on the
+list, because silex has no `tar` applet to preempt it.
+
+It has to be in the environment — `export SILEX_NO_APPLETS=sort`
+or `ENV` — not a prefix on the command it is meant to affect.
+Command search runs before the prefix is applied, so
+`SILEX_NO_APPLETS=sort sort -T /tmp f` still gets the applet.
 
 **`python3` on PATH. `python` is not.** Per PEP 394.
 
 **No GPU in slim.** CPU only.
 
-**Coreutils are busybox, not silex.** `sort --parallel` works
-via GNU sort wrapper. Other GNU-only flags don't.
+**Coreutils are silex for 31 names, busybox for the rest.**
+Inside a `RUN` step, `cat sed grep sort find cp mv rm ln mkdir
+chmod touch head tail wc cut tr printf echo env date stat
+install xargs tee basename dirname readlink realpath mktemp
+sha256sum` are silex applets, run in-process. Everything else
+— `awk`, `tar`, `gzip`, `diff`, `patch` and ~370 more — is
+busybox, and `/usr/bin` still holds GNU coreutils 9.1 and GNU
+grep for anything that asks by full path.
 
-The blocker here is coverage, not correctness. On correctness
-`core/`'s applets pass **243/0** of the GNU coreutils suite
-(on a native filesystem — see the scorecard for why measuring
-on `/mnt/c` invented 27 failures), 66/0 on GNU grep, 50/1 on
-GNU sed and 99/100 on toybox. But there are 32 of them, and an
-image needs more than 32: no `awk`, `tar`, `gzip`, `diff` or
-`patch`. Until that set is filled in, busybox stays and the
-silex applets are a faster subset rather than a replacement.
+On correctness the applets pass **243/0** of the GNU coreutils
+suite (on a native filesystem — see the scorecard for why
+measuring on `/mnt/c` invented 27 failures), 66/0 on GNU grep,
+50/1 on GNU sed and 99/100 on toybox. Where they are behind is
+flag coverage, tracked in
+[core/docs/FLAG_GAPS.md](core/docs/FLAG_GAPS.md): `sort` has no
+`-T`/`-C`, `grep` no `--exclude-dir`, `install` no `-b`. An
+unsupported flag is a hard error, not a silent difference —
+`SILEX_NO_APPLETS` above is the way out.
+
+`sort --parallel` works via the GNU sort wrapper. It did not
+before 2026-08-20: the loop that drops wrappers for tools that
+aren't installed was also deleting `sort-parallel`, the wrapper's
+own implementation, so the wrapper fell through to plain `sort`
+every time.
 
 **git not in slim.** `silex:dev` or `apk add git`.
 

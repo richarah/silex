@@ -156,13 +156,30 @@ _run_with_output "cp wrapper in PATH" "/usr/local/silex/bin/cp" 'which cp'
 
 _run_with_output "sort wrapper in PATH" "/usr/local/silex/bin/sort" 'which sort'
 
-_run_with_output "git wrapper in PATH" "/usr/local/silex/bin/git" 'which git'
+# The git wrapper is only shipped when git is: the final stage drops any wrapper
+# whose /usr/bin/<tool> is absent, because a wrapper on PATH for a missing tool
+# makes `command -v git` succeed and then `git` fail confusingly -- configure
+# scripts probe exactly that way. git is not in slim ("git not in slim" --
+# README), so in slim the wrapper must be ABSENT. This asserted the opposite and
+# had been failing on the published image; it now checks the real contract,
+# whichever way round the image is built.
+_run "git wrapper present iff git is" '
+if [ -x /usr/bin/git ]; then
+    test -x /usr/local/silex/bin/git
+else
+    ! test -e /usr/local/silex/bin/git
+fi
+'
 
 _run_with_output "tar wrapper in PATH" "/usr/local/silex/bin/tar" 'which tar'
 
-_run "git wrapper does shallow clone" '
-# Verify wrapper adds --depth 1 (by checking wrapper script content)
-grep -q "depth 1" /usr/local/silex/bin/git
+_run "git wrapper does shallow clone, when shipped" '
+# Only meaningful where the wrapper survived the drop-if-tool-absent pass.
+if [ -e /usr/local/silex/bin/git ]; then
+    grep -q "depth 1" /usr/local/silex/bin/git
+else
+    true
+fi
 '
 
 _run "SILEX_WRAPPERS=off bypasses cp wrapper" '
