@@ -117,6 +117,8 @@ printf '' > "$T/empty.txt"
 printf 'no newline' > "$T/nonewline.txt"
 # Multi-line with counts
 printf 'alpha beta\ngamma delta epsilon\nzeta\n' > "$T/multiword.txt"
+# Mixed case/digit/space/punctuation, for the POSIX character-class tests below.
+printf 'abc123\n456\nHello world\nnospace\nPUNCT!;\n' > "$T/classes.txt"
 mkdir -p "$T/subdir"
 printf 'subfile\n' > "$T/subdir/sub.txt"
 
@@ -683,25 +685,64 @@ run_test "grep: -m max count" \
     "grep -m 2 a $T/fruits.txt" "grep -m 2 a $T/fruits.txt" "grep"
 
 # COV-04: POSIX character classes (exercises charclass_re.c)
+#
+# READ THIS BEFORE ADDING A PIPELINE TO ANY TEST IN THIS FILE.
+#
+# run_test builds the silex side as `eval "$SILEX $mb_cmd"`, which prefixes only
+# the FIRST word. In a pipeline every later stage therefore runs the HOST tool
+# out of PATH, not silex's applet. These five tests used to read
+#
+#     printf 'abc123\n456\n' | grep '[[:alpha:]]'
+#
+# so the silex side was `silex printf ... | /usr/bin/grep ...` and the reference
+# side was `printf ... | /usr/bin/grep ...` -- the same GNU grep on both sides.
+# They could not have failed for any grep bug, and they never entered silex's
+# regex engine: `make coverage` reported 0.00% for charclass_re.c while these
+# tests sat here passing, and docs/COVERAGE.md listed the file as a "genuine
+# hole" on the strength of it.
+#
+# Reading from a file keeps grep as the FIRST word, so it is silex's grep that
+# runs. Where a pipeline is genuinely needed, wrap the whole thing in
+# `sh -c '...'` (as the xargs tests do) so every stage goes through silex.
 run_test "grep: [:alpha:] class" \
-    "printf 'abc123\n456\n' | grep '[[:alpha:]]'" \
-    "printf 'abc123\n456\n' | grep '[[:alpha:]]'" "grep"
+    "grep '[[:alpha:]]' $T/classes.txt" \
+    "grep '[[:alpha:]]' $T/classes.txt" "grep"
 
 run_test "grep: [:digit:] class" \
-    "printf 'abc\n123\n' | grep '[[:digit:]]'" \
-    "printf 'abc\n123\n' | grep '[[:digit:]]'" "grep"
+    "grep '[[:digit:]]' $T/classes.txt" \
+    "grep '[[:digit:]]' $T/classes.txt" "grep"
 
 run_test "grep: [:space:] class" \
-    "printf 'a b\nnospace\n' | grep '[[:space:]]'" \
-    "printf 'a b\nnospace\n' | grep '[[:space:]]'" "grep"
+    "grep '[[:space:]]' $T/classes.txt" \
+    "grep '[[:space:]]' $T/classes.txt" "grep"
 
 run_test "grep: [:upper:] class" \
-    "printf 'Hello\nworld\n' | grep '[[:upper:]]'" \
-    "printf 'Hello\nworld\n' | grep '[[:upper:]]'" "grep"
+    "grep '[[:upper:]]' $T/classes.txt" \
+    "grep '[[:upper:]]' $T/classes.txt" "grep"
 
 run_test "grep: [:lower:] class" \
-    "printf 'Hello\nWORLD\n' | grep '[[:lower:]]'" \
-    "printf 'Hello\nWORLD\n' | grep '[[:lower:]]'" "grep"
+    "grep '[[:lower:]]' $T/classes.txt" \
+    "grep '[[:lower:]]' $T/classes.txt" "grep"
+
+run_test "grep: negated class" \
+    "grep '[^[:digit:]]' $T/classes.txt" \
+    "grep '[^[:digit:]]' $T/classes.txt" "grep"
+
+run_test "grep: class with a range" \
+    "grep '[[:upper:]a-f]' $T/classes.txt" \
+    "grep '[[:upper:]a-f]' $T/classes.txt" "grep"
+
+run_test "grep: -E class with repeat" \
+    "grep -E '[[:alnum:]]+' $T/classes.txt" \
+    "grep -E '[[:alnum:]]+' $T/classes.txt" "grep"
+
+run_test "grep: [:punct:] class" \
+    "grep '[[:punct:]]' $T/classes.txt" \
+    "grep '[[:punct:]]' $T/classes.txt" "grep"
+
+run_test "sed: [:digit:] class" \
+    "sed 's/[[:digit:]]/#/g' $T/classes.txt" \
+    "sed 's/[[:digit:]]/#/g' $T/classes.txt" "sed"
 
 run_test "grep: [:alnum:] class" \
     "printf 'abc123\n---\n' | grep '[[:alnum:]]'" \

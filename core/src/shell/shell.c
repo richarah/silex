@@ -155,6 +155,10 @@ int shell_init(shell_ctx_t *sh, int argc, char **argv)
         if (getcwd(cwd, sizeof(cwd)))
             vars_set(&sh->vars, "PWD", cwd);
     }
+    /* Exported, not just set -- see the note in exec.c's cd builtin. A shell
+     * started without PWD in its environment (via exec, or from a launcher that
+     * does not set it) must still hand PWD to its own children. */
+    vars_export(&sh->vars, "PWD");
 
     /* POSIX: PPID shall be set to the decimal value of the parent process ID */
     char ppid_buf[32];

@@ -202,7 +202,36 @@ silex_module_t *module_load(const char *so_path)
         close(fd);
         return NULL;
     }
-    close(fd);
+
+    /* The descriptor is DELIBERATELY not closed.
+     *
+     * dlopen caches loaded objects by the pathname string it was given. This
+     * function used to close(fd) right here -- so the next module_load() got
+     * the same lowest-free descriptor, built the same "/proc/self/fd/3", and
+     * dlopen returned the handle to the FIRST module instead of loading the
+     * second. dlsym then produced the first module's silex_module_init, and the
+     * caller got the first module's silex_module_t back under the second
+     * module's path. No error was reported anywhere: the second module simply
+     * did not exist as far as the shell was concerned.
+     *
+     * The effect was that AT MOST ONE module worked per process, and which one
+     * depended on readdir() order. With this repo's three shipped modules in
+     * one directory -- the arrangement `make install-modules` produces -- two of
+     * them were unreachable.
+     *
+     * Holding the descriptor open keeps every module's /proc path distinct for
+     * the life of the process, which is exactly as long as the modules
+     * themselves live (module_unload is a no-op; nothing is ever dlclosed).
+     * open() returns the lowest UNUSED descriptor, so retained descriptors
+     * cannot collide. They are O_CLOEXEC, so nothing leaks into a child.
+     *
+     * Do not "tidy" this into a close(). Every failure path BEFORE this point
+     * still closes, because those descriptors were never handed to dlopen. The
+     * rejection paths below deliberately do not: they dlclose(), but dlclose
+     * only truly unloads at refcount zero, and if the object stayed mapped a
+     * recycled descriptor number would rebuild a path string that still names
+     * it -- the same confusion, in a rarer place. A handful of descriptors held
+     * against malformed modules is the cheaper mistake. */
 
     /* Step 8: dlsym for the init function */
     /* Clear any existing error */

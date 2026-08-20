@@ -105,7 +105,26 @@ static const char *sh_getvar(shell_ctx_t *sh, const char *name)
              * is set but EMPTY joins with nothing; only an UNSET IFS falls
              * back to a space. Treating the two alike made
              * `set -- "" ""; IFS=` yield " " rather than "", so `${*:-word}`
-             * saw a non-null value and skipped the default. */
+             * saw a non-null value and skipped the default.
+             *
+             * DELIBERATE DIVERGENCE FROM DASH (Oils toysh-posix 18). Joining
+             * here and letting ordinary field splitting run over the result is
+             * POSIX 2.5.2 taken literally, and it makes an unquoted $* split
+             * exactly as a variable holding the joined string does:
+             *
+             *     IFS=x; set -- "" "a"
+             *     v="$*"   # x-a, i.e. "xa"
+             *     f $v     # 2 fields: "" and "a"   -- all shells agree
+             *     f $*     # 2 fields in silex and bash; ONE in dash
+             *
+             * dash drops the null field only when it came from a positional,
+             * so its own `$v` and `$*` disagree about the identical string.
+             * bash agrees with silex on every case measured (empty/non-empty
+             * mixes, 1-3 positionals, whitespace and non-whitespace IFS), and
+             * Oils' own file marks bash's output as `## BUG bash`. Matching
+             * dash would mean special-casing positionals to delete null fields
+             * and giving up that invariant, so silex keeps it. The invariant
+             * is pinned in test_posix_gaps2.sh. */
             char sep     = ' ';
             int  has_sep = 1;
             if (name[0] == '*') {
@@ -212,6 +231,70 @@ static char *expand_tilde(shell_ctx_t *sh, const char *word, int in_assignment)
     char *result = strdup(sb_str(&sb));
     sb_free(&sb);
     return result;
+}
+
+static const char *skip_construct(const char *p);
+
+/*
+ * Tilde-expand the WORD of ${var-word} / ${var:=word} and friends.
+ *
+ * Outside an assignment this is a plain leading-tilde expansion, which is what
+ * the four call sites used to do directly.
+ *
+ * Inside one it is not. An assignment RHS expands a tilde at the start and
+ * after every unquoted colon, so that PATH=~/bin:~/sbin works -- and POSIX
+ * applies that to the whole RHS, including the text a ${...-word} contributes.
+ * dash agrees: `x=${undef-~:~}` with HOME=/home/bar gives /home/bar:/home/bar.
+ *
+ * silex expanded neither tilde and printed `~:~` (Oils `tilde` 11). Both were
+ * lost for the same reason: expand_tilde() was called with in_assignment=0, so
+ * the colon was not a delimiter, the "username" became `:~`, no such user
+ * exists, and the whole word came back unexpanded -- taking the LEADING tilde
+ * down with it, even though that one needed no colon handling.
+ *
+ * expand_word_assign() cannot do this itself: it splits the RHS on colons but
+ * uses skip_construct() to step over a ${...} whole, precisely so that
+ * `V=${u:-x}` is not cut into `${u` and `-x}`. The colons inside the expansion
+ * are therefore invisible to it, and this is where they become visible.
+ *
+ * Returns a malloc'd string, or NULL to mean "unchanged" (matching
+ * expand_tilde's contract, so callers keep the `til_ ? til_ : word_part` form).
+ */
+static char *expand_tilde_word(shell_ctx_t *sh, const char *word)
+{
+    if (!sh->in_assign)
+        return expand_tilde(sh, word, 0);
+
+    /* Segment on top-level colons, exactly as expand_word_assign does, and
+     * tilde-expand each segment in assignment context. */
+    strbuf_t out;
+    sb_init(&out, 64);
+    int changed = 0;
+
+    const char *p = word;
+    const char *seg = p;
+    for (;;) {
+        const char *skipped = skip_construct(p);
+        if (skipped != p) { p = skipped; continue; }
+
+        if (*p == ':' || *p == '\0') {
+            char *s = strndup(seg, (size_t)(p - seg));
+            if (s) {
+                char *t = expand_tilde(sh, s, 1);
+                if (t) { changed = 1; sb_append(&out, t); free(t); }
+                else     sb_append(&out, s);
+                free(s);
+            }
+            if (*p == '\0') break;
+            sb_appendc(&out, ':');
+            seg = p + 1;
+        }
+        p++;
+    }
+
+    char *r = changed ? strdup(sb_str(&out)) : NULL;
+    sb_free(&out);
+    return r;
 }
 
 /* -------------------------------------------------------------------------
@@ -672,7 +755,7 @@ static char *expand_braced_body(shell_ctx_t *sh, const char *body, int in_dquote
                   /* Tilde expansion applies to the word of ${var-word} and
                    * friends when unquoted (smoosh semantics.var.format.tilde:
                    * `: ${x:=~}` must assign $HOME). */
-                  char *til_ = in_dquote ? NULL : expand_tilde(sh, word_part, 0);
+                  char *til_ = in_dquote ? NULL : expand_tilde_word(sh, word_part);
                   expand_into(sh, til_ ? til_ : word_part, &sb, in_dquote);
                   free(til_);
                   sh->pp_join_unquoted = sj_; sh->pp_word_dq = wd_; }
@@ -694,7 +777,7 @@ static char *expand_braced_body(shell_ctx_t *sh, const char *body, int in_dquote
                   /* Tilde expansion applies to the word of ${var-word} and
                    * friends when unquoted (smoosh semantics.var.format.tilde:
                    * `: ${x:=~}` must assign $HOME). */
-                  char *til_ = in_dquote ? NULL : expand_tilde(sh, word_part, 0);
+                  char *til_ = in_dquote ? NULL : expand_tilde_word(sh, word_part);
                   expand_into(sh, til_ ? til_ : word_part, &sb, in_dquote);
                   free(til_);
                   sh->pp_join_unquoted = sj_; sh->pp_word_dq = wd_; }
@@ -718,7 +801,7 @@ static char *expand_braced_body(shell_ctx_t *sh, const char *body, int in_dquote
                   /* Tilde expansion applies to the word of ${var-word} and
                    * friends when unquoted (smoosh semantics.var.format.tilde:
                    * `: ${x:=~}` must assign $HOME). */
-                  char *til_ = in_dquote ? NULL : expand_tilde(sh, word_part, 0);
+                  char *til_ = in_dquote ? NULL : expand_tilde_word(sh, word_part);
                   expand_into(sh, til_ ? til_ : word_part, &sb, in_dquote);
                   free(til_);
                   sh->pp_join_unquoted = sj_; sh->pp_word_dq = wd_; }
@@ -747,7 +830,7 @@ static char *expand_braced_body(shell_ctx_t *sh, const char *body, int in_dquote
                   /* Tilde expansion applies to the word of ${var-word} and
                    * friends when unquoted (smoosh semantics.var.format.tilde:
                    * `: ${x:=~}` must assign $HOME). */
-                  char *til_ = in_dquote ? NULL : expand_tilde(sh, word_part, 0);
+                  char *til_ = in_dquote ? NULL : expand_tilde_word(sh, word_part);
                   expand_into(sh, til_ ? til_ : word_part, &sb, in_dquote);
                   free(til_);
                   sh->pp_join_unquoted = sj_; sh->pp_word_dq = wd_; }
@@ -2776,7 +2859,42 @@ char *expand_word_assign(shell_ctx_t *sh, const char *word)
      * while the identical expansion worked as a command argument, in a for
      * list, and in a case word. PREFIX=${PREFIX:-$(pwd)} is a ubiquitous idiom;
      * this is what stopped modernish from bootstrapping.
+     *
+     * Two shortcuts before the segment machinery, because an RHS that is one
+     * segment is the overwhelmingly common case and the loop below charges it
+     * for a split it does not need -- a strndup of the whole word, a second
+     * strbuf, and a copy of the expansion from one buffer into the other:
+     *
+     *   - No `~` anywhere means no segment can begin with one (expand_tilde only
+     *     fires on a leading `~`), so the colons are not delimiters and the word
+     *     is a single segment. That is `x=$y`, `x=${v#a}`, `x=$(cmd)`, and also
+     *     PATH=/usr/bin:/bin.
+     *   - If on top of that the word holds none of `'` `"` `\` `$` or backtick,
+     *     nothing below can alter a byte of it -- see the matching argument in
+     *     expand_word_full -- so it expands to itself. There is no field
+     *     splitting or globbing on an assignment RHS, so unlike a command word
+     *     `*` and `[` are ordinary characters here and need no rejecting.
      */
+    if (!strchr(word, '~')) {
+        int plain = 1;
+        for (const char *q = word; *q; q++) {
+            if (*q == '\'' || *q == '"' || *q == '\\' ||
+                *q == '$'  || *q == '`') { plain = 0; break; }
+        }
+        if (plain)
+            return arena_strdup(sh->scratch, word);
+
+        int saved_ia = sh->in_assign;
+        sh->in_assign = 1;
+        strbuf_t sb;
+        sb_init(&sb, 128);
+        expand_into(sh, word, &sb, 0);
+        sh->in_assign = saved_ia;
+        char *r = arena_strdup(sh->scratch, sb_str(&sb));
+        sb_free(&sb);
+        return r;
+    }
+
     strbuf_t result_sb;
     sb_init(&result_sb, 128);
 
@@ -2841,6 +2959,49 @@ expand_result_t expand_word_full(shell_ctx_t *sh, const char *word)
      * \x01 field boundary, so the splitter below can tell a boundary from a
      * literal 0x01 byte in the data. See shell.h. */
     sh->at_field_boundary = 0;
+
+    /* Fast path: a word with no expansion, quoting, tilde or glob syntax in it
+     * expands to itself, as one field.
+     *
+     * Every operator, keyword-adjacent literal and numeric argument in a script
+     * is such a word -- `[`, `-lt`, `1000000`, `]` are four of the five words in
+     * `[ $i -lt 1000000 ]` -- and each of them was walking the whole machinery
+     * below: two quote-aware scans of the text, a 128-byte strbuf, a
+     * byte-at-a-time copy through emit_literal_char, then arena_strdup, a malloc
+     * for the one-element field list, a realloc for the final list, a SECOND
+     * arena_strdup of the identical bytes, and three frees. Roughly four
+     * malloc/free pairs and two copies to hand back the string it was given.
+     *
+     * The reject set is every byte the code below can act on: `'` `"` `\` `$`
+     * and backtick are the only characters expand_into() branches on (all others
+     * fall through to a verbatim emit_literal_char, and emit_guards is 0 here
+     * because a word with no `$`/backtick never IFS-splits); `~` is the only
+     * character expand_tilde() acts on; and `*` `?` `[` are the only ones
+     * has_unquoted_glob() reports. So for a word holding none of them the slow
+     * path provably yields arena_strdup(word) as a single field -- including for
+     * the empty word, which likewise stays one empty field.
+     */
+    {
+        const char *q = word;
+        for (; *q; q++) {
+            switch (*q) {
+            case '\'': case '"': case '\\': case '$': case '`':
+            case '~':  case '*': case '?':  case '[':
+                goto not_plain;
+            default:
+                break;
+            }
+        }
+        char **arr = arena_alloc(sh->scratch, 2 * sizeof(char *));
+        arr[0] = arena_strdup(sh->scratch, word);
+        arr[1] = NULL;
+        sh->emit_guards = 0;
+        res.words = arr;
+        res.count = 1;
+        return res;
+    }
+not_plain:
+    ;   /* a label must precede a statement, not a declaration */
 
     /* Determine whether this word contains unquoted expansions / globs.
      * These checks must be done on the original token text (before expansion),

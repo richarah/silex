@@ -1,8 +1,42 @@
 # silex flag gap analysis
 
-Generated: 2026-03-31
+Generated: 2026-03-31. **Partially re-measured 2026-08-18 — see "What has
+landed since" below before trusting any individual entry.**
 
 This document classifies every GNU flag that silex builtins don't currently handle.
+
+## What has landed since the March triage
+
+The classification below is a triage of GNU's flag surface as it stood on
+2026-03-31. A good deal of it has been implemented since, so an entry appearing
+here does **not** mean the flag is missing. The lists were re-probed against the
+current binary on 2026-08-18 for the five tools with the largest sections; the
+rest have not been re-checked and should be treated as unverified.
+
+**grep** — 11 of the 15 BUILTIN entries are implemented: `-o -m -A -B -C -H -h
+-L -Z -b -x`. Still absent: `--line-buffered`, `--label=LABEL`, `-z`,
+`--exclude-dir=DIR`.
+
+**sort** — implemented: `-M`, `-R`, `-c`. Still absent: `-C`, `-T DIR`,
+`--files0-from=FILE`. Note that `-V`/`--version-sort` and
+`-h`/`--human-numeric-sort` are listed below as MODULE work; both are now
+builtins, and `sort_version.so` / `sort_human.so` were never needed.
+
+**xargs** — implemented: `-a`, `-L`, `-s`, `-t`. Still absent: `-x`,
+`--show-limits`, `-E STRING`. (`-p`, prompt, remains deliberately unimplemented:
+it is useless without a terminal.)
+
+**install** — implemented: `-D`, `-m`. Still absent: `-b` (backup), `-C`
+(compare).
+
+**find** — `-print0`, `-newer` and `-size` are implemented; these were the
+critical-path entries.
+
+The authoritative, re-runnable figure is
+`bash tests/conformance/new_flags_test.sh build/bin/silex` (28/28 as of
+2026-08-18), and per-tool status is in
+[IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md). Prefer either to the lists
+below when they disagree: the lists are a plan, and only the tests are evidence.
 
 ## Classification
 
@@ -182,3 +216,10 @@ This document classifies every GNU flag that silex builtins don't currently hand
 **Module dispatch prerequisites:**
 - Wire `registry_lookup()` into all core tools
 - Check flag, if unknown, try module before error
+
+Done for `grep`, `sort`, `xargs`, `cp` and `install` (2026-08-18 for the last
+two: they had the lookup only in their SHORT-flag loop, so a long option was
+looked up under the name `"--"` and `cp --reflink` could never reach
+`modules/cp_reflink.so`). `find` has the lookup but cannot use a hit: it
+evaluates a predicate TREE, and the module API has no way to inject a node into
+one. Extending the API for that is unscheduled.

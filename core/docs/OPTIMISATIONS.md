@@ -44,6 +44,10 @@ measurements, and whether it was kept or reverted.
 | B-7  | mkdir/cp/chmod/touch active fscache insert | Syscall | stat calls after write op | 1 stat/dir | 0 (cache hit) | eliminates stat after all write builtins | +0.2K | KEPT |
 | B-8  | XC-02 dead mkdir -p elimination | Syscall | mkdir -p when dirs confirmed | applet dispatch + loop | skip entirely | O(1) for repeated mkdir -p | +0.1K | KEPT |
 | B-9  | io_uring: skip single-op batches | Syscall | rm 1 file via io_uring vs direct | extra io_uring setup | direct unlink() | avoids ring overhead | +0.0K | KEPT |
+| I-01 | vars_is_exported: hash, don't sweep | CPU | bench_interpreter (param expansion 50k) | full 256-bucket sweep per assignment | one bucket | largest single self-time cost | +0.0K | KEPT |
+| I-02 | expand_word_full: plain-word fast path | Alloc/CPU | bench_interpreter (test builtin 100k) | 199ms | 141ms | 1.41x | +0.1K | KEPT |
+| I-03 | expand_word_assign: single-segment path | Alloc | bench_interpreter (param expansion 50k) | — | folded into I-04 row | — | +0.0K | KEPT |
+| I-04 | exec: no overlay for a lone assignment | Alloc | bench_interpreter (param expansion 50k) | 122ms | 73ms | 1.67x | +0.0K | KEPT |
 
 ---
 
@@ -1338,3 +1342,86 @@ find . --vcs --changed-within 1d  # recent changes, skipping VCS noise
 
 `STATX_MTIME` added to the `compute_needed_mask()` result when this predicate is
 present in the expression tree.
+
+---
+
+### I-01..I-04: the shell interpreter, 2026-08-18
+
+**Category**: CPU / allocation
+**Files**: `src/shell/vars.c`, `src/shell/expand.c`, `src/shell/exec.c`
+**Benchmark**: `tests/bench/bench_interpreter.sh` (INTERPRETATION half)
+
+**Problem**:
+
+`bench_interpreter.sh` exists to pin the second half of silex's speed thesis --
+that it interprets shell more slowly than dash, and that this is the ceiling. It
+measured 1.4x-2.3x. Nothing had ever profiled it.
+
+The profile (gcc `-pg`, `-fno-ipa-icf` so identical functions keep their own
+symbols) showed no single hot loop. It showed *volume*: for the five-command
+body `[ $i -lt 1000000 ]; x=${v#a}; x=${v%j}; i=$((i+1))`, 26 `arena_alloc`, 18
+`arena_strdup`, 27 `sb_appendn` and 12 `vars_get` calls **per iteration**.
+
+**Fixes**:
+
+**I-01 — `vars_is_exported()` swept the whole table.** It walked all
+`VARS_HASH_SIZE` (256) buckets of every scope looking for a name whose hash says
+exactly which single bucket can hold it. It runs once per variable assignment,
+so every assignment was O(256) pointer chases. Replaced with `vars_find()`. This
+was the largest single self-time entry in the profile (16.9%), and it vanished
+from it entirely.
+
+**I-02 — `expand_word_full()` had no fast path.** A word containing none of
+`' " \ $ ` ~ * ? [` cannot be changed by anything the expander does, and yields
+exactly one field. Four of the five words in `[ $i -lt 1000000 ]` are such
+words. Each was paying two quote-aware scans of its text, a 128-byte strbuf, a
+byte-at-a-time copy through `emit_literal_char`, an `arena_strdup`, a malloc for
+the one-element field list, a realloc for the final list, a *second*
+`arena_strdup` of the identical bytes, and three frees.
+
+**I-03 — `expand_word_assign()` always split into tilde segments.** An
+assignment RHS expands `~` at the start and after each unquoted colon, so the
+function splits on colons. With no `~` anywhere in the word there is nothing for
+a segment to do: `expand_tilde` only fires on a leading tilde. The split cost a
+`strndup` of the whole word, a second strbuf, and a copy between the two. With
+nothing expandable in the word at all, the word is its own result.
+
+**I-04 — the assignment overlay ran for a single assignment.** Assignments are
+applied left to right, each visible to the next (`x=5 y=$((x+2)) cmd`), which
+`exec_simple_cmd_inner` implements by storing each into the variable table while
+expanding and restoring afterwards. One assignment has no next one, and its own
+RHS is expanded before the store, so the overlay was observable to nobody: three
+`calloc`s, a `strdup`, two variable-store writes and three `free`s per `x=...`.
+
+**Measurements**:
+
+Interleaved against a build of the previous commit (`afca60d`) -- base, new and
+dash sampled round-robin, best of 7, so a noise burst lands on all three. The
+figures moved 10-15% between separate runs on this machine, which is why the
+comparison is interleaved rather than two runs read side by side.
+
+| Case | base | new | dash | was | now |
+|------|------|-----|------|-----|-----|
+| arithmetic while loop 100k | 142 ms | 93 ms | 85 ms | 1.57x slower | 1.09x slower |
+| case dispatch 100k | 146 ms | 103 ms | 93 ms | 1.67x | 1.11x |
+| test builtin 100k | 199 ms | 141 ms | 131 ms | 1.62x | 1.08x |
+| function call 50k | 97 ms | 60 ms | 50 ms | 2.07x | 1.20x |
+| parameter expansion 50k | 122 ms | 73 ms | 57 ms | 2.25x | 1.28x |
+| literal assignment 50k | 106 ms | 62 ms | 47 ms | — | 1.32x |
+| quoted concat 50k | 101 ms | 63 ms | 52 ms | — | 1.21x |
+
+**Speedup**: 1.41x-1.71x against the previous commit; the gap to dash on this
+benchmark closed from 1.57x-2.25x to 1.08x-1.32x.
+
+**Why each is safe**: all four are fast paths, so their correctness is a claim
+about what the slow path *would* have done. Each carries that argument as a
+comment at the site -- specifically, which characters the slow path can act on,
+and why a word without them reaches the same result. The reject sets differ
+between I-02 and I-03 on purpose: an assignment RHS undergoes neither field
+splitting nor pathname expansion, so `*` and `[` are ordinary characters there.
+
+**Not attempted**: `exec_simple_cmd_inner` is now the largest single entry in
+the profile (14.7% self time on a literal-assignment loop). It is an 888-line
+function whose per-command setup is the cost; taking it apart is a refactor, not
+an optimisation, and is tracked separately.
+

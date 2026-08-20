@@ -464,6 +464,33 @@ static redir_t *parse_redirect(parser_t *p, int io_fd)
          * delimiter `EOF'"2`, which no line could match, and the here-doc ran
          * on to the end of the file. */
         const char *raw = tgt.text;
+
+        /* An UNQUOTED command substitution in the delimiter is a syntax error.
+         *
+         * The delimiter word undergoes quote removal and nothing else (POSIX
+         * 2.7.4), so `<<$(a)` names a delimiter that no line can be written to
+         * match -- it would have to contain the literal text `$(a)`, which the
+         * shell would then have to not expand. dash and mksh reject it; bash
+         * accepts it and treats the text literally. dash's rejection is
+         * specifically of `$(`: `<<$X`, `<<${X}` and ``<<`a` `` are all fine
+         * there, and so they stay fine here.
+         *
+         * Quoting makes it ordinary text again -- `<<'$(a)'` is a perfectly good
+         * delimiter -- so the scan tracks quotes rather than searching the raw
+         * word for the two characters. */
+        {
+            int in_sq = 0, in_dq = 0;
+            for (const char *q = raw; *q; q++) {
+                if (*q == '\\' && q[1] && !in_sq) { q++; continue; }
+                if (*q == '\'' && !in_dq) { in_sq = !in_sq; continue; }
+                if (*q == '"'  && !in_sq) { in_dq = !in_dq; continue; }
+                if (!in_sq && !in_dq && *q == '$' && q[1] == '(') {
+                    parser_error(p, "\"(\" unexpected in here-document delimiter");
+                    return NULL;
+                }
+            }
+        }
+
         int   no_expand = 0;
         char *actual_delim = arena_alloc(p->arena, strlen(raw) + 1);
         {

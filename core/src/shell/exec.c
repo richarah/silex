@@ -248,10 +248,19 @@ static const shell_builtin_t shell_builtins[] = {
     { NULL, NULL }
 };
 
+/* Every simple command asks this, and a command that is NOT a builtin -- the
+ * common case in a build -- used to run all 40 strcmp()s before answering no.
+ * `[` sits at entry 19, so each `[ x -lt y ]` paid 19 of them.
+ *
+ * Comparing the first byte first turns the misses into a single byte compare;
+ * only a genuine first-character match reaches strcmp, and that one starts at
+ * byte 1 because byte 0 is already known equal. An empty name matches nothing,
+ * exactly as before (no table entry has an empty name). */
 static shell_builtin_fn find_shell_builtin(const char *name)
 {
+    const char c0 = name[0];
     for (const shell_builtin_t *b = shell_builtins; b->name; b++) {
-        if (strcmp(b->name, name) == 0)
+        if (b->name[0] == c0 && strcmp(b->name + 1, name + 1) == 0)
             return b->fn;
     }
     return NULL;
@@ -352,23 +361,25 @@ static int special_builtin_error_exits(const char *name)
      * divergence rather than close one. `times` likewise. */
 }
 
+/* Same shape as find_shell_builtin: this is asked about every command name,
+ * and the answer is usually no. Switching on the first character answers most
+ * names without a single strcmp, instead of running up to fifteen of them.
+ * The set is POSIX 2.14 and unchanged. */
 static int is_special_builtin(const char *name)
 {
-    return (strcmp(name, ":") == 0 ||
-            strcmp(name, ".") == 0 ||
-            strcmp(name, "break") == 0 ||
-            strcmp(name, "continue") == 0 ||
-            strcmp(name, "eval") == 0 ||
-            strcmp(name, "exec") == 0 ||
-            strcmp(name, "exit") == 0 ||
-            strcmp(name, "export") == 0 ||
-            strcmp(name, "readonly") == 0 ||
-            strcmp(name, "return") == 0 ||
-            strcmp(name, "set") == 0 ||
-            strcmp(name, "shift") == 0 ||
-            strcmp(name, "times") == 0 ||
-            strcmp(name, "trap") == 0 ||
-            strcmp(name, "unset") == 0);
+    switch (name[0]) {
+    case ':': return name[1] == '\0';
+    case '.': return name[1] == '\0';
+    case 'b': return strcmp(name, "break") == 0;
+    case 'c': return strcmp(name, "continue") == 0;
+    case 'e': return strcmp(name, "eval") == 0 || strcmp(name, "exec") == 0 ||
+                     strcmp(name, "exit") == 0 || strcmp(name, "export") == 0;
+    case 'r': return strcmp(name, "readonly") == 0 || strcmp(name, "return") == 0;
+    case 's': return strcmp(name, "set") == 0 || strcmp(name, "shift") == 0;
+    case 't': return strcmp(name, "times") == 0 || strcmp(name, "trap") == 0;
+    case 'u': return strcmp(name, "unset") == 0;
+    default:  return 0;
+    }
 }
 
 /* -------------------------------------------------------------------------
@@ -818,10 +829,24 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
          * the next (`x=5 y=$((x+2)) cmd` gives y=7 -- smoosh
          * semantics.special.assign.visible). Apply each into the shell vars as
          * an overlay while expanding, then restore; the per-path machinery
-         * below re-applies them where they belong. */
-        char **aov_saved = calloc((size_t)nassigns, sizeof(char *));
-        int   *aov_had   = calloc((size_t)nassigns, sizeof(int));
-        int   *aov_exp   = calloc((size_t)nassigns, sizeof(int));
+         * below re-applies them where they belong.
+         *
+         * A SINGLE assignment has no "next" to be visible to, so the overlay is
+         * observable only to itself -- and its own RHS was already expanded
+         * before the store, so it cannot see it either. Leaving the arrays NULL
+         * skips the store and the matching restore below (both are already
+         * guarded on them), which takes three callocs, a strdup, two var-store
+         * writes and three frees off every `x=...`, `x=$y cmd` and `IFS=: cmd`
+         * -- by far the commonest shape an assignment comes in. Two or more
+         * assignments still get the full left-to-right overlay. */
+        char **aov_saved = NULL;
+        int   *aov_had   = NULL;
+        int   *aov_exp   = NULL;
+        if (nassigns > 1) {
+            aov_saved = calloc((size_t)nassigns, sizeof(char *));
+            aov_had   = calloc((size_t)nassigns, sizeof(int));
+            aov_exp   = calloc((size_t)nassigns, sizeof(int));
+        }
         for (int i = 0; i < nassigns; i++) {
             const char *eq = strchr(assigns[i], '=');
             if (!eq) { anames[i] = NULL; avals[i] = NULL; continue; }
@@ -1031,17 +1056,23 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
          * command: `PATH=$DEFPATH command awk ...` (modernish's `str ematch`)
          * must find awk via that PATH. Apply the assignments to the shell vars
          * (exported so a child exec inherits them) and restore afterwards. */
-        char **abuiltin_saved = NULL;
-        int   *abuiltin_had   = NULL;
+        char **abuiltin_saved  = NULL;
+        int   *abuiltin_had    = NULL;
+        int   *abuiltin_wasexp = NULL;
         if (nassigns > 0) {
-            abuiltin_saved = calloc((size_t)nassigns, sizeof(char *));
-            abuiltin_had   = calloc((size_t)nassigns, sizeof(int));
-            if (abuiltin_saved && abuiltin_had) {
+            abuiltin_saved  = calloc((size_t)nassigns, sizeof(char *));
+            abuiltin_had    = calloc((size_t)nassigns, sizeof(int));
+            abuiltin_wasexp = calloc((size_t)nassigns, sizeof(int));
+            if (abuiltin_saved && abuiltin_had && abuiltin_wasexp) {
                 for (int ai = 0; ai < nassigns; ai++) {
                     if (!anames[ai]) continue;
                     const char *ov = vars_get(&sh->vars, anames[ai]);
-                    abuiltin_had[ai]   = ov != NULL;
-                    abuiltin_saved[ai] = ov ? strdup(ov) : NULL;
+                    abuiltin_had[ai]    = ov != NULL;
+                    abuiltin_saved[ai]  = ov ? strdup(ov) : NULL;
+                    /* The export is TEMPORARY, so remember whether the name was
+                     * already exported -- the restore below has to put the flag
+                     * back even in the cases where the VALUE stays. */
+                    abuiltin_wasexp[ai] = vars_is_exported(&sh->vars, anames[ai]);
                     vars_set(&sh->vars, anames[ai], avals[ai] ? avals[ai] : "");
                     vars_export(&sh->vars, anames[ai]);
                 }
@@ -1121,10 +1152,33 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
                     vars_unset(&sh->vars, anames[ai]);
             }
         }
+        /* Undo the temporary EXPORT, even where the VALUE stays.
+         *
+         * POSIX 2.9.1: assignments preceding a special builtin persist as SHELL
+         * variables. They are not added to the environment -- an ordinary
+         * assignment does not export, and a prefix on a special builtin is an
+         * ordinary assignment that happens to be written in front of a command.
+         * The export above exists only so that a builtin which goes on to exec
+         * something (`PATH=$DEFPATH command awk ...`) is found through it.
+         *
+         * Leaving the flag set meant `pre1=pre1 readonly x=x` put pre1 into the
+         * environment of every later child. Oils builtin-special 3 catches it
+         * through the next command being `exec sh -c 'echo pre1=$pre1'`: silex
+         * printed pre1=pre1 where dash, bash and yash all print pre1= .
+         *
+         * `export` is exempt for the obvious reason -- `x=1 export x` asked for
+         * the flag, and from here that is indistinguishable from our own. */
+        if (nassigns > 0 && abuiltin_wasexp && strcmp(cmd, "export") != 0) {
+            for (int ai = 0; ai < nassigns; ai++) {
+                if (!anames[ai] || abuiltin_wasexp[ai]) continue;
+                vars_unexport(&sh->vars, anames[ai]);
+            }
+        }
         if (abuiltin_saved)
             for (int ai = 0; ai < nassigns; ai++) free(abuiltin_saved[ai]);
         free(abuiltin_saved);
         free(abuiltin_had);
+        free(abuiltin_wasexp);
 
         /* 'exec' with no command: redirections are permanent (not restored).
          * Also when it is reached through `command` (`command exec 8<file`). */
@@ -3190,6 +3244,13 @@ static int exec_builtin_cd(shell_ctx_t *sh, int argc, char **argv)
         }
     }
 
+    /* PWD and OLDPWD are EXPORTED, not merely set (POSIX 2.5.3 lists both among
+     * the variables the shell sets and exports; dash and bash both put them in
+     * the environment). silex only set them, so they reached a child solely
+     * when the parent's environment had happened to supply them -- and OLDPWD,
+     * which nothing inherits, never did. Oils builtin-cd 5 checks it directly
+     * with `env | grep OLDPWD  # It's EXPORTED too!`. Each store below is
+     * followed by its export. */
     /* The base for a relative path and the value stored as OLDPWD is the current
      * logical $PWD (falling back to getcwd() when PWD is unset or not absolute). */
     char cwdbuf[PATH_MAX];
@@ -3205,10 +3266,12 @@ static int exec_builtin_cd(shell_ctx_t *sh, int argc, char **argv)
             fprintf(stderr, "silex: cd: %s: %s\n", dir, strerror(errno));
             return 1;
         }
-        if (prev) vars_set(&sh->vars, "OLDPWD", prev);
+        if (prev) { vars_set(&sh->vars, "OLDPWD", prev);
+                    vars_export(&sh->vars, "OLDPWD"); }
         char pwd[PATH_MAX];
         if (getcwd(pwd, sizeof(pwd))) {
             vars_set(&sh->vars, "PWD", pwd);
+            vars_export(&sh->vars, "PWD");
             if (print_dir) printf("%s\n", pwd);
         }
         return 0;
@@ -3223,8 +3286,10 @@ static int exec_builtin_cd(shell_ctx_t *sh, int argc, char **argv)
             fprintf(stderr, "silex: cd: %s: %s\n", dir, strerror(errno));
             return 1;
         }
-        if (cur_pwd) vars_set(&sh->vars, "OLDPWD", cur_pwd);
+        if (cur_pwd) { vars_set(&sh->vars, "OLDPWD", cur_pwd);
+                       vars_export(&sh->vars, "OLDPWD"); }
         vars_set(&sh->vars, "PWD", canon);
+        vars_export(&sh->vars, "PWD");
         if (print_dir) printf("%s\n", canon);
         return 0;
     }
@@ -3234,10 +3299,12 @@ static int exec_builtin_cd(shell_ctx_t *sh, int argc, char **argv)
         fprintf(stderr, "silex: cd: %s: %s\n", dir, strerror(errno));
         return 1;
     }
-    if (cur_pwd) vars_set(&sh->vars, "OLDPWD", cur_pwd);
+    if (cur_pwd) { vars_set(&sh->vars, "OLDPWD", cur_pwd);
+                   vars_export(&sh->vars, "OLDPWD"); }
     char pwd[PATH_MAX];
     if (getcwd(pwd, sizeof(pwd))) {
         vars_set(&sh->vars, "PWD", pwd);
+        vars_export(&sh->vars, "PWD");
         if (print_dir) printf("%s\n", pwd);
     }
     return 0;
@@ -3529,6 +3596,18 @@ static int exec_builtin_read(shell_ctx_t *sh, int argc, char **argv)
 
     strbuf_t line;
     sb_init(&line, 256);
+    /* Parallel to `line`, one byte per character: '\1' where the character was
+     * backslash-escaped, ' ' where it stood for itself. Without -r, POSIX says
+     * a backslash "shall preserve the literal value of the next character" --
+     * which means the escaped character must ALSO stop being an IFS delimiter.
+     * The escape therefore cannot be resolved by the reader alone (it would
+     * lose which bytes were literal) nor by the splitter alone (the backslash
+     * would still be in the value), so the flag travels alongside the text and
+     * the splitter consults it. Before this, `read` kept the backslash in the
+     * buffer and never looked at it again: `IFS=: read a b <<< 'x\:y'` stored
+     * a=`x\` and split at the escaped colon. */
+    strbuf_t esc;
+    sb_init(&esc, 256);
 
     /* Read one byte at a time with read(2), NOT buffered fgetc(stdin): stdio
      * would slurp a whole block from the underlying fd, consuming past the
@@ -3555,12 +3634,17 @@ static int exec_builtin_read(shell_ctx_t *sh, int argc, char **argv)
         if (!raw && c == '\\') {
             unsigned char nch;
             ssize_t n2 = read(STDIN_FILENO, &nch, 1);
-            if (n2 <= 0) { sb_appendc(&line, '\\'); c = EOF; break; }
+            /* A backslash at end of input escapes nothing, so it is discarded:
+             * `printf 'trail\' | read t` leaves t=trail in both dash and bash.
+             * silex used to keep the backslash. */
+            if (n2 <= 0) { c = EOF; break; }
             if (nch == '\n') continue;  /* line continuation */
-            sb_appendc(&line, '\\');
+            if (nch == '\0') continue;  /* as for an unescaped NUL, above */
             sb_appendc(&line, (char)nch);
+            sb_appendc(&esc, '\1');
         } else {
             sb_appendc(&line, (char)c);
+            sb_appendc(&esc, ' ');
         }
     }
 
@@ -3569,21 +3653,32 @@ static int exec_builtin_read(shell_ctx_t *sh, int argc, char **argv)
     if (!ifs) ifs = " \t\n";
 
     int nvars = argc - opt_i;
+    size_t linelen = sb_len(&line);
     if (nvars == 0) {
-        /* No variable names: discard */
+        /* No variable names: discard. (linelen is captured BEFORE the free --
+         * sb_free zeroes the struct, so reading sb_len afterwards asked a freed
+         * buffer for its length and only gave the right answer by accident.) */
         sb_free(&line);
-        return (c == EOF && sb_len(&line) == 0) ? 1 : 0;
+        sb_free(&esc);
+        return (c == EOF && linelen == 0) ? 1 : 0;
     }
 
     char *linecopy = strdup(sb_str(&line));
+    char *esccopy  = strdup(sb_str(&esc));
     sb_free(&line);
-    if (!linecopy) return 1;
+    sb_free(&esc);
+    if (!linecopy || !esccopy) { free(linecopy); free(esccopy); return 1; }
+
+    /* A delimiter only delimits if it was not escaped. `q` indexes into
+     * linecopy; esccopy is the same length. */
+#define READ_IS_IFS(q) (esccopy[(q) - linecopy] != '\1' && \
+                        strchr(ifs, (unsigned char)*(q)) != NULL)
 
     char *p = linecopy;
     for (int vi = opt_i; vi < argc; vi++) {
         /* Trim leading IFS on all but last */
         if (vi < argc - 1) {
-            while (*p && strchr(ifs, (unsigned char)*p)) p++;
+            while (*p && READ_IS_IFS(p)) p++;
         }
         if (vi == argc - 1) {
             /* Last var gets the rest of the line. POSIX: read discards leading
@@ -3591,26 +3686,27 @@ static int exec_builtin_read(shell_ctx_t *sh, int argc, char **argv)
              * but keeps internal whitespace -- `IFS=' ' read x` on "  ab  cd  "
              * yields "ab  cd". (Only whitespace is trimmed; an IFS non-whitespace
              * delimiter is significant.) */
-            while (*p && strchr(ifs, (unsigned char)*p) &&
-                   isspace((unsigned char)*p)) p++;
+            while (*p && READ_IS_IFS(p) && isspace((unsigned char)*p)) p++;
             char *e = p + strlen(p);
-            while (e > p && strchr(ifs, (unsigned char)e[-1]) &&
-                   isspace((unsigned char)e[-1])) e--;
+            while (e > p && READ_IS_IFS(e - 1) && isspace((unsigned char)e[-1]))
+                e--;
             *e = '\0';
             vars_set(&sh->vars, argv[vi], p);
             break;
         }
         /* Find end of field */
         char *start = p;
-        while (*p && !strchr(ifs, (unsigned char)*p)) p++;
+        while (*p && !READ_IS_IFS(p)) p++;
         char saved = *p;
         *p = '\0';
         vars_set(&sh->vars, argv[vi], start);
         *p = saved;
         if (*p) p++;
     }
+#undef READ_IS_IFS
 
     free(linecopy);
+    free(esccopy);
     return (c == EOF) ? 1 : 0;
 }
 
