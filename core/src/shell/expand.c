@@ -1016,13 +1016,16 @@ static char *expand_braced_body(shell_ctx_t *sh, const char *body, int in_dquote
         int lit = pattern_literal_len(pat);
         if (lit > 0) {
             size_t i = 0;
-            int replaced = 0;
             while (i <= slen) {
                 if (slen - i >= (size_t)lit &&
                     memcmp(s + i, pat, (size_t)lit) == 0) {
                     sb_append(&sb, repl);
                     i += (size_t)lit;
-                    replaced = 1;
+                    /* Non-global: the first match is the only one, so copy the
+                     * tail and stop. The general loop needs a `replaced` flag
+                     * to reach the same place because its match test is spread
+                     * across an inner loop; here the decision is made where the
+                     * match is found, so the flag would never be read. */
                     if (!global) {
                         sb_append(&sb, s + i);
                         break;
@@ -1033,7 +1036,6 @@ static char *expand_braced_body(shell_ctx_t *sh, const char *body, int in_dquote
                     sb_appendc(&sb, s[i]);
                 i++;
             }
-            (void)replaced;
             char *r = arena_strdup(sh->scratch, sb_str(&sb));
             sb_free(&sb);
             sb_free(&rsb);
