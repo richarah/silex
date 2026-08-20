@@ -331,10 +331,14 @@ RUN set -ex \
     && tar xf /src/busybox.tar.bz2 -C /build \
     && cd /build/busybox-${BUSYBOX_VERSION} \
     && make defconfig \
+    # busybox links incrementally (ld -r into built-in.o). mold cannot read a
+    # thin-LTO object during that partial link without the plugin, so the LTO
+    # in the inherited CFLAGS/LDFLAGS has to come back off for this build only.
+    # -fno-lto trails -flto=thin, and the last of the pair wins.
     && make -j$(nproc) \
         CC="${CC}" \
-        EXTRA_CFLAGS="${CFLAGS}" \
-        EXTRA_LDFLAGS="${LDFLAGS}" \
+        EXTRA_CFLAGS="${CFLAGS} -fno-lto" \
+        EXTRA_LDFLAGS="${LDFLAGS} -fno-lto" \
     && install -m755 busybox /out/bin/busybox \
     && strip --strip-unneeded /out/bin/busybox \
     && rm -rf /build/busybox-${BUSYBOX_VERSION}

@@ -93,6 +93,88 @@ if bad:
 print("  OK: %d ARG pins match sources.json" % checked)
 PY
 
+# ---------------------------------------------------------------------------
+# 1b. Drift: do the two Dockerfiles still build shared components the same way?
+#
+# The ARG check above catches a version that moved. It does not catch a build
+# FLAG that moved, and that is the failure that actually keeps happening: a fix
+# lands in Dockerfile.bootstrap and is never mirrored into the self-hosted
+# Dockerfile, which nobody runs until they need an image. Six such breaks were
+# sitting in it at once -- zstd's ZSTD_BUILD_STATIC, tini's
+# -Wno-strict-prototypes, dash's --bindir, busybox's LTO flags, apk's strlcpy
+# -include, and a missing toolchain -- every one of them already fixed on the
+# bootstrap side.
+#
+# Only compiler/configure FLAGS are compared. Package installs and fetch
+# commands legitimately differ (apt on debian vs apk on silex:slim), so
+# including them would make this noisy enough to be ignored.
+# ---------------------------------------------------------------------------
+echo
+echo "== Checking shared build flags across Dockerfiles =="
+
+python3 - $DOCKERFILES <<'PY' || fail=1
+import re, sys
+
+# "# Build zstd." -> zstd. The two files do not always name a component the
+# same way, so a few are mapped onto a common key.
+ALIAS = {"apk-tools": "apk", "gnu": "coreutils", "the": "silex-core",
+         "stage-1": "clang", "silex-nosync.so": "silex-nosync"}
+
+def key(header):
+    tok = header.split(None, 2)[2] if len(header.split()) > 2 else ""
+    tok = tok.split()[0].strip(".,:;()").lower()
+    return ALIAS.get(tok, tok)
+
+# Flags are what we compare: cmake -D..., configure --..., and the
+# CC/CFLAGS/LDFLAGS/EXTRA_* assignments passed to make.
+FLAG = re.compile(r'^(-D|--|CC=|CXX=|CFLAGS=|CXXFLAGS=|LDFLAGS=|EXTRA_\w+=)')
+
+def blocks(path):
+    out, cur, state = {}, None, 0
+    for line in open(path):
+        s = line.rstrip("\n")
+        if re.match(r'^# Build ', s):
+            cur, state = key(s), 1
+            out.setdefault(cur, [])
+            continue
+        if state == 1 and re.match(r'^(RUN|COPY|ENV)\b', s):
+            state = 2
+        if state == 2:
+            if re.match(r'^# ={10,}', s):
+                state = 0
+                continue
+            t = re.sub(r'\s+', ' ', s.strip())
+            t = re.sub(r'\s*\\$', '', t).strip()
+            if FLAG.match(t):
+                out[cur].append(t)
+    return {k: sorted(v) for k, v in out.items() if v}
+
+a_path, b_path = sys.argv[1], sys.argv[2]
+A, B = blocks(a_path), blocks(b_path)
+
+shared = sorted(set(A) & set(B))
+if not shared:
+    # A comparison that pairs nothing would pass silently forever.
+    print("  ERROR: no shared components found -- this check is not working.")
+    sys.exit(1)
+
+bad = 0
+for comp in shared:
+    only_a = [x for x in A[comp] if x not in B[comp]]
+    only_b = [x for x in B[comp] if x not in A[comp]]
+    if only_a or only_b:
+        bad += 1
+        print("  DRIFT  %s" % comp)
+        for x in only_a: print("           only in %s: %s" % (a_path, x))
+        for x in only_b: print("           only in %s: %s" % (b_path, x))
+
+if bad:
+    print("\n  %d component(s) build differently in the two Dockerfiles." % bad)
+    print("  If the difference is deliberate, say so in a comment on both sides.")
+    sys.exit(1)
+print("  OK: %d shared components build with matching flags" % len(shared))
+PY
+
 if [ "$DRIFT_ONLY" -eq 1 ]; then
     if [ "$fail" -eq 0 ]; then
         echo "verify-sources: drift check passed"

@@ -1,15 +1,28 @@
-# Build context pruning for the SDK image build.
+# Build context pruning. This file applies to TWO different builds, and the
+# exclusions below must be safe for both:
 #
-# core/ is not itself a Docker build context. It is passed to the sdk/ build as
-# a BuildKit NAMED context:
+#   1. The SDK image, which takes core/ as a BuildKit NAMED context:
 #
-#     docker build --build-context core=../core -f sdk/dockerfiles/Dockerfile sdk/
+#          docker build --build-context core=../core -f sdk/dockerfiles/Dockerfile sdk/
 #
-# BuildKit applies this file to that named context, which is the only reason it
-# exists here. Without it the context is 1.4 GB, essentially all of it
-# tests/external/repos -- vendored checkouts of oil, cpython, coreutils, grep
-# and friends that the image build has no use for. With it, 3.8 MB.
-tests/
+#   2. The external test image, for which core/ IS the build context directly
+#      (see the external-test-docker target in core/Makefile):
+#
+#          docker build -t silex-test -f tests/external/Dockerfile .
+#
+# The weight is entirely tests/external/repos -- vendored checkouts of oil,
+# cpython, coreutils, grep and friends, 1.4 GB of the 1.4 GB that tests/ costs.
+# Everything else under tests/ is 752 KB.
+#
+# So exclude the repos, NOT all of tests/. Excluding tests/ wholesale prunes
+# tests/external/docker-run.sh out of build (2), whose Dockerfile then does
+# `COPY . .` and produces an image missing the very script the Makefile asks it
+# to run -- `bash: tests/external/docker-run.sh: No such file or directory`,
+# exit 127, before a single suite executes. The build cost of keeping the rest
+# of tests/ is under a megabyte.
+tests/external/repos/
+# build/ is safe to prune for both: docker-run.sh runs `make clean` and
+# `make release-glibc` inside the container rather than using a host build.
 build/
 *.gcov
 

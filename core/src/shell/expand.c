@@ -1441,6 +1441,14 @@ static void arith_read_operand(arith_ctx_t *ac, char *buf, size_t bufsz)
             if (!v && ac->sh->opt_u) {
                 fprintf(stderr, "silex: %s: unbound variable\n", inner);
                 expansion_abort(ac->sh, 1);
+                /* The sole early return in this function, and it used to skip
+                 * the buf[ni] = '\0' that every other path ends on -- leaving
+                 * the caller's namebuf unterminated (and, for an unbound var
+                 * in the first operand, entirely uninitialised). The caller
+                 * reads namebuf[0] and strtol()s it before it looks at
+                 * expansion_abort, so `set -u` with an unset variable inside
+                 * $(( )) read uninitialised stack. */
+                buf[ni] = '\0';
                 return;
             }
             if (v)

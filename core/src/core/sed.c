@@ -1505,10 +1505,18 @@ static const char *resolve_symlinks(const char *name, char *buf, size_t bufsz)
         } else {
             char dir[PATH_MAX];
             path_dirname(buf, dir);
-            if (strcmp(dir, ".") == 0)
+            if (strcmp(dir, ".") == 0) {
                 snprintf(buf, bufsz, "%s", target);
-            else
-                snprintf(buf, bufsz, "%s/%s", dir, target);
+            } else {
+                /* dir and target are each up to PATH_MAX, so joining them can
+                 * overrun buf. snprintf truncates rather than overflows, but a
+                 * truncated path is a WRONG path -- silently editing the wrong
+                 * file under -i is worse than stopping. Same check the temp
+                 * file name gets below. */
+                int r = snprintf(buf, bufsz, "%s/%s", dir, target);
+                if (r < 0 || (size_t)r >= bufsz)
+                    sed_panic(4, "couldn't resolve %s: path too long", name);
+            }
         }
     }
     return buf;
@@ -1520,8 +1528,17 @@ static FILE *open_input(exec_t *st, const char *name)
      * real file called "-" (GNU in-place-hyphen). */
     if (strcmp(name, "-") == 0 && !O.inplace) {
         st->cur_name = "-";
-        if (O.unbuffered)
-            setvbuf(stdin, NULL, _IONBF, 0);
+        /* setvbuf has to happen before any I/O on the stream, and "-" may
+         * appear more than once in the operand list -- `sed -u p - -` came
+         * back through here and called it again on a stream already read
+         * from, which is undefined. Once per process is the whole intent. */
+        if (O.unbuffered) {
+            static int stdin_unbuffered = 0;
+            if (!stdin_unbuffered) {
+                setvbuf(stdin, NULL, _IONBF, 0);
+                stdin_unbuffered = 1;
+            }
+        }
         return stdin;
     }
     static char linkbuf[PATH_MAX];
@@ -1695,6 +1712,51 @@ static FILE *get_rfile(sed_cmd_t *cmd)
 
 /* ---- runtime regex helpers ---- */
 
+/* Match re against the byte range [start,end) of s.
+ *
+ * REG_STARTEND is the BSD/glibc extension that expresses this directly: the
+ * subject is bounded by offsets rather than by a NUL, so embedded NULs in the
+ * pattern space are ordinary bytes, and the offsets handed back stay absolute
+ * (relative to s, not to start).  Anchoring is the caller's business via
+ * REG_NOTBOL, exactly as it is with REG_STARTEND.
+ *
+ * musl has no REG_STARTEND and no other length-taking regexec, so there it is
+ * emulated by matching a NUL-terminated copy of the range and shifting the
+ * offsets back.  The one thing the copy cannot reproduce is a NUL *inside* the
+ * range: musl's regexec stops there, so on a musl build a NUL truncates the
+ * subject.  glibc builds are unaffected -- this compiles to the plain
+ * REG_STARTEND call.
+ */
+static int sed_regexec_range(const regex_t *re, const char *s,
+                             size_t start, size_t end,
+                             size_t nmatch, regmatch_t *pmatch, int eflags)
+{
+#ifdef REG_STARTEND
+    pmatch[0].rm_so = (regoff_t)start;
+    pmatch[0].rm_eo = (regoff_t)end;
+    return regexec(re, s, nmatch, pmatch, eflags | REG_STARTEND);
+#else
+    size_t len = end - start;
+    char *tmp = malloc(len + 1);
+    if (!tmp) return REG_ESPACE;
+    memcpy(tmp, s + start, len);
+    tmp[len] = '\0';
+
+    int rc = regexec(re, tmp, nmatch, pmatch, eflags);
+    if (rc == 0) {
+        /* Re-base onto s so callers see absolute offsets either way. */
+        for (size_t i = 0; i < nmatch; i++) {
+            if (pmatch[i].rm_so >= 0) {
+                pmatch[i].rm_so += (regoff_t)start;
+                pmatch[i].rm_eo += (regoff_t)start;
+            }
+        }
+    }
+    free(tmp);
+    return rc;
+#endif
+}
+
 static regex_t *effective_re(exec_t *st, regex_t *re, size_t src_off,
                              const parser_t *ps)
 {
@@ -1734,12 +1796,11 @@ static int addr_match_one(exec_t *st, sed_addr_t *a, size_t src_off,
         return (st->linenum - a->line) % a->step == 0;
     case ADDR_REGEX: {
         regex_t *re = effective_re(st, a->re, src_off, psinfo);
-        /* REG_STARTEND: length-based matching so embedded NULs in the
-         * pattern space do not truncate the subject */
+        /* Length-based matching so embedded NULs in the pattern space do
+         * not truncate the subject (see sed_regexec_range). */
         regmatch_t m0;
-        m0.rm_so = 0;
-        m0.rm_eo = (regoff_t)sb_len(&st->ps);
-        int r = regexec(re, sb_str(&st->ps), 1, &m0, REG_STARTEND) == 0;
+        int r = sed_regexec_range(re, sb_str(&st->ps), 0, sb_len(&st->ps),
+                                  1, &m0, 0) == 0;
         g_exec_re = re;
         return r;
     }
@@ -1913,12 +1974,10 @@ static int do_subst(exec_t *st, sed_cmd_t *cmd, const parser_t *psinfo)
     size_t prev_end = (size_t)-1;   /* end of the previous match */
 
     while (pos <= slen) {
-        /* REG_STARTEND: match within [pos,slen) of the buffer itself so
-         * embedded NULs are ordinary bytes; offsets come back absolute */
-        int ef = REG_STARTEND | (pos > 0 ? REG_NOTBOL : 0);
-        m[0].rm_so = (regoff_t)pos;
-        m[0].rm_eo = (regoff_t)slen;
-        if (regexec(re, subject, 10, m, ef) != 0)
+        /* Match within [pos,slen) of the buffer itself so embedded NULs are
+         * ordinary bytes; offsets come back absolute (see sed_regexec_range). */
+        int ef = (pos > 0 ? REG_NOTBOL : 0);
+        if (sed_regexec_range(re, subject, pos, slen, 10, m, ef) != 0)
             break;
         size_t so = (size_t)m[0].rm_so;
         size_t eo = (size_t)m[0].rm_eo;
@@ -1949,7 +2008,7 @@ static int do_subst(exec_t *st, sed_cmd_t *cmd, const parser_t *psinfo)
                     break;
                 case RT_GROUP: {
                     int g = rt->grp;
-                    if (m[g].rm_so >= 0)   /* REG_STARTEND: absolute */
+                    if (m[g].rm_so >= 0)   /* offsets are absolute */
                         append_cased(&out, s + (size_t)m[g].rm_so,
                                      (size_t)(m[g].rm_eo - m[g].rm_so),
                                      &case_mode, &one_shot);
@@ -2189,7 +2248,11 @@ static void run_stream(sed_cmd_t *head, exec_t *st, const parser_t *psinfo)
                                st->ps_had_delim);
                 flush_appends(st);
                 if (!next_record(st)) {
-                    cycle_print = 0;
+                    /* Out of input: GNU sed stops without running any further
+                     * command, and the pattern space was already auto-printed
+                     * just above. stream_end only flushes appends -- it never
+                     * reads cycle_print -- so clearing the flag here achieved
+                     * nothing; the goto is what skips the second print. */
                     goto stream_end;
                 }
                 break;
@@ -2718,8 +2781,13 @@ int applet_sed(int argc, char **argv)
     head = parse_script(&ps, NULL);
 
     /* ---------- execute ---------- */
-    int nfiles = argc - i;
-    char **files = argv + i;
+    /* volatile: these are live across the nested setjmp below (and out_fp is
+     * read by its error handler), so C leaves their values indeterminate after
+     * a longjmp unless they are volatile.  gcc says so as -Wclobbered, which
+     * is -Werror under scan-build; clang has no such warning, which is why an
+     * ordinary build never mentioned it. */
+    volatile int nfiles = argc - i;
+    char ** volatile files = argv + i;
     char *dash = (char *)"-";
     if (nfiles == 0) {
         files = &dash;
@@ -2742,7 +2810,7 @@ int applet_sed(int argc, char **argv)
         if (c->a1.type == ADDR_LAST || (c->has_a2 && c->a2.type == ADDR_LAST))
             st->need_lookahead = 1;
 
-    int exit_code = 0;
+    volatile int exit_code = 0;
 
     if (!O.separate && !O.inplace) {
         /* one continuous stream */
@@ -2760,10 +2828,10 @@ int applet_sed(int argc, char **argv)
         if (st->input_open_failed && exit_code == 0)
             exit_code = 2;
     } else {
-        for (int fi = 0; fi < nfiles; fi++) {
+        for (volatile int fi = 0; fi < nfiles; fi++) {
             char *one[1];
             char realbuf[PATH_MAX];
-            const char *fname = files[fi];
+            const char * volatile fname = files[fi];
 
             if (O.inplace && strcmp(fname, "-") != 0 && O.follow_syms) {
                 if (realpath(fname, realbuf))
@@ -2791,7 +2859,7 @@ int applet_sed(int argc, char **argv)
                 break;
 
             char tmp_path[PATH_MAX];
-            FILE *out_fp = stdout;
+            FILE * volatile out_fp = stdout;
             if (O.inplace) {
                 if (strcmp(fname, "-") == 0) {
                     /* GNU treats a literal "-" operand as a FILE named "-"
