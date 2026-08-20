@@ -702,7 +702,8 @@ static int glob_excluded(const char *basename, const grep_opts_t *g)
 }
 
 /* Forward declaration for recursive use */
-static int grep_path(const char *path, int show_fname, const grep_opts_t *g);
+static int grep_path(const char *path, int show_fname, int in_recursion,
+                    const grep_opts_t *g);
 
 /* Recursively grep a directory. */
 static int grep_dir(const char *dirpath, const grep_opts_t *g)
@@ -746,7 +747,7 @@ static int grep_dir(const char *dirpath, const grep_opts_t *g)
             continue;
         }
 
-        int r = grep_path(child, 1, g);
+        int r = grep_path(child, 1, 1, g);
         if (r == 0)
             result = 0;
     }
@@ -756,15 +757,30 @@ static int grep_dir(const char *dirpath, const grep_opts_t *g)
 }
 
 /* Grep one path (file or directory). show_fname: prepend filename. */
-static int grep_path(const char *path, int show_fname, const grep_opts_t *g)
+static int grep_path(const char *path, int show_fname, int in_recursion,
+                    const grep_opts_t *g)
 {
     /* POSIX: "-" means stdin */
     if (strcmp(path, "-") == 0) {
         return grep_stream(stdin, "(standard input)", show_fname, g);
     }
 
+    /* stat() for a path the user NAMED, lstat() only while recursing.
+     *
+     * This was lstat() unconditionally, and lstat() reports the LINK, so
+     * S_ISREG was false for every symlink and the !S_ISREG arm below returned
+     * "no match" -- silently, with no diagnostic and exit status 1. On Debian
+     * /etc/os-release is a symlink to ../usr/lib/os-release, so
+     * `grep -q ID_LIKE=debian /etc/os-release` answered "no" on a file that
+     * plainly says yes. Any configure script probing a symlinked path got the
+     * same wrong answer, and nothing anywhere said so.
+     *
+     * GNU's rule, which this now follows: a symlink named on the command line
+     * is followed; symlinks FOUND while walking a tree under -r are not, so a
+     * link back up the tree cannot make the walk loop forever. */
     struct stat st;
-    if (lstat(path, &st) != 0) {
+    int strc = in_recursion ? lstat(path, &st) : stat(path, &st);
+    if (strc != 0) {
         if (!g->opt_s)
             err_sys("grep", "%s", path);
         return 2;
@@ -1201,7 +1217,7 @@ int applet_grep(int argc, char **argv)
         int show_fname = (nfiles > 1) || g.opt_r || g.opt_H;
         if (g.opt_h) show_fname = 0;  /* -h overrides */
         for (int j = i; j < argc; j++) {
-            int r = grep_path(argv[j], show_fname, &g);
+            int r = grep_path(argv[j], show_fname, 0, &g);
             if (r == 0)
                 final_result = 0;
             else if (r == 2)

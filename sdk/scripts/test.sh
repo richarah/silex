@@ -156,13 +156,30 @@ _run_with_output "cp wrapper in PATH" "/usr/local/silex/bin/cp" 'which cp'
 
 _run_with_output "sort wrapper in PATH" "/usr/local/silex/bin/sort" 'which sort'
 
-_run_with_output "git wrapper in PATH" "/usr/local/silex/bin/git" 'which git'
+# The git wrapper is only shipped when git is: the final stage drops any wrapper
+# whose /usr/bin/<tool> is absent, because a wrapper on PATH for a missing tool
+# makes `command -v git` succeed and then `git` fail confusingly -- configure
+# scripts probe exactly that way. git is not in slim ("git not in slim" --
+# README), so in slim the wrapper must be ABSENT. This asserted the opposite and
+# had been failing on the published image; it now checks the real contract,
+# whichever way round the image is built.
+_run "git wrapper present iff git is" '
+if [ -x /usr/bin/git ]; then
+    test -x /usr/local/silex/bin/git
+else
+    ! test -e /usr/local/silex/bin/git
+fi
+'
 
 _run_with_output "tar wrapper in PATH" "/usr/local/silex/bin/tar" 'which tar'
 
-_run "git wrapper does shallow clone" '
-# Verify wrapper adds --depth 1 (by checking wrapper script content)
-grep -q "depth 1" /usr/local/silex/bin/git
+_run "git wrapper does shallow clone, when shipped" '
+# Only meaningful where the wrapper survived the drop-if-tool-absent pass.
+if [ -e /usr/local/silex/bin/git ]; then
+    grep -q "depth 1" /usr/local/silex/bin/git
+else
+    true
+fi
 '
 
 _run "SILEX_WRAPPERS=off bypasses cp wrapper" '
@@ -246,6 +263,33 @@ echo "--- POSIX shell ---"
 
 _run "dash present" 'dash --version 2>&1 || true; command -v dash'
 _run "/bin/dash exists" 'test -x /bin/dash'
+
+# /bin/sh is silex as of 2026-08-20. Assert it by BEHAVIOUR, not by reading the
+# symlink -- the symlink says where /bin/sh points, only running it says what
+# answers. `type sed` naming an in-process applet is something no other shell
+# in this image can say: dash and busybox both report a path under /usr/bin.
+# (There is no `sh --version` to ask; dash has none either.)
+_run_with_output "/bin/sh is silex" "silex builtin" '/bin/sh -c "type sed"'
+_run "/bin/silex exists" 'test -x /bin/silex'
+_run_with_output "/bin/silex reports itself" "silex" '/bin/silex --version'
+
+# The escape hatch has to work, or the swap is one-way. Under SILEX_SH=dash the
+# same probe must name a PATH instead of an in-process applet.
+_run_with_output "SILEX_SH=dash falls back to dash" "/sed" \
+    'SILEX_SH=dash SILEX_QUIET=on /usr/local/bin/silex-entrypoint /bin/sh -c "type sed" 2>&1'
+
+# Applets are dispatched in-process ahead of PATH, except the ones
+# SILEX_NO_APPLETS names, which must resolve through PATH.
+# cp is on that list because the cp wrapper adds --reflink=auto and the applet
+# rejects the flag; if this regresses, every cp in the image loses reflink.
+_run_with_output "cp is exempted and resolves through PATH" "/cp" \
+    '/bin/sh -c "command -v cp"'
+_run "exempted cp still accepts --reflink=auto" \
+    'cd /tmp && echo x > _rf && cp --reflink=auto _rf _rf2 && rm -f _rf _rf2'
+
+# The sort wrapper's implementation must actually be present. It was deleted
+# by the wrapper-pruning loop for months, which made --parallel a silent no-op.
+_run "sort-parallel present" 'test -x /usr/local/silex/bin/sort-parallel'
 
 # --------------------------------------------------------------------------
 echo "--- Debian shims ---"

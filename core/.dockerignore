@@ -1,0 +1,20 @@
+# Build context pruning for the SDK image build.
+#
+# core/ is not itself a Docker build context. It is passed to the sdk/ build as
+# a BuildKit NAMED context:
+#
+#     docker build --build-context core=../core -f sdk/dockerfiles/Dockerfile sdk/
+#
+# BuildKit applies this file to that named context, which is the only reason it
+# exists here. Without it the context is 1.4 GB, essentially all of it
+# tests/external/repos -- vendored checkouts of oil, cpython, coreutils, grep
+# and friends that the image build has no use for. With it, 3.8 MB.
+tests/
+build/
+*.gcov
+
+# Nothing below is needed to compile the binary.
+docs/
+*.md
+.git/
+.github/

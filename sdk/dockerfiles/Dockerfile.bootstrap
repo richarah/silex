@@ -410,6 +410,30 @@ RUN clang -O2 -shared -fPIC -nostartfiles \
         /src/silex-nosync.c \
     && strip /out/lib/silex-nosync.so
 
+# ============================================================================
+# Build the silex core binary -- the image's /bin/sh.
+#
+# core/ is a sibling of sdk/ in the monorepo and therefore OUTSIDE this build
+# context, which is sdk/. It arrives as a BuildKit named context instead:
+#
+#     docker build --build-context core=../core ...
+#
+# (the Makefile passes it; a build without it fails at this COPY rather than
+# silently producing an image with the old /bin/sh). core/.dockerignore prunes
+# tests/, build/ and *.gcov from that context -- tests/external/repos alone is
+# 1.4 GB of vendored checkouts, versus 3.8 MB for everything that is needed.
+#
+# `make release`, not `make all`: `all` produces a DEV build, and the two share
+# object paths, so the flavour stamp -- not timestamps -- is what forces a
+# rebuild. CC is clang here, which core's Makefile accepts.
+# ============================================================================
+COPY --from=core . /src/silex-core
+RUN cd /src/silex-core \
+    && make release -j"$(nproc)" CC="${CC}" \
+    && install -m755 build/bin/silex /out/bin/silex \
+    && rm -rf /src/silex-core \
+    && /out/bin/silex --version
+
 # Strip LLVM install: remove headers, static libs, cmake files, and shared libs
 # not needed for compilation.
 # Keep: clang, clang++, clang-18, lld, ld.lld, libLLVM.so, libclang-cpp.so,
@@ -674,6 +698,7 @@ COPY --from=build-c /opt/mold/ /opt/mold/
 # Core tools: busybox, dash, tini, zstd, xxhash, pigz, pixz.
 COPY --from=build-c /out/bin/busybox    /bin/busybox
 COPY --from=build-c /out/bin/dash       /bin/dash
+COPY --from=build-c /out/bin/silex      /bin/silex
 COPY --from=build-c /out/bin/tini       /usr/bin/tini
 COPY --from=build-c /out/bin/zstd       /usr/bin/zstd
 COPY --from=build-c /out/bin/xxhsum     /usr/bin/xxhsum
@@ -707,10 +732,25 @@ COPY --from=build-rust /out/bin/uv  /usr/bin/uv
 
 # ============================================================================
 # Configure busybox: install applets as symlinks.
-# dash is /bin/sh; busybox provides everything else.
+#
+# /bin/sh is silex; busybox provides what silex has no applet for (awk, tar,
+# gzip, diff, patch and ~370 others). The gate the README set for this swap --
+# >=95% of the Smoosh POSIX conformance suite and a clean 5/5 on Autoconf -- is
+# met: 185/186 (99.5%, against dash's 143 and bash's 152 on that same runner),
+# 5/5 on curl, cpython, openssl, sqlite and zlib, 1696/0 on ShellSpec and 0
+# fatal bugs on modernish. See core/EXTERNAL_TEST_SCORECARD.md.
+#
+# silex dispatches on argv[0], so the symlink is the whole mechanism. dash
+# stays at /bin/dash as the escape hatch; SILEX_SH=dash in the entrypoint
+# switches one container back without a rebuild.
+#
+# This also changes what a build script's `sed`, `grep`, `find` and `cp`
+# resolve to: silex runs its own applets IN-PROCESS, ahead of PATH. That is the
+# point, and it is the part with the blast radius -- SILEX_NO_APPLETS names the
+# exceptions and the entrypoint sets it.
 # ============================================================================
 RUN /bin/busybox --install -s /bin \
-    && ln -sf /bin/dash /bin/sh \
+    && ln -sf /bin/silex /bin/sh \
     && ln -sf /bin/busybox /usr/bin/which \
     && ln -sf /bin/busybox /usr/bin/find \
     && ln -sf /bin/busybox /usr/bin/awk \
@@ -768,7 +808,17 @@ COPY scripts/wrappers/         /usr/local/silex/bin/
 # the git code path on the strength of it.
 #
 # Only ship a wrapper for a tool that actually exists.
+#
+# The loop must skip anything in this directory that is NOT a wrapper, and
+# sort-parallel is the one such thing: it is GNU sort itself, copied in above
+# as the sort wrapper's implementation. It has no /usr/bin/sort-parallel to
+# check against, so the loop deleted it -- and the wrapper, finding no
+# implementation, silently fell through to plain `sort` with no --parallel at
+# all. The published silex:slim has no /usr/local/silex/bin/sort-parallel for
+# exactly this reason, which is to say the image's advertised parallel sort has
+# never once run.
 RUN for _w in /usr/local/silex/bin/*; do \
+        case "$(basename "$_w")" in sort-parallel) continue ;; esac; \
         _t="/usr/bin/$(basename "$_w")"; \
         [ -x "$_t" ] || { echo "silex: no $_t, dropping wrapper $(basename "$_w")"; rm -f "$_w"; }; \
     done
