@@ -26,7 +26,7 @@ jobs:
     name: Build & test (gcc)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y gcc make
       - name: Build
@@ -41,7 +41,7 @@ jobs:
     name: ASan/UBSan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y gcc make
       - name: Build (debug + sanitizers)
@@ -64,7 +64,7 @@ jobs:
     name: Arena poisoning
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y gcc make dash
       - name: Unit + compat tests with arena poisoning
@@ -75,7 +75,7 @@ jobs:
     name: Compat tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y gcc make dash
       - name: Build
@@ -88,7 +88,7 @@ jobs:
     name: Static analysis
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -113,7 +113,7 @@ jobs:
     name: Shellcheck
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install shellcheck
         run: sudo apt-get update && sudo apt-get install -y shellcheck
       - name: Run shellcheck on our test scripts
@@ -140,7 +140,7 @@ jobs:
     container:
       image: alpine:latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install build dependencies
         run: apk add --no-cache gcc musl-dev make binutils linux-headers
       - name: Build (musl static release)
@@ -160,7 +160,7 @@ jobs:
     name: aarch64 cross-compile
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install aarch64 toolchain
         run: |
           sudo apt-get update
@@ -180,7 +180,7 @@ jobs:
     container:
       image: alpine:latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install dependencies
         # coreutils: the compat suite compares silex against the SYSTEM tool, and
         # on Alpine that is busybox, which pads `wc` output differently from GNU.
@@ -199,7 +199,7 @@ jobs:
     name: Build and test (glibc/Ubuntu)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y gcc make
       - name: Build release-glibc
@@ -216,7 +216,7 @@ jobs:
     container:
       image: alpine:latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install dependencies
         # coreutils: the compat suite compares silex against the SYSTEM tool, and
         # on Alpine that is busybox, which pads `wc` output differently from GNU.
@@ -233,7 +233,7 @@ jobs:
     name: ASan/UBSan (glibc/Ubuntu)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y gcc make
       - name: Build debug
@@ -247,7 +247,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60  # Parallel execution in Docker (~45 min)
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Cache external test repositories
         uses: actions/cache@v4
@@ -329,7 +329,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y gcc make dash
       - name: Build release
@@ -356,7 +356,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install clang
         run: sudo apt-get update && sudo apt-get install -y clang make
       - name: Build fuzz harnesses
@@ -391,7 +391,7 @@ jobs:
     timeout-minutes: 20
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y gcc make dash gcovr
       - name: Coverage
