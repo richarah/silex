@@ -771,7 +771,17 @@ static void simple_cmd_preexpand_redirs(shell_ctx_t *sh, redir_t *redirs)
 
 /*
  * Expand the env-prefix assignments and bank the exit status of their last
- * command substitution into *cmdsub_exit / *cmdsub_seen.  On success the
+ * command substitution into *cmdsub_exit / *cmdsub_seen.
+ *
+ * Those two out-parameters look like redundant copies of sh->last_cmdsub_exit
+ * and sh->last_cmdsub_seen, and are not: the caller ZEROES both fields before
+ * expanding the command words, so that the words' own substitutions can be
+ * told apart from the assignments'.  These are the snapshot taken before that
+ * reset, and the empty-expansion path reads them afterwards to decide whose
+ * status the command completes with.  Reading the live fields there would
+ * always see the words' tally.
+ *
+ * On success the
  * malloc'd anames/avals arrays (parallel; NULL entries where an assignment
  * was malformed) become the caller's to free.  Returns -1 on out-of-memory
  * (diagnostic printed, nothing to free) and 2 on a readonly violation --
@@ -850,7 +860,10 @@ static int simple_cmd_expand_assigns(shell_ctx_t *sh, char **assigns,
             vars_set(&sh->vars, anames[i], avals[i] ? avals[i] : "");
         }
     }
-    /* Restore the overlay (reverse order handles duplicate names). The
+    /* Restore the overlay (reverse order handles duplicate names). The third
+     * of the three env-prefix overlays -- see the note in simple_cmd_builtin.
+     * This one alone re-exports a declared-but-unset name, because vars_unset
+     * destroys the declaration. The
      * word/command paths apply the values again through their own
      * save/restore; special builtins get persistence there. */
     if (!ro_name && aov_saved && aov_had && aov_exp) {
@@ -978,7 +991,21 @@ static int simple_cmd_builtin(shell_ctx_t *sh, const simple_cmd_t *c, shell_buil
      * duration. This matters when the builtin resolves or execs another
      * command: `PATH=$DEFPATH command awk ...` (modernish's `str ematch`)
      * must find awk via that PATH. Apply the assignments to the shell vars
-     * (exported so a child exec inherits them) and restore afterwards. */
+     * (exported so a child exec inherits them) and restore afterwards.
+     *
+     * THREE COPIES OF THIS OVERLAY EXIST, and they are deliberately NOT
+     * identical -- save value/had/exported, set, export, restore in reverse:
+     *   here (abuiltin_*)  -- assignments PERSIST for a special builtin (POSIX
+     *                         2.9.1), the unexport is deferred to its own loop
+     *                         and exempts `export`, and `exec` keeps both;
+     *   simple_cmd_applet (aapp_*) -- unexports inline, never persists;
+     *   simple_cmd_expand_assigns (aov_*) -- re-exports a declared-but-unset
+     *                         name that vars_unset would have destroyed.
+     * Each difference is a bug that was fixed in one copy only: Oils
+     * builtin-special 3, `TZ=UTC date`, and declared-but-unset export
+     * respectively. So a change to one is a question about the other two --
+     * check all three, and do not unify them without re-running the Oils
+     * differential, smoosh and ShellSpec, which is what distinguishes them. */
     char **abuiltin_saved  = NULL;
     int   *abuiltin_had    = NULL;
     int   *abuiltin_wasexp = NULL;
@@ -1305,6 +1332,10 @@ static int simple_cmd_applet(shell_ctx_t *sh, const simple_cmd_t *c, const apple
     }
 
     /* A `VAR=val applet` prefix has to reach the applet's ENVIRONMENT.
+     *
+     * One of the three env-prefix overlays -- see the note in
+     * simple_cmd_builtin for how the three differ and why a change here is a
+     * question about the other two.
      * An external utility gets this for free from the exec; an applet
      * runs in-process and reads getenv(), so without this the binding is
      * simply invisible -- `TZ=UTC date` printed local time, and
@@ -1619,8 +1650,18 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
         int arc = simple_cmd_expand_assigns(sh, assigns, nassigns,
                                             &anames, &avals,
                                             &cmdsub_exit, &assign_cmdsub_seen);
-        if (arc < 0)
-            return 1;                    /* out of memory */
+        if (arc < 0) {                   /* out of memory */
+            /* An assignment-only command has already applied its redirections
+             * (they are how `paths=`tr '\n' ':'`<<EOF` reads its here-document),
+             * and only `exec` makes a redirection permanent. Returning without
+             * restoring them left the shell's stdout pointed at the target for
+             * the rest of the script, as though `exec >out` had run. The
+             * readonly path immediately below always restored; this one did
+             * not, back to before the arms were split -- the split is only what
+             * put the two side by side where the difference was visible. */
+            if (arctx_active) redirect_restore(&arctx);
+            return 1;
+        }
         if (arc > 0) {                   /* readonly violation, interactive */
             if (arctx_active) redirect_restore(&arctx);
             return arc;
