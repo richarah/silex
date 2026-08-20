@@ -88,8 +88,56 @@ static job_t *parse_jobspec(shell_ctx_t *sh, const char *spec);
  * This enables in-process builtin short-circuit for all 27 applets.
  * ------------------------------------------------------------------------- */
 
+/* SILEX_NO_APPLETS names applets that must NOT be dispatched in-process, so
+ * the name resolves through PATH like any other external command. Separator
+ * is `:` (PATH-like), `,` or space; the value `all` suppresses every applet.
+ *
+ * An applet beating PATH is deliberate and stays the default, but it assumes
+ * silex's applet is a fair substitute for
+ * whatever PATH would have found, and sometimes it demonstrably is not. In
+ * the silex Docker image, /usr/local/silex/bin/cp is a wrapper that adds
+ * `--reflink=auto` for copy-on-write filesystems, and silex's own cp rejects
+ * that flag outright (it lives in the optional silex-gnu-cp module). An
+ * in-process cp does not merely skip the wrapper, it makes the wrapper
+ * unreachable. This is the escape hatch for that case, and for the more
+ * general one: something in PATH is genuinely better and the caller knows it.
+ * docs/FLAG_GAPS.md tracks which applets are behind GNU and on what.
+ *
+ * It is read fresh each time rather than cached, so `export
+ * SILEX_NO_APPLETS=...` mid-script takes effect. The value is short and the
+ * scan is a few strcmps against an already-hot string.
+ *
+ * It must be in the ENVIRONMENT, not an env-prefix on the command it is meant
+ * to affect. Command search happens before the prefix is applied, so
+ *
+ *     SILEX_NO_APPLETS=sort sort -T /tmp f     <- still the applet
+ *     export SILEX_NO_APPLETS=sort; sort ...   <- PATH, as asked
+ *
+ * The prefix form does work on a command that resolves LATER, which is why
+ * `SILEX_NO_APPLETS=sort command -v sort` reports the PATH answer. */
+static int applet_suppressed(const char *name)
+{
+    const char *list = getenv("SILEX_NO_APPLETS");
+    if (!list || !*list) return 0;
+    size_t nlen = strlen(name);
+    for (const char *p = list; *p; ) {
+        while (*p == ':' || *p == ',' || *p == ' ') p++;
+        const char *start = p;
+        while (*p && *p != ':' && *p != ',' && *p != ' ') p++;
+        size_t len = (size_t)(p - start);
+        if (len == 0) continue;
+        if (len == 3 && strncmp(start, "all", 3) == 0) return 1;
+        if (len == nlen && strncmp(start, name, nlen) == 0) return 1;
+    }
+    return 0;
+}
+
+/* Command search uses this. The internal printf delegation deliberately does
+ * NOT -- see exec_builtin_printf_sh -- because that is the shell's own printf
+ * implementation, not a command the user is asking to resolve. */
 static const applet_t *find_applet_by_name(const char *name)
 {
+    if (applet_suppressed(name)) return NULL;
     return find_applet(name);
 }
 
@@ -3905,8 +3953,13 @@ static int exec_builtin_printf_sh(shell_ctx_t *sh, int argc, char **argv)
      * in-shell version understood only %s/%b/%d/%f/%% and printed everything
      * else -- e.g. `%03d`, `%-40s` -- literally, so modernish's test runner
      * (`printf '  %03d: %-40s - %s\\n' ...`) showed its format string instead of
-     * the formatted results. */
-    const applet_t *ap = find_applet_by_name("printf");
+     * the formatted results.
+     *
+     * find_applet, not find_applet_by_name: this is the shell builtin `printf`
+     * borrowing the applet as its implementation, so SILEX_NO_APPLETS=printf
+     * must not turn the builtin into a stub. It suppresses applets as
+     * COMMANDS; the builtin is found before them either way. */
+    const applet_t *ap = find_applet("printf");
     int rc = ap ? ap->fn(argc, argv) : 1;
     if (fflush(stdout) != 0 || ferror(stdout)) {
         clearerr(stdout);
@@ -5047,8 +5100,11 @@ static int exec_builtin_command(shell_ctx_t *sh, int argc, char **argv)
             else         printf("%s\n", name);
             return 0;
         }
-        /* Check applet table */
-        if (find_applet(name)) {
+        /* Check applet table. find_applet_by_name, so that a name suppressed
+         * via SILEX_NO_APPLETS is reported as whatever PATH holds -- configure
+         * scripts decide things on `command -v cp`, and an answer that does not
+         * match what actually runs is worse than either answer alone. */
+        if (find_applet_by_name(name)) {
             if (verbose) printf("%s is a silex builtin\n", name);
             else         printf("%s\n", name);
             return 0;
@@ -5168,7 +5224,9 @@ static int exec_builtin_type(shell_ctx_t *sh, int argc, char **argv)
                    is_special_builtin(name) ? "special " : "");
             continue;
         }
-        if (find_applet(name)) {
+        /* find_applet_by_name: a SILEX_NO_APPLETS name is not a builtin here,
+         * it is whatever PATH resolves to. Same reasoning as `command -v`. */
+        if (find_applet_by_name(name)) {
             printf("%s is a silex builtin\n", name);
             continue;
         }
@@ -5511,8 +5569,11 @@ static int exec_builtin_hash(shell_ctx_t *sh, int argc, char **argv)
     for (; i < argc; i++) {
         const char *name = argv[i];
 
-        /* Skip builtins and commands with / */
-        if (strchr(name, '/') || find_shell_builtin(name) || find_applet(name)) {
+        /* Skip builtins and commands with /. A SILEX_NO_APPLETS name is NOT
+         * skipped -- it resolves through PATH, so it is exactly the kind of
+         * name `hash` exists to remember. */
+        if (strchr(name, '/') || find_shell_builtin(name) ||
+            find_applet_by_name(name)) {
             continue;
         }
 
