@@ -71,10 +71,30 @@ doing, "it's static" is not the explanation. The builtins are.
 (An earlier revision of this document claimed static linking was worth 23%. It
 was wrong. See below.)
 
-## The interpreter is still slower than dash
+## The interpreter is no longer slower than dash
 
-Re-measured 2026-08-18 with `tests/bench/bench_interpreter.sh`, best-of-3,
-static-pie release against dash 0.5.12:
+**Superseded on 2026-08-20.** Everything in this section was true when it was
+written and is kept because the shape of the story matters — but the numbers
+below are two days stale in silex's favour, which is the exact failure mode
+this document warns about further down. Current figures, interleaved best-of-11
+with every sample validated, `tests/bench/bench_compare.sh`:
+
+    arithmetic while loop 100k     silex  63 ms   dash  75 ms   -> 1.19x FASTER
+    case dispatch 100k             silex  73 ms   dash  85 ms   -> 1.16x FASTER
+    test builtin 100k              silex 101 ms   dash 120 ms   -> 1.19x FASTER
+    function call 50k              silex  41 ms   dash  45 ms   -> 1.10x FASTER
+    parameter expansion 50k        silex  47 ms   dash  51 ms   -> 1.09x FASTER
+
+What closed it: fast paths through `expand_word_full`, `expand_word_assign`,
+the assignment overlay and the variable-table lookup (`docs/OPTIMISATIONS.md`
+I-01..I-04), then a builtin lookup that stopped comparing every command name
+against all 40 table entries (I-05). So "if a workload becomes
+interpretation-bound, silex loses" no longer holds; builds remain
+dispatch-bound either way, so the end-to-end figure at the top is unaffected.
+
+The original section, as measured 2026-08-18 with
+`tests/bench/bench_interpreter.sh`, best-of-3, static-pie release against dash
+0.5.12:
 
     arithmetic while loop 100k     silex 118 ms   dash  76 ms   -> 1.55x slower
     case dispatch 100k             silex 127 ms   dash  86 ms   -> 1.48x slower
@@ -93,7 +113,8 @@ which is how you end up unable to tell a real regression from a stale baseline.
 silex wins on builds because builds spend their shell time *dispatching commands*,
 not *interpreting control flow*. If a workload ever becomes interpretation-bound
 rather than dispatch-bound, silex loses. That is the ceiling, and it is where the
-optimisation effort should go next.
+optimisation effort should go next. *(It went there. See the top of this
+section: as of 2026-08-20 silex is ahead on all five of these cases.)*
 
 (It used to be 56x slower: `has_unquoted_glob()` treated `[` as a glob
 metacharacter, so every `if [ ... ]` ran a full `glob()` over the working

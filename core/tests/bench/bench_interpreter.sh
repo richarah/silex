@@ -12,12 +12,20 @@
 # August it was 1.7x and nobody knew, because nothing re-measured it. A number
 # in a README with no benchmark behind it is a number that silently rots -- so
 # re-read the table below rather than this comment. As of 2026-08-20 claim 2
-# no longer holds as written: silex is AHEAD of dash on four of the five
-# interpretation cases (test builtin 1.17x, case dispatch 1.14x, arithmetic
-# 1.13x, function call level), and parameter expansion is the last one behind,
-# at 1.02x slower. The gap closed from both ends -- the interpreter work in
-# perf/interpreter-and-module-loader, and a builtin lookup that stopped
+# no longer holds as written: silex is AHEAD of dash on ALL FIVE interpretation
+# cases, by 1.09x to 1.19x. The gap closed from both ends -- the interpreter
+# work in perf/interpreter-and-module-loader, and a builtin lookup that stopped
 # running 40 strcmps to say "not a builtin".
+#
+# That "all five" corrects an earlier reading in this same header, which had
+# parameter expansion alone still behind at 1.02x slower. It did not reproduce:
+# re-measured interleaved, best of 11, every sample validated, parameter
+# expansion is 1.09x FASTER -- and so is the build the 1.02x was taken from, so
+# the difference is in the measurement, not the code. The earlier figure came
+# from two SEQUENTIAL runs of this script at the default BENCH_REPS=3, which is
+# exactly the comparison this script cannot make: see bench_compare.sh, which
+# exists for A/B and interleaves. Quote a ratio from here only for silex vs the
+# reference shell, and only from a run of at least 7 reps.
 #
 # WHY NOT bench_shell.sh: that one measures a REAL build (zlib configure+make)
 # and is the honest end-to-end figure, but it is dominated by gcc and needs a
@@ -147,7 +155,7 @@ if [ "$STATUS" -ne 0 ]; then
     exit 1
 fi
 
-echo "Read this as: silex wins big where the shell DISPATCHES, and is now level"
-echo "with dash or slightly ahead where it INTERPRETS -- it used to lose there."
+echo "Read this as: silex wins big where the shell DISPATCHES, and is now ahead"
+echo "of dash everywhere it INTERPRETS too -- it used to lose there."
 echo "Builds are dispatch-bound, which is why the end-to-end figure in"
 echo "bench_shell.sh is positive but small. Do not quote either half alone."
