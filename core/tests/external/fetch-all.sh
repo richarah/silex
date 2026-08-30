@@ -23,7 +23,7 @@ cd "$REPOS_DIR"
 
 # Progress counter
 SUITE=0
-TOTAL=10
+TOTAL=11
 FAILED=""   # names of repos whose clone failed (reported at the end)
 
 fetch_repo() {
@@ -142,6 +142,23 @@ fetch_repo "SQLite" \
 fetch_repo "zlib" \
     "https://github.com/madler/zlib.git" \
     "zlib"
+
+# gnulib is not a suite -- it is a BUILD DEPENDENCY of the GNU suites. grep, sed
+# and coreutils are git checkouts with no ./configure, so each runs ./bootstrap,
+# which needs a full gnulib next to it.
+#
+# It is fetched HERE, sequentially, because those three suites run as a parallel
+# batch and each used to clone it on demand into the same ../gnulib. They raced:
+# whichever got there first left a half-written tree, and the others died with
+#
+#     ./bootstrap: Error: --gnulib-srcdir or $GNULIB_SRCDIR is specified,
+#                  but does not contain gnulib-tool
+#
+# then "./configure: not found", zero tests, and -- until the total=0 blocker --
+# a clean exit 0. Cloning it once up front removes the race entirely.
+fetch_repo "gnulib (build dep for GNU suites)" \
+    "https://git.savannah.gnu.org/git/gnulib.git" \
+    "gnulib"
 
 cd "$REPOS_DIR"
 

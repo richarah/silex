@@ -36,6 +36,14 @@ for _repo in oil smoosh modernish mksh shellspec coreutils grep sed toybox proje
         _missing="$_missing $_repo"
     fi
 done
+# gnulib is checked by CONTENT, not just presence. grep/sed/coreutils bootstrap
+# against it, and a half-written tree -- from a partial cache restore, or from
+# the clone race that used to happen when all three fetched it themselves --
+# satisfies `[ -d ]` while still failing bootstrap with "does not contain
+# gnulib-tool". The directory existing is not the property we need.
+if [ ! -f "tests/external/repos/gnulib/gnulib-tool" ]; then
+    _missing="$_missing gnulib"
+fi
 if [ -n "$_missing" ]; then
     echo ""
     echo "Fetching external test repositories (missing:$_missing)..."
