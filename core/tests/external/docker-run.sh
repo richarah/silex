@@ -36,6 +36,14 @@ for _repo in oil smoosh modernish mksh shellspec coreutils grep sed toybox proje
         _missing="$_missing $_repo"
     fi
 done
+# gnulib is checked by CONTENT, not just presence. grep/sed/coreutils bootstrap
+# against it, and a half-written tree -- from a partial cache restore, or from
+# the clone race that used to happen when all three fetched it themselves --
+# satisfies `[ -d ]` while still failing bootstrap with "does not contain
+# gnulib-tool". The directory existing is not the property we need.
+if [ ! -f "tests/external/repos/gnulib/gnulib-tool" ]; then
+    _missing="$_missing gnulib"
+fi
 if [ -n "$_missing" ]; then
     echo ""
     echo "Fetching external test repositories (missing:$_missing)..."
@@ -124,6 +132,8 @@ echo "  SCORECARD"
 echo "════════════════════════════════════════════════════════════════"
 echo ""
 
+ZERO_TEST_SUITES=""
+
 parse_results() {
     local file="$1"
     local name="$2"
@@ -133,24 +143,43 @@ parse_results() {
         return
     fi
 
-    # Try multiple patterns to extract pass/fail counts
-    local pass=$(grep -iE '(passed|pass|ok)[:\s=]+[0-9]+' "$file" | grep -oE '[0-9]+' | head -1 || echo "?")
-    local fail=$(grep -iE '(failed|fail|not ok)[:\s=]+[0-9]+' "$file" | grep -oE '[0-9]+' | head -1 || echo "?")
-    local total=$(grep -iE 'total[:\s=]+[0-9]+' "$file" | grep -oE '[0-9]+' | head -1 || echo "?")
-
-    # If we couldn't parse, check for specific patterns
-    if [ "$pass" = "?" ] && [ "$fail" = "?" ]; then
-        # Check for SKIP/PASS markers
-        if grep -q "SKIP:" "$file"; then
-            printf "  %-25s SKIPPED\n" "$name"
-            return
-        elif grep -q "ERROR:" "$file"; then
-            printf "  %-25s ERROR\n" "$name"
-            return
+    # Read the canonical line each runner emits:  <label>: pass=N fail=N total=N
+    #
+    # The previous approach grepped the whole file for /(pass|fail|total)[:=]/
+    # and took `grep -oE '[0-9]+' | head -1` -- the FIRST number on the first
+    # matching line, for all three counters. Against a line like
+    # "TOTAL: 583" followed by "PASS: 201" it reported pass=201 fail=201
+    # total=201 for mksh, whose real result was 201/382/583, and 16/16/16 for
+    # toybox, whose real result was 16/1/17. It never read the same number
+    # twice by accident; it read the same number three times by construction.
+    local summary
+    summary=$(grep -oE 'pass=[0-9]+ fail=[0-9]+ total=[0-9]+' "$file" | tail -1)
+    if [ -n "$summary" ]; then
+        local pass fail total
+        pass=$(printf '%s' "$summary" | sed 's/.*pass=\([0-9]*\).*/\1/')
+        fail=$(printf '%s' "$summary" | sed 's/.*fail=\([0-9]*\).*/\1/')
+        total=$(printf '%s' "$summary" | sed 's/.*total=\([0-9]*\).*/\1/')
+        if [ "$total" = "0" ]; then
+            # A suite that ran nothing is not a suite that passed. Recorded so
+            # the critical-requirements section can block on it.
+            printf "  %-25s RAN NO TESTS (total=0)\n" "$name"
+            ZERO_TEST_SUITES="$ZERO_TEST_SUITES $name"
+        else
+            printf "  %-25s pass: %-6s fail: %-6s total: %s\n" "$name" "$pass" "$fail" "$total"
         fi
+        return
     fi
 
-    printf "  %-25s pass: %-6s fail: %-6s total: %s\n" "$name" "$pass" "$fail" "$total"
+    # Runners that emit a verdict but no counts. Report the verdict as-is
+    # rather than inventing numbers for it.
+    local verdict
+    verdict=$(grep -oE '^Result: .*' "$file" | tail -1)
+    if [ -n "$verdict" ]; then
+        printf "  %-25s %s\n" "$name" "$verdict"
+        return
+    fi
+
+    printf "  %-25s NO MACHINE-READABLE SUMMARY\n" "$name"
 }
 
 # Parse each suite
@@ -196,6 +225,21 @@ else
     echo "? Configure results not found"
 fi
 
+# Check 3: no suite may report zero tests.
+#
+# The per-suite exit-status block below catches a suite that CRASHED, but not
+# one that exited 0 having run nothing. gnu-coreutils, gnu-grep and gnu-sed all
+# did exactly that -- "./configure: not found", zero tests, exit 0 -- and sailed
+# through the gate, which is the same class of hole the exit-status block was
+# added to close.
+if [ -n "$ZERO_TEST_SUITES" ]; then
+    echo "✗ suite(s) ran zero tests:$ZERO_TEST_SUITES (BLOCKER)"
+    ZERO_TEST_FAIL=1
+else
+    echo "✓ every suite with counts ran at least one test (PASS)"
+    ZERO_TEST_FAIL=0
+fi
+
 echo ""
 echo "════════════════════════════════════════════════════════════════"
 echo "  Results saved to: $RESULTS/*-$TIMESTAMP.txt"
@@ -235,6 +279,10 @@ done
 echo ""
 if [ "$failed" -gt 0 ]; then
     echo "✗ $failed of 10 suite(s) failed. Results in $RESULTS/"
+    exit 1
+fi
+if [ "${ZERO_TEST_FAIL:-0}" -ne 0 ]; then
+    echo "✗ suite(s) ran zero tests:$ZERO_TEST_SUITES"
     exit 1
 fi
 echo "✓ All 10 suites passed."
