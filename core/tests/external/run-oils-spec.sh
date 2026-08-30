@@ -55,8 +55,38 @@ s = s.replace(
     "            _out, _err = p.communicate()\n"
     "            actual['stdout'] = _out.decode('utf-8', 'replace') if isinstance(_out, bytes) else _out\n"
     "            actual['stderr'] = _err.decode('utf-8', 'replace') if isinstance(_err, bytes) else _err")
+
+# Python-2-only constructs. A pristine `git clone --depth 1` still carries all
+# of these, so they MUST be patched here rather than in the checkout. They were
+# absent for a long time only because the local repos/oil had been hand-patched
+# in place -- which CI, cloning fresh every run, could never reproduce: every
+# one of the 139 files died on `import cStringIO` and was counted as
+# "crash/hang", giving TOTAL cases: 0.
+s = s.replace("cStringIO.StringIO()", "StringIO_module.StringIO()")
+s = s.replace("import cStringIO\n",
+              "try:\n"
+              "    import cStringIO as StringIO_module\n"
+              "except ImportError:\n"
+              "    import io as StringIO_module\n")
+s = s.replace("unique.iteritems()", "unique.items()")
+s = s.replace("xrange(", "range(")
 open(p, 'w').write(s)
 EOF
+
+# Fail loudly if the patched harness will not even parse. Without this, any
+# future upstream drift reappears as 139 identical "no result (crash/hang)"
+# lines and a TOTAL of 0 -- which reads like a silex regression rather than a
+# harness that never started.
+# An IMPORT smoke test, not py_compile: every py2-ism that has actually broken
+# this harness (cStringIO, xrange, iteritems) is valid python3 SYNTAX and fails
+# only at run time, so py_compile passes them all and guards nothing. Importing
+# the module executes the import list for real.
+if ! PYTHONPATH="$WORK/harness" python3 -c 'import test.sh_spec' 2>"$WORK/import.err"; then
+    echo "ERROR: patched sh_spec.py does not import under python3:"
+    sed 's/^/    /' "$WORK/import.err" | tail -15
+    echo "  (upstream Oils changed; the py3 patch list in $0 needs updating)"
+    exit 1
+fi
 
 PASS=0; FAIL=0; NFILES=0; ERRFILES=0
 cd "$OIL_DIR"
@@ -74,10 +104,17 @@ for f in spec/*.test.sh; do
             --tmp-env "$WORK/tmp" --path-env "$PATH" \
             --stats-file "$WORK/stats" \
             --stats-template '%(num_passed)d %(num_failed)d %(num_cases_run)d' \
-            "$f" "$SILEX" >/dev/null 2>&1
+            "$f" "$SILEX" >/dev/null 2>"$WORK/err"
     if [ ! -f "$WORK/stats" ]; then
         ERRFILES=$((ERRFILES + 1))
         echo "  no result (crash/hang): $f"
+        # Show the harness's own diagnosis once. A systemic breakage (bad
+        # import, wrong argv) hits all 139 files identically, and printing the
+        # reason once turns a wall of "crash/hang" into something actionable.
+        if [ "$ERRFILES" -eq 1 ] && [ -s "$WORK/err" ]; then
+            echo "    first failure, stderr was:"
+            sed 's/^/      /' "$WORK/err" | tail -15
+        fi
         continue
     fi
     read -r p fl _total < "$WORK/stats"
