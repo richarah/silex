@@ -5,6 +5,7 @@
 #endif
 
 #include "../util/error.h"
+#include "../util/opt.h"
 
 #include <limits.h>
 #include <stdio.h>
@@ -222,106 +223,47 @@ int applet_cut(int argc, char **argv)
     int have_delim = 0;
     const char *positions = NULL;
     int mode = 0; /* 'b', 'c', or 'f' */
-    int i;
+    static const opt_long_t longs[] = {
+        { "bytes",          OPT_JOINED, 'b' },
+        { "characters",     OPT_JOINED, 'c' },
+        { "fields",         OPT_JOINED, 'f' },
+        { "delimiter",      OPT_JOINED, 'd' },
+        { "only-delimited", OPT_BARE,   's' },
+        { NULL, 0, 0 }
+    };
+    opt_t o;
+    int c;
 
-    for (i = 1; i < argc; i++) {
-        const char *arg = argv[i];
-
-        if (strcmp(arg, "--") == 0) { i++; break; }
-
-        if (strncmp(arg, "--bytes=", 8) == 0) {
-            positions = arg + 8; opt_b = 1; mode = 'b'; continue;
-        }
-        if (strncmp(arg, "--characters=", 13) == 0) {
-            positions = arg + 13; opt_c = 1; mode = 'c'; continue;
-        }
-        if (strncmp(arg, "--fields=", 9) == 0) {
-            positions = arg + 9; opt_f = 1; mode = 'f'; continue;
-        }
-        if (strncmp(arg, "--delimiter=", 12) == 0) {
-            if (strlen(arg + 12) != 1) {
+    opt_init(&o, argc, argv, "b:c:f:d:s", longs, 0);
+    while ((c = opt_next(&o)) != OPT_DONE) {
+        switch (c) {
+        case 'b': positions = o.arg; opt_b = 1; mode = 'b'; break;
+        case 'c': positions = o.arg; opt_c = 1; mode = 'c'; break;
+        case 'f': positions = o.arg; opt_f = 1; mode = 'f'; break;
+        case 'd':
+            if (strlen(o.arg) != 1) {
                 err_msg("cut", "the delimiter must be a single character");
                 return 1;
             }
-            delim = arg[12]; have_delim = 1; continue;
-        }
-        if (strcmp(arg, "--only-delimited") == 0) { opt_s = 1; continue; }
-
-        if (arg[0] != '-' || arg[1] == '\0')
+            delim = o.arg[0];
+            have_delim = 1;
             break;
-
-        const char *p = arg + 1;
-        int stop = 0;
-        while (*p && !stop) {
-            switch (*p) {
-            case 'b':
-                opt_b = 1; mode = 'b';
-                if (p[1]) { positions = p + 1; stop = 1; }
-                else {
-                    i++;
-                    if (i >= argc) {
-                        err_usage("cut", "-b LIST [-z] [FILE...]");
-                        return 1;
-                    }
-                    positions = argv[i];
-                }
-                break;
-            case 'c':
-                opt_c = 1; mode = 'c';
-                if (p[1]) { positions = p + 1; stop = 1; }
-                else {
-                    i++;
-                    if (i >= argc) {
-                        err_usage("cut", "-c LIST [-z] [FILE...]");
-                        return 1;
-                    }
-                    positions = argv[i];
-                }
-                break;
-            case 'f':
-                opt_f = 1; mode = 'f';
-                if (p[1]) { positions = p + 1; stop = 1; }
-                else {
-                    i++;
-                    if (i >= argc) {
-                        err_usage("cut", "-f LIST [-d DELIM] [-s] [FILE...]");
-                        return 1;
-                    }
-                    positions = argv[i];
-                }
-                break;
-            case 'd':
-                if (p[1]) {
-                    if (p[2] != '\0') {
-                        err_msg("cut", "the delimiter must be a single character");
-                        return 1;
-                    }
-                    delim = p[1];
-                    have_delim = 1;
-                    stop = 1;
-                } else {
-                    i++;
-                    if (i >= argc) {
-                        err_usage("cut", "-f LIST -d DELIM [FILE...]");
-                        return 1;
-                    }
-                    if (strlen(argv[i]) != 1) {
-                        err_msg("cut", "the delimiter must be a single character");
-                        return 1;
-                    }
-                    delim = argv[i][0];
-                    have_delim = 1;
-                }
-                break;
-            case 's': opt_s = 1; break;
-            default:
-                err_msg("cut", "unrecognized option '-%c'", *p);
-                err_usage("cut", "[-bcf] LIST [-d DELIM] [-s] [FILE...]");
-                return 1;
+        case 's': opt_s = 1; break;
+        case OPT_MISSING:
+            switch (o.opt) {
+            case 'b': err_usage("cut", "-b LIST [-z] [FILE...]"); break;
+            case 'c': err_usage("cut", "-c LIST [-z] [FILE...]"); break;
+            case 'f': err_usage("cut", "-f LIST [-d DELIM] [-s] [FILE...]"); break;
+            default:  err_usage("cut", "-f LIST -d DELIM [FILE...]"); break;
             }
-            p++;
+            return 1;
+        default:
+            opt_err_unknown("cut", &o);
+            err_usage("cut", "[-bcf] LIST [-d DELIM] [-s] [FILE...]");
+            return 1;
         }
     }
+    int i = o.ind;
 
     if (mode == 0) {
         err_msg("cut", "you must specify a list of bytes, characters, or fields");

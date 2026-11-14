@@ -9,6 +9,7 @@
 #endif
 
 #include "../util/error.h"
+#include "../util/opt.h"
 #include "../module/registry.h"
 
 #include <ctype.h>
@@ -749,149 +750,90 @@ int applet_sort(int argc, char **argv)
     g_nkeys  = 0;
     g_n_mmaps = 0;
     int ret = 0;
-    int i;
+    static const opt_long_t longs[] = {
+        { "reverse",               OPT_BARE,   'r' },
+        { "unique",                OPT_BARE,   'u' },
+        { "stable",                OPT_BARE,   's' },
+        { "zero-terminated",       OPT_BARE,   'z' },
+        { "numeric-sort",          OPT_BARE,   'n' },
+        { "general-numeric-sort",  OPT_BARE,   'g' },
+        { "human-numeric-sort",    OPT_BARE,   'h' },
+        { "version-sort",          OPT_BARE,   'V' },
+        { "month-sort",            OPT_BARE,   'M' },
+        { "ignore-leading-blanks", OPT_BARE,   'b' },
+        { "dictionary-order",      OPT_BARE,   'd' },
+        { "ignore-case",           OPT_BARE,   'f' },
+        { "ignore-nonprinting",    OPT_BARE,   'i' },
+        { "output",                OPT_JOINED, 'o' },
+        { "field-separator",       OPT_JOINED, 't' },
+        { "key",                   OPT_JOINED, 'k' },
+        { NULL, 0, 0 }
+    };
+    opt_t o;
+    int c;
 
-    for (i = 1; i < argc; i++) {
-        const char *arg = argv[i];
-
-        if (strcmp(arg, "--") == 0) { i++; break; }
-        if (arg[0] != '-' || arg[1] == '\0') break;
-
-        /* Long options */
-        if (strcmp(arg, "--reverse") == 0)          { g_opts.reverse = 1; continue; }
-        if (strcmp(arg, "--unique") == 0)            { g_opts.unique = 1; continue; }
-        if (strcmp(arg, "--stable") == 0)            { continue; /* always stable */ }
-        if (strcmp(arg, "--zero-terminated") == 0)   { g_opts.zero_term = 1; continue; }
-        if (strcmp(arg, "--numeric-sort") == 0)      { g_opts.numeric = 1; continue; }
-        if (strcmp(arg, "--general-numeric-sort") == 0) { g_opts.general_numeric = 1; continue; }
-        if (strcmp(arg, "--human-numeric-sort") == 0)   { g_opts.human_numeric = 1; continue; }
-        if (strcmp(arg, "--version-sort") == 0)      { g_opts.version_sort = 1; continue; }
-        if (strcmp(arg, "--month-sort") == 0)        { g_opts.month_sort = 1; continue; }
-        if (strcmp(arg, "--ignore-leading-blanks") == 0) { g_opts.ignore_blanks = 1; continue; }
-        if (strcmp(arg, "--dictionary-order") == 0)  { g_opts.dict_order = 1; continue; }
-        if (strcmp(arg, "--ignore-case") == 0)       { g_opts.fold_lower = 1; continue; }
-        if (strcmp(arg, "--ignore-nonprinting") == 0) { g_opts.ignore_nonprint = 1; continue; }
-
-        if (strncmp(arg, "--output=", 9) == 0) { g_opts.outfile = arg + 9; continue; }
-        if (strncmp(arg, "--field-separator=", 18) == 0) {
-            g_opts.field_sep = arg[18];
+    opt_init(&o, argc, argv, "bdfinghVMrusczRt:k:o:", longs, 0);
+    while ((c = opt_next(&o)) != OPT_DONE) {
+        switch (c) {
+        case 'b': g_opts.ignore_blanks = 1; break;
+        case 'd': g_opts.dict_order = 1; break;
+        case 'f': g_opts.fold_lower = 1; break;
+        case 'i': g_opts.ignore_nonprint = 1; break;
+        case 'n': g_opts.numeric = 1; break;
+        case 'g': g_opts.general_numeric = 1; break;
+        case 'h': g_opts.human_numeric = 1; break;
+        case 'V': g_opts.version_sort = 1; break;
+        case 'M': g_opts.month_sort = 1; break;
+        case 'r': g_opts.reverse = 1; break;
+        case 'u': g_opts.unique = 1; break;
+        case 's': break; /* stable — already our default */
+        case 'z': g_opts.zero_term = 1; break;
+        case 'c': g_opts.check_only = 1; break;
+        case 'R': g_opts.random_sort = 1; break;
+        case 't':
+            g_opts.field_sep = o.arg[0];
             g_opts.have_sep = 1;
-            continue;
-        }
-        if (strncmp(arg, "--key=", 6) == 0) {
+            break;
+        case 'k':
             if (g_nkeys >= MAX_KEYS) {
                 err_msg("sort", "too many -k keys");
                 return 1;
             }
-            if (parse_keydef(arg + 6, &g_keys[g_nkeys]) != 0) {
-                err_msg("sort", "invalid key: '%s'", arg + 6);
+            if (parse_keydef(o.arg, &g_keys[g_nkeys]) != 0) {
+                err_msg("sort", "invalid key: '%s'", o.arg);
                 return 1;
             }
             g_nkeys++;
-            continue;
-        }
-
-        /* Unrecognized long option: try module lookup */
-        if (arg[1] == '-') {
-            silex_module_t *mod = registry_lookup("sort", arg);
-            if (mod) {
-                return mod->handler(argc, argv, i);
-            }
-            err_msg("sort", "unrecognized option '%s'", arg);
+            break;
+        case 'o':
+            g_opts.outfile = o.arg;
+            break;
+        case OPT_MISSING:
             err_usage("sort", "[-bdfginrsuvz] [-t SEP] [-k KEY] [-o FILE] [FILE...]");
-            return 2;
-        }
-
-        /* Short flags (clustered) */
-        const char *p = arg + 1;
-        int stop = 0;
-        while (*p && !stop) {
-            switch (*p) {
-            case 'b': g_opts.ignore_blanks = 1; break;
-            case 'd': g_opts.dict_order = 1; break;
-            case 'f': g_opts.fold_lower = 1; break;
-            case 'i': g_opts.ignore_nonprint = 1; break;
-            case 'n': g_opts.numeric = 1; break;
-            case 'g': g_opts.general_numeric = 1; break;
-            case 'h': g_opts.human_numeric = 1; break;
-            case 'V': g_opts.version_sort = 1; break;
-            case 'M': g_opts.month_sort = 1; break;
-            case 'r': g_opts.reverse = 1; break;
-            case 'u': g_opts.unique = 1; break;
-            case 's': break; /* stable — already our default */
-            case 'z': g_opts.zero_term = 1; break;
-            case 'c': g_opts.check_only = 1; break;
-            case 'R': g_opts.random_sort = 1; break;
-            case 't': {
-                const char *sep;
-                if (p[1]) { sep = p + 1; }  /* stop set unconditionally below */
-                else {
-                    i++;
-                    if (i >= argc) {
-                        err_usage("sort", "[-bdfginrsuvz] [-t SEP] [-k KEY] [-o FILE] [FILE...]");
-                        return 1;
-                    }
-                    sep = argv[i];
-                }
-                g_opts.field_sep = sep[0];
-                g_opts.have_sep = 1;
-                stop = 1;
-                break;
-            }
-            case 'k': {
-                const char *keystr;
-                if (p[1]) { keystr = p + 1; }  /* stop set unconditionally below */
-                else {
-                    i++;
-                    if (i >= argc) {
-                        err_usage("sort", "[-bdfginrsuvz] [-t SEP] [-k KEY] [-o FILE] [FILE...]");
-                        return 1;
-                    }
-                    keystr = argv[i];
-                }
-                if (g_nkeys >= MAX_KEYS) {
-                    err_msg("sort", "too many -k keys");
-                    return 1;
-                }
-                if (parse_keydef(keystr, &g_keys[g_nkeys]) != 0) {
-                    err_msg("sort", "invalid key: '%s'", keystr);
-                    return 1;
-                }
-                g_nkeys++;
-                stop = 1;
-                break;
-            }
-            case 'o': {
-                const char *ofile;
-                if (p[1]) { ofile = p + 1; }  /* stop set unconditionally below */
-                else {
-                    i++;
-                    if (i >= argc) {
-                        err_usage("sort", "[-bdfginrsuvz] [-t SEP] [-k KEY] [-o FILE] [FILE...]");
-                        return 1;
-                    }
-                    ofile = argv[i];
-                }
-                g_opts.outfile = ofile;
-                stop = 1;
-                break;
-            }
-            default:
-                /* Try module lookup before error */
-                {
-                    char flag_str[3] = {'-', *p, '\0'};
-                    silex_module_t *mod = registry_lookup("sort", flag_str);
-                    if (mod) {
-                        return mod->handler(argc, argv, i);
-                    }
-                }
-                err_msg("sort", "unrecognized option '-%c'", *p);
+            return 1;
+        default:
+            /* Unrecognized long option: try module lookup */
+            if (o.islong) {
+                silex_module_t *mod = registry_lookup("sort", o.cur);
+                if (mod)
+                    return mod->handler(argc, argv, o.cur_ind);
+                err_msg("sort", "unrecognized option '%s'", o.cur);
                 err_usage("sort", "[-bdfginrsuvz] [-t SEP] [-k KEY] [-o FILE] [FILE...]");
                 return 2;
             }
-            p++;
+            /* Try module lookup before error */
+            {
+                char flag_str[3] = {'-', (char)o.opt, '\0'};
+                silex_module_t *mod = registry_lookup("sort", flag_str);
+                if (mod)
+                    return mod->handler(argc, argv, o.cur_ind);
+            }
+            opt_err_unknown("sort", &o);
+            err_usage("sort", "[-bdfginrsuvz] [-t SEP] [-k KEY] [-o FILE] [FILE...]");
+            return 2;
         }
     }
+    int i = o.ind;
 
     /* Read all input lines */
     line_t *lines = NULL;

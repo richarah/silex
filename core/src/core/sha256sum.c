@@ -5,6 +5,7 @@
 #endif
 
 #include "../util/error.h"
+#include "../util/opt.h"
 
 #include <errno.h>
 #include <limits.h>
@@ -226,32 +227,33 @@ int applet_sha256sum(int argc, char **argv)
     int opt_status = 0;   /* --status: no output in check mode */
     int opt_warn   = 1;   /* --warn / --quiet */
     int opt_b      = 0;   /* -b: binary mode (ignore on Linux) */
-    int i;
+    enum { L_STATUS = 0x100, L_QUIET, L_WARN };
+    static const opt_long_t longs[] = {
+        { "check",  OPT_BARE, 'c'      },
+        { "status", OPT_BARE, L_STATUS },
+        { "quiet",  OPT_BARE, L_QUIET  },
+        { "warn",   OPT_BARE, L_WARN   },
+        { NULL, 0, 0 }
+    };
+    opt_t o;
+    int c;
 
-    for (i = 1; i < argc; i++) {
-        const char *arg = argv[i];
-        if (strcmp(arg, "--") == 0) { i++; break; }
-        if (arg[0] != '-' || arg[1] == '\0') break;
-
-        if (strcmp(arg, "--check") == 0)  { opt_c = 1; continue; }
-        if (strcmp(arg, "--status") == 0) { opt_status = 1; continue; }
-        if (strcmp(arg, "--quiet") == 0)  { opt_warn = 0; continue; }
-        if (strcmp(arg, "--warn") == 0)   { opt_warn = 1; continue; }
-
-        const char *p = arg + 1;
-        while (*p) {
-            switch (*p) {
-            case 'c': opt_c = 1; break;
-            case 'b': opt_b = 1; break;
-            case 't': opt_b = 0; break;
-            default:
-                err_msg("sha256sum", "unrecognized option '-%c'", *p);
-                err_usage("sha256sum", "[-c] [FILE]...");
-                return 1;
-            }
-            p++;
+    opt_init(&o, argc, argv, "cbt", longs, 0);
+    while ((c = opt_next(&o)) != OPT_DONE) {
+        switch (c) {
+        case 'c': opt_c = 1; break;
+        case 'b': opt_b = 1; break;
+        case 't': opt_b = 0; break;
+        case L_STATUS: opt_status = 1; break;
+        case L_QUIET:  opt_warn = 0; break;
+        case L_WARN:   opt_warn = 1; break;
+        default:
+            opt_err_unknown("sha256sum", &o);
+            err_usage("sha256sum", "[-c] [FILE]...");
+            return 1;
         }
     }
+    int i = o.ind;
     (void)opt_b;
 
     /* Check mode */

@@ -5,6 +5,7 @@
 #endif
 
 #include "../util/error.h"
+#include "../util/opt.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -75,30 +76,25 @@ static void do_dirname(const char *path, char *out, size_t outsz)
 
 int applet_dirname(int argc, char **argv)
 {
+    static const opt_long_t longs[] = {
+        { "zero", OPT_BARE, 'z' },
+        { NULL, 0, 0 }
+    };
     int opt_z = 0; /* -z: NUL-terminated output */
-    int i;
+    opt_t o;
+    int c;
 
-    for (i = 1; i < argc; i++) {
-        const char *arg = argv[i];
-
-        if (strcmp(arg, "--") == 0) { i++; break; }
-        if (strcmp(arg, "--zero") == 0) { opt_z = 1; continue; }
-
-        if (arg[0] != '-' || arg[1] == '\0')
-            break;
-
-        const char *p = arg + 1;
-        while (*p) {
-            switch (*p) {
-            case 'z': opt_z = 1; break;
-            default:
-                err_msg("dirname", "unrecognized option '-%c'", *p);
-                err_usage("dirname", "[-z] NAME...");
-                return 1;
-            }
-            p++;
+    opt_init(&o, argc, argv, "z", longs, 0);
+    while ((c = opt_next(&o)) != OPT_DONE) {
+        switch (c) {
+        case 'z': opt_z = 1; break;
+        default:
+            opt_err_unknown("dirname", &o);
+            err_usage("dirname", "[-z] NAME...");
+            return 1;
         }
     }
+    int i = o.ind;
 
     if (i >= argc) {
         err_usage("dirname", "[-z] NAME...");

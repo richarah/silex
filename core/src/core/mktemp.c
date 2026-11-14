@@ -5,6 +5,7 @@
 #endif
 
 #include "../util/error.h"
+#include "../util/opt.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,40 +25,27 @@ int applet_mktemp(int argc, char **argv)
     if (!envtmp || envtmp[0] == '\0')
         envtmp = "/tmp";
 
-    for (i = 1; i < argc; i++) {
-        const char *arg = argv[i];
-        if (strcmp(arg, "--") == 0) { i++; break; }
-        if (arg[0] != '-' || arg[1] == '\0') break;
-
-        const char *p = arg + 1;
-        int stop = 0;
-        while (*p && !stop) {
-            switch (*p) {
-            case 'd': opt_d = 1; break;
-            case 'u': opt_u = 1; break;
-            case 'p':
-                if (p[1]) { tmpdir = p + 1; stop = 1; }
-                else {
-                    i++;
-                    if (i >= argc) {
-                        err_usage("mktemp", "[-d] [-p DIR] [TEMPLATE]");
-                        return 1;
-                    }
-                    tmpdir = argv[i];
-                    stop = 1;
-                }
-                break;
-            case 't':
-                /* -t: prefix only; deprecated but common */
-                break;
-            default:
-                err_msg("mktemp", "unrecognized option '-%c'", *p);
-                err_usage("mktemp", "[-d] [-p DIR] [TEMPLATE]");
-                return 1;
-            }
-            p++;
+    opt_t o;
+    int c;
+    opt_init(&o, argc, argv, "dup:t", NULL, 0);
+    while ((c = opt_next(&o)) != OPT_DONE) {
+        switch (c) {
+        case 'd': opt_d = 1; break;
+        case 'u': opt_u = 1; break;
+        case 'p': tmpdir = o.arg; break;
+        case 't':
+            /* -t: prefix only; deprecated but common */
+            break;
+        case OPT_MISSING:
+            err_usage("mktemp", "[-d] [-p DIR] [TEMPLATE]");
+            return 1;
+        default:
+            opt_err_unknown("mktemp", &o);
+            err_usage("mktemp", "[-d] [-p DIR] [TEMPLATE]");
+            return 1;
         }
     }
+    i = o.ind;
 
     if (i < argc)
         tmpl = argv[i];

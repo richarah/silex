@@ -156,6 +156,15 @@ Shell builtins (`applet_*`) follow the same convention. Internal helpers that
 cannot fail return void. Functions that return pointers return NULL on failure
 and print to stderr before returning.
 
+### Option parsing
+
+Applets with ordinary flags parse them with the shared iterator in
+`src/util/opt.h` (not getopt: its global `optind` state would leak between
+in-process builtin runs). It walks argv once, keeps all state in a stack
+`opt_t`, and never allocates. It only classifies arguments; every message and
+exit code stays with the applet. Not covered: echo, printf, find, sh, env,
+xargs and loadable modules, whose syntax is their own.
+
 ### Memory
 
 - Per-command allocations use `arena_alloc()` from `src/util/arena.h`.

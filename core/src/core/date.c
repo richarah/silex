@@ -5,6 +5,7 @@
 #endif
 
 #include "../util/error.h"
+#include "../util/opt.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -312,94 +313,76 @@ int applet_date(int argc, char **argv)
     const char *opt_iso    = NULL;  /* -I[TIMESPEC] */
     const char *set_date   = NULL;  /* -s DATE */
     const char *op_settime = NULL;  /* bare MMDDhhmm[[CC]YY][.ss] operand */
-    int i;
+    static const opt_long_t longs[] = {
+        { "date",      OPT_REQ,  'd' },
+        { "utc",       OPT_BARE, 'u' },
+        { "universal", OPT_BARE, 'u' },
+        { "rfc-2822",  OPT_BARE, 'R' },
+        { "rfc-email", OPT_BARE, 'R' },
+        { NULL, 0, 0 }
+    };
+    opt_t o;
+    int c;
 
-    for (i = 1; i < argc; i++) {
-        const char *arg = argv[i];
-
-        if (strcmp(arg, "--") == 0) { i++; break; }
-
-        /* +FORMAT -- at most one */
-        if (arg[0] == '+') {
-            if (opt_format) {
-                err_msg("date", "extra operand '%s'", arg);
-                return 1;
+    opt_init(&o, argc, argv, "uRI::s:d:", longs, 0);
+    for (;;) {
+        const char *arg = opt_peek(&o);
+        if (arg) {
+            /* +FORMAT -- at most one */
+            if (arg[0] == '+') {
+                if (opt_format) {
+                    err_msg("date", "extra operand '%s'", arg);
+                    return 1;
+                }
+                opt_format = arg + 1;
+                opt_skip(&o);
+                continue;
             }
-            opt_format = arg + 1;
-            continue;
-        }
-
-        if (strncmp(arg, "--date=", 7) == 0) {
-            opt_date = arg + 7;
-            continue;
-        }
-        if (strcmp(arg, "--date") == 0 || strcmp(arg, "-d") == 0) {
-            i++;
-            if (i >= argc) {
-                err_usage("date", "[-uR] [-d STRING] [+FORMAT]");
-                return 1;
-            }
-            opt_date = argv[i];
-            continue;
-        }
-        if (strcmp(arg, "--utc") == 0 || strcmp(arg, "--universal") == 0) {
-            opt_u = 1;
-            continue;
-        }
-        if (strcmp(arg, "--rfc-2822") == 0 ||
-            strcmp(arg, "--rfc-email") == 0) {
-            opt_R = 1;
-            continue;
-        }
-        if (strncmp(arg, "--iso-8601", 10) == 0) {
-            if (arg[10] == '=')
-                opt_iso = arg + 11;
-            else
-                opt_iso = "seconds";
-            continue;
-        }
-
-        if (arg[0] != '-' || arg[1] == '\0')
-            break;
-
-        const char *p = arg + 1;
-        int stop = 0;
-        while (*p && !stop) {
-            switch (*p) {
-            case 'u': opt_u = 1; break;
-            case 'R': opt_R = 1; break;
-            case 'I':
-                /* -I or -ITIMESPEC */
-                if (p[1]) {
-                    opt_iso = p + 1;
-                    stop = 1;
-                } else {
+            /* --iso-8601[=TIMESPEC]; anything else after the name is
+             * ignored, as it always has been */
+            if (strncmp(arg, "--iso-8601", 10) == 0) {
+                if (arg[10] == '=')
+                    opt_iso = arg + 11;
+                else
                     opt_iso = "seconds";
-                }
-                break;
-            case 's':
-                /* -s DATE */
-                if (p[1]) {
-                    set_date = p + 1;
-                    stop = 1;
-                } else {
-                    i++;
-                    if (i >= argc) {
-                        err_usage("date", "[-uR] [-d STRING] [-s DATE] [+FORMAT]");
-                        return 1;
-                    }
-                    set_date = argv[i];
-                }
-                opt_set = 1;
-                break;
-            default:
-                err_msg("date", "unrecognized option '-%c'", *p);
-                err_usage("date", "[-uRIs] [-d STRING] [+FORMAT]");
-                return 1;
+                opt_skip(&o);
+                continue;
             }
-            p++;
+        }
+
+        c = opt_next(&o);
+        if (c == OPT_DONE)
+            break;
+        /* -d is only recognised as a word of its own, never in a cluster or
+         * with its argument attached. */
+        if (o.opt == 'd' && !o.islong && strcmp(o.cur, "-d") != 0)
+            c = OPT_UNKNOWN;
+        switch (c) {
+        case 'd': opt_date = o.arg; break;
+        case 'u': opt_u = 1; break;
+        case 'R': opt_R = 1; break;
+        case 'I':
+            /* -I or -ITIMESPEC */
+            opt_iso = o.arg ? o.arg : "seconds";
+            break;
+        case 's':
+            /* -s DATE */
+            set_date = o.arg;
+            opt_set = 1;
+            break;
+        case OPT_MISSING:
+            if (o.opt == 's')
+                err_usage("date", "[-uR] [-d STRING] [-s DATE] [+FORMAT]");
+            else
+                err_usage("date", "[-uR] [-d STRING] [+FORMAT]");
+            return 1;
+        default:
+            opt_err_unknown("date", &o);
+            err_usage("date", "[-uRIs] [-d STRING] [+FORMAT]");
+            return 1;
         }
     }
+    int i = o.ind;
 
     /* Anything left is an operand. `date [+FORMAT]` takes at most one, and a
      * non-'+' operand is the obsolescent MMDDhhmm[[CC]YY][.ss] "set the clock"

@@ -8,6 +8,7 @@
 #endif
 
 #include "../util/error.h"
+#include "../util/opt.h"
 #include "../util/path.h"
 
 #include <errno.h>
@@ -72,44 +73,36 @@ int applet_readlink(int argc, char **argv)
     int opt_n = 0; /* -n: no newline */
     int opt_q = 0; /* -q: quiet (suppress errors) */
     int opt_z = 0; /* -z: NUL-terminated output */
-    int i;
+    static const opt_long_t longs[] = {
+        { "canonicalize",          OPT_BARE, 'f' },
+        { "canonicalize-existing", OPT_BARE, 'e' },
+        { "canonicalize-missing",  OPT_BARE, 'm' },
+        { "no-newline",            OPT_BARE, 'n' },
+        { "quiet",                 OPT_BARE, 'q' },
+        { "silent",                OPT_BARE, 'q' },
+        { "zero",                  OPT_BARE, 'z' },
+        { NULL, 0, 0 }
+    };
+    opt_t o;
+    int c;
 
-    for (i = 1; i < argc; i++) {
-        const char *arg = argv[i];
-
-        if (strcmp(arg, "--") == 0) { i++; break; }
-
-        if (strcmp(arg, "--canonicalize") == 0)               { opt_f = 1; continue; }
-        if (strcmp(arg, "--canonicalize-existing") == 0)       { opt_e = 1; continue; }
-        if (strcmp(arg, "--canonicalize-missing") == 0)        { opt_m = 1; continue; }
-        if (strcmp(arg, "--no-newline") == 0)                  { opt_n = 1; continue; }
-        if (strcmp(arg, "--quiet") == 0 ||
-            strcmp(arg, "--silent") == 0)                      { opt_q = 1; continue; }
-        if (strcmp(arg, "--zero") == 0)                        { opt_z = 1; continue; }
-
-        if (arg[0] != '-' || arg[1] == '\0')
-            break;
-
-        const char *p = arg + 1;
-        int stop = 0;
-        while (*p && !stop) {
-            switch (*p) {
-            case 'f': opt_f = 1; break;
-            case 'e': opt_e = 1; break;
-            case 'm': opt_m = 1; break;
-            case 'n': opt_n = 1; break;
-            case 'q': opt_q = 1; break;
-            case 's': opt_q = 1; break; /* -s = --silent */
-            case 'z': opt_z = 1; break;
-            default:
-                err_msg("readlink", "unrecognized option '-%c'", *p);
-                err_usage("readlink", "[-femnqz] FILE...");
-                return 1;
-            }
-            p++;
+    opt_init(&o, argc, argv, "femnqsz", longs, 0);
+    while ((c = opt_next(&o)) != OPT_DONE) {
+        switch (c) {
+        case 'f': opt_f = 1; break;
+        case 'e': opt_e = 1; break;
+        case 'm': opt_m = 1; break;
+        case 'n': opt_n = 1; break;
+        case 'q': opt_q = 1; break;
+        case 's': opt_q = 1; break; /* -s = --silent */
+        case 'z': opt_z = 1; break;
+        default:
+            opt_err_unknown("readlink", &o);
+            err_usage("readlink", "[-femnqz] FILE...");
+            return 1;
         }
-        (void)stop;
     }
+    int i = o.ind;
 
     if (i >= argc) {
         err_usage("readlink", "[-femnqz] FILE...");

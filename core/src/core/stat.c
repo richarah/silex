@@ -5,6 +5,7 @@
 #endif
 
 #include "../util/error.h"
+#include "../util/opt.h"
 #include "../util/strbuf.h"
 
 #include <errno.h>
@@ -591,61 +592,45 @@ int applet_stat(int argc, char **argv)
     int use_utc     = 0;
     int add_newline = 1;   /* --printf suppresses trailing newline */
     const char *format  = NULL;
-    int i;
+    enum { L_PRINTF = 0x100, L_NO_DEREF };
+    static const opt_long_t longs[] = {
+        { "format",         OPT_JOINED, 'c'        },
+        { "printf",         OPT_JOINED, L_PRINTF   },
+        { "terse",          OPT_BARE,   't'        },
+        { "dereference",    OPT_BARE,   'L'        },
+        { "no-dereference", OPT_BARE,   L_NO_DEREF },
+        { "file-system",    OPT_BARE,   'f'        },
+        { NULL, 0, 0 }
+    };
+    opt_t o;
+    int c;
 
-    for (i = 1; i < argc; i++) {
-        const char *arg = argv[i];
-
-        if (strcmp(arg, "--") == 0) { i++; break; }
-
-        if (strncmp(arg, "--format=", 9) == 0) {
-            format = arg + 9;
+    opt_init(&o, argc, argv, "ftLc:", longs, 0);
+    while ((c = opt_next(&o)) != OPT_DONE) {
+        switch (c) {
+        case 'f': opt_fs = 1; break;
+        case 't': opt_terse = 1; break;
+        case 'L': opt_follow = 1; opt_nofollow = 0; break;
+        case L_NO_DEREF: opt_nofollow = 1; opt_follow = 0; break;
+        case 'c':
+            /* -c FORMAT / --format=FORMAT */
+            format = o.arg;
             add_newline = 1;
-            continue;
-        }
-        if (strncmp(arg, "--printf=", 9) == 0) {
-            format = arg + 9;
-            add_newline = 0;
-            continue;
-        }
-        if (strcmp(arg, "--terse") == 0)         { opt_terse = 1; continue; }
-        if (strcmp(arg, "--dereference") == 0)   { opt_follow = 1; opt_nofollow = 0; continue; }
-        if (strcmp(arg, "--no-dereference") == 0){ opt_nofollow = 1; opt_follow = 0; continue; }
-        if (strcmp(arg, "--file-system") == 0)   { opt_fs = 1; continue; }
-
-        if (arg[0] != '-' || arg[1] == '\0')
             break;
-
-        const char *p = arg + 1;
-        int stop = 0;
-        while (*p && !stop) {
-            switch (*p) {
-            case 'f': opt_fs = 1; break;
-            case 't': opt_terse = 1; break;
-            case 'L': opt_follow = 1; opt_nofollow = 0; break;
-            case 'c':
-                /* -c FORMAT */
-                if (p[1]) {
-                    format = p + 1;
-                    stop = 1;
-                } else {
-                    i++;
-                    if (i >= argc) {
-                        err_usage("stat", "[-ftL] [-c FORMAT] FILE...");
-                        return 1;
-                    }
-                    format = argv[i];
-                }
-                add_newline = 1;
-                break;
-            default:
-                err_msg("stat", "unrecognized option '-%c'", *p);
-                err_usage("stat", "[-ftL] [-c FORMAT] FILE...");
-                return 1;
-            }
-            p++;
+        case L_PRINTF:
+            format = o.arg;
+            add_newline = 0;
+            break;
+        case OPT_MISSING:
+            err_usage("stat", "[-ftL] [-c FORMAT] FILE...");
+            return 1;
+        default:
+            opt_err_unknown("stat", &o);
+            err_usage("stat", "[-ftL] [-c FORMAT] FILE...");
+            return 1;
         }
     }
+    int i = o.ind;
 
     if (i >= argc) {
         err_usage("stat", "[-ftL] [-c FORMAT] FILE...");

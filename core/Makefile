@@ -174,6 +174,7 @@ UTIL_SRCS = \
     $(SRCDIR)/util/strbuf.c \
     $(SRCDIR)/util/path.c \
     $(SRCDIR)/util/error.c \
+    $(SRCDIR)/util/opt.c \
     $(SRCDIR)/util/arena.c \
     $(SRCDIR)/util/platform.c \
     $(SRCDIR)/util/charclass.c \
@@ -411,6 +412,7 @@ TEST_CHARCLASS = build/bin/test_charclass
 TEST_LINESCAN  = build/bin/test_linescan
 TEST_REGEX     = build/bin/test_regex
 TEST_ARENA     = build/bin/test_arena
+TEST_OPT       = build/bin/test_opt
 
 REGEX_TEST_SRCS = \
     $(SRCDIR)/util/regex/classify.c \
@@ -435,12 +437,17 @@ $(TEST_ARENA): tests/unit/test_arena.c $(SRCDIR)/util/arena.c \
 	$(CC) $(CFLAGS_COMMON) -I$(SRCDIR) -o $@ \
 	    tests/unit/test_arena.c $(SRCDIR)/util/arena.c
 
+$(TEST_OPT): tests/unit/test_opt.c $(SRCDIR)/util/opt.c $(SRCDIR)/util/error.c \
+                  $(SRCDIR)/util/opt.h | $(BINDIR)
+	$(CC) $(CFLAGS_COMMON) -I$(SRCDIR) -o $@ \
+	    tests/unit/test_opt.c $(SRCDIR)/util/opt.c $(SRCDIR)/util/error.c
+
 $(TEST_REGEX): tests/unit/test_regex.c $(REGEX_TEST_SRCS) | $(BINDIR)
 	@mkdir -p $(OBJDIR)/util/regex
 	$(CC) $(CFLAGS_COMMON) -I$(SRCDIR) -o $@ \
 	    tests/unit/test_regex.c $(REGEX_TEST_SRCS)
 
-test: $(TARGET) $(TEST_CHARCLASS) $(TEST_LINESCAN) $(TEST_REGEX) $(TEST_ARENA)
+test: $(TARGET) $(TEST_CHARCLASS) $(TEST_LINESCAN) $(TEST_REGEX) $(TEST_ARENA) $(TEST_OPT)
 	@echo "=== Running unit tests ==="
 	@bash tests/unit/run_tests.sh $(TARGET)
 	@echo "--- test_charclass (C) ---"
@@ -451,6 +458,8 @@ test: $(TARGET) $(TEST_CHARCLASS) $(TEST_LINESCAN) $(TEST_REGEX) $(TEST_ARENA)
 	@$(TEST_REGEX) && echo "PASS: test_regex"
 	@echo "--- test_arena (C) ---"
 	@$(TEST_ARENA) && echo "PASS: test_arena"
+	@echo "--- test_opt (C) ---"
+	@$(TEST_OPT) && echo "PASS: test_opt"
 
 # --- Coverage -----------------------------------------------------------------
 # Line coverage over the unit + compat suites. Reports; does not gate (a coverage
@@ -717,7 +726,8 @@ $(FUZZ_DIR):
 # none of which had ever been built.
 FUZZ_CORE = $(SRCDIR)/util/arena.c $(SRCDIR)/util/strbuf.c \
             $(SRCDIR)/util/path.c  $(SRCDIR)/util/error.c \
-            $(SRCDIR)/util/charclass.c $(SRCDIR)/util/intern.c
+            $(SRCDIR)/util/charclass.c $(SRCDIR)/util/intern.c \
+            $(SRCDIR)/util/opt.c
 
 # grep and sed pull in the regex engine, the module registry (they consult it for
 # unrecognised flags) and vcsignore.
@@ -882,6 +892,7 @@ clean:
 $(OBJDIR)/util/strbuf.o:    $(SRCDIR)/util/strbuf.c    $(SRCDIR)/util/strbuf.h
 $(OBJDIR)/util/path.o:      $(SRCDIR)/util/path.c      $(SRCDIR)/util/path.h
 $(OBJDIR)/util/error.o:     $(SRCDIR)/util/error.c     $(SRCDIR)/util/error.h
+$(OBJDIR)/util/opt.o:       $(SRCDIR)/util/opt.c       $(SRCDIR)/util/opt.h
 $(OBJDIR)/util/arena.o:     $(SRCDIR)/util/arena.c     $(SRCDIR)/util/arena.h
 $(OBJDIR)/util/platform.o:  $(SRCDIR)/util/platform.c  $(SRCDIR)/util/platform.h
 $(OBJDIR)/util/charclass.o:      $(SRCDIR)/util/charclass.c $(SRCDIR)/util/charclass.h

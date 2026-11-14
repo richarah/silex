@@ -5,6 +5,7 @@
 #endif
 
 #include "../util/error.h"
+#include "../util/opt.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -225,114 +226,59 @@ int applet_head(int argc, char **argv)
     int opt_q     = 0;
     int opt_v     = 0;
     int ret       = 0;
-    int i;
-
-    for (i = 1; i < argc; i++) {
-        const char *arg = argv[i];
-
-        if (strcmp(arg, "--") == 0) { i++; break; }
-        if (arg[0] != '-' || arg[1] == '\0') break;
-
-        if (strcmp(arg, "--quiet") == 0 || strcmp(arg, "--silent") == 0) {
-            opt_q = 1; continue;
-        }
-        if (strcmp(arg, "--verbose") == 0) { opt_v = 1; continue; }
-
+    static const opt_long_t longs[] = {
+        { "quiet",   OPT_BARE, 'q' },
+        { "silent",  OPT_BARE, 'q' },
+        { "verbose", OPT_BARE, 'v' },
         /* Long --lines/--bytes, joined (`--bytes=4`) or separated
          * (`--bytes 4`) -- getopt_long accepts both for a required
-         * argument, and only the joined form was handled. */
-        if (strncmp(arg, "--lines", 7) == 0 &&
-            (arg[7] == '\0' || arg[7] == '=')) {
-            const char *val = arg[7] == '=' ? arg + 8 : (++i < argc ? argv[i] : NULL);
-            if (!val) {
-                err_usage("head", "[-n N] [-c N] [-qv] [FILE...]");
-                return 1;
-            }
-            if (parse_count(val, &count, &negative) != 0) {
-                err_msg("head", "invalid number of lines: '%s'", val);
+         * argument, and only the joined form used to be handled. */
+        { "lines",   OPT_REQ,  'n' },
+        { "bytes",   OPT_REQ,  'c' },
+        { NULL, 0, 0 }
+    };
+    opt_t o;
+    int c;
+
+    opt_init(&o, argc, argv, "qvn:c:", longs, 0);
+    while ((c = opt_next(&o)) != OPT_DONE) {
+        switch (c) {
+        case 'q': opt_q = 1; break;
+        case 'v': opt_v = 1; break;
+        case 'n':
+            if (parse_count(o.arg, &count, &negative) != 0) {
+                err_msg("head", "invalid number of lines: '%s'", o.arg);
                 return 1;
             }
             use_bytes = 0;
-            continue;
-        }
-        if (strncmp(arg, "--bytes", 7) == 0 &&
-            (arg[7] == '\0' || arg[7] == '=')) {
-            const char *val = arg[7] == '=' ? arg + 8 : (++i < argc ? argv[i] : NULL);
-            if (!val) {
-                err_usage("head", "[-n N] [-c N] [-qv] [FILE...]");
-                return 1;
-            }
-            if (parse_count(val, &count, &negative) != 0) {
-                err_msg("head", "invalid number of bytes: '%s'", val);
+            break;
+        case 'c':
+            if (parse_count(o.arg, &count, &negative) != 0) {
+                err_msg("head", "invalid number of bytes: '%s'", o.arg);
                 return 1;
             }
             use_bytes = 1;
-            continue;
-        }
-
-        /* Short flags */
-        const char *p = arg + 1;
-        int stop = 0;
-        while (*p && !stop) {
-            switch (*p) {
-            case 'q': opt_q = 1; break;
-            case 'v': opt_v = 1; break;
-            case 'n': {
-                const char *val;
-                if (p[1]) { val = p + 1; }  /* stop set unconditionally below */
-                else {
-                    i++;
-                    if (i >= argc) {
-                        err_usage("head", "[-n N] [-c N] [-qv] [FILE...]");
-                        return 1;
-                    }
-                    val = argv[i];
-                }
-                if (parse_count(val, &count, &negative) != 0) {
-                    err_msg("head", "invalid number of lines: '%s'", val);
+            break;
+        case OPT_MISSING:
+            err_usage("head", "[-n N] [-c N] [-qv] [FILE...]");
+            return 1;
+        default:
+            /* Legacy: -NUM as shorthand for -n NUM */
+            if (o.opt >= '0' && o.opt <= '9') {
+                const char *p = opt_rest(&o);
+                if (parse_count(p, &count, &negative) != 0) {
+                    err_msg("head", "invalid number: '%s'", p);
                     return 1;
                 }
                 use_bytes = 0;
-                stop = 1;
                 break;
             }
-            case 'c': {
-                const char *val;
-                if (p[1]) { val = p + 1; }  /* stop set unconditionally below */
-                else {
-                    i++;
-                    if (i >= argc) {
-                        err_usage("head", "[-n N] [-c N] [-qv] [FILE...]");
-                        return 1;
-                    }
-                    val = argv[i];
-                }
-                if (parse_count(val, &count, &negative) != 0) {
-                    err_msg("head", "invalid number of bytes: '%s'", val);
-                    return 1;
-                }
-                use_bytes = 1;
-                stop = 1;
-                break;
-            }
-            default:
-                /* Legacy: -NUM as shorthand for -n NUM */
-                if (*p >= '0' && *p <= '9') {
-                    if (parse_count(p, &count, &negative) != 0) {
-                        err_msg("head", "invalid number: '%s'", p);
-                        return 1;
-                    }
-                    use_bytes = 0;
-                    stop = 1;
-                    break;
-                }
-                err_msg("head", "unrecognized option '-%c'", *p);
-                err_usage("head", "[-n N] [-c N] [-qv] [FILE...]");
-                return 1;
-            }
-            p++;
+            opt_err_unknown("head", &o);
+            err_usage("head", "[-n N] [-c N] [-qv] [FILE...]");
+            return 1;
         }
     }
+    int i = o.ind;
 
     int nfiles = argc - i;
 

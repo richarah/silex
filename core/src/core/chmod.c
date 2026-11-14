@@ -10,6 +10,7 @@
 #endif
 
 #include "../util/error.h"
+#include "../util/opt.h"
 #include "../util/path.h"
 #include "../cache/fscache.h"
 
@@ -323,7 +324,6 @@ int applet_chmod(int argc, char **argv)
     char ref_path[PATH_MAX];
     int  have_ref     = 0;
     int ret = 0;
-    int i;
 
     g_any_error  = 0;
     g_use_ref    = 0;
@@ -337,50 +337,27 @@ int applet_chmod(int argc, char **argv)
      * `chmod f -w` applies mode -w to file f.  Dash-modes accumulate
      * into the mode string with ','; if none was seen, the FIRST operand
      * is the mode (coreutils tests/chmod/usage.sh encodes this). */
+    static const opt_long_t longs[] = {
+        { "recursive", OPT_BARE,   'R' },
+        { "verbose",   OPT_BARE,   'v' },
+        { "reference", OPT_JOINED, 0x100 },
+        { NULL, 0, 0 }
+    };
     char *operands[1024];
     int nops = 0;
-    int seen_ddash = 0;
-    for (i = 1; i < argc; i++) {
-        char *arg = argv[i];
-
-        if (!seen_ddash && strcmp(arg, "--") == 0) {
-            seen_ddash = 1;
-            continue;
-        }
-        if (seen_ddash || arg[0] != '-' || arg[1] == '\0') {
-            if (nops < 1024)
-                operands[nops++] = arg;
-            continue;
-        }
-
-        /* Long options */
-        if (strcmp(arg, "--recursive") == 0) {
-            opt_recursive = 1;
-            continue;
-        }
-        if (strcmp(arg, "--verbose") == 0) {
-            opt_verbose = 1;
-            continue;
-        }
-        if (strncmp(arg, "--reference=", 12) == 0) {
-            const char *rfile = arg + 12;
-            size_t rlen = strlen(rfile);
-            if (rlen == 0 || rlen >= PATH_MAX) {
-                err_msg("chmod", "--reference path invalid");
-                return 1;
-            }
-            memcpy(ref_path, rfile, rlen + 1);
-            have_ref = 1;
-            continue;
-        }
-
+    opt_t o;
+    int c;
+    opt_init(&o, argc, argv, "Rvf", longs, OPT_PERMUTE);
+    for (;;) {
         /* GNU: an argument like -r / -w+x / -rwx is a MODE, not options --
          * `chmod -r scr` removes read permission (smoosh sh.file.weirdness).
          * Only chars that can start a symbolic clause count; R/v/f stay
          * options. */
-        {
+        const char *arg = opt_peek(&o);
+        if (arg && arg[0] == '-' && arg[1] != '\0' &&
+            !(arg[1] == '-' && arg[2] == '\0')) {
             const char *m = arg + 1;
-            int is_mode = (*m != '\0');
+            int is_mode = 1;
             for (const char *q = m; *q && is_mode; q++)
                 if (!strchr("rwxXst01234567ugoa+-=,", *q))
                     is_mode = 0;
@@ -394,28 +371,41 @@ int applet_chmod(int argc, char **argv)
                 if (cur) g_modestr[cur++] = ',';
                 memcpy(g_modestr + cur, arg, add + 1);
                 have_mode = 1;
+                opt_skip(&o);
                 continue;
             }
         }
 
-        /* Short flags */
-        const char *p = arg + 1;
-        while (*p) {
-            switch (*p) {
-            case 'R': opt_recursive = 1; break;
-            case 'v': opt_verbose   = 1; break;
-            /* -f/--silent: suppress most error messages (GNU). The exit
-             * status still reflects failures; only the noise is dropped.
-             * smoosh's builtin.dot.path preamble runs `chmod -f 333 ...`
-             * under set -e, so rejecting the flag aborted the whole test. */
-            case 'f': opt_silent    = 1; break;
-            default:
-                err_msg("chmod", "unrecognized option '-%c'", *p);
-                err_usage("chmod",
-                    "[-Rfv] [--reference=RFILE] MODE FILE...");
+        c = opt_next(&o);
+        if (c == OPT_DONE)
+            break;
+        switch (c) {
+        case OPT_OPERAND:
+            if (nops < 1024)
+                operands[nops++] = (char *)o.arg;
+            break;
+        case 'R': opt_recursive = 1; break;
+        case 'v': opt_verbose   = 1; break;
+        /* -f/--silent: suppress most error messages (GNU). The exit
+         * status still reflects failures; only the noise is dropped.
+         * smoosh's builtin.dot.path preamble runs `chmod -f 333 ...`
+         * under set -e, so rejecting the flag aborted the whole test. */
+        case 'f': opt_silent    = 1; break;
+        case 0x100: {
+            size_t rlen = strlen(o.arg);
+            if (rlen == 0 || rlen >= PATH_MAX) {
+                err_msg("chmod", "--reference path invalid");
                 return 1;
             }
-            p++;
+            memcpy(ref_path, o.arg, rlen + 1);
+            have_ref = 1;
+            break;
+        }
+        default:
+            opt_err_unknown("chmod", &o);
+            err_usage("chmod",
+                "[-Rfv] [--reference=RFILE] MODE FILE...");
+            return 1;
         }
     }
 

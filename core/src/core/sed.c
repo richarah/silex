@@ -32,6 +32,7 @@
 
 #include "../util/error.h"
 #include "../util/noreturn.h"
+#include "../util/opt.h"
 #include "../util/path.h"
 #include "../util/strbuf.h"
 
@@ -2559,196 +2560,134 @@ int applet_sed(int argc, char **argv)
     } while (0)
 
     /* ---------- option parsing (GNU style) ---------- */
-    int i = 1;
-    for (; i < argc; i++) {
-        const char *arg = argv[i];
-        if (arg[0] != '-' || arg[1] == '\0')
-            break;                          /* operand ("-" = stdin) */
-        if (strcmp(arg, "--") == 0) { i++; break; }
+    enum {
+        L_QUIET = 0x100, L_POSIX, L_ERE, L_SEPARATE, L_NULLDATA, L_UNBUFFERED,
+        L_SANDBOX, L_DEBUG, L_FOLLOW, L_INPLACE, L_LINELEN, L_EXPR, L_FILE,
+        L_HELP, L_VERSION
+    };
+    /* GNU sed ignores a "=VALUE" on options that take none. */
+#define LAX (OPT_BARE | OPT_JOINED)
+    static const opt_long_t longs[] = {
+        { "quiet",           LAX,     L_QUIET      },
+        { "silent",          LAX,     L_QUIET      },
+        { "posix",           LAX,     L_POSIX      },
+        { "regexp-extended", LAX,     L_ERE        },
+        { "separate",        LAX,     L_SEPARATE   },
+        { "null-data",       LAX,     L_NULLDATA   },
+        { "unbuffered",      LAX,     L_UNBUFFERED },
+        { "sandbox",         LAX,     L_SANDBOX    },
+        { "debug",           LAX,     L_DEBUG      },
+        { "follow-symlinks", LAX,     L_FOLLOW     },
+        { "in-place",        LAX,     L_INPLACE    },
+        { "line-length",     LAX,     L_LINELEN    },
+        { "expression",      OPT_REQ, 'e'          },
+        { "file",            OPT_REQ, 'f'          },
+        { "help",            LAX,     L_HELP       },
+        { "version",         LAX,     L_VERSION    },
+        { NULL, 0, 0 }
+    };
+#undef LAX
+    opt_t o;
+    int oc;
 
-        if (arg[1] == '-') {
-            /* long options */
-            const char *name = arg + 2;
-            const char *val = strchr(name, '=');
-            size_t nlen = val ? (size_t)(val - name) : strlen(name);
-            if (val) val++;
-#define LOPT(s) (strlen(s) == nlen && strncmp(name, s, nlen) == 0)
-            if (LOPT("quiet") || LOPT("silent")) { O.quiet = 1; continue; }
-            if (LOPT("posix"))            { O.posix = 1; continue; }
-            if (LOPT("regexp-extended"))  { O.ere = 1; continue; }
-            if (LOPT("separate"))         { O.separate = 1; continue; }
-            if (LOPT("null-data"))        { O.nulldata = 1; continue; }
-            if (LOPT("unbuffered"))       { O.unbuffered = 1; continue; }
-            if (LOPT("sandbox"))          { O.sandbox = 1; continue; }
-            if (LOPT("debug"))            { O.debug = 1; continue; }
-            if (LOPT("follow-symlinks"))  { O.follow_syms = 1; continue; }
-            if (LOPT("in-place")) {
-                O.inplace = 1;
-                O.separate = 1;
-                O.in_suffix = val ? strdup(val) : NULL;
-                continue;
-            }
-            if (LOPT("line-length")) {
-                if (!val) sed_panic(1, "option '--line-length' requires an argument");
-                O.line_len = strtol(val, NULL, 10);
-                continue;
-            }
-            if (LOPT("expression")) {
-                if (!val) {
-                    if (++i >= argc)
-                        sed_panic(1, "option '--expression' requires an argument");
-                    val = argv[i];
-                }
-                if (sb_len(&script) > 0) sb_appendc(&script, '\n');
-                ADD_SEG(0, NULL);
-                sb_append(&script, val);
-                have_script = 1;
-                continue;
-            }
-            if (LOPT("file")) {
-                if (!val) {
-                    if (++i >= argc)
-                        sed_panic(1, "option '--file' requires an argument");
-                    val = argv[i];
-                }
-                goto read_script_file;
-            }
-            if (LOPT("help")) {
-                print_usage_body(stdout);
-                fputs("E-mail bug reports to: <bug-sed@gnu.org>.\n", stdout);
-                sb_free(&script);
-                /* GNU exits 4 ("panic") when even --help can't be
-                 * written, e.g. redirected to /dev/full */
-                if (fflush(stdout) != 0 || ferror(stdout)) {
-                    clearerr(stdout);
-                    return 4;
-                }
-                return 0;
-            }
-            if (LOPT("version")) {
-                fputs(SED_VERSION_STR, stdout);
-                sb_free(&script);
-                if (fflush(stdout) != 0 || ferror(stdout)) {
-                    clearerr(stdout);
-                    return 4;
-                }
-                return 0;
-            }
-            fprintf(stderr, "sed: unrecognized option '--%.*s'\n",
-                    (int)nlen, name);
-            print_usage_body(stderr);
-            sb_free(&script);
-            return 1;
-#undef LOPT
-        read_script_file:
-            {
-                FILE *sfp = strcmp(val, "-") == 0 ? stdin : fopen(val, "r");
-                if (!sfp)
-                    sed_panic(4, "couldn't open file %s: %s", val,
-                              strerror(errno));
-                if (sb_len(&script) > 0) sb_appendc(&script, '\n');
-                ADD_SEG(1, val);
-                size_t seg_from = sb_len(&script);
-                char rbuf[4096];
-                size_t nr;
-                while ((nr = fread(rbuf, 1, sizeof(rbuf), sfp)) > 0)
-                    sb_appendn(&script, rbuf, nr);
-                if (sfp != stdin) fclose(sfp);
-                strip_crlf_from(&script, seg_from);
-                have_script = 1;
-                continue;
-            }
+    opt_init(&o, argc, argv, "nErszue:f:i::l:", longs, 0);
+    while ((oc = opt_next(&o)) != OPT_DONE) {
+        switch (oc) {
+        case 'n': case L_QUIET:      O.quiet = 1; break;
+        case 'E': case 'r': case L_ERE: O.ere = 1; break;
+        case 's': case L_SEPARATE:   O.separate = 1; break;
+        case 'z': case L_NULLDATA:   O.nulldata = 1; break;
+        case 'u': case L_UNBUFFERED: O.unbuffered = 1; break;
+        case L_POSIX:   O.posix = 1; break;
+        case L_SANDBOX: O.sandbox = 1; break;
+        case L_DEBUG:   O.debug = 1; break;
+        case L_FOLLOW:  O.follow_syms = 1; break;
+        case 'e':
+            if (sb_len(&script) > 0) sb_appendc(&script, '\n');
+            ADD_SEG(0, NULL);
+            sb_append(&script, o.arg);
+            have_script = 1;
+            break;
+        case 'f': {
+            const char *val = o.arg;
+            FILE *sfp = strcmp(val, "-") == 0 ? stdin : fopen(val, "r");
+            if (!sfp)
+                sed_panic(4, "couldn't open file %s: %s", val,
+                          strerror(errno));
+            if (sb_len(&script) > 0) sb_appendc(&script, '\n');
+            ADD_SEG(1, val);
+            size_t seg_from = sb_len(&script);
+            char rbuf[4096];
+            size_t nr;
+            while ((nr = fread(rbuf, 1, sizeof(rbuf), sfp)) > 0)
+                sb_appendn(&script, rbuf, nr);
+            if (sfp != stdin) fclose(sfp);
+            strip_crlf_from(&script, seg_from);
+            have_script = 1;
+            break;
         }
-
-        /* short options, possibly clustered */
-        /* Sentinel, compared by pointer identity below. Its CONTENTS never
-         * matter; only that no character of `arg` shares its address. */
-        static const char opt_consumed_rest[] = "";
-
-        /* An option that takes an argument swallows the rest of this argv
-         * element, so the cluster scan must stop. It said so by pointing `f` at
-         * a literal "x" and testing `*f == 'x' && f != arg + 1 && f[-1] == 0`
-         * -- which reads the byte BEFORE a string literal, out of bounds, on
-         * every such option (cppcheck: negativeIndex). Nothing needed the read:
-         * sed has no -x, so the test could only ever be reached with `f` on the
-         * sentinel. A named sentinel compared by IDENTITY says the same thing
-         * and cannot be confused with an option letter. */
-        for (const char *f = arg + 1; *f; f++) {
-            switch (*f) {
-            case 'n': O.quiet = 1; break;
-            case 'E': case 'r': O.ere = 1; break;
-            case 's': O.separate = 1; break;
-            case 'z': O.nulldata = 1; break;
-            case 'u': O.unbuffered = 1; break;
-            case 'e': {
-                const char *val = f[1] ? f + 1 : NULL;
-                if (!val) {
-                    if (++i >= argc)
-                        sed_panic(1, "option requires an argument -- 'e'");
-                    val = argv[i];
-                }
-                if (sb_len(&script) > 0) sb_appendc(&script, '\n');
-                ADD_SEG(0, NULL);
-                sb_append(&script, val);
-                have_script = 1;
-                f = opt_consumed_rest;
-                break;
+        case 'i':
+            O.inplace = 1;
+            O.separate = 1;
+            if (o.arg) {
+                free(O.in_suffix);
+                O.in_suffix = strdup(o.arg);
             }
-            case 'f': {
-                const char *val = f[1] ? f + 1 : NULL;
-                if (!val) {
-                    if (++i >= argc)
-                        sed_panic(1, "option requires an argument -- 'f'");
-                    val = argv[i];
-                }
-                FILE *sfp = strcmp(val, "-") == 0 ? stdin : fopen(val, "r");
-                if (!sfp)
-                    sed_panic(4, "couldn't open file %s: %s", val,
-                              strerror(errno));
-                if (sb_len(&script) > 0) sb_appendc(&script, '\n');
-                ADD_SEG(1, val);
-                size_t seg_from = sb_len(&script);
-                char rbuf[4096];
-                size_t nr;
-                while ((nr = fread(rbuf, 1, sizeof(rbuf), sfp)) > 0)
-                    sb_appendn(&script, rbuf, nr);
-                if (sfp != stdin) fclose(sfp);
-                strip_crlf_from(&script, seg_from);
-                have_script = 1;
-                f = opt_consumed_rest;
-                break;
+            break;
+        case L_INPLACE:
+            O.inplace = 1;
+            O.separate = 1;
+            O.in_suffix = o.arg ? strdup(o.arg) : NULL;
+            break;
+        case 'l':
+            O.line_len = strtol(o.arg, NULL, 10);
+            break;
+        case L_LINELEN:
+            if (!o.arg) sed_panic(1, "option '--line-length' requires an argument");
+            O.line_len = strtol(o.arg, NULL, 10);
+            break;
+        case L_HELP:
+            print_usage_body(stdout);
+            fputs("E-mail bug reports to: <bug-sed@gnu.org>.\n", stdout);
+            sb_free(&script);
+            /* GNU exits 4 ("panic") when even --help can't be
+             * written, e.g. redirected to /dev/full */
+            if (fflush(stdout) != 0 || ferror(stdout)) {
+                clearerr(stdout);
+                return 4;
             }
-            case 'i': {
-                O.inplace = 1;
-                O.separate = 1;
-                if (f[1]) {
-                    free(O.in_suffix);
-                    O.in_suffix = strdup(f + 1);
-                    f = opt_consumed_rest;
-                }
-                break;
+            return 0;
+        case L_VERSION:
+            fputs(SED_VERSION_STR, stdout);
+            sb_free(&script);
+            if (fflush(stdout) != 0 || ferror(stdout)) {
+                clearerr(stdout);
+                return 4;
             }
-            case 'l': {
-                const char *val = f[1] ? f + 1 : NULL;
-                if (!val) {
-                    if (++i >= argc)
-                        sed_panic(1, "option requires an argument -- 'l'");
-                    val = argv[i];
-                }
-                O.line_len = strtol(val, NULL, 10);
-                f = opt_consumed_rest;
-                break;
-            }
-            default:
-                fprintf(stderr, "sed: invalid option -- '%c'\n", *f);
+            return 0;
+        case OPT_MISSING:
+            if (o.islong)
+                sed_panic(1, "option '--%s' requires an argument", o.lopt->name);
+            sed_panic(1, "option requires an argument -- '%c'", o.opt);
+        default:
+            if (o.islong) {
+                const char *name = o.cur + 2;
+                const char *eq = strchr(name, '=');
+                int nlen = eq ? (int)(eq - name) : (int)strlen(name);
+                fprintf(stderr, "sed: unrecognized option '--%.*s'\n",
+                        nlen, name);
                 print_usage_body(stderr);
                 sb_free(&script);
-                free(O.in_suffix);
                 return 1;
             }
-            if (f == opt_consumed_rest) break;
+            fprintf(stderr, "sed: invalid option -- '%c'\n", o.opt);
+            print_usage_body(stderr);
+            sb_free(&script);
+            free(O.in_suffix);
+            return 1;
         }
     }
+    int i = o.ind;
 
     /* First operand is the script if none was given via -e/-f */
     if (!have_script) {

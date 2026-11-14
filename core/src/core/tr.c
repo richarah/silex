@@ -5,6 +5,7 @@
 #endif
 
 #include "../util/error.h"
+#include "../util/opt.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -270,28 +271,22 @@ int applet_tr(int argc, char **argv)
     int opt_d = 0; /* -d: delete */
     int opt_s = 0; /* -s: squeeze */
     int opt_c = 0; /* -c/-C: complement */
-    int i;
+    opt_t o;
+    int oc;
 
-    for (i = 1; i < argc; i++) {
-        const char *arg = argv[i];
-
-        if (strcmp(arg, "--") == 0) { i++; break; }
-        if (arg[0] != '-' || arg[1] == '\0') break;
-
-        const char *p = arg + 1;
-        while (*p) {
-            switch (*p) {
-            case 'd': opt_d = 1; break;
-            case 's': opt_s = 1; break;
-            case 'c': case 'C': opt_c = 1; break;
-            default:
-                err_msg("tr", "unrecognized option '-%c'", *p);
-                err_usage("tr", "[-dsc] SET1 [SET2]");
-                return 1;
-            }
-            p++;
+    opt_init(&o, argc, argv, "dscC", NULL, 0);
+    while ((oc = opt_next(&o)) != OPT_DONE) {
+        switch (oc) {
+        case 'd': opt_d = 1; break;
+        case 's': opt_s = 1; break;
+        case 'c': case 'C': opt_c = 1; break;
+        default:
+            opt_err_unknown("tr", &o);
+            err_usage("tr", "[-dsc] SET1 [SET2]");
+            return 1;
         }
     }
+    int i = o.ind;
 
     int nsets = argc - i;
 

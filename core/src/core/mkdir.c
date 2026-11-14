@@ -5,6 +5,7 @@
 #endif
 
 #include "../util/error.h"
+#include "../util/opt.h"
 #include "../util/path.h"
 #include "../cache/fscache.h"
 
@@ -148,69 +149,40 @@ int applet_mkdir(int argc, char **argv)
     mode_t opt_m = 0777;
     int opt_m_set = 0;   /* -m/--mode was given: set that mode EXACTLY (no umask) */
     int ret = 0;
-    int i;
+    static const opt_long_t longs[] = {
+        { "mode",    OPT_JOINED, 'm' },
+        { "parents", OPT_BARE,   'p' },
+        { "verbose", OPT_BARE,   'v' },
+        { NULL, 0, 0 }
+    };
+    opt_t o;
+    int c;
 
-    for (i = 1; i < argc; i++) {
-        const char *arg = argv[i];
-
-        if (strcmp(arg, "--") == 0) {
-            i++;
-            break;
-        }
-        if (arg[0] != '-' || arg[1] == '\0')
-            break;
-
-        /* Handle long options */
-        if (strncmp(arg, "--mode=", 7) == 0) {
-            mode_t m = parse_mode_str(arg + 7);
+    opt_init(&o, argc, argv, "pvm:", longs, 0);
+    while ((c = opt_next(&o)) != OPT_DONE) {
+        switch (c) {
+        case 'p': opt_p = 1; break;
+        case 'v': opt_v = 1; break;
+        case 'm': {
+            mode_t m = parse_mode_str(o.arg);
             if (m == (mode_t)-1) {
-                err_msg("mkdir", "invalid mode: %s", arg + 7);
+                err_msg("mkdir", "invalid mode: %s", o.arg);
                 return 1;
             }
             opt_m = m;
             opt_m_set = 1;
-            continue;
+            break;
         }
-        if (strcmp(arg, "--parents") == 0) { opt_p = 1; continue; }
-        if (strcmp(arg, "--verbose") == 0) { opt_v = 1; continue; }
-
-        /* Short flags */
-        const char *p = arg + 1;
-        int unknown = 0;
-        while (*p && !unknown) {
-            switch (*p) {
-            case 'p': opt_p = 1; break;
-            case 'v': opt_v = 1; break;
-            case 'm': {
-                const char *mstr;
-                if (p[1]) {
-                    mstr = p + 1;
-                    p += strlen(p) - 1; /* advance to end of this arg */
-                } else {
-                    i++;
-                    if (i >= argc) {
-                        err_usage("mkdir", "[-pvm MODE] DIR...");
-                        return 1;
-                    }
-                    mstr = argv[i];
-                }
-                mode_t m = parse_mode_str(mstr);
-                if (m == (mode_t)-1) {
-                    err_msg("mkdir", "invalid mode: %s", mstr);
-                    return 1;
-                }
-                opt_m = m;
-                opt_m_set = 1;
-                break;
-            }
-            default:
-                err_msg("mkdir", "unrecognized option '-%c'", *p);
-                err_usage("mkdir", "[-pvm MODE] DIR...");
-                return 1;
-            }
-            p++;
+        case OPT_MISSING:
+            err_usage("mkdir", "[-pvm MODE] DIR...");
+            return 1;
+        default:
+            opt_err_unknown("mkdir", &o);
+            err_usage("mkdir", "[-pvm MODE] DIR...");
+            return 1;
         }
     }
+    int i = o.ind;
 
     if (i >= argc) {
         err_usage("mkdir", "[-pvm MODE] DIR...");

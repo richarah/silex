@@ -5,6 +5,7 @@
 #endif
 
 #include "../util/error.h"
+#include "../util/opt.h"
 #include "../util/path.h"
 #include "../util/strbuf.h"
 
@@ -357,49 +358,43 @@ int applet_ln(int argc, char **argv)
 {
     struct ln_opts opts = {0};
     int ret = 0;
-    int i;
+    enum { L_FORCE = 0x100 };
+    static const opt_long_t longs[] = {
+        { "symbolic",            OPT_BARE, 's'     },
+        { "force",               OPT_BARE, L_FORCE },
+        { "verbose",             OPT_BARE, 'v'     },
+        { "no-dereference",      OPT_BARE, 'n'     },
+        { "relative",            OPT_BARE, 'r'     },
+        { "no-target-directory", OPT_BARE, 'T'     },
+        { "interactive",         OPT_BARE, 'i'     },
+        { "logical",             OPT_BARE, 'L'     },
+        { "physical",            OPT_BARE, 'P'     },
+        { NULL, 0, 0 }
+    };
+    opt_t o;
+    int c;
 
-    for (i = 1; i < argc; i++) {
-        const char *arg = argv[i];
-
-        if (strcmp(arg, "--") == 0) { i++; break; }
-
-        if (arg[0] != '-' || arg[1] == '\0')
-            break;
-
-        /* Long options */
-        if (strcmp(arg, "--symbolic") == 0)          { opts.symbolic = 1;  continue; }
-        if (strcmp(arg, "--force") == 0)              { opts.force = 1;     continue; }
-        if (strcmp(arg, "--verbose") == 0)            { opts.verbose = 1;   continue; }
-        if (strcmp(arg, "--no-dereference") == 0)     { opts.no_deref = 1;  continue; }
-        if (strcmp(arg, "--relative") == 0)           { opts.relative = 1;  continue; }
-        if (strcmp(arg, "--no-target-directory") == 0){ opts.no_target = 1; continue; }
-        if (strcmp(arg, "--interactive") == 0)        { opts.interactive = 1; opts.force = 0; continue; }
-        if (strcmp(arg, "--logical") == 0)            { opts.logical = 1;   continue; }
-        if (strcmp(arg, "--physical") == 0)           { opts.logical = 0;   continue; }
-
-        /* Short flags */
-        const char *p = arg + 1;
-        while (*p) {
-            switch (*p) {
-            case 's': opts.symbolic = 1;  break;
-            /* -f and -i override each other: the LAST one wins (POSIX) */
-            case 'f': opts.force    = 1; opts.interactive = 0; break;
-            case 'i': opts.interactive = 1; opts.force = 0;    break;
-            case 'v': opts.verbose  = 1;  break;
-            case 'n': opts.no_deref = 1;  break;
-            case 'r': opts.relative = 1;  break;
-            case 'T': opts.no_target = 1; break;
-            case 'L': opts.logical  = 1;  break;
-            case 'P': opts.logical  = 0;  break;
-            default:
-                err_msg("ln", "unrecognized option '-%c'", *p);
-                err_usage("ln", "[-sfinrTLPv] TARGET LINK_NAME");
-                return 1;
-            }
-            p++;
+    opt_init(&o, argc, argv, "sfivnrTLP", longs, 0);
+    while ((c = opt_next(&o)) != OPT_DONE) {
+        switch (c) {
+        case 's': opts.symbolic = 1;  break;
+        case L_FORCE: opts.force = 1; break;
+        /* -f and -i override each other: the LAST one wins (POSIX) */
+        case 'f': opts.force    = 1; opts.interactive = 0; break;
+        case 'i': opts.interactive = 1; opts.force = 0;    break;
+        case 'v': opts.verbose  = 1;  break;
+        case 'n': opts.no_deref = 1;  break;
+        case 'r': opts.relative = 1;  break;
+        case 'T': opts.no_target = 1; break;
+        case 'L': opts.logical  = 1;  break;
+        case 'P': opts.logical  = 0;  break;
+        default:
+            opt_err_unknown("ln", &o);
+            err_usage("ln", "[-sfinrTLPv] TARGET LINK_NAME");
+            return 1;
         }
     }
+    int i = o.ind;
 
     int noperands = argc - i;
     if (noperands < 2) {

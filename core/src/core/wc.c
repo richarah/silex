@@ -5,6 +5,7 @@
 #endif
 
 #include "../util/error.h"
+#include "../util/opt.h"
 #include "../util/linescan.h"
 
 #include <ctype.h>
@@ -159,37 +160,32 @@ int applet_wc(int argc, char **argv)
     int opt_m = 0;   /* -m chars */
     int opt_L = 0;   /* -L max line length */
     int ret   = 0;
-    int i;
+    static const opt_long_t longs[] = {
+        { "lines",           OPT_BARE, 'l' },
+        { "words",           OPT_BARE, 'w' },
+        { "bytes",           OPT_BARE, 'c' },
+        { "chars",           OPT_BARE, 'm' },
+        { "max-line-length", OPT_BARE, 'L' },
+        { NULL, 0, 0 }
+    };
+    opt_t o;
+    int oc;
 
-    for (i = 1; i < argc; i++) {
-        const char *arg = argv[i];
-        if (strcmp(arg, "--") == 0) { i++; break; }
-        if (arg[0] != '-' || arg[1] == '\0') break;
-
-        if (strcmp(arg, "--lines") == 0)     { opt_l = 1; continue; }
-        if (strcmp(arg, "--words") == 0)     { opt_w = 1; continue; }
-        if (strcmp(arg, "--bytes") == 0)     { opt_c = 1; continue; }
-        if (strcmp(arg, "--chars") == 0)     { opt_m = 1; continue; }
-        if (strcmp(arg, "--max-line-length") == 0) { opt_L = 1; continue; }
-
-        const char *p = arg + 1;
-        int unknown = 0;
-        while (*p && !unknown) {
-            switch (*p) {
-            case 'l': opt_l = 1; break;
-            case 'w': opt_w = 1; break;
-            case 'c': opt_c = 1; break;
-            case 'm': opt_m = 1; break;
-            case 'L': opt_L = 1; break;
-            default:
-                err_msg("wc", "unrecognized option '-%c'", *p);
-                err_usage("wc", "[-clwmL] [FILE...]");
-                return 1;
-            }
-            p++;
+    opt_init(&o, argc, argv, "lwcmL", longs, 0);
+    while ((oc = opt_next(&o)) != OPT_DONE) {
+        switch (oc) {
+        case 'l': opt_l = 1; break;
+        case 'w': opt_w = 1; break;
+        case 'c': opt_c = 1; break;
+        case 'm': opt_m = 1; break;
+        case 'L': opt_L = 1; break;
+        default:
+            opt_err_unknown("wc", &o);
+            err_usage("wc", "[-clwmL] [FILE...]");
+            return 1;
         }
-        if (unknown) return 1;
     }
+    int i = o.ind;
 
     /* Default: lines, words, bytes */
     int default_mode = !(opt_l || opt_w || opt_c || opt_m || opt_L);

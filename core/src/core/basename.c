@@ -5,6 +5,7 @@
 #endif
 
 #include "../util/error.h"
+#include "../util/opt.h"
 #include "../util/path.h"
 
 #include <stdio.h>
@@ -58,55 +59,37 @@ static void do_basename(const char *path, const char *suffix, char *out)
 
 int applet_basename(int argc, char **argv)
 {
+    static const opt_long_t longs[] = {
+        { "suffix",   OPT_JOINED, 's' },
+        { "multiple", OPT_BARE,   'a' },
+        { "zero",     OPT_BARE,   'z' },
+        { NULL, 0, 0 }
+    };
     int opt_a  = 0;   /* -a: treat every operand as NAME */
     int opt_z  = 0;   /* -z: NUL-terminated output */
     const char *opt_s = NULL; /* -s SUFFIX */
-    int i;
+    opt_t o;
+    int c;
 
-    for (i = 1; i < argc; i++) {
-        const char *arg = argv[i];
-
-        if (strcmp(arg, "--") == 0) { i++; break; }
-
-        if (strncmp(arg, "--suffix=", 9) == 0) {
-            opt_s = arg + 9;
+    opt_init(&o, argc, argv, "as:z", longs, 0);
+    while ((c = opt_next(&o)) != OPT_DONE) {
+        switch (c) {
+        case 'a': opt_a = 1; break;
+        case 'z': opt_z = 1; break;
+        case 's':
             opt_a = 1; /* -s implies -a */
-            continue;
-        }
-        if (strcmp(arg, "--multiple") == 0)  { opt_a = 1; continue; }
-        if (strcmp(arg, "--zero") == 0)       { opt_z = 1; continue; }
-
-        if (arg[0] != '-' || arg[1] == '\0')
+            opt_s = o.arg;
             break;
-
-        const char *p = arg + 1;
-        int stop = 0;
-        while (*p && !stop) {
-            switch (*p) {
-            case 'a': opt_a = 1; break;
-            case 'z': opt_z = 1; break;
-            case 's':
-                opt_a = 1; /* -s implies -a */
-                if (p[1]) {
-                    opt_s = p + 1;
-                    stop = 1; /* rest of arg is suffix */
-                } else {
-                    i++;
-                    if (i >= argc) {
-                        err_usage("basename", "[-az] [-s SUFFIX] NAME...");
-                        return 1;
-                    }
-                    opt_s = argv[i];
-                }
-                break;
-            default:
-                err_msg("basename", "unrecognized option '-%c'", *p);
-                err_usage("basename", "[-az] [-s SUFFIX] NAME...");
-                return 1;
-            }
-            p++;
+        case OPT_MISSING:
+            err_usage("basename", "[-az] [-s SUFFIX] NAME...");
+            return 1;
+        default:
+            opt_err_unknown("basename", &o);
+            err_usage("basename", "[-az] [-s SUFFIX] NAME...");
+            return 1;
         }
     }
+    int i = o.ind;
 
     int nargs = argc - i;
 
