@@ -6,6 +6,7 @@
 
 #include "../util/path.h"
 #include "../util/error.h"
+#include "../util/opt.h"
 
 #include <errno.h>
 #include <limits.h>
@@ -96,46 +97,34 @@ int applet_realpath(int argc, char **argv)
 {
     int opt_m           = 0;   /* -m: allow nonexistent components */
     const char *rel_to  = NULL; /* --relative-to=DIR */
-    int i;
+    static const opt_long_t longs[] = {
+        { "relative-to", OPT_REQ, 0x100 },
+        { NULL, 0, 0 }
+    };
+    opt_t o;
+    int c;
 
-    for (i = 1; i < argc; i++) {
-        const char *arg = argv[i];
-        if (strcmp(arg, "--") == 0) { i++; break; }
-
-        if (strncmp(arg, "--relative-to=", 14) == 0) {
-            rel_to = arg + 14;
-            continue;
-        }
-        if (strcmp(arg, "--relative-to") == 0) {
-            i++;
-            if (i >= argc) {
-                err_usage("realpath", "[-m] [--relative-to=DIR] PATH...");
-                return 1;
-            }
-            rel_to = argv[i];
-            continue;
-        }
-
-        if (arg[0] != '-' || arg[1] == '\0') break;
-
-        const char *p = arg + 1;
-        while (*p) {
-            switch (*p) {
-            case 'm': opt_m = 1; break;
-            case 'e': break; /* -e: all components must exist (default) */
-            case 'L': break; /* -L: logical (resolve relative to cwd, no POSIX) */
-            case 'P': break; /* -P: physical (default) */
-            case 'q': break; /* -q: quiet */
-            case 's': break; /* -s: no symlink resolution (GNU ext) */
-            case 'z': break; /* -z: NUL separated output */
-            default:
-                err_msg("realpath", "unrecognized option '-%c'", *p);
-                err_usage("realpath", "[-m] [--relative-to=DIR] PATH...");
-                return 1;
-            }
-            p++;
+    opt_init(&o, argc, argv, "meLPqsz", longs, 0);
+    while ((c = opt_next(&o)) != OPT_DONE) {
+        switch (c) {
+        case 0x100: rel_to = o.arg; break;
+        case 'm': opt_m = 1; break;
+        case 'e': break; /* -e: all components must exist (default) */
+        case 'L': break; /* -L: logical (resolve relative to cwd, no POSIX) */
+        case 'P': break; /* -P: physical (default) */
+        case 'q': break; /* -q: quiet */
+        case 's': break; /* -s: no symlink resolution (GNU ext) */
+        case 'z': break; /* -z: NUL separated output */
+        case OPT_MISSING:
+            err_usage("realpath", "[-m] [--relative-to=DIR] PATH...");
+            return 1;
+        default:
+            opt_err_unknown("realpath", &o);
+            err_usage("realpath", "[-m] [--relative-to=DIR] PATH...");
+            return 1;
         }
     }
+    int i = o.ind;
 
     if (i >= argc) {
         err_usage("realpath", "[-m] [--relative-to=DIR] PATH...");

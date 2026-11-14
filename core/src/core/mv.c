@@ -5,6 +5,7 @@
 #endif
 
 #include "../util/error.h"
+#include "../util/opt.h"
 #include "../util/path.h"
 
 #include <dirent.h>
@@ -301,42 +302,34 @@ int applet_mv(int argc, char **argv)
 {
     struct mv_opts opts = {0};
     int ret = 0;
-    int i;
+    static const opt_long_t longs[] = {
+        { "force",               OPT_BARE, 'f' },
+        { "interactive",         OPT_BARE, 'i' },
+        { "no-clobber",          OPT_BARE, 'n' },
+        { "verbose",             OPT_BARE, 'v' },
+        { "update",              OPT_BARE, 'u' },
+        { "no-target-directory", OPT_BARE, 'T' },
+        { NULL, 0, 0 }
+    };
+    opt_t o;
+    int c;
 
-    for (i = 1; i < argc; i++) {
-        const char *arg = argv[i];
-
-        if (strcmp(arg, "--") == 0) { i++; break; }
-
-        if (arg[0] != '-' || arg[1] == '\0')
-            break;
-
-        /* Long options */
-        if (strcmp(arg, "--force") == 0)         { opts.force = 1; opts.interactive = 0; continue; }
-        if (strcmp(arg, "--interactive") == 0)   { opts.interactive = 1; opts.force = 0; continue; }
-        if (strcmp(arg, "--no-clobber") == 0)    { opts.no_clobber = 1; continue; }
-        if (strcmp(arg, "--verbose") == 0)        { opts.verbose = 1; continue; }
-        if (strcmp(arg, "--update") == 0)         { opts.update = 1; continue; }
-        if (strcmp(arg, "--no-target-directory") == 0) { opts.no_target = 1; continue; }
-
-        /* Short flags */
-        const char *p = arg + 1;
-        while (*p) {
-            switch (*p) {
-            case 'f': opts.force = 1; opts.interactive = 0; break;
-            case 'i': opts.interactive = 1; opts.force = 0; break;
-            case 'n': opts.no_clobber = 1; break;
-            case 'v': opts.verbose = 1; break;
-            case 'u': opts.update = 1; break;
-            case 'T': opts.no_target = 1; break;
-            default:
-                err_msg("mv", "unrecognized option '-%c'", *p);
-                err_usage("mv", "[-finvuT] SOURCE... DEST");
-                return 1;
-            }
-            p++;
+    opt_init(&o, argc, argv, "finvuT", longs, 0);
+    while ((c = opt_next(&o)) != OPT_DONE) {
+        switch (c) {
+        case 'f': opts.force = 1; opts.interactive = 0; break;
+        case 'i': opts.interactive = 1; opts.force = 0; break;
+        case 'n': opts.no_clobber = 1; break;
+        case 'v': opts.verbose = 1; break;
+        case 'u': opts.update = 1; break;
+        case 'T': opts.no_target = 1; break;
+        default:
+            opt_err_unknown("mv", &o);
+            err_usage("mv", "[-finvuT] SOURCE... DEST");
+            return 1;
         }
     }
+    int i = o.ind;
 
     int noperands = argc - i;
     if (noperands < 2) {

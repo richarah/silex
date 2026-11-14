@@ -5,6 +5,7 @@
 #endif
 
 #include "../util/error.h"
+#include "../util/opt.h"
 
 #include <fcntl.h>
 #include <stdio.h>
@@ -18,26 +19,21 @@ int applet_tee(int argc, char **argv)
 {
     int opt_a = 0;   /* -a: append mode */
     int opt_i = 0;   /* -i: ignore SIGINT */
-    int i;
+    opt_t o;
+    int c;
 
-    for (i = 1; i < argc; i++) {
-        const char *arg = argv[i];
-        if (strcmp(arg, "--") == 0) { i++; break; }
-        if (arg[0] != '-' || arg[1] == '\0') break;
-
-        const char *p = arg + 1;
-        while (*p) {
-            switch (*p) {
-            case 'a': opt_a = 1; break;
-            case 'i': opt_i = 1; break;
-            default:
-                err_msg("tee", "unrecognized option '-%c'", *p);
-                err_usage("tee", "[-ai] [FILE]...");
-                return 1;
-            }
-            p++;
+    opt_init(&o, argc, argv, "ai", NULL, 0);
+    while ((c = opt_next(&o)) != OPT_DONE) {
+        switch (c) {
+        case 'a': opt_a = 1; break;
+        case 'i': opt_i = 1; break;
+        default:
+            opt_err_unknown("tee", &o);
+            err_usage("tee", "[-ai] [FILE]...");
+            return 1;
         }
     }
+    int i = o.ind;
 
     (void)opt_i;  /* signal handling not needed in subprocess context */
 

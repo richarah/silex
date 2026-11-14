@@ -5,6 +5,7 @@
 #endif
 
 #include "../util/error.h"
+#include "../util/opt.h"
 #include "../cache/fscache.h"
 
 #include <errno.h>
@@ -242,98 +243,58 @@ int applet_touch(int argc, char **argv)
     int have_time = 0;
     struct timespec stamp = {0, 0};
     int ret = 0;
-    int i;
+    static const opt_long_t longs[] = {
+        { "no-create", OPT_BARE, 'c' },
+        { NULL, 0, 0 }
+    };
+    opt_t o;
+    int c;
 
-    for (i = 1; i < argc; i++) {
-        const char *arg = argv[i];
-
-        if (strcmp(arg, "--") == 0) { i++; break; }
-        if (arg[0] != '-' || arg[1] == '\0') break;
-
-        if (strcmp(arg, "--no-create") == 0)  { opt_c = 1; continue; }
-
-        /* Short flags (may be clustered: -am, -ac, etc.) */
-        const char *p = arg + 1;
-        int stop = 0;
-        while (*p && !stop) {
-            switch (*p) {
-            case 'a': opt_a = 1; break;
-            case 'm': opt_m = 1; break;
-            case 'c': opt_c = 1; break;
-            case 't': {
-                /* -t STAMP: next arg or remainder */
-                const char *stamp_str;
-                if (p[1]) {
-                    stamp_str = p + 1;  /* stop set unconditionally below */
-                } else {
-                    i++;
-                    if (i >= argc) {
-                        err_usage("touch", "[-amc] [-t STAMP] [-r REF] [-d DATE] FILE...");
-                        return 1;
-                    }
-                    stamp_str = argv[i];
-                }
-                if (parse_t_stamp(stamp_str, &stamp) != 0) {
-                    err_msg("touch", "invalid date format: '%s'", stamp_str);
-                    return 1;
-                }
-                have_time = 1;
-                stop = 1;
-                break;
-            }
-            case 'r': {
-                /* -r REF: use reference file's times */
-                const char *ref;
-                if (p[1]) {
-                    ref = p + 1;  /* stop set unconditionally below */
-                } else {
-                    i++;
-                    if (i >= argc) {
-                        err_usage("touch", "[-amc] [-t STAMP] [-r REF] [-d DATE] FILE...");
-                        return 1;
-                    }
-                    ref = argv[i];
-                }
-                struct stat ref_st;
-                if (stat(ref, &ref_st) != 0) {
-                    err_sys("touch", "cannot stat reference '%s'", ref);
-                    return 1;
-                }
-                /* Use mtime of reference as the stamp */
-                stamp = ref_st.st_mtim;
-                have_time = 1;
-                stop = 1;
-                break;
-            }
-            case 'd': {
-                /* -d DATE */
-                const char *date_str;
-                if (p[1]) {
-                    date_str = p + 1;  /* stop set unconditionally below */
-                } else {
-                    i++;
-                    if (i >= argc) {
-                        err_usage("touch", "[-amc] [-t STAMP] [-r REF] [-d DATE] FILE...");
-                        return 1;
-                    }
-                    date_str = argv[i];
-                }
-                if (parse_d_date(date_str, &stamp) != 0) {
-                    err_msg("touch", "invalid date string: '%s'", date_str);
-                    return 1;
-                }
-                have_time = 1;
-                stop = 1;
-                break;
-            }
-            default:
-                err_msg("touch", "unrecognized option '-%c'", *p);
-                err_usage("touch", "[-amct] [-t STAMP] [-r REF] [-d DATE] FILE...");
+    /* Short flags may be clustered: -am, -ac, etc. */
+    opt_init(&o, argc, argv, "amct:r:d:", longs, 0);
+    while ((c = opt_next(&o)) != OPT_DONE) {
+        switch (c) {
+        case 'a': opt_a = 1; break;
+        case 'm': opt_m = 1; break;
+        case 'c': opt_c = 1; break;
+        case 't':
+            /* -t STAMP: next arg or remainder */
+            if (parse_t_stamp(o.arg, &stamp) != 0) {
+                err_msg("touch", "invalid date format: '%s'", o.arg);
                 return 1;
             }
-            p++;
+            have_time = 1;
+            break;
+        case 'r': {
+            /* -r REF: use reference file's times */
+            struct stat ref_st;
+            if (stat(o.arg, &ref_st) != 0) {
+                err_sys("touch", "cannot stat reference '%s'", o.arg);
+                return 1;
+            }
+            /* Use mtime of reference as the stamp */
+            stamp = ref_st.st_mtim;
+            have_time = 1;
+            break;
+        }
+        case 'd':
+            /* -d DATE */
+            if (parse_d_date(o.arg, &stamp) != 0) {
+                err_msg("touch", "invalid date string: '%s'", o.arg);
+                return 1;
+            }
+            have_time = 1;
+            break;
+        case OPT_MISSING:
+            err_usage("touch", "[-amc] [-t STAMP] [-r REF] [-d DATE] FILE...");
+            return 1;
+        default:
+            opt_err_unknown("touch", &o);
+            err_usage("touch", "[-amct] [-t STAMP] [-r REF] [-d DATE] FILE...");
+            return 1;
         }
     }
+    int i = o.ind;
 
     if (i >= argc) {
         err_usage("touch", "[-amct] [-t STAMP] [-r REF] [-d DATE] FILE...");

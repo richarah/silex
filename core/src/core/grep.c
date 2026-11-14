@@ -5,6 +5,7 @@
 #endif
 
 #include "../util/error.h"
+#include "../util/opt.h"
 #include "../util/path.h"
 #include "../util/strbuf.h"
 #include "../util/charclass.h"
@@ -933,228 +934,130 @@ int applet_grep(int argc, char **argv)
         setvbuf(stdout, grep_out_buf, _IOFBF, sizeof(grep_out_buf));
     }
 
-    int i;
-    for (i = 1; i < argc; i++) {
-        const char *arg = argv[i];
+    enum {
+        L_VCS = 0x100, L_COLOR, L_INCLUDE, L_EXCLUDE, L_REGEXP, L_FILE
+    };
+    static const opt_long_t longs[] = {
+        { "extended-regexp",    OPT_BARE,              'E'       },
+        { "fixed-strings",      OPT_BARE,              'F'       },
+        { "count",              OPT_BARE,              'c'       },
+        { "ignore-case",        OPT_BARE,              'i'       },
+        { "files-with-matches", OPT_BARE,              'l'       },
+        { "line-number",        OPT_BARE,              'n'       },
+        { "quiet",              OPT_BARE,              'q'       },
+        { "silent",             OPT_BARE,              'q'       },
+        { "no-messages",        OPT_BARE,              's'       },
+        { "invert-match",       OPT_BARE,              'v'       },
+        { "word-regexp",        OPT_BARE,              'w'       },
+        { "recursive",          OPT_BARE,              'r'       },
+        { "vcs",                OPT_BARE,              L_VCS     },
+        { "smart-case",         OPT_BARE,              'S'       },
+        { "color",              OPT_BARE | OPT_JOINED, L_COLOR   },
+        { "colour",             OPT_BARE | OPT_JOINED, L_COLOR   },
+        { "include",            OPT_REQ,               L_INCLUDE },
+        { "exclude",            OPT_REQ,               L_EXCLUDE },
+        { "regexp",             OPT_NEXT,              L_REGEXP  },
+        { "file",               OPT_NEXT,              L_FILE    },
+        { NULL, 0, 0 }
+    };
+    opt_t o;
+    int c;
 
-        if (strcmp(arg, "--") == 0) { i++; break; }
-
-        /* Long options */
-        if (strcmp(arg, "--extended-regexp") == 0)   { g.opt_E = 1; continue; }
-        if (strcmp(arg, "--fixed-strings")   == 0)   { g.opt_F = 1; continue; }
-        if (strcmp(arg, "--count")           == 0)   { g.opt_c = 1; continue; }
-        if (strcmp(arg, "--ignore-case")     == 0)   { g.opt_i = 1; continue; }
-        if (strcmp(arg, "--files-with-matches") == 0){ g.opt_l = 1; continue; }
-        if (strcmp(arg, "--line-number")     == 0)   { g.opt_n = 1; continue; }
-        if (strcmp(arg, "--quiet")           == 0 ||
-            strcmp(arg, "--silent")          == 0)   { g.opt_q = 1; continue; }
-        if (strcmp(arg, "--no-messages")     == 0)   { g.opt_s = 1; continue; }
-        if (strcmp(arg, "--invert-match")    == 0)   { g.opt_v = 1; continue; }
-        if (strcmp(arg, "--word-regexp")     == 0)   { g.opt_w = 1; continue; }
-        if (strcmp(arg, "--recursive")       == 0)   { g.opt_r = 1; continue; }
-        if (strcmp(arg, "--vcs")             == 0)   { g.opt_vcs = 1; g.opt_r = 1; continue; }
-        if (strcmp(arg, "--smart-case")      == 0)   { g.opt_smart = 1; continue; }
-        if (strcmp(arg, "--color")           == 0 ||
-            strcmp(arg, "--colour")          == 0 ||
-            strcmp(arg, "--color=always")    == 0 ||
-            strcmp(arg, "--colour=always")   == 0)   { g.opt_color = 1; continue; }
-        if (strcmp(arg, "--color=auto")      == 0 ||
-            strcmp(arg, "--colour=auto")     == 0)   { g.opt_color = color_auto; continue; }
-        if (strcmp(arg, "--color=never")     == 0 ||
-            strcmp(arg, "--colour=never")    == 0)   { g.opt_color = 0; continue; }
-
-        if (strncmp(arg, "--include=", 10) == 0) {
-            if (g.n_include >= MAX_GLOBS) { err_msg("grep", "too many --include globs"); goto parse_error; }
-            g.include_globs[g.n_include++] = (char *)(arg + 10);
-            continue;
-        }
-        if (strcmp(arg, "--include") == 0) {
-            if (++i >= argc) { err_msg("grep", "--include requires argument"); goto parse_error; }
-            if (g.n_include >= MAX_GLOBS) { err_msg("grep", "too many --include globs"); goto parse_error; }
-            g.include_globs[g.n_include++] = argv[i];
-            continue;
-        }
-        if (strncmp(arg, "--exclude=", 10) == 0) {
-            if (g.n_exclude >= MAX_GLOBS) { err_msg("grep", "too many --exclude globs"); goto parse_error; }
-            g.exclude_globs[g.n_exclude++] = (char *)(arg + 10);
-            continue;
-        }
-        if (strcmp(arg, "--exclude") == 0) {
-            if (++i >= argc) { err_msg("grep", "--exclude requires argument"); goto parse_error; }
-            if (g.n_exclude >= MAX_GLOBS) { err_msg("grep", "too many --exclude globs"); goto parse_error; }
-            g.exclude_globs[g.n_exclude++] = argv[i];
-            continue;
-        }
-
-        if (strcmp(arg, "--regexp") == 0 || strcmp(arg, "-e") == 0) {
-            /* handled in short-flag section below; but long form: */
-            if (strcmp(arg, "--regexp") == 0) {
-                if (++i >= argc) { err_msg("grep", "--regexp requires argument"); goto parse_error; }
-                if (g.npatterns >= MAX_PATTERNS) { err_msg("grep", "too many patterns"); goto parse_error; }
-                g.patterns[g.npatterns] = strdup(argv[i]);
-                if (!g.patterns[g.npatterns]) { err_msg("grep", "out of memory"); goto parse_error; }
-                g.npatterns++;
-                continue;
-            }
-        }
-        if (strcmp(arg, "--file") == 0) {
-            if (++i >= argc) { grep_opts_free(&g); err_msg("grep", "--file requires argument"); goto parse_error; }
-            if (load_pattern_file(argv[i], &g) != 0) { grep_opts_free(&g); goto parse_error; }
-            continue;
-        }
-
-        /* Unknown long option: try module lookup */
-        if (arg[0] == '-' && arg[1] == '-') {
-            silex_module_t *mod = registry_lookup("grep", arg);
-            if (mod) {
-                grep_opts_free(&g);
-                return mod->handler(argc, argv, i);
-            }
-            grep_opts_free(&g);
-            err_msg("grep", "unrecognized option '%s'", arg);
-            goto parse_error;
-        }
-
-        if (arg[0] != '-' || arg[1] == '\0')
+    opt_init(&o, argc, argv, "EFcilLHhnqsvwrRoxbZSm:A:B:C:e:f:", longs, 0);
+    while ((c = opt_next(&o)) != OPT_DONE) {
+        switch (c) {
+        case 'E': g.opt_E = 1; break;
+        case 'F': g.opt_F = 1; break;
+        case 'c': g.opt_c = 1; break;
+        case 'i': g.opt_i = 1; break;
+        case 'l': g.opt_l = 1; break;
+        case 'L': g.opt_L = 1; break;
+        case 'H': g.opt_H = 1; break;
+        case 'h': g.opt_h = 1; break;
+        case 'n': g.opt_n = 1; break;
+        case 'q': g.opt_q = 1; break;
+        case 's': g.opt_s = 1; break;
+        case 'v': g.opt_v = 1; break;
+        case 'w': g.opt_w = 1; break;
+        case 'r': case 'R': g.opt_r = 1; break;
+        case 'o': g.opt_o = 1; break;
+        case 'x': g.opt_x = 1; break;
+        case 'b': g.opt_b = 1; break;
+        case 'Z': g.opt_Z = 1; break;
+        case 'S': g.opt_smart = 1; break;
+        case L_VCS: g.opt_vcs = 1; g.opt_r = 1; break;
+        case L_COLOR:
+            if (!o.arg || strcmp(o.arg, "always") == 0)
+                g.opt_color = 1;
+            else if (strcmp(o.arg, "auto") == 0)
+                g.opt_color = color_auto;
+            else if (strcmp(o.arg, "never") == 0)
+                g.opt_color = 0;
+            else
+                goto unknown;
             break;
-
-        /* Short options */
-        const char *p = arg + 1;
-        int stop = 0;
-        while (*p && !stop) {
-            switch (*p) {
-            case 'E': g.opt_E = 1; break;
-            case 'F': g.opt_F = 1; break;
-            case 'c': g.opt_c = 1; break;
-            case 'i': g.opt_i = 1; break;
-            case 'l': g.opt_l = 1; break;
-            case 'L': g.opt_L = 1; break;
-            case 'H': g.opt_H = 1; break;
-            case 'h': g.opt_h = 1; break;
-            case 'n': g.opt_n = 1; break;
-            case 'q': g.opt_q = 1; break;
-            case 's': g.opt_s = 1; break;
-            case 'v': g.opt_v = 1; break;
-            case 'w': g.opt_w = 1; break;
-            case 'r': case 'R': g.opt_r = 1; break;
-            case 'o': g.opt_o = 1; break;
-            case 'x': g.opt_x = 1; break;
-            case 'b': g.opt_b = 1; break;
-            case 'Z': g.opt_Z = 1; break;
-            case 'S': g.opt_smart = 1; break;
-            case 'm': {
-                const char *val;
-                if (p[1]) { val = p + 1; }  /* stop set unconditionally below */
-                else {
-                    if (++i >= argc) {
-                        err_msg("grep", "-m requires argument"); goto parse_error;
-                    }
-                    val = argv[i];
-                }
-                g.max_matches = atoi(val);
-                stop = 1;
-                break;
-            }
-            case 'A': {
-                const char *val;
-                if (p[1]) { val = p + 1; }  /* stop set unconditionally below */
-                else {
-                    if (++i >= argc) {
-                        err_msg("grep", "-A requires argument"); goto parse_error;
-                    }
-                    val = argv[i];
-                }
-                g.context_A = atoi(val);
-                stop = 1;
-                break;
-            }
-            case 'B': {
-                const char *val;
-                if (p[1]) { val = p + 1; }  /* stop set unconditionally below */
-                else {
-                    if (++i >= argc) {
-                        err_msg("grep", "-B requires argument"); goto parse_error;
-                    }
-                    val = argv[i];
-                }
-                g.context_B = atoi(val);
-                stop = 1;
-                break;
-            }
-            case 'C': {
-                const char *val;
-                if (p[1]) { val = p + 1; }  /* stop set unconditionally below */
-                else {
-                    if (++i >= argc) {
-                        err_msg("grep", "-C requires argument"); goto parse_error;
-                    }
-                    val = argv[i];
-                }
-                g.context_A = g.context_B = atoi(val);
-                stop = 1;
-                break;
-            }
-            case 'e': {
-                const char *pat;
-                if (p[1]) {
-                    pat = p + 1;
-                    p += strlen(p) - 1;
-                } else {
-                    if (++i >= argc) {
-                        err_msg("grep", "-e requires argument");
-                        goto parse_error;
-                    }
-                    pat = argv[i];
-                }
-                if (g.npatterns >= MAX_PATTERNS) {
-                    err_msg("grep", "too many patterns");
-                    goto parse_error;
-                }
-                g.patterns[g.npatterns] = strdup(pat);
-                if (!g.patterns[g.npatterns]) {
-                    err_msg("grep", "out of memory");
-                    goto parse_error;
-                }
-                g.npatterns++;
-                stop = 1;
-                break;
-            }
-            case 'f': {
-                const char *fname;
-                if (p[1]) {
-                    fname = p + 1;
-                    p += strlen(p) - 1;
-                } else {
-                    if (++i >= argc) {
-                        grep_opts_free(&g);
-                        err_msg("grep", "-f requires argument");
-                        goto parse_error;
-                    }
-                    fname = argv[i];
-                }
-                if (load_pattern_file(fname, &g) != 0) {
-                    grep_opts_free(&g);
-                    goto parse_error;
-                }
-                stop = 1;
-                break;
-            }
-            default:
-                /* Try module lookup before error */
-                {
-                    char flag_str[3] = {'-', *p, '\0'};
-                    silex_module_t *mod = registry_lookup("grep", flag_str);
-                    if (mod) {
-                        grep_opts_free(&g);
-                        return mod->handler(argc, argv, i);
-                    }
-                }
-                err_msg("grep", "unrecognized option '-%c'", *p);
+        case L_INCLUDE:
+            if (g.n_include >= MAX_GLOBS) { err_msg("grep", "too many --include globs"); goto parse_error; }
+            g.include_globs[g.n_include++] = (char *)o.arg;
+            break;
+        case L_EXCLUDE:
+            if (g.n_exclude >= MAX_GLOBS) { err_msg("grep", "too many --exclude globs"); goto parse_error; }
+            g.exclude_globs[g.n_exclude++] = (char *)o.arg;
+            break;
+        case 'm': g.max_matches = atoi(o.arg); break;
+        case 'A': g.context_A = atoi(o.arg); break;
+        case 'B': g.context_B = atoi(o.arg); break;
+        case 'C': g.context_A = g.context_B = atoi(o.arg); break;
+        case 'e':
+        case L_REGEXP:
+            if (g.npatterns >= MAX_PATTERNS) {
+                err_msg("grep", "too many patterns");
                 goto parse_error;
             }
-            p++;
+            g.patterns[g.npatterns] = strdup(o.arg);
+            if (!g.patterns[g.npatterns]) {
+                err_msg("grep", "out of memory");
+                goto parse_error;
+            }
+            g.npatterns++;
+            break;
+        case 'f':
+        case L_FILE:
+            if (load_pattern_file(o.arg, &g) != 0)
+                goto parse_error;
+            break;
+        case OPT_MISSING:
+            if (o.islong)
+                err_msg("grep", "--%s requires argument", o.lopt->name);
+            else
+                err_msg("grep", "-%c requires argument", o.opt);
+            goto parse_error;
+        default:
+        unknown:
+            /* Unknown long option: try module lookup */
+            if (o.islong) {
+                silex_module_t *mod = registry_lookup("grep", o.cur);
+                if (mod) {
+                    grep_opts_free(&g);
+                    return mod->handler(argc, argv, o.cur_ind);
+                }
+                err_msg("grep", "unrecognized option '%s'", o.cur);
+                goto parse_error;
+            }
+            /* Try module lookup before error */
+            {
+                char flag_str[3] = {'-', (char)o.opt, '\0'};
+                silex_module_t *mod = registry_lookup("grep", flag_str);
+                if (mod) {
+                    grep_opts_free(&g);
+                    return mod->handler(argc, argv, o.cur_ind);
+                }
+            }
+            err_msg("grep", "unrecognized option '-%c'", o.opt);
+            goto parse_error;
         }
     }
+    int i = o.ind;
 
     /* If no -e/-f patterns, first non-option arg is the pattern */
     if (g.npatterns == 0) {

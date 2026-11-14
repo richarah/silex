@@ -9,6 +9,7 @@
 #endif
 
 #include "../util/error.h"
+#include "../util/opt.h"
 #include "../util/path.h"
 #include "../cache/fscache.h"
 #include "../module/registry.h"
@@ -402,100 +403,105 @@ int applet_cp(int argc, char **argv)
     int ret = 0;
     int i;
 
-    for (i = 1; i < argc; i++) {
-        const char *arg = argv[i];
-
-        if (strcmp(arg, "--") == 0) { i++; break; }
-
+    enum {
+        L_RECURSIVE = 0x100, L_PRESERVE, L_FORCE, L_INTERACTIVE, L_NO_CLOBBER,
+        L_UPDATE, L_VERBOSE, L_NO_TARGET, L_DEREF, L_NO_DEREF
+    };
+    static const opt_long_t longs[] = {
+        { "recursive",           OPT_BARE,              L_RECURSIVE   },
+        { "preserve",            OPT_BARE | OPT_JOINED, L_PRESERVE    },
+        { "force",               OPT_BARE,              L_FORCE       },
+        { "interactive",         OPT_BARE,              L_INTERACTIVE },
+        { "no-clobber",          OPT_BARE,              L_NO_CLOBBER  },
+        { "update",              OPT_BARE,              L_UPDATE      },
+        { "verbose",             OPT_BARE,              L_VERBOSE     },
+        { "no-target-directory", OPT_BARE,              L_NO_TARGET   },
+        { "dereference",         OPT_BARE,              L_DEREF       },
+        { "no-dereference",      OPT_BARE,              L_NO_DEREF    },
+        { NULL, 0, 0 }
+    };
+    opt_t o;
+    int c;
+    opt_init(&o, argc, argv, "rRpfinuvTLHPad", longs, 0);
+    while ((c = opt_next(&o)) != OPT_DONE) {
+        switch (c) {
         /* Long options */
-        if (strcmp(arg, "--recursive") == 0)      { opts.recursive = 1; continue; }
-        if (strcmp(arg, "--preserve") == 0)        { opts.preserve = 1; continue; }
-        if (strcmp(arg, "--force") == 0)           { opts.force = 1; continue; }
-        if (strcmp(arg, "--interactive") == 0)     { opts.interactive = 1; continue; }
-        if (strcmp(arg, "--no-clobber") == 0)      { opts.no_clobber = 1; continue; }
-        if (strcmp(arg, "--update") == 0)          { opts.update = 1; continue; }
-        if (strcmp(arg, "--verbose") == 0)         { opts.verbose = 1; continue; }
-        if (strcmp(arg, "--no-target-directory") == 0) { opts.no_target = 1; continue; }
-        if (strcmp(arg, "--dereference") == 0)     { opts.follow_all = 1; continue; }
-        if (strcmp(arg, "--no-dereference") == 0)  { opts.follow_all = 0; opts.follow_cmd = 0; continue; }
-        if (strncmp(arg, "--preserve=", 11) == 0)  { opts.preserve = 1; continue; }
-
-        if (arg[0] != '-' || arg[1] == '\0')
-            break;
-
-        /* An unrecognised LONG option gets a module lookup, as grep, sort,
-         * find and xargs already do for theirs.
-         *
-         * Without this it fell through to the short-flag loop below, which
-         * starts at arg+1 -- so `--reflink=always` was read as the short flag
-         * `-` and looked up under the two-character name "--", reporting
-         * "unrecognized option '--'". Every flag modules/cp_reflink.c
-         * advertises is a long one (--reflink, --reflink=auto/always/never),
-         * so the module that ships in this repo could not be reached by any
-         * invocation at all. */
-        if (arg[1] == '-') {
-            silex_module_t *mod = registry_lookup("cp", arg);
-            if (mod)
-                return mod->handler(argc, argv, i);
-            fprintf(stderr, "silex: cp: unrecognized option '%s'\n", arg);
-            fprintf(stderr, "silex: cp: unsupported flag %s. "
-                    "Install silex-gnu-cp module or GNU coreutils.\n", arg);
-            return 1;
-        }
+        case L_RECURSIVE:   opts.recursive = 1; break;
+        case L_PRESERVE:    opts.preserve = 1; break;
+        case L_FORCE:       opts.force = 1; break;
+        case L_INTERACTIVE: opts.interactive = 1; break;
+        case L_NO_CLOBBER:  opts.no_clobber = 1; break;
+        case L_UPDATE:      opts.update = 1; break;
+        case L_VERBOSE:     opts.verbose = 1; break;
+        case L_NO_TARGET:   opts.no_target = 1; break;
+        case L_DEREF:       opts.follow_all = 1; break;
+        case L_NO_DEREF:    opts.follow_all = 0; opts.follow_cmd = 0; break;
 
         /* Short flags */
-        const char *p = arg + 1;
-        int unknown_flag = 0;
-        while (*p && !unknown_flag) {
-            switch (*p) {
-            case 'r': case 'R': opts.recursive = 1; break;
-            case 'p': opts.preserve = 1; break;
-            case 'f': opts.force = 1; opts.interactive = 0; break;
-            case 'i': opts.interactive = 1; opts.force = 0; break;
-            case 'n': opts.no_clobber = 1; break;
-            case 'u': opts.update = 1; break;
-            case 'v': opts.verbose = 1; break;
-            case 'T': opts.no_target = 1; break;
-            case 'L': opts.follow_all = 1; opts.follow_cmd = 0; break;
-            case 'H': opts.follow_cmd = 1; opts.follow_all = 0; break;
-            case 'P': opts.follow_all = 0; opts.follow_cmd = 0; break;
-            case 'a':
-                /* -a = -rpP */
-                opts.recursive = 1;
-                opts.preserve = 1;
-                opts.follow_all = 0;
-                opts.follow_cmd = 0;
-                break;
-            case 'd':
-                /* -d = --no-dereference --preserve=links */
-                opts.follow_all = 0;
-                opts.follow_cmd = 0;
-                break;
-            default:
-                /* Try module lookup before error */
-                {
-                    char flag_str[3] = {'-', *p, '\0'};
-                    silex_module_t *mod = registry_lookup("cp", flag_str);
-                    if (mod) {
-                        /* `i`, not 1: flag_index is documented as the argv slot
-                         * the unrecognised flag was found in, and modules index
-                         * argv with it (cp_reflink reads argv[flag_index] to
-                         * pick its mode). A hardcoded 1 was right only when the
-                         * flag happened to be the first argument. */
-                        return mod->handler(argc, argv, i);
-                    }
-                }
-                /* Unknown flag */
-                fprintf(stderr, "silex: cp: unrecognized option '-%c'\n", *p);
-                fprintf(stderr, "silex: cp: unsupported flag -%c. "
-                        "Install silex-gnu-cp module or GNU coreutils.\n", *p);
+        case 'r': case 'R': opts.recursive = 1; break;
+        case 'p': opts.preserve = 1; break;
+        case 'f': opts.force = 1; opts.interactive = 0; break;
+        case 'i': opts.interactive = 1; opts.force = 0; break;
+        case 'n': opts.no_clobber = 1; break;
+        case 'u': opts.update = 1; break;
+        case 'v': opts.verbose = 1; break;
+        case 'T': opts.no_target = 1; break;
+        case 'L': opts.follow_all = 1; opts.follow_cmd = 0; break;
+        case 'H': opts.follow_cmd = 1; opts.follow_all = 0; break;
+        case 'P': opts.follow_all = 0; opts.follow_cmd = 0; break;
+        case 'a':
+            /* -a = -rpP */
+            opts.recursive = 1;
+            opts.preserve = 1;
+            opts.follow_all = 0;
+            opts.follow_cmd = 0;
+            break;
+        case 'd':
+            /* -d = --no-dereference --preserve=links */
+            opts.follow_all = 0;
+            opts.follow_cmd = 0;
+            break;
+        default:
+            /* An unrecognised LONG option gets a module lookup, as grep,
+             * sort, find and xargs already do for theirs.
+             *
+             * Without this it fell through to the short-flag loop, which
+             * started at arg+1 -- so `--reflink=always` was read as the short
+             * flag `-` and looked up under the two-character name "--",
+             * reporting "unrecognized option '--'". Every flag
+             * modules/cp_reflink.c advertises is a long one (--reflink,
+             * --reflink=auto/always/never), so the module that ships in this
+             * repo could not be reached by any invocation at all. */
+            if (o.islong) {
+                silex_module_t *mod = registry_lookup("cp", o.cur);
+                if (mod)
+                    return mod->handler(argc, argv, o.cur_ind);
+                fprintf(stderr, "silex: cp: unrecognized option '%s'\n", o.cur);
+                fprintf(stderr, "silex: cp: unsupported flag %s. "
+                        "Install silex-gnu-cp module or GNU coreutils.\n", o.cur);
                 return 1;
             }
-            p++;
-        }
-        if (unknown_flag)
+            /* Try module lookup before error */
+            {
+                char flag_str[3] = {'-', (char)o.opt, '\0'};
+                silex_module_t *mod = registry_lookup("cp", flag_str);
+                if (mod) {
+                    /* o.cur_ind, not 1: flag_index is documented as the argv
+                     * slot the unrecognised flag was found in, and modules
+                     * index argv with it (cp_reflink reads argv[flag_index] to
+                     * pick its mode). A hardcoded 1 was right only when the
+                     * flag happened to be the first argument. */
+                    return mod->handler(argc, argv, o.cur_ind);
+                }
+            }
+            /* Unknown flag */
+            fprintf(stderr, "silex: cp: unrecognized option '-%c'\n", o.opt);
+            fprintf(stderr, "silex: cp: unsupported flag -%c. "
+                    "Install silex-gnu-cp module or GNU coreutils.\n", o.opt);
             return 1;
+        }
     }
+    i = o.ind;
 
     /* Need at least src and dst */
     int noperands = argc - i;

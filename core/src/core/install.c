@@ -5,6 +5,7 @@
 #endif
 
 #include "../util/error.h"
+#include "../util/opt.h"
 #include "../util/path.h"
 #include "../module/registry.h"
 
@@ -259,143 +260,77 @@ int applet_install(int argc, char **argv)
     const char *opt_group  = NULL;
     const char *opt_suffix = NULL; /* -S SUFFIX: backup suffix */
     const char *opt_target = NULL; /* -t DIR: target directory */
-    int i;
+    static const opt_long_t longs[] = {
+        { "mode",                OPT_JOINED, 'm' },
+        { "owner",               OPT_JOINED, 'o' },
+        { "group",               OPT_JOINED, 'g' },
+        { "suffix",              OPT_JOINED, 'S' },
+        { "target-directory",    OPT_JOINED, 't' },
+        { "directory",           OPT_BARE,   'd' },
+        { "verbose",             OPT_BARE,   'v' },
+        { "preserve-timestamps", OPT_BARE,   'p' },
+        { "strip",               OPT_BARE,   's' },
+        { NULL, 0, 0 }
+    };
+    opt_t o;
+    int c;
 
-    for (i = 1; i < argc; i++) {
-        const char *arg = argv[i];
-
-        if (strcmp(arg, "--") == 0) { i++; break; }
-
-        if (strncmp(arg, "--mode=", 7) == 0) {
-            mode_t m = parse_mode(arg + 7);
+    opt_init(&o, argc, argv, "dDvpsm:o:g:S:t:", longs, 0);
+    while ((c = opt_next(&o)) != OPT_DONE) {
+        switch (c) {
+        case 'd': opt_d = 1; break;
+        case 'D': opt_D = 1; break;
+        case 'v': opt_v = 1; break;
+        case 'p': opt_p = 1; break;
+        case 's': opt_s = 1; break;
+        case 'm': {
+            mode_t m = parse_mode(o.arg);
             if (m == (mode_t)-1) {
-                err_msg("install", "invalid mode '%s'", arg + 7);
+                err_msg("install", "invalid mode '%s'", o.arg);
                 return 1;
             }
             opt_m = m; have_mode = 1;
-            continue;
-        }
-        if (strncmp(arg, "--owner=", 8) == 0) { opt_owner = arg + 8; continue; }
-        if (strncmp(arg, "--group=", 8) == 0) { opt_group = arg + 8; continue; }
-        if (strncmp(arg, "--suffix=", 9) == 0) { opt_suffix = arg + 9; continue; }
-        if (strncmp(arg, "--target-directory=", 19) == 0) {
-            opt_target = arg + 19; continue;
-        }
-        if (strcmp(arg, "--directory") == 0)  { opt_d = 1; continue; }
-        if (strcmp(arg, "--verbose") == 0)     { opt_v = 1; continue; }
-        if (strcmp(arg, "--preserve-timestamps") == 0) { opt_p = 1; continue; }
-        if (strcmp(arg, "--strip") == 0)       { opt_s = 1; continue; }
-
-        if (arg[0] != '-' || arg[1] == '\0')
             break;
-
-        /* Long options get their own module lookup, for the same reason cp's
-         * does: falling through to the short-flag loop reads `--foo` as the
-         * short flag `-` and looks the module up under "--". */
-        if (arg[1] == '-') {
-            silex_module_t *mod = registry_lookup("install", arg);
-            if (mod)
-                return mod->handler(argc, argv, i);
-            err_msg("install", "unrecognized option '%s'", arg);
-            err_usage("install", "[-dvps] [-m MODE] [-o OWNER] [-g GROUP] SRC... DST");
-            return 1;
         }
-
-        const char *p = arg + 1;
-        int stop = 0;
-        while (*p && !stop) {
-            switch (*p) {
-            case 'd': opt_d = 1; break;
-            case 'D': opt_D = 1; break;
-            case 'v': opt_v = 1; break;
-            case 'p': opt_p = 1; break;
-            case 's': opt_s = 1; break;
-            case 'm': {
-                const char *mstr;
-                if (p[1]) {
-                    mstr = p + 1;
-                    stop = 1;
-                } else {
-                    i++;
-                    if (i >= argc) {
-                        err_usage("install", "[-dvps] [-m MODE] [-o OWNER] [-g GROUP] SRC... DST");
-                        return 1;
-                    }
-                    mstr = argv[i];
-                }
-                mode_t m = parse_mode(mstr);
-                if (m == (mode_t)-1) {
-                    err_msg("install", "invalid mode '%s'", mstr);
-                    return 1;
-                }
-                opt_m = m; have_mode = 1;
-                break;
-            }
-            case 'o': {
-                if (p[1]) { opt_owner = p + 1; stop = 1; }
-                else {
-                    i++;
-                    if (i >= argc) {
-                        err_usage("install", "[-dvps] [-m MODE] [-o OWNER] [-g GROUP] SRC... DST");
-                        return 1;
-                    }
-                    opt_owner = argv[i];
-                }
-                break;
-            }
-            case 'g': {
-                if (p[1]) { opt_group = p + 1; stop = 1; }
-                else {
-                    i++;
-                    if (i >= argc) {
-                        err_usage("install", "[-dvps] [-m MODE] [-o OWNER] [-g GROUP] SRC... DST");
-                        return 1;
-                    }
-                    opt_group = argv[i];
-                }
-                break;
-            }
-            case 'S': {
-                if (p[1]) { opt_suffix = p + 1; stop = 1; }
-                else {
-                    i++;
-                    if (i >= argc) {
-                        err_usage("install", "[-dvps] [-S SUFFIX] SRC... DST");
-                        return 1;
-                    }
-                    opt_suffix = argv[i];
-                }
-                break;
-            }
-            case 't': {
-                if (p[1]) { opt_target = p + 1; stop = 1; }
-                else {
-                    i++;
-                    if (i >= argc) {
-                        err_usage("install", "[-dvps] [-t DIR] SRC...");
-                        return 1;
-                    }
-                    opt_target = argv[i];
-                }
-                break;
-            }
-            default:
-                /* Try module lookup before error */
-                {
-                    char flag_str[3] = {'-', *p, '\0'};
-                    silex_module_t *mod = registry_lookup("install", flag_str);
-                    if (mod) {
-                        /* `i`, not 1 -- see the same fix in cp.c. */
-                        return mod->handler(argc, argv, i);
-                    }
-                }
-                err_msg("install", "unrecognized option '-%c'", *p);
+        case 'o': opt_owner  = o.arg; break;
+        case 'g': opt_group  = o.arg; break;
+        case 'S': opt_suffix = o.arg; break;
+        case 't': opt_target = o.arg; break;
+        case OPT_MISSING:
+            if (o.opt == 'S')
+                err_usage("install", "[-dvps] [-S SUFFIX] SRC... DST");
+            else if (o.opt == 't')
+                err_usage("install", "[-dvps] [-t DIR] SRC...");
+            else
+                err_usage("install", "[-dvps] [-m MODE] [-o OWNER] [-g GROUP] SRC... DST");
+            return 1;
+        default:
+            /* Long options get their own module lookup, for the same reason
+             * cp's does: treated as a short cluster, `--foo` would be looked
+             * up as the short flag `-`, under "--". */
+            if (o.islong) {
+                silex_module_t *mod = registry_lookup("install", o.cur);
+                if (mod)
+                    return mod->handler(argc, argv, o.cur_ind);
+                err_msg("install", "unrecognized option '%s'", o.cur);
                 err_usage("install", "[-dvps] [-m MODE] [-o OWNER] [-g GROUP] SRC... DST");
                 return 1;
             }
-            p++;
+            /* Try module lookup before error */
+            {
+                char flag_str[3] = {'-', (char)o.opt, '\0'};
+                silex_module_t *mod = registry_lookup("install", flag_str);
+                if (mod) {
+                    /* o.cur_ind, not 1 -- see the same fix in cp.c. */
+                    return mod->handler(argc, argv, o.cur_ind);
+                }
+            }
+            opt_err_unknown("install", &o);
+            err_usage("install", "[-dvps] [-m MODE] [-o OWNER] [-g GROUP] SRC... DST");
+            return 1;
         }
     }
+    int i = o.ind;
 
     /* If -d: create directories */
     if (opt_d) {

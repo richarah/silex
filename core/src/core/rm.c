@@ -5,6 +5,7 @@
 #endif
 
 #include "../util/error.h"
+#include "../util/opt.h"
 #include "../util/path.h"
 
 #include <dirent.h>
@@ -162,48 +163,42 @@ int applet_rm(int argc, char **argv)
 {
     struct rm_opts opts = {0};
     int ret = 0;
-    int i;
+    enum { L_FORCE = 0x100, L_INTERACTIVE, L_NO_PRESERVE_ROOT, L_PRESERVE_ROOT };
+    static const opt_long_t longs[] = {
+        { "recursive",        OPT_BARE, 'r'                },
+        { "force",            OPT_BARE, L_FORCE            },
+        { "interactive",      OPT_BARE, L_INTERACTIVE      },
+        { "verbose",          OPT_BARE, 'v'                },
+        { "no-preserve-root", OPT_BARE, L_NO_PRESERVE_ROOT },
+        { "preserve-root",    OPT_BARE, L_PRESERVE_ROOT    },
+        { NULL, 0, 0 }
+    };
+    opt_t o;
+    int c;
 
-    for (i = 1; i < argc; i++) {
-        const char *arg = argv[i];
-
-        if (strcmp(arg, "--") == 0) { i++; break; }
-
-        /* Long options */
-        if (strcmp(arg, "--recursive") == 0) { opts.recursive = 1; continue; }
-        if (strcmp(arg, "--force") == 0)      { opts.force = 1;     continue; }
-        if (strcmp(arg, "--interactive") == 0){ opts.interactive = 1; continue; }
-        if (strcmp(arg, "--verbose") == 0)    { opts.verbose = 1;   continue; }
-
+    opt_init(&o, argc, argv, "rRfiv", longs, 0);
+    while ((c = opt_next(&o)) != OPT_DONE) {
+        switch (c) {
+        case 'r': case 'R': opts.recursive = 1; break;
+        case 'f': opts.force = 1; opts.interactive = 0; break;
+        case 'i': opts.interactive = 1; opts.force = 0; break;
+        case 'v': opts.verbose = 1; break;
+        case L_FORCE:       opts.force = 1; break;
+        case L_INTERACTIVE: opts.interactive = 1; break;
         /* Explicitly reject --no-preserve-root for safety */
-        if (strcmp(arg, "--no-preserve-root") == 0) {
+        case L_NO_PRESERVE_ROOT:
             err_msg("rm", "--no-preserve-root is not supported for safety reasons");
             return 1;
-        }
         /* Accept but ignore --preserve-root (it's the default) */
-        if (strcmp(arg, "--preserve-root") == 0) {
-            continue;
-        }
-
-        if (arg[0] != '-' || arg[1] == '\0')
+        case L_PRESERVE_ROOT:
             break;
-
-        /* Short flags */
-        const char *p = arg + 1;
-        while (*p) {
-            switch (*p) {
-            case 'r': case 'R': opts.recursive = 1; break;
-            case 'f': opts.force = 1; opts.interactive = 0; break;
-            case 'i': opts.interactive = 1; opts.force = 0; break;
-            case 'v': opts.verbose = 1; break;
-            default:
-                err_msg("rm", "unrecognized option '-%c'", *p);
-                err_usage("rm", "[-rRfiv] FILE...");
-                return 1;
-            }
-            p++;
+        default:
+            opt_err_unknown("rm", &o);
+            err_usage("rm", "[-rRfiv] FILE...");
+            return 1;
         }
     }
+    int i = o.ind;
 
     if (i >= argc) {
         if (opts.force)

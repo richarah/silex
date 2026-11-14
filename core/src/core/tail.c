@@ -9,6 +9,7 @@
 #endif
 
 #include "../util/error.h"
+#include "../util/opt.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -410,141 +411,72 @@ int applet_tail(int argc, char **argv)
     int opt_v        = 0;
     pid_t watch_pid  = 0;
     int ret          = 0;
-    int i;
-
-    for (i = 1; i < argc; i++) {
-        const char *arg = argv[i];
-
-        if (strcmp(arg, "--") == 0) { i++; break; }
-        if (arg[0] != '-' || arg[1] == '\0') break;
-
-        if (strcmp(arg, "--follow") == 0)  { opt_f = 1; continue; }
-        if (strcmp(arg, "--quiet") == 0 ||
-            strcmp(arg, "--silent") == 0)  { opt_q = 1; continue; }
-        if (strcmp(arg, "--verbose") == 0) { opt_v = 1; continue; }
-
+    enum { L_PID = 0x100 };
+    static const opt_long_t longs[] = {
+        { "follow",  OPT_BARE, 'f'   },
+        { "quiet",   OPT_BARE, 'q'   },
+        { "silent",  OPT_BARE, 'q'   },
+        { "verbose", OPT_BARE, 'v'   },
         /* getopt_long takes a required argument either joined (`--bytes=4`)
-         * or as the NEXT word (`--bytes 4`); only the joined form was
+         * or as the NEXT word (`--bytes 4`); only the joined form was once
          * accepted, so `tail --bytes 4` -- the form the Oils umask test and
          * plenty of scripts use -- died on "unrecognized option '--'". */
-        if (strncmp(arg, "--lines", 7) == 0 &&
-            (arg[7] == '\0' || arg[7] == '=')) {
-            const char *val = arg[7] == '=' ? arg + 8 : (++i < argc ? argv[i] : NULL);
-            if (!val) {
-                err_usage("tail", "[-n N] [-c N] [-fqv] [--pid PID] [FILE...]");
-                return 1;
-            }
-            if (parse_count(val, &count, &plus_mode) != 0) {
-                err_msg("tail", "invalid number of lines: '%s'", val);
+        { "lines",   OPT_REQ,  'n'   },
+        { "bytes",   OPT_REQ,  'c'   },
+        { "pid",     OPT_REQ,  L_PID },
+        { NULL, 0, 0 }
+    };
+    opt_t o;
+    int c;
+
+    opt_init(&o, argc, argv, "fqvn:c:", longs, 0);
+    while ((c = opt_next(&o)) != OPT_DONE) {
+        switch (c) {
+        case 'f': opt_f = 1; break;
+        case 'q': opt_q = 1; break;
+        case 'v': opt_v = 1; break;
+        case 'n':
+            if (parse_count(o.arg, &count, &plus_mode) != 0) {
+                err_msg("tail", "invalid number of lines: '%s'", o.arg);
                 return 1;
             }
             use_bytes = 0;
-            continue;
-        }
-        if (strncmp(arg, "--bytes", 7) == 0 &&
-            (arg[7] == '\0' || arg[7] == '=')) {
-            const char *val = arg[7] == '=' ? arg + 8 : (++i < argc ? argv[i] : NULL);
-            if (!val) {
-                err_usage("tail", "[-n N] [-c N] [-fqv] [--pid PID] [FILE...]");
-                return 1;
-            }
-            if (parse_count(val, &count, &plus_mode) != 0) {
-                err_msg("tail", "invalid number of bytes: '%s'", val);
+            break;
+        case 'c':
+            if (parse_count(o.arg, &count, &plus_mode) != 0) {
+                err_msg("tail", "invalid number of bytes: '%s'", o.arg);
                 return 1;
             }
             use_bytes = 1;
-            continue;
-        }
-        if (strncmp(arg, "--pid=", 6) == 0) {
+            break;
+        case L_PID: {
             char *end;
-            long pv = strtol(arg + 6, &end, 10);
+            long pv = strtol(o.arg, &end, 10);
             if (*end != '\0' || pv <= 0) {
-                err_msg("tail", "invalid --pid value: '%s'", arg + 6);
+                err_msg("tail", "invalid --pid value: '%s'", o.arg);
                 return 1;
             }
             watch_pid = (pid_t)pv;
-            continue;
+            break;
         }
-        if (strcmp(arg, "--pid") == 0) {
-            i++;
-            if (i >= argc) {
-                err_usage("tail", "[-n N] [-c N] [-fqv] [--pid PID] [FILE...]");
-                return 1;
-            }
-            char *end;
-            long pv = strtol(argv[i], &end, 10);
-            if (*end != '\0' || pv <= 0) {
-                err_msg("tail", "invalid --pid value: '%s'", argv[i]);
-                return 1;
-            }
-            watch_pid = (pid_t)pv;
-            continue;
-        }
-
-        /* Short flags */
-        const char *p = arg + 1;
-        int stop = 0;
-        while (*p && !stop) {
-            switch (*p) {
-            case 'f': opt_f = 1; break;
-            case 'q': opt_q = 1; break;
-            case 'v': opt_v = 1; break;
-            case 'n': {
-                const char *val;
-                if (p[1]) { val = p + 1; }  /* stop set unconditionally below */
-                else {
-                    i++;
-                    if (i >= argc) {
-                        err_usage("tail", "[-n N] [-c N] [-fqv] [--pid PID] [FILE...]");
-                        return 1;
-                    }
-                    val = argv[i];
-                }
-                if (parse_count(val, &count, &plus_mode) != 0) {
-                    err_msg("tail", "invalid number of lines: '%s'", val);
-                    return 1;
-                }
+        case OPT_MISSING:
+            err_usage("tail", "[-n N] [-c N] [-fqv] [--pid PID] [FILE...]");
+            return 1;
+        default:
+            /* Historic syntax: `tail -30` / `tail +5` == -n 30 / -n +5.
+             * Still emitted by real build systems (GNU coreutils' own
+             * test harness does `| tail -30`). */
+            if (o.opt >= '0' && o.opt <= '9' &&
+                parse_count(opt_rest(&o), &count, &plus_mode) == 0) {
                 use_bytes = 0;
-                stop = 1;
                 break;
             }
-            case 'c': {
-                const char *val;
-                if (p[1]) { val = p + 1; }  /* stop set unconditionally below */
-                else {
-                    i++;
-                    if (i >= argc) {
-                        err_usage("tail", "[-n N] [-c N] [-fqv] [--pid PID] [FILE...]");
-                        return 1;
-                    }
-                    val = argv[i];
-                }
-                if (parse_count(val, &count, &plus_mode) != 0) {
-                    err_msg("tail", "invalid number of bytes: '%s'", val);
-                    return 1;
-                }
-                use_bytes = 1;
-                stop = 1;
-                break;
-            }
-            default:
-                /* Historic syntax: `tail -30` / `tail +5` == -n 30 / -n +5.
-                 * Still emitted by real build systems (GNU coreutils' own
-                 * test harness does `| tail -30`). */
-                if (*p >= '0' && *p <= '9') {
-                    if (parse_count(p, &count, &plus_mode) == 0) {
-                        use_bytes = 0;
-                        stop = 1;
-                        break;
-                    }
-                }
-                err_msg("tail", "unrecognized option '-%c'", *p);
-                err_usage("tail", "[-n N] [-c N] [-fqv] [--pid PID] [FILE...]");
-                return 1;
-            }
-            p++;
+            opt_err_unknown("tail", &o);
+            err_usage("tail", "[-n N] [-c N] [-fqv] [--pid PID] [FILE...]");
+            return 1;
         }
     }
+    int i = o.ind;
 
     int nfiles = argc - i;
 

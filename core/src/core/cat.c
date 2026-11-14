@@ -9,6 +9,7 @@
 #endif
 
 #include "../util/error.h"
+#include "../util/opt.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -371,66 +372,56 @@ int applet_cat(int argc, char **argv)
     int ret = 0;
     int i;
 
-    for (i = 1; i < argc; i++) {
-        const char *arg = argv[i];
-
-        if (strcmp(arg, "--") == 0) { i++; break; }
-
-        if (arg[0] != '-' || arg[1] == '\0')
+    opt_t o;
+    int c;
+    opt_init(&o, argc, argv, "unbsvetAET", NULL, 0);
+    while ((c = opt_next(&o)) != OPT_DONE) {
+        switch (c) {
+        case 'u':
+            /* -u: unbuffered; no-op (we use read/write directly) */
             break;
-
-        const char *p = arg + 1;
-        int done_flags = 0;
-        while (*p && !done_flags) {
-            switch (*p) {
-            case 'u':
-                /* -u: unbuffered; no-op (we use read/write directly) */
-                break;
-            case 'n':
-                opts.number_all = 1;
-                break;
-            case 'b':
-                opts.number_nonblank = 1;
-                opts.number_all = 0; /* -b overrides -n */
-                break;
-            case 's':
-                opts.squeeze = 1;
-                break;
-            case 'v':
-                opts.show_nonprint = 1;
-                break;
-            case 'e':
-                /* -e implies -v and -E */
-                opts.show_nonprint = 1;
-                opts.show_ends = 1;
-                break;
-            case 't':
-                /* -t implies -v and -T */
-                opts.show_nonprint = 1;
-                opts.show_tabs = 1;
-                break;
-            case 'A':
-                /* -A implies -v, -E, -T */
-                opts.show_nonprint = 1;
-                opts.show_ends = 1;
-                opts.show_tabs = 1;
-                break;
-            case 'E':
-                opts.show_ends = 1;
-                break;
-            case 'T':
-                opts.show_tabs = 1;
-                break;
-            default:
-                err_msg("cat", "unrecognized option '-%c'", *p);
-                err_usage("cat", "[-unbs veTtA] [FILE...]");
-                return 1;
-            }
-            p++;
+        case 'n':
+            opts.number_all = 1;
+            break;
+        case 'b':
+            opts.number_nonblank = 1;
+            opts.number_all = 0; /* -b overrides -n */
+            break;
+        case 's':
+            opts.squeeze = 1;
+            break;
+        case 'v':
+            opts.show_nonprint = 1;
+            break;
+        case 'e':
+            /* -e implies -v and -E */
+            opts.show_nonprint = 1;
+            opts.show_ends = 1;
+            break;
+        case 't':
+            /* -t implies -v and -T */
+            opts.show_nonprint = 1;
+            opts.show_tabs = 1;
+            break;
+        case 'A':
+            /* -A implies -v, -E, -T */
+            opts.show_nonprint = 1;
+            opts.show_ends = 1;
+            opts.show_tabs = 1;
+            break;
+        case 'E':
+            opts.show_ends = 1;
+            break;
+        case 'T':
+            opts.show_tabs = 1;
+            break;
+        default:
+            opt_err_unknown("cat", &o);
+            err_usage("cat", "[-unbs veTtA] [FILE...]");
+            return 1;
         }
-        if (done_flags)
-            break;
     }
+    i = o.ind;
 
     /* -b overrides -n per POSIX */
     if (opts.number_nonblank)
