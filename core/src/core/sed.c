@@ -14,8 +14,21 @@
  * unreadable input operands, 4 for I/O errors ("panics").
  *
  * The applet runs IN-PROCESS inside the shell, so nothing here may call
- * exit(): errors longjmp back to applet_sed(), which owns every
- * allocation through the command list and frees it on all paths.
+ * exit(): errors longjmp back to applet_sed().  Whatever this invocation
+ * has not released by then stays in the shell for the rest of the script,
+ * so ownership is arranged to make that impossible rather than merely
+ * avoided path by path:
+ *
+ *   - everything the COMPILER allocates is reachable from the parser_t
+ *     (the program list, rooted in it the moment a command exists, and the
+ *     parser's scratch buffers, which hold every in-flight temporary);
+ *   - everything the EXECUTOR holds (input stream, pattern/hold space,
+ *     R/w streams) is reachable from the exec_t and the stream tables;
+ *   - both live in the file-scope `R` (see sed_release()), never in a
+ *     local, so the setjmp handler sees their current values.
+ *
+ * A perr()/sed_panic() from any depth therefore loses nothing, and the
+ * error paths need no frees of their own.  tests/leak/ checks it.
  *
  * POSIX/GNU: an empty regex recalls the last regex EXECUTED at runtime,
  * not the last one compiled (GNU's own testsuite 'recall' case rejects
@@ -137,11 +150,36 @@ typedef struct {
     size_t      start;       /* byte offset into the joined script */
 } sed_seg_t;
 
+/* Compile-time scratch buffers.  Each has exactly one user at a time; the
+ * pairs that are alive together (an s command's pattern while its
+ * replacement is read and its regex preprocessed; the halves of y) use
+ * different ones. */
+enum {
+    SB_RE,      /* read_re_until(): regex source (also y's raw halves)   */
+    SB_REPL,    /* read_repl_until(): raw s replacement                  */
+    SB_PRE,     /* preprocess_re(): regex text handed to regcomp()       */
+    SB_LIT,     /* parse_replacement(): literal run being collected      */
+    SB_TEXT,    /* read_text_arg(): a/i/c text                           */
+    SB_Y0,      /* y: decoded source half                                */
+    SB_Y1,      /* y: decoded destination half                           */
+    SB_COUNT
+};
+
+struct sed_cmd;
+
+/* The parser owns the compile: the program and every temporary.  It lives
+ * in R (file scope), so after a longjmp from any depth parser_free() still
+ * reaches all of it. */
 typedef struct {
     const char *src;   /* joined script text */
     const char *p;     /* parse cursor */
     sed_seg_t  *segs;
     int         nsegs;
+
+    struct sed_cmd  *head;   /* the program; a command is linked here the
+                                moment it is allocated */
+    struct sed_cmd **tail;
+    strbuf_t    sb[SB_COUNT];
 } parser_t;
 
 /* Format the GNU location prefix for the segment containing offset. */
@@ -257,24 +295,57 @@ static regex_t *g_exec_re;
 
 /* R-command read streams and w-command write streams are shared PER
  * FILENAME across commands: `sed -e 1Rb -e 2Rb` reads successive lines
- * of b, and two `w f` commands append to one open handle. */
+ * of b, and two `w f` commands append to one open handle.
+ *
+ * The tables grow as needed.  They used to be fixed at 64 entries, and a
+ * stream opened past that was never recorded -- so never closed: every R
+ * read past the 64th file leaked a descriptor, and w output went to stderr
+ * instead of the named file. */
 typedef struct { const char *name; FILE *fp; int pending_delim; } fstream_t;
-static fstream_t g_rstreams[64];
-static int       g_nrstreams;
-static fstream_t g_wstreams[64];
-static int       g_nwstreams;
+static fstream_t *g_rstreams;
+static int        g_nrstreams, g_caprstreams;
+static fstream_t *g_wstreams;
+static int        g_nwstreams, g_capwstreams;
+
+static void close_stream_fp(FILE *fp)
+{
+    if (fp && fp != stdout && fp != stderr)
+        fclose(fp);
+}
+
+/* Record an open stream (fp may be NULL: a missing R file is remembered so
+ * it is not retried).  Takes ownership of fp even when it fails. */
+static fstream_t *streams_add(fstream_t **tab, int *n, int *cap,
+                              const char *name, FILE *fp)
+{
+    if (*n == *cap) {
+        int ncap = *cap ? *cap * 2 : 8;
+        fstream_t *nt = realloc(*tab, (size_t)ncap * sizeof(**tab));
+        if (!nt) {
+            close_stream_fp(fp);
+            sed_panic(4, "out of memory");
+        }
+        *tab = nt;
+        *cap = ncap;
+    }
+    fstream_t *fs = &(*tab)[(*n)++];
+    fs->name = name;
+    fs->fp = fp;
+    fs->pending_delim = 0;
+    return fs;
+}
 
 static void close_streams(void)
 {
     for (int i = 0; i < g_nrstreams; i++)
-        if (g_rstreams[i].fp)
-            fclose(g_rstreams[i].fp);
-    g_nrstreams = 0;
+        close_stream_fp(g_rstreams[i].fp);
     for (int i = 0; i < g_nwstreams; i++)
-        if (g_wstreams[i].fp && g_wstreams[i].fp != stdout &&
-            g_wstreams[i].fp != stderr)
-            fclose(g_wstreams[i].fp);
-    g_nwstreams = 0;
+        close_stream_fp(g_wstreams[i].fp);
+    free(g_rstreams);
+    free(g_wstreams);
+    g_rstreams = g_wstreams = NULL;
+    g_nrstreams = g_caprstreams = 0;
+    g_nwstreams = g_capwstreams = 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -298,6 +369,29 @@ static void free_cmds(sed_cmd_t *head)
         free(head);
         head = next;
     }
+}
+
+/* A parser scratch buffer, emptied for a new use.  The returned text stays
+ * valid until the same buffer is next requested. */
+static strbuf_t *scratch(parser_t *ps, int which)
+{
+    strbuf_t *sb = &ps->sb[which];
+    if (!sb->buf)
+        xb_init(sb, 64);
+    else
+        sb_reset(sb);
+    return sb;
+}
+
+/* Release everything the compile allocated.  Safe on a zeroed parser and
+ * on one abandoned half way through a command. */
+static void parser_free(parser_t *ps)
+{
+    free_cmds(ps->head);
+    ps->head = NULL;
+    ps->tail = &ps->head;
+    for (int i = 0; i < SB_COUNT; i++)
+        sb_free(&ps->sb[i]);
 }
 
 /* ------------------------------------------------------------------ */
@@ -363,48 +457,47 @@ static int decode_escape(parser_t *ps, const char **pp)
  * (backslash-protected when the byte is a regex metacharacter); all other
  * backslash sequences pass through for regcomp.  In POSIX mode, escapes
  * inside bracket expressions are NOT decoded (GNU normalize_text():
- * --posix 's/[\t]/X/' matches backslash-or-t, not tab).  Returns
- * malloc'd text. */
-static char *preprocess_re(parser_t *ps, const char *src)
+ * --posix 's/[\t]/X/' matches backslash-or-t, not tab).  Returns text in
+ * the parser's SB_PRE scratch buffer. */
+static const char *preprocess_re(parser_t *ps, const char *src)
 {
-    strbuf_t sb;
-    xb_init(&sb, strlen(src) + 8);
+    strbuf_t *sb = scratch(ps, SB_PRE);
     const char *q = src;
     int in_br = 0, br_first = 0;
     while (*q) {
         if (in_br) {
-            if (br_first && *q == ']') { br_first = 0; sb_appendc(&sb, *q++); continue; }
+            if (br_first && *q == ']') { br_first = 0; sb_appendc(sb, *q++); continue; }
             br_first = 0;
             if (*q == '[' && (q[1] == ':' || q[1] == '.' || q[1] == '=')) {
                 char kind = q[1];
-                sb_appendc(&sb, *q++); sb_appendc(&sb, *q++);
+                sb_appendc(sb, *q++); sb_appendc(sb, *q++);
                 while (*q && !(*q == kind && q[1] == ']'))
-                    sb_appendc(&sb, *q++);
-                if (*q) { sb_appendc(&sb, *q++); sb_appendc(&sb, *q++); }
+                    sb_appendc(sb, *q++);
+                if (*q) { sb_appendc(sb, *q++); sb_appendc(sb, *q++); }
                 continue;
             }
-            if (*q == ']') { in_br = 0; sb_appendc(&sb, *q++); continue; }
+            if (*q == ']') { in_br = 0; sb_appendc(sb, *q++); continue; }
             if (*q == '\\' && q[1] && O.posix) {
                 /* POSIX: keep verbatim inside brackets */
-                sb_appendc(&sb, *q++);
-                sb_appendc(&sb, *q++);
+                sb_appendc(sb, *q++);
+                sb_appendc(sb, *q++);
                 continue;
             }
             if (*q == '\\' && q[1]) {
                 const char *r = q + 1;
                 int b = decode_escape(ps, &r);
-                if (b >= 0) { sb_appendc(&sb, (char)b); q = r; continue; }
-                sb_appendc(&sb, *q++);
-                sb_appendc(&sb, *q++);
+                if (b >= 0) { sb_appendc(sb, (char)b); q = r; continue; }
+                sb_appendc(sb, *q++);
+                sb_appendc(sb, *q++);
                 continue;
             }
-            sb_appendc(&sb, *q++);
+            sb_appendc(sb, *q++);
             continue;
         }
         if (*q == '[') {
             in_br = 1;
-            sb_appendc(&sb, *q++);
-            if (*q == '^') sb_appendc(&sb, *q++);
+            sb_appendc(sb, *q++);
+            if (*q == '^') sb_appendc(sb, *q++);
             br_first = 1;
             continue;
         }
@@ -413,21 +506,18 @@ static char *preprocess_re(parser_t *ps, const char *src)
             int b = decode_escape(ps, &r);
             if (b >= 0) {
                 if (strchr(".[]*^$\\+?(){}|", b))
-                    sb_appendc(&sb, '\\');
-                sb_appendc(&sb, (char)b);
+                    sb_appendc(sb, '\\');
+                sb_appendc(sb, (char)b);
                 q = r;
                 continue;
             }
-            sb_appendc(&sb, *q++);
-            sb_appendc(&sb, *q++);
+            sb_appendc(sb, *q++);
+            sb_appendc(sb, *q++);
             continue;
         }
-        sb_appendc(&sb, *q++);
+        sb_appendc(sb, *q++);
     }
-    char *out = strdup(sb_str(&sb));
-    sb_free(&sb);
-    if (!out) sed_panic(4, "out of memory");
-    return out;
+    return sb_str(sb);
 }
 
 /* Compile a (preprocessed) regex; on failure report at the current parse
@@ -458,11 +548,11 @@ static regex_t *compile_re(parser_t *ps, const char *pre, int icase, int mline)
  * hide the delimiter; \<delim> becomes the literal delimiter character
  * (kept backslash-protected so a metacharacter delimiter stays literal).
  * Consumes the closing delimiter.  what: "address regex" / "'s' command"
- * for the unterminated-error message. */
-static char *read_re_until(parser_t *ps, char delim, const char *what)
+ * for the unterminated-error message.  Returns text in the parser's SB_RE
+ * scratch buffer. */
+static const char *read_re_until(parser_t *ps, char delim, const char *what)
 {
-    strbuf_t sb;
-    xb_init(&sb, 64);
+    strbuf_t *sb = scratch(ps, SB_RE);
     int in_br = 0;      /* inside [...] */
     int br_first = 0;   /* position right after [ or [^ */
     while (*ps->p && *ps->p != '\n') {
@@ -470,23 +560,20 @@ static char *read_re_until(parser_t *ps, char delim, const char *what)
         if (!in_br) {
             if (c == delim) {
                 ps->p++;
-                char *out = strdup(sb_str(&sb));
-                sb_free(&sb);
-                if (!out) sed_panic(4, "out of memory");
-                return out;
+                return sb_str(sb);
             }
             if (c == '\\' && ps->p[1]) {
                 if (ps->p[1] == '\n') {   /* line continuation: literal NL */
-                    sb_appendc(&sb, '\\');
-                    sb_appendc(&sb, 'n');
+                    sb_appendc(sb, '\\');
+                    sb_appendc(sb, 'n');
                     ps->p += 2;
                     continue;
                 }
                 if (ps->p[1] == delim) {
                     /* Escaped delimiter: literal character */
                     if (strchr(".[]*^$\\+?(){}|", delim))
-                        sb_appendc(&sb, '\\');
-                    sb_appendc(&sb, delim);
+                        sb_appendc(sb, '\\');
+                    sb_appendc(sb, delim);
                     ps->p += 2;
                     continue;
                 }
@@ -495,11 +582,11 @@ static char *read_re_until(parser_t *ps, char delim, const char *what)
                      * or end the pattern (GNU bug#79519: s/\c[// works).
                      * In POSIX mode \c is not special -- warn and let the
                      * '[' be parsed normally. */
-                    sb_appendc(&sb, '\\');
-                    sb_appendc(&sb, 'c');
+                    sb_appendc(sb, '\\');
+                    sb_appendc(sb, 'c');
                     ps->p += 2;
                     if (*ps->p && *ps->p != delim && *ps->p != '\n') {
-                        sb_appendc(&sb, *ps->p);
+                        sb_appendc(sb, *ps->p);
                         ps->p++;
                     }
                     continue;
@@ -508,94 +595,87 @@ static char *read_re_until(parser_t *ps, char delim, const char *what)
                     strcmp(what, "'s' command") == 0)
                     fprintf(stderr, "sed: warning: using \"\\c\" in the"
                                     " 's' command is not portable\n");
-                sb_appendc(&sb, c);
-                sb_appendc(&sb, ps->p[1]);
+                sb_appendc(sb, c);
+                sb_appendc(sb, ps->p[1]);
                 ps->p += 2;
                 continue;
             }
             if (c == '[') {
                 in_br = 1;
                 br_first = 1;
-                sb_appendc(&sb, c);
+                sb_appendc(sb, c);
                 ps->p++;
-                if (*ps->p == '^') { sb_appendc(&sb, '^'); ps->p++; }
+                if (*ps->p == '^') { sb_appendc(sb, '^'); ps->p++; }
                 continue;
             }
-            sb_appendc(&sb, c);
+            sb_appendc(sb, c);
             ps->p++;
         } else {
             if (c == '[' && (ps->p[1] == ':' || ps->p[1] == '.' ||
                              ps->p[1] == '=')) {
                 char kind = ps->p[1];
                 br_first = 0;   /* a following ']' closes the bracket */
-                sb_appendc(&sb, '[');
-                sb_appendc(&sb, kind);
+                sb_appendc(sb, '[');
+                sb_appendc(sb, kind);
                 ps->p += 2;
                 while (*ps->p && !(*ps->p == kind && ps->p[1] == ']')) {
-                    sb_appendc(&sb, *ps->p);
+                    sb_appendc(sb, *ps->p);
                     ps->p++;
                 }
                 if (!*ps->p) break;
-                sb_appendc(&sb, kind);
-                sb_appendc(&sb, ']');
+                sb_appendc(sb, kind);
+                sb_appendc(sb, ']');
                 ps->p += 2;
                 continue;
             }
             if (c == ']' && !br_first) {
                 in_br = 0;
-                sb_appendc(&sb, c);
+                sb_appendc(sb, c);
                 ps->p++;
                 continue;
             }
             br_first = 0;
-            sb_appendc(&sb, c);
+            sb_appendc(sb, c);
             ps->p++;
         }
     }
-    sb_free(&sb);
     perr(ps, "unterminated %s", what);
-    return NULL; /* unreached */
 }
 
 /* Read the raw replacement text of s up to the unescaped delimiter.
- * Backslash-newline embeds a literal newline.  Consumes the delimiter. */
-static char *read_repl_until(parser_t *ps, char delim)
+ * Backslash-newline embeds a literal newline.  Consumes the delimiter.
+ * Returns text in the parser's SB_REPL scratch buffer. */
+static const char *read_repl_until(parser_t *ps, char delim)
 {
-    strbuf_t sb;
-    xb_init(&sb, 64);
+    strbuf_t *sb = scratch(ps, SB_REPL);
     while (*ps->p) {
         char c = *ps->p;
         if (c == delim) {
             ps->p++;
-            char *out = strdup(sb_str(&sb));
-            sb_free(&sb);
-            if (!out) sed_panic(4, "out of memory");
-            return out;
+            return sb_str(sb);
         }
         if (c == '\n')
             break;
         if (c == '\\' && ps->p[1]) {
             if (ps->p[1] == delim) {
-                sb_appendc(&sb, delim);
+                sb_appendc(sb, delim);
                 ps->p += 2;
                 continue;
             }
             if (ps->p[1] == '\n') {
-                sb_appendc(&sb, '\n');
+                sb_appendc(sb, '\n');
                 ps->p += 2;
                 continue;
             }
-            sb_appendc(&sb, c);
-            sb_appendc(&sb, ps->p[1]);
+            sb_appendc(sb, c);
+            sb_appendc(sb, ps->p[1]);
             ps->p += 2;
             continue;
         }
-        sb_appendc(&sb, c);
+        sb_appendc(sb, c);
         ps->p++;
     }
-    sb_free(&sb);
     perr(ps, "unterminated 's' command");
-    return NULL; /* unreached */
 }
 
 /* Parse a raw replacement string into tokens (compile time). */
@@ -605,23 +685,22 @@ static void parse_replacement(parser_t *ps, sed_cmd_t *cmd, const char *raw)
     rtok_t *rt = calloc((size_t)cap, sizeof(rtok_t));
     if (!rt) sed_panic(4, "out of memory");
     cmd->rt = rt;      /* owned by cmd immediately (error-safe) */
-    strbuf_t lit;
-    xb_init(&lit, 32);
+    strbuf_t *lit = scratch(ps, SB_LIT);
 
 #define FLUSH_LIT() do {                                             \
-        if (sb_len(&lit) > 0) {                                      \
+        if (sb_len(lit) > 0) {                                      \
             if (n == cap) { cap *= 2;                                \
                 rt = realloc(rt, (size_t)cap * sizeof(rtok_t));      \
-                if (!rt) { sb_free(&lit); sed_panic(4, "out of memory"); } \
+                if (!rt) sed_panic(4, "out of memory"); \
                 memset(rt + n, 0, (size_t)(cap - n) * sizeof(rtok_t)); \
                 cmd->rt = rt; }                                      \
             rt[n].t = RT_LIT;                                        \
-            rt[n].len = sb_len(&lit);                                \
+            rt[n].len = sb_len(lit);                                \
             rt[n].lit = malloc(rt[n].len + 1);                       \
-            if (!rt[n].lit) { sb_free(&lit); sed_panic(4, "out of memory"); } \
-            memcpy(rt[n].lit, sb_str(&lit), rt[n].len + 1);          \
+            if (!rt[n].lit) sed_panic(4, "out of memory"); \
+            memcpy(rt[n].lit, sb_str(lit), rt[n].len + 1);          \
             n++; cmd->nrt = n;                                       \
-            sb_reset(&lit);                                          \
+            sb_reset(lit);                                          \
         }                                                            \
     } while (0)
 
@@ -629,7 +708,7 @@ static void parse_replacement(parser_t *ps, sed_cmd_t *cmd, const char *raw)
         FLUSH_LIT();                                                 \
         if (n == cap) { cap *= 2;                                    \
             rt = realloc(rt, (size_t)cap * sizeof(rtok_t));          \
-            if (!rt) { sb_free(&lit); sed_panic(4, "out of memory"); } \
+            if (!rt) sed_panic(4, "out of memory"); \
             memset(rt + n, 0, (size_t)(cap - n) * sizeof(rtok_t));   \
             cmd->rt = rt; }                                          \
         rt[n].t = (ty);                                              \
@@ -660,7 +739,7 @@ static void parse_replacement(parser_t *ps, sed_cmd_t *cmd, const char *raw)
                     /* GNU-only escape: literal char plus a warning */
                     fprintf(stderr, "sed: warning: using \"\\%c\" in the"
                                     " 's' command is not portable\n", e);
-                    sb_appendc(&lit, e);
+                    sb_appendc(lit, e);
                     q += 2;
                     continue;
                 }
@@ -669,7 +748,7 @@ static void parse_replacement(parser_t *ps, sed_cmd_t *cmd, const char *raw)
                 continue;
             }
             if (e == '&' || e == '\\') {
-                sb_appendc(&lit, e);
+                sb_appendc(lit, e);
                 q += 2;
                 continue;
             }
@@ -682,20 +761,19 @@ static void parse_replacement(parser_t *ps, sed_cmd_t *cmd, const char *raw)
                 const char *r = q + 1;
                 int b = decode_escape(ps, &r);
                 if (b >= 0) {
-                    sb_appendc(&lit, (char)b);
+                    sb_appendc(lit, (char)b);
                     q = r;
                     continue;
                 }
             }
             /* Unknown escape: the character itself, backslash dropped */
-            sb_appendc(&lit, e);
+            sb_appendc(lit, e);
             q += 2;
             continue;
         }
-        sb_appendc(&lit, *q++);
+        sb_appendc(lit, *q++);
     }
     FLUSH_LIT();
-    sb_free(&lit);
 #undef FLUSH_LIT
 #undef ADD_TOK
 }
@@ -749,7 +827,7 @@ static int parse_addr(parser_t *ps, sed_addr_t *addr, int is_second)
             delim = *ps->p;
         }
         ps->p++;
-        char *raw = read_re_until(ps, delim, "address regex");
+        const char *raw = read_re_until(ps, delim, "address regex");
         /* I/M modifiers */
         int icase = 0, mline = 0;
         for (;;) {
@@ -758,17 +836,11 @@ static int parse_addr(parser_t *ps, sed_addr_t *addr, int is_second)
             else break;
         }
         if (raw[0] == '\0') {
-            if (icase || mline) {
-                free(raw);
+            if (icase || mline)
                 perr(ps, "cannot specify modifiers on empty regexp");
-            }
-            free(raw);
             addr->re = NULL;   /* runtime recall */
         } else {
-            char *pre = preprocess_re(ps, raw);
-            free(raw);
-            addr->re = compile_re(ps, pre, icase, mline);
-            free(pre);
+            addr->re = compile_re(ps, preprocess_re(ps, raw), icase, mline);
         }
         addr->type = ADDR_REGEX;
         return 1;
@@ -839,14 +911,12 @@ static char *read_filename(parser_t *ps)
  *   a\text            (text on the same line after the backslash)         */
 static void read_text_arg(parser_t *ps, sed_cmd_t *cmd, char cname)
 {
-    strbuf_t sb;
-    xb_init(&sb, 64);
+    strbuf_t *sb = scratch(ps, SB_TEXT);
     if (*ps->p == '\\') {
         ps->p++;
         if (*ps->p == '\0') {
             /* `a\` at end of script: GNU appends nothing at all (not an
              * empty line) -- neutralize the command */
-            sb_free(&sb);
             cmd->cmd = '#';
             cmd->text = strdup("");
             cmd->tlen = 0;
@@ -861,8 +931,7 @@ static void read_text_arg(parser_t *ps, sed_cmd_t *cmd, char cname)
             size_t off = (size_t)(ps->p - ps->src) + 1;
             for (int si = 0; si < ps->nsegs; si++) {
                 if (ps->segs[si].start == off && !ps->segs[si].is_file) {
-                    sb_free(&sb);
-                    perr(ps, "incomplete command");
+                            perr(ps, "incomplete command");
                 }
             }
         }
@@ -876,24 +945,23 @@ static void read_text_arg(parser_t *ps, sed_cmd_t *cmd, char cname)
              * bare `a` with no text at end of script */
             if (*ps->p)
                 ps->p++;
-            sb_free(&sb);
             perr(ps, "expected \\ after 'a', 'c' or 'i'");
         }
         skip_ws(ps);
     }
     for (;;) {
         while (*ps->p && *ps->p != '\n' && *ps->p != '\\') {
-            sb_appendc(&sb, *ps->p);
+            sb_appendc(sb, *ps->p);
             ps->p++;
         }
         if (*ps->p == '\\' && ps->p[1] == '\n') {
-            sb_appendc(&sb, '\n');
+            sb_appendc(sb, '\n');
             ps->p += 2;
             continue;
         }
         if (*ps->p == '\\' && ps->p[1]) {
             /* GNU keeps other escapes as the escaped character */
-            sb_appendc(&sb, ps->p[1]);
+            sb_appendc(sb, ps->p[1]);
             ps->p += 2;
             continue;
         }
@@ -902,11 +970,10 @@ static void read_text_arg(parser_t *ps, sed_cmd_t *cmd, char cname)
     if (*ps->p == '\n')
         ps->p++;
     (void)cname;
-    cmd->tlen = sb_len(&sb);
+    cmd->tlen = sb_len(sb);
     cmd->text = malloc(cmd->tlen + 1);
-    if (!cmd->text) { sb_free(&sb); sed_panic(4, "out of memory"); }
-    memcpy(cmd->text, sb_str(&sb), cmd->tlen + 1);
-    sb_free(&sb);
+    if (!cmd->text) sed_panic(4, "out of memory");
+    memcpy(cmd->text, sb_str(sb), cmd->tlen + 1);
 }
 
 /* ------------------------------------------------------------------ */
@@ -925,10 +992,11 @@ static int max_addrs(char c)
     }
 }
 
-static sed_cmd_t *parse_script(parser_t *ps, sed_cmd_t ***tail_out)
+/* Compile the script into ps->head.  Each command is linked into the
+ * parser's list as soon as it is allocated, so an error at any point leaves
+ * the partial program owned by the parser (and freed by parser_free()). */
+static void parse_script(parser_t *ps)
 {
-    sed_cmd_t *head = NULL;
-    sed_cmd_t **tail = &head;
     sed_cmd_t *brace_stack[64];
     int depth = 0;
 
@@ -956,8 +1024,8 @@ static sed_cmd_t *parse_script(parser_t *ps, sed_cmd_t ***tail_out)
 
         sed_cmd_t *cmd = calloc(1, sizeof(sed_cmd_t));
         if (!cmd) sed_panic(4, "out of memory");
-        *tail = cmd;                 /* linked immediately: error-safe */
-        tail = &cmd->next;
+        *ps->tail = cmd;             /* owned by the parser from here on */
+        ps->tail = &cmd->next;
         cmd->src_off = (size_t)(ps->p - ps->src);
 
         int naddr = 0;
@@ -1146,14 +1214,10 @@ static sed_cmd_t *parse_script(parser_t *ps, sed_cmd_t ***tail_out)
             if (*ps->p == '\0' || *ps->p == '\n')
                 perr(ps, "unterminated 's' command");
             char delim = *ps->p++;
-            char *pat = read_re_until(ps, delim, "'s' command");
-            char *raw_repl = NULL;
-            /* Hold pat in the cmd's wfile slot is wrong; keep local but
-             * free before any perr via structured handling below. */
-            raw_repl = read_repl_until(ps, delim);   /* may longjmp: pat leaks
-                                                        only on error exit */
-            parse_replacement(ps, cmd, raw_repl);
-            free(raw_repl);
+            /* pat and the replacement live in the parser's scratch buffers
+             * (SB_RE, SB_REPL), so the perr()s below need not free them */
+            const char *pat = read_re_until(ps, delim, "'s' command");
+            parse_replacement(ps, cmd, read_repl_until(ps, delim));
 
             /* flags */
             cmd->snth = 0;
@@ -1163,27 +1227,27 @@ static sed_cmd_t *parse_script(parser_t *ps, sed_cmd_t ***tail_out)
                 char f = *ps->p;
                 if (f == 'g') {
                     ps->p++;
-                    if (seen_g) { free(pat); perr(ps, "multiple 'g' options to 's' command"); }
+                    if (seen_g) { perr(ps, "multiple 'g' options to 's' command"); }
                     seen_g = 1;
                     cmd->sflags |= SF_G;
                 } else if (f == 'p') {
                     ps->p++;
-                    if (seen_p) { free(pat); perr(ps, "multiple 'p' options to 's' command"); }
+                    if (seen_p) { perr(ps, "multiple 'p' options to 's' command"); }
                     seen_p = 1;
                     cmd->sflags |= SF_P;
                 } else if (f == 'i' || f == 'I') {
                     ps->p++;
-                    if (O.posix) { free(pat); perr(ps, "unknown option to 's'"); }
+                    if (O.posix) { perr(ps, "unknown option to 's'"); }
                     icase = 1;
                 } else if (f == 'm' || f == 'M') {
                     ps->p++;
-                    if (O.posix) { free(pat); perr(ps, "unknown option to 's'"); }
+                    if (O.posix) { perr(ps, "unknown option to 's'"); }
                     mline = 1;
                     cmd->sflags |= SF_M;
                 } else if (f == 'e') {
                     ps->p++;
-                    if (O.posix) { free(pat); perr(ps, "unknown option to 's'"); }
-                    if (O.sandbox) { free(pat); perr(ps, "e/r/w commands disabled in sandbox mode"); }
+                    if (O.posix) { perr(ps, "unknown option to 's'"); }
+                    if (O.sandbox) { perr(ps, "e/r/w commands disabled in sandbox mode"); }
                     cmd->sflags |= SF_E;
                     if (cmd->sflags & SF_P)
                         cmd->int_arg = 1;   /* p seen before e: print first */
@@ -1191,13 +1255,13 @@ static sed_cmd_t *parse_script(parser_t *ps, sed_cmd_t ***tail_out)
                     char *end;
                     long v = strtol(ps->p, &end, 10);
                     ps->p = end;
-                    if (seen_num) { free(pat); perr(ps, "multiple number options to 's' command"); }
+                    if (seen_num) { perr(ps, "multiple number options to 's' command"); }
                     seen_num = 1;
-                    if (v == 0) { free(pat); perr(ps, "number option to 's' command may not be zero"); }
+                    if (v == 0) { perr(ps, "number option to 's' command may not be zero"); }
                     cmd->snth = (int)v;
                 } else if (f == 'w') {
                     ps->p++;
-                    if (O.sandbox) { free(pat); perr(ps, "e/r/w commands disabled in sandbox mode"); }
+                    if (O.sandbox) { perr(ps, "e/r/w commands disabled in sandbox mode"); }
                     cmd->wfile = read_filename(ps);
                     break;
                 } else if (f == '\0' || f == '\n' || f == ';' ||
@@ -1205,7 +1269,6 @@ static sed_cmd_t *parse_script(parser_t *ps, sed_cmd_t ***tail_out)
                     break;
                 } else {
                     ps->p++;
-                    free(pat);
                     perr(ps, "unknown option to 's'");
                 }
             }
@@ -1213,15 +1276,11 @@ static sed_cmd_t *parse_script(parser_t *ps, sed_cmd_t ***tail_out)
                 cmd->snth = 1;
 
             if (pat[0] == '\0') {
-                if (icase || mline) {
-                    free(pat);
+                if (icase || mline)
                     perr(ps, "cannot specify modifiers on empty regexp");
-                }
                 cmd->re = NULL;   /* runtime recall */
             } else {
-                char *pre = preprocess_re(ps, pat);
-                cmd->re = compile_re(ps, pre, icase, mline);
-                free(pre);
+                cmd->re = compile_re(ps, preprocess_re(ps, pat), icase, mline);
             }
             /* validate \N group references now that re is known
              * (GNU skips this validation in POSIX mode) */
@@ -1229,13 +1288,11 @@ static sed_cmd_t *parse_script(parser_t *ps, sed_cmd_t ***tail_out)
                 for (int i = 0; i < cmd->nrt; i++) {
                     if (cmd->rt[i].t == RT_GROUP &&
                         (size_t)cmd->rt[i].grp > cmd->re->re_nsub) {
-                        int bad = cmd->rt[i].grp;
-                        free(pat);
-                        perr(ps, "invalid reference \\%d on 's' command's RHS", bad);
+                        perr(ps, "invalid reference \\%d on 's' command's RHS",
+                             cmd->rt[i].grp);
                     }
                 }
             }
-            free(pat);
             expect_cmd_end(ps);
             break;
         }
@@ -1249,80 +1306,68 @@ static sed_cmd_t *parse_script(parser_t *ps, sed_cmd_t ***tail_out)
              * while splitting would let \c swallow the closing delimiter;
              * GNU's match_slash/convert split the same way, which is why
              * `y/a/\c/` is a length error, not an unterminated command. */
-            strbuf_t half[2];
-            xb_init(&half[0], 32);
-            xb_init(&half[1], 32);
+            strbuf_t *half[2] = { scratch(ps, SB_Y0), scratch(ps, SB_Y1) };
             int ok = 1;
             for (int h = 0; h < 2 && ok; h++) {
-                strbuf_t raw;
-                xb_init(&raw, 32);
+                strbuf_t *raw = scratch(ps, SB_RE);
                 for (;;) {
                     char yc = *ps->p;
                     if (yc == '\0' || yc == '\n') { ok = 0; break; }
                     if (yc == delim) { ps->p++; break; }
                     if (yc == '\\' && ps->p[1]) {
-                        sb_appendc(&raw, yc);
-                        sb_appendc(&raw, ps->p[1]);
+                        sb_appendc(raw, yc);
+                        sb_appendc(raw, ps->p[1]);
                         ps->p += 2;
                         continue;
                     }
-                    sb_appendc(&raw, yc);
+                    sb_appendc(raw, yc);
                     ps->p++;
                 }
                 /* decode pass */
-                const char *q = sb_str(&raw);
+                const char *q = sb_str(raw);
                 while (*q) {
                     if (*q == '\\' && q[1]) {
                         char e = q[1];
-                        if (e == delim) { sb_appendc(&half[h], delim); q += 2; continue; }
-                        if (e == '\\')  { sb_appendc(&half[h], '\\');  q += 2; continue; }
-                        if (e == '\n')  { sb_appendc(&half[h], '\n');  q += 2; continue; }
+                        if (e == delim) { sb_appendc(half[h], delim); q += 2; continue; }
+                        if (e == '\\')  { sb_appendc(half[h], '\\');  q += 2; continue; }
+                        if (e == '\n')  { sb_appendc(half[h], '\n');  q += 2; continue; }
                         if (e == 'c' && q[2] == '\0') {
                             /* dangling \c in y stays two characters
                              * (GNU: `y/a/\c/` is a LENGTH error) */
-                            sb_appendc(&half[h], '\\');
-                            sb_appendc(&half[h], 'c');
+                            sb_appendc(half[h], '\\');
+                            sb_appendc(half[h], 'c');
                             q += 2;
                             continue;
                         }
                         const char *r = q + 1;
                         int b = decode_escape(ps, &r);
-                        if (b >= 0) { sb_appendc(&half[h], (char)b); q = r; continue; }
-                        sb_appendc(&half[h], e);
+                        if (b >= 0) { sb_appendc(half[h], (char)b); q = r; continue; }
+                        sb_appendc(half[h], e);
                         q += 2;
                         continue;
                     }
                     if (*q == '\\' && !q[1]) {
                         /* dangling backslash (e.g. from a dangling \c):
                          * a literal backslash */
-                        sb_appendc(&half[h], '\\');
+                        sb_appendc(half[h], '\\');
                         q++;
                         continue;
                     }
-                    sb_appendc(&half[h], *q++);
+                    sb_appendc(half[h], *q++);
                 }
-                sb_free(&raw);
             }
-            if (!ok) {
-                sb_free(&half[0]);
-                sb_free(&half[1]);
+            if (!ok)
                 perr(ps, "unterminated 'y' command");
-            }
-            if (sb_len(&half[0]) != sb_len(&half[1])) {
-                sb_free(&half[0]);
-                sb_free(&half[1]);
+            if (sb_len(half[0]) != sb_len(half[1]))
                 perr(ps, "'y' command strings have different lengths");
-            }
             cmd->ymap = malloc(256);
-            if (!cmd->ymap) { sb_free(&half[0]); sb_free(&half[1]); sed_panic(4, "out of memory"); }
+            if (!cmd->ymap) sed_panic(4, "out of memory");
             for (int i = 0; i < 256; i++)
                 cmd->ymap[i] = (unsigned char)i;
-            const char *s0 = sb_str(&half[0]);
-            const char *s1 = sb_str(&half[1]);
-            for (size_t i = 0; i < sb_len(&half[0]); i++)
+            const char *s0 = sb_str(half[0]);
+            const char *s1 = sb_str(half[1]);
+            for (size_t i = 0; i < sb_len(half[0]); i++)
                 cmd->ymap[(unsigned char)s0[i]] = (unsigned char)s1[i];
-            sb_free(&half[0]);
-            sb_free(&half[1]);
             expect_cmd_end(ps);
             break;
         }
@@ -1339,10 +1384,10 @@ static sed_cmd_t *parse_script(parser_t *ps, sed_cmd_t ***tail_out)
     }
 
     /* Resolve branch targets */
-    for (sed_cmd_t *cmd2 = head; cmd2; cmd2 = cmd2->next) {
+    for (sed_cmd_t *cmd2 = ps->head; cmd2; cmd2 = cmd2->next) {
         if ((cmd2->cmd == 'b' || cmd2->cmd == 't' || cmd2->cmd == 'T') &&
             cmd2->label && cmd2->label[0]) {
-            sed_cmd_t *dest = head;
+            sed_cmd_t *dest = ps->head;
             for (; dest; dest = dest->next)
                 if (dest->cmd == ':' && dest->label &&
                     strcmp(dest->label, cmd2->label) == 0)
@@ -1355,9 +1400,6 @@ static sed_cmd_t *parse_script(parser_t *ps, sed_cmd_t ***tail_out)
             cmd2->jump = dest;
         }
     }
-
-    if (tail_out) *tail_out = tail;
-    return head;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1404,6 +1446,9 @@ typedef struct {
 
     int      quit_code;      /* >= 0 once q/Q executed */
     int      quit_noprint;
+
+    strbuf_t nbuf;           /* N: pattern space being joined (owned here,
+                                not on the stack: next_record() can panic) */
 } exec_t;
 
 static char REC_DELIM = '\n';
@@ -1463,23 +1508,18 @@ static void wfile_write(exec_t *st, sed_cmd_t *cmd, const char *data,
                 sed_panic(4, "couldn't open file %s: %s", cmd->wfile,
                           strerror(errno));
         }
-        if (g_nwstreams < (int)(sizeof(g_wstreams)/sizeof(g_wstreams[0]))) {
-            g_wstreams[g_nwstreams].name = cmd->wfile;
-            g_wstreams[g_nwstreams].fp = fp;
-            g_wstreams[g_nwstreams].pending_delim = 0;
-            fs = &g_wstreams[g_nwstreams];
-            g_nwstreams++;
-        }
+        fs = streams_add(&g_wstreams, &g_nwstreams, &g_capwstreams,
+                         cmd->wfile, fp);
     }
-    fp = fs ? fs->fp : stderr;
-    if (fs && fs->pending_delim) {
+    fp = fs->fp;
+    if (fs->pending_delim) {
         fputc(REC_DELIM, fp);
         fs->pending_delim = 0;
     }
     fwrite(data, 1, len, fp);
     if (had_delim)
         fputc(REC_DELIM, fp);
-    else if (fs)
+    else
         fs->pending_delim = 1;
     if (O.unbuffered || fp == stderr)
         fflush(fp);
@@ -1559,6 +1599,16 @@ static FILE *open_input(exec_t *st, const char *name)
     return fp;
 }
 
+/* Close the current input file, if any.  Every way out of a stream (EOF,
+ * q/Q, an error, the next -s/-i file) must come through here: `sed 1q f`
+ * used to leave f open, one descriptor per run, in the shell. */
+static void close_input(exec_t *st)
+{
+    if (st->fp && st->fp != stdin)
+        fclose(st->fp);
+    st->fp = NULL;
+}
+
 /* Fetch the next raw record into (*buf,*len); continuous mode walks the
  * file list.  Returns 1 on success. */
 static int fetch_record(exec_t *st, char **buf, size_t *len, int *had_delim)
@@ -1586,9 +1636,7 @@ static int fetch_record(exec_t *st, char **buf, size_t *len, int *had_delim)
         }
         if (ferror(st->fp))
             sed_panic(4, "read error on %s: %s", st->cur_name, strerror(errno));
-        if (st->fp != stdin)
-            fclose(st->fp);
-        st->fp = NULL;
+        close_input(st);
         if (st->cur >= st->nfiles)
             return 0;
     }
@@ -1703,11 +1751,7 @@ static FILE *get_rfile(sed_cmd_t *cmd)
             strcmp(g_rstreams[i].name, cmd->wfile) == 0)
             return g_rstreams[i].fp;
     FILE *fp = fopen(cmd->wfile, "r");   /* missing: silently ignored */
-    if (g_nrstreams < (int)(sizeof(g_rstreams)/sizeof(g_rstreams[0]))) {
-        g_rstreams[g_nrstreams].name = cmd->wfile;
-        g_rstreams[g_nrstreams].fp = fp;
-        g_nrstreams++;
-    }
+    streams_add(&g_rstreams, &g_nrstreams, &g_caprstreams, cmd->wfile, fp);
     return fp;
 }
 
@@ -1842,20 +1886,26 @@ static int cmd_matches(exec_t *st, sed_cmd_t *cmd, const parser_t *psinfo,
                 else
                     cmd->active = 1;
                 break;
+            /* N is strtol()'s, so up to LONG_MAX: the end line saturates
+             * instead of overflowing. Signed overflow is undefined, and
+             * where it wrapped, `2,+9223372036854775807p` ended the range
+             * at once instead of running to EOF as GNU does (found by
+             * fuzz_sed_expr under UBSan). */
             case ADDR_REL:
-                cmd->end_line = st->linenum + cmd->a2.line;
+                cmd->end_line = cmd->a2.line > LONG_MAX - st->linenum
+                              ? LONG_MAX : st->linenum + cmd->a2.line;
                 if (cmd->end_line <= st->linenum)
                     *range_last = 1;
                 else
                     cmd->active = 1;
                 break;
             case ADDR_MULT: {
+                /* the next multiple of n at or after the current line */
                 long n = cmd->a2.line;
                 long end = st->linenum;
-                if (n > 0) {
-                    end = ((st->linenum + n - 1) / n) * n;
-                    if (end == st->linenum && st->linenum % n != 0)
-                        end += n;
+                if (n > 0 && st->linenum % n != 0) {
+                    long q = st->linenum / n + 1;
+                    end = q > LONG_MAX / n ? LONG_MAX : q * n;
                 }
                 cmd->end_line = end;
                 if (end <= st->linenum)
@@ -2114,6 +2164,29 @@ static void do_list(exec_t *st, long width)
 /* ---- main per-stream execution ---- */
 
 /* Returns the exit code contribution (0 normally). */
+#ifdef SILEX_FUZZ
+/* Fuzz builds only (tests/fuzz/fuzz_sed_expr.c; never in the binary).
+ * sed is Turing-complete: `:a;ba` never ends and `H;G` doubles the hold
+ * space per line, both by specification.  Unbounded, the first such input
+ * stops the fuzzer with a timeout/OOM that is not a bug.  Past a budget the
+ * run is aborted through the ordinary runtime-error path instead -- which
+ * also puts a mid-stream panic, with the input open and the program
+ * compiled, under the fuzzer's leak checker on every such input. */
+#ifndef SILEX_FUZZ_MAX_STEPS
+#define SILEX_FUZZ_MAX_STEPS 200000UL
+#endif
+#ifndef SILEX_FUZZ_MAX_BYTES
+#define SILEX_FUZZ_MAX_BYTES (1UL << 20)
+#endif
+static unsigned long g_fuzz_steps;
+static void fuzz_budget(const exec_t *st)
+{
+    if (++g_fuzz_steps > SILEX_FUZZ_MAX_STEPS ||
+        sb_len(&st->ps) + sb_len(&st->hs) > SILEX_FUZZ_MAX_BYTES)
+        sed_panic(4, "fuzz budget exceeded");
+}
+#endif
+
 static void run_stream(sed_cmd_t *head, exec_t *st, const parser_t *psinfo)
 {
     /* GNU prepend idiom: a single address 0 on r queues the file before
@@ -2135,6 +2208,9 @@ static void run_stream(sed_cmd_t *head, exec_t *st, const parser_t *psinfo)
 
     restart_no_read:
         while (cmd) {
+#ifdef SILEX_FUZZ
+            fuzz_budget(st);
+#endif
             int range_last;
             if (!cmd_matches(st, cmd, psinfo, &range_last)) {
                 if (cmd->cmd == '{' && cmd->jump)
@@ -2260,24 +2336,25 @@ static void run_stream(sed_cmd_t *head, exec_t *st, const parser_t *psinfo)
 
             case 'N': {
                 flush_appends(st);
-                strbuf_t save;
-                xb_init(&save, sb_len(&st->ps) + 1);
-                sb_appendn(&save, sb_str(&st->ps), sb_len(&st->ps));
+                strbuf_t *save = &st->nbuf;
+                if (!save->buf)
+                    xb_init(save, sb_len(&st->ps) + 1);
+                else
+                    sb_reset(save);
+                sb_appendn(save, sb_str(&st->ps), sb_len(&st->ps));
                 int save_delim = st->ps_had_delim;
                 if (!next_record(st)) {
                     /* GNU: N at EOF prints pattern space (unless -n) and
                      * exits; POSIX mode exits without printing. */
-                    sb_free(&save);
                     st->ps_had_delim = save_delim;
                     if (O.posix || O.posix_env)
                         cycle_print = 0;
                     goto cycle_end_final;
                 }
-                sb_appendc(&save, REC_DELIM);
-                sb_appendn(&save, sb_str(&st->ps), sb_len(&st->ps));
+                sb_appendc(save, REC_DELIM);
+                sb_appendn(save, sb_str(&st->ps), sb_len(&st->ps));
                 sb_reset(&st->ps);
-                sb_appendn(&st->ps, sb_str(&save), sb_len(&save));
-                sb_free(&save);
+                sb_appendn(&st->ps, sb_str(save), sb_len(save));
                 break;
             }
 
@@ -2493,6 +2570,43 @@ static void print_usage_body(FILE *f)
 }
 
 /* ------------------------------------------------------------------ */
+/* Invocation lifetime                                                */
+/* ------------------------------------------------------------------ */
+
+/* Everything one invocation owns.  File scope, NOT locals of applet_sed():
+ * these change after setjmp(), and a non-volatile automatic changed between
+ * setjmp() and longjmp() is indeterminate afterwards (C11 7.13.2.1) -- the
+ * handler could free a stale pointer, or none.  (It used to be worse: the
+ * program list was only assigned to applet_sed()'s `head` AFTER
+ * parse_script() returned, so every rejected script leaked all of it.) */
+static struct {
+    strbuf_t  script;   /* joined -e/-f text */
+    parser_t  ps;       /* the compiled program and compile scratch */
+    exec_t   *st;       /* execution state, including the input stream */
+} R;
+
+/* Release everything the invocation holds -- on success, on every early
+ * return and from the setjmp handler alike.  Idempotent. */
+static void sed_release(void)
+{
+    close_streams();
+    if (R.st) {
+        close_input(R.st);
+        sb_free(&R.st->ps);
+        sb_free(&R.st->hs);
+        sb_free(&R.st->nbuf);
+        free(R.st->peek);
+        free(R.st);
+        R.st = NULL;
+    }
+    parser_free(&R.ps);
+    sb_free(&R.script);
+    free(O.in_suffix);
+    O.in_suffix = NULL;
+    g_exec_re = NULL;
+}
+
+/* ------------------------------------------------------------------ */
 /* Main applet entry                                                  */
 /* ------------------------------------------------------------------ */
 
@@ -2518,43 +2632,33 @@ int applet_sed(int argc, char **argv)
     if (getenv("POSIXLY_CORRECT"))
         O.posix_env = 1;
 
-    strbuf_t script;
-    xb_init(&script, 256);
     sed_seg_t segs[128];
     int nsegs = 0;
     int expr_count = 0;
     int have_script = 0;
 
-    sed_cmd_t *head = NULL;
-    exec_t *st = NULL;
-    parser_t ps;
-    memset(&ps, 0, sizeof(ps));
+#ifdef SILEX_FUZZ
+    g_fuzz_steps = 0;
+#endif
+    /* R is empty here: every exit of the previous invocation released it. */
+    memset(&R, 0, sizeof(R));
+    R.ps.tail = &R.ps.head;
 
-    g_nrstreams = 0;
-    g_nwstreams = 0;
-
+    /* Armed before the first allocation: xb_init() itself can panic. */
     int jc = setjmp(sed_jmp);
     if (jc != 0) {
         /* error unwinding: free everything and return GNU's exit code */
-        close_streams();
-        free_cmds(head);
-        sb_free(&script);
-        if (st) {
-            sb_free(&st->ps);
-            sb_free(&st->hs);
-            free(st->peek);
-            free(st);
-        }
-        g_exec_re = NULL;
+        sed_release();
         return jc;
     }
+    xb_init(&R.script, 256);
 
 #define ADD_SEG(isf, name) do {                                       \
         if (nsegs < 128) {                                            \
             segs[nsegs].is_file = (isf);                              \
             segs[nsegs].expr_index = (isf) ? 0 : ++expr_count;        \
             segs[nsegs].fname = (name);                               \
-            segs[nsegs].start = sb_len(&script);                      \
+            segs[nsegs].start = sb_len(&R.script);                      \
             nsegs++;                                                  \
         }                                                             \
     } while (0)
@@ -2603,9 +2707,9 @@ int applet_sed(int argc, char **argv)
         case L_DEBUG:   O.debug = 1; break;
         case L_FOLLOW:  O.follow_syms = 1; break;
         case 'e':
-            if (sb_len(&script) > 0) sb_appendc(&script, '\n');
+            if (sb_len(&R.script) > 0) sb_appendc(&R.script, '\n');
             ADD_SEG(0, NULL);
-            sb_append(&script, o.arg);
+            sb_append(&R.script, o.arg);
             have_script = 1;
             break;
         case 'f': {
@@ -2614,15 +2718,15 @@ int applet_sed(int argc, char **argv)
             if (!sfp)
                 sed_panic(4, "couldn't open file %s: %s", val,
                           strerror(errno));
-            if (sb_len(&script) > 0) sb_appendc(&script, '\n');
+            if (sb_len(&R.script) > 0) sb_appendc(&R.script, '\n');
             ADD_SEG(1, val);
-            size_t seg_from = sb_len(&script);
+            size_t seg_from = sb_len(&R.script);
             char rbuf[4096];
             size_t nr;
             while ((nr = fread(rbuf, 1, sizeof(rbuf), sfp)) > 0)
-                sb_appendn(&script, rbuf, nr);
+                sb_appendn(&R.script, rbuf, nr);
             if (sfp != stdin) fclose(sfp);
-            strip_crlf_from(&script, seg_from);
+            strip_crlf_from(&R.script, seg_from);
             have_script = 1;
             break;
         }
@@ -2637,6 +2741,7 @@ int applet_sed(int argc, char **argv)
         case L_INPLACE:
             O.inplace = 1;
             O.separate = 1;
+            free(O.in_suffix);   /* -i.a --in-place=.b: the last one wins */
             O.in_suffix = o.arg ? strdup(o.arg) : NULL;
             break;
         case 'l':
@@ -2649,7 +2754,7 @@ int applet_sed(int argc, char **argv)
         case L_HELP:
             print_usage_body(stdout);
             fputs("E-mail bug reports to: <bug-sed@gnu.org>.\n", stdout);
-            sb_free(&script);
+            sed_release();
             /* GNU exits 4 ("panic") when even --help can't be
              * written, e.g. redirected to /dev/full */
             if (fflush(stdout) != 0 || ferror(stdout)) {
@@ -2659,7 +2764,7 @@ int applet_sed(int argc, char **argv)
             return 0;
         case L_VERSION:
             fputs(SED_VERSION_STR, stdout);
-            sb_free(&script);
+            sed_release();
             if (fflush(stdout) != 0 || ferror(stdout)) {
                 clearerr(stdout);
                 return 4;
@@ -2677,13 +2782,12 @@ int applet_sed(int argc, char **argv)
                 fprintf(stderr, "sed: unrecognized option '--%.*s'\n",
                         nlen, name);
                 print_usage_body(stderr);
-                sb_free(&script);
+                sed_release();
                 return 1;
             }
             fprintf(stderr, "sed: invalid option -- '%c'\n", o.opt);
             print_usage_body(stderr);
-            sb_free(&script);
-            free(O.in_suffix);
+            sed_release();
             return 1;
         }
     }
@@ -2693,12 +2797,11 @@ int applet_sed(int argc, char **argv)
     if (!have_script) {
         if (i >= argc) {
             print_usage_body(stderr);
-            sb_free(&script);
-            free(O.in_suffix);
+            sed_release();
             return 1;
         }
         ADD_SEG(0, NULL);
-        sb_append(&script, argv[i]);
+        sb_append(&R.script, argv[i]);
         i++;
     }
 #undef ADD_SEG
@@ -2713,11 +2816,13 @@ int applet_sed(int argc, char **argv)
     }
 
     /* ---------- compile ---------- */
-    ps.src = sb_str(&script);
-    ps.p   = ps.src;
-    ps.segs = segs;
-    ps.nsegs = nsegs;
-    head = parse_script(&ps, NULL);
+    R.ps.src = sb_str(&R.script);
+    R.ps.p   = R.ps.src;
+    R.ps.segs = segs;
+    R.ps.nsegs = nsegs;
+    parse_script(&R.ps);
+    sed_cmd_t *head = R.ps.head;
+    const parser_t *ps = &R.ps;
 
     /* ---------- execute ---------- */
     /* volatile: these are live across the nested setjmp below (and out_fp is
@@ -2736,7 +2841,7 @@ int applet_sed(int argc, char **argv)
     if (O.inplace && argc - i == 0)
         sed_panic(1, "no input files while in-place editing");
 
-    st = calloc(1, sizeof(*st));
+    exec_t *st = R.st = calloc(1, sizeof(*st));
     if (!st) sed_panic(4, "out of memory");
     xb_init(&st->ps, 256);
     xb_init(&st->hs, 8);
@@ -2758,7 +2863,7 @@ int applet_sed(int argc, char **argv)
         st->cur = 0;
         st->cur_name = "-";
         st->out = stdout;
-        run_stream(head, st, &ps);
+        run_stream(head, st, ps);
         /* a pending delimiter at stream end is DISCARDED: the missing
          * final newline of the input is preserved in the output */
         st->pending_nl = 0;
@@ -2788,7 +2893,7 @@ int applet_sed(int argc, char **argv)
             st->files = one;
             st->nfiles = 1;
             st->cur = 0;
-            st->fp = NULL;
+            close_input(st);   /* still open if q/Q ended the last file */
             st->have_peek = 0;
             st->linenum = 0;
             st->last_line = 0;
@@ -2846,7 +2951,7 @@ int applet_sed(int argc, char **argv)
                 memcpy(&sed_jmp, &saved, sizeof(jmp_buf));
                 longjmp(sed_jmp, rc);
             }
-            run_stream(head, st, &ps);
+            run_stream(head, st, ps);
             st->pending_nl = 0;   /* preserve missing final newline */
             memcpy(&sed_jmp, &saved, sizeof(jmp_buf));
 
@@ -2895,14 +3000,6 @@ int applet_sed(int argc, char **argv)
     }
 
     /* ---------- cleanup ---------- */
-    close_streams();
-    sb_free(&st->ps);
-    sb_free(&st->hs);
-    free(st->peek);
-    free(st);
-    free_cmds(head);
-    sb_free(&script);
-    free(O.in_suffix);
-    g_exec_re = NULL;
+    sed_release();
     return exit_code;
 }
