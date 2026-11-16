@@ -1134,6 +1134,7 @@ int applet_find(int argc, char **argv)
     if (fa.pos < fa.argc) {
         expr = parse_expr(&fa);
         if (!expr) {
+            if (fa.vcs_ign) vcsignore_free(fa.vcs_ign);
             return 1;
         }
     }

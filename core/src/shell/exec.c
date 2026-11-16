@@ -2391,7 +2391,6 @@ int exec_node(shell_ctx_t *sh, node_t *node)
          * shell's own finished background jobs. */
         if (!sh->interactive)
             job_reap_and_prune(&sh->jobs);
-        char *jobcmd = describe_node(node->u.binary.left);
         /* Block every signal across the fork. The child inherits the parent's
          * trap HANDLERS and only clears them a few instructions later, so a
          * signal aimed at the new job in that window (`cmd & kill -URG $!`,
@@ -2406,7 +2405,6 @@ int exec_node(shell_ctx_t *sh, node_t *node)
         if (pid < 0) {
             sigprocmask(SIG_SETMASK, &async_oldmask, NULL);
             perror("fork");
-            free(jobcmd);
             rc = 1;
             break;
         }
@@ -2467,6 +2465,7 @@ int exec_node(shell_ctx_t *sh, node_t *node)
         setpgid(pid, pid);
         sigprocmask(SIG_SETMASK, &async_oldmask, NULL);
         sh->last_bg_pid = pid;
+        char *jobcmd = describe_node(node->u.binary.left);
         job_t *j = job_register(&sh->jobs, pid, pid, jobcmd);
         free(jobcmd);
         /* Interactive shells announce the new job: `[1] 12345`. */

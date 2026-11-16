@@ -2501,9 +2501,8 @@ static void expand_into(shell_ctx_t *sh, const char *word, strbuf_t *out,
                 p = cmdsubst_body_end(p);
                 size_t clen = (size_t)(p - start);
                 if (*p == ')') p++;   /* step past the closing ')' */
-                char *cmd = strndup(start, clen);
-                char *result = cmd_subst(sh, cmd ? cmd : "");
-                free(cmd);
+                char *cmd = arena_strndup(sh->scratch, start, clen);
+                char *result = cmd_subst(sh, cmd);
                 emit_data(sh, out, result);
                 continue;
             }
@@ -2520,11 +2519,10 @@ static void expand_into(shell_ctx_t *sh, const char *word, strbuf_t *out,
                  * kept in the body for expand_braced to remove. */
                 const char *end = scan_braced_end(p, in_dquote);
                 size_t blen = (size_t)(end - start);
-                char *body = strndup(start, blen);
+                char *body = arena_strndup(sh->scratch, start, blen);
                 if (*end == '}') p = end + 1;   /* step past the closing brace */
                 else            p = end;
-                char *val  = expand_braced(sh, body ? body : "", in_dquote);
-                free(body);
+                char *val  = expand_braced(sh, body, in_dquote);
                 /* expand_braced() already ran expand_into() on any quoted word
                  * part, so `val` may itself contain guard/boundary markers with
                  * its data already escaped -- append it RAW, never through
