@@ -1,0 +1,48 @@
+#!/bin/bash
+# silex-vg -- run silex under valgrind memcheck, as a drop-in for the binary.
+#
+# Every suite takes the silex binary as its first argument and invokes it
+# (`"$SILEX" sed ...`, `"$SILEX" sh -c ...`). Handing them THIS script
+# instead puts every silex process they start under valgrind, and nothing
+# else: `valgrind bash run_tests.sh` -- what `make test-valgrind` used to do
+# -- instruments bash, and without --trace-children never looks at silex at
+# all.
+#
+#   SILEX_VG_BIN   the real (unsanitised -- valgrind cannot run an ASan
+#                  build) silex binary                        (required)
+#   SILEX_VG_LOG   directory for the logs, one per invocation (required)
+#   SILEX_VG_OPTS  extra valgrind options                     (optional)
+#
+# Verdict, not exit status: tests/valgrind/run.sh reads the logs. No
+# --error-exitcode -- it would also replace the status of every FORKED child
+# (a subshell, a $(...)) that valgrind faults, so `$(false); echo $?` printed
+# 99 and the suites failed on statuses valgrind invented.
+#
+# Each invocation logs to SILEX_VG_LOG/vg.PID.log, PID being this silex's
+# (exec keeps it); its forked children write into the same file, every line
+# prefixed ==CHILDPID==, which is how run.sh tells them apart. --log-fd on a
+# high descriptor, not --log-file: valgrind leaves a --log-file open as fd 3
+# in the program, and silex then treated `4>&3` as valid (test_posix_gaps).
+#
+# silex dispatches on argv[0]. Under valgrind argv[0] is always the real
+# binary, so when this wrapper is reached through another name (a test that
+# symlinks it as `cat`), that name is passed as the applet argument instead.
+
+: "${SILEX_VG_BIN:?SILEX_VG_BIN must name the silex binary}"
+: "${SILEX_VG_LOG:?SILEX_VG_LOG must name a log directory}"
+
+name=$(basename "$0")
+case "$name" in
+    silex-vg|silex) ;;
+    *)              set -- "$name" "$@" ;;
+esac
+
+# bash, not sh: dash cannot redirect a descriptor above 9.
+exec 200>>"$SILEX_VG_LOG/vg.$$.log"
+# shellcheck disable=SC2086
+exec valgrind --tool=memcheck \
+    --leak-check=full --show-leak-kinds=definite,indirect \
+    --errors-for-leak-kinds=definite,indirect \
+    --log-fd=200 \
+    $SILEX_VG_OPTS \
+    "$SILEX_VG_BIN" "$@"

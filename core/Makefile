@@ -285,7 +285,7 @@ TARGET = $(BINDIR)/silex
 .PHONY: all clean debug release release-glibc release-docker test install check \
         test-asan test-poison poison-build compat-test shell-test security-test \
         bench bench-ci coverage integration-test fuzz fuzz-run \
-        analyze cppcheck test-valgrind cross-check \
+        analyze cppcheck test-valgrind test-leak test-leak-asan cross-check \
         size-check install-hooks musl \
         stress-test edge-test external-test external-fetch \
         external-test-docker external-fetch-docker
@@ -557,6 +557,31 @@ test-asan: $(TARGET)
 	@echo "=== Running unit tests (ASan+UBSan) ==="
 	@bash tests/unit/run_tests.sh $(TARGET)
 
+# Builtin-path resource growth (tests/leak/run_builtin_leak.sh).
+#
+# Inside `silex sh` an applet is a function call, not a process: whatever it
+# does not free or close stays in the shell for the rest of the script. Every
+# other suite runs applets as one-shot processes, where the kernel cleans up
+# at exit -- which is how sed leaked a compiled script per rejected program
+# and an fd per failed `sed -i` past all of them. This runs every applet, ok
+# and error cases, WARMUP + 2 x ITERS times in one long-lived silex sh, and
+# fails on any fd growth, on VmRSS growth in both measured windows, or on
+# unstable results. LEAK_WARMUP / LEAK_ITERS / LEAK_SLACK_KB tune it.
+test-leak: $(TARGET)
+	@echo "=== Running builtin-path leak tests ==="
+	@bash tests/leak/run_builtin_leak.sh $(abspath $(TARGET))
+
+# The same suite against the ASan/UBSan build: LeakSanitizer's report at each
+# shell's exit names any allocation nobody can reach any more, with a stack,
+# and UBSan aborts on undefined behaviour along the way. Same flags as
+# test-asan, so running both does not rebuild in between.
+test-leak-asan: CFLAGS = $(CFLAGS_DEBUG)
+test-leak-asan: LDFLAGS =
+test-leak-asan: LDLIBS = -ldl
+test-leak-asan: $(TARGET)
+	@echo "=== Running builtin-path leak tests (ASan+UBSan) ==="
+	@bash tests/leak/run_builtin_leak.sh $(abspath $(TARGET))
+
 # Arena lifetime checking.
 #
 # A pointer that outlives an arena_reset() is a use-after-free that neither
@@ -754,9 +779,20 @@ $(FUZZ_DIR)/fuzz_grep_pattern: tests/fuzz/fuzz_grep_pattern.c \
     $(REGEX_TEST_SRCS) $(FUZZ_CORE) | $(FUZZ_DIR)
 	$(FUZZ_CC) $(FUZZ_FLAGS) -o $@ $^
 
+# Drives the REAL applet_sed() in-process, argv and all, so the shared option
+# parser (opt.c, in FUZZ_CORE) and sed's compiler/executor are what is being
+# fuzzed -- it used to be a stub that only called libc regcomp(). sed needs
+# nothing from FUZZ_TOOL_DEPS: its regexes are libc's. -DSILEX_FUZZ gives
+# sed.c an execution budget (fuzz_budget()) so `:a;ba` cannot stall a run.
+# Seeds: tests/fuzz/corpus/sed/ (layout documented in the harness).
+# UBSan halts on the first report (the harness sets halt_on_error through
+# __ubsan_default_options): left at its default it only PRINTS and carries
+# on, so the signed overflow this harness found in `addr,+N` left no
+# reproducer and failed nothing. Not -fno-sanitize-recover, which does the
+# same but drops ~70% of the coverage features libFuzzer steers by.
 $(FUZZ_DIR)/fuzz_sed_expr: tests/fuzz/fuzz_sed_expr.c \
-    $(SRCDIR)/core/sed.c $(FUZZ_CORE) $(FUZZ_TOOL_DEPS) | $(FUZZ_DIR)
-	$(FUZZ_CC) $(FUZZ_FLAGS) $(CFLAGS_LINESCAN) -o $@ $^ -ldl
+    $(SRCDIR)/core/sed.c $(FUZZ_CORE) | $(FUZZ_DIR)
+	$(FUZZ_CC) $(FUZZ_FLAGS) -DSILEX_FUZZ -o $@ $^
 
 ITERS ?= 1000000
 fuzz-run: fuzz
@@ -796,10 +832,24 @@ cppcheck-all: $(ALL_SRCS)
 	    -I$(SRCDIR) $(ALL_SRCS)
 
 # --- Valgrind -----------------------------------------------------------------
+# Every silex process the suites start runs under memcheck (via the
+# tests/valgrind/silex-vg wrapper, handed to the suites as the binary): the
+# unit + shell suites, and the builtin-path leak suite, where one long-lived
+# silex sh runs each applet repeatedly. Fails on any memcheck error or any
+# definitely/indirectly lost block in any silex process.
+#
+# This used to be `valgrind ... bash tests/unit/run_tests.sh`, which put BASH
+# under valgrind -- without --trace-children it never instrumented silex at
+# all, so it could not see a single silex leak.
+#
+# Its own flags: valgrind cannot run the ASan build, and -O1 -g keeps stacks
+# readable. Like every flavour, switching to it rebuilds (BUILD_STAMP).
+test-valgrind: CFLAGS = $(CFLAGS_COMMON) -O1 -g -fno-omit-frame-pointer
+test-valgrind: LDFLAGS =
+test-valgrind: LDLIBS = -ldl
 test-valgrind: $(TARGET)
-	@echo "=== Running unit tests under valgrind ==="
-	valgrind --leak-check=full --error-exitcode=1 \
-	    bash tests/unit/run_tests.sh $(TARGET)
+	@echo "=== Running tests with silex under valgrind ==="
+	@bash tests/valgrind/run.sh $(abspath $(TARGET))
 
 # --- Cross compilation --------------------------------------------------------
 cross-check:

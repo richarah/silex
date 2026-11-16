@@ -148,6 +148,13 @@ silex includes comprehensive test suites for validation:
     make integration-test  # Integration tests
     make security-test     # Security validation
     make edge-test         # Edge case handling
+    make test-leak         # Builtin-path leaks: every applet, repeated in one
+                           # long-lived silex sh (fd / memory growth)
+    make test-asan         # Unit tests on the ASan/UBSan build
+    make test-leak-asan    # Builtin-path leaks on the ASan/UBSan build
+    make test-valgrind     # Unit + leak suites, every silex under memcheck
+    make fuzz              # libFuzzer harnesses (fuzz_sed_expr drives the real
+                           # applet_sed; seeds in tests/fuzz/corpus/sed)
 
 ### External Test Suites
 
