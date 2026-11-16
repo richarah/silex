@@ -2633,9 +2633,12 @@ int applet_sed(int argc, char **argv)
         O.posix_env = 1;
 
     sed_seg_t segs[128];
-    int nsegs = 0;
-    int expr_count = 0;
-    int have_script = 0;
+    /* volatile: modified after setjmp() below. The handler does not read
+     * them, but gcc -O1 and above reports -Wclobbered, which -Werror
+     * makes a build failure. */
+    volatile int nsegs = 0;
+    volatile int expr_count = 0;
+    volatile int have_script = 0;
 
 #ifdef SILEX_FUZZ
     g_fuzz_steps = 0;
