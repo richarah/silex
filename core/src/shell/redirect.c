@@ -28,8 +28,15 @@
  * park their saved fds high for exactly this reason. */
 #define FD_SAVE_BASE 10
 
-/* Save fd orig_fd into a new fd (CLOEXEC), record in ctx */
-static int save_fd(redirect_ctx_t *ctx, int orig_fd, arena_t *arena)
+/* Save fd orig_fd into a new fd (CLOEXEC), record in ctx.
+ *
+ * The record is malloc'd and freed by redirect_restore()/redirect_commit(),
+ * whose lifetime it actually has. It used to come from the shell's
+ * persistent parse arena, which is never reset: every redirection of the
+ * shell's life -- each `cmd >/dev/null` in a loop -- left 16 bytes behind
+ * for good, until the arena hit its 64 MB cap and abort()ed the shell after
+ * ~4 million redirections (tests/leak/ CONTROL row). */
+static int save_fd(redirect_ctx_t *ctx, int orig_fd)
 {
     int saved = fcntl(orig_fd, F_DUPFD_CLOEXEC, FD_SAVE_BASE);
     if (saved < 0) {
@@ -37,7 +44,12 @@ static int save_fd(redirect_ctx_t *ctx, int orig_fd, arena_t *arena)
         saved = -1;
     }
 
-    saved_fd_t *entry = arena_alloc(arena, sizeof(saved_fd_t));
+    saved_fd_t *entry = malloc(sizeof(saved_fd_t));
+    if (!entry) {
+        /* same outcome as the arena's out-of-memory path it replaces */
+        fputs("silex: redirect: out of memory\n", stderr);
+        abort();
+    }
     entry->orig_fd  = orig_fd;
     entry->saved_fd = saved;
     entry->next     = ctx->saved;
@@ -72,7 +84,7 @@ int redirect_apply(struct shell_ctx *sh, redir_t *redirs, redirect_ctx_t *ctx)
         }
 
         /* Save the original fd before we touch it */
-        save_fd(ctx, fd, sh->parse_arena.head ? sh->vars.arena : &sh->parse_arena);
+        save_fd(ctx, fd);
 
         int new_fd = -1;
 
@@ -324,7 +336,9 @@ int redirect_apply(struct shell_ctx *sh, redir_t *redirs, redirect_ctx_t *ctx)
 void redirect_restore(redirect_ctx_t *ctx)
 {
     fflush(NULL);   /* flush all stdio buffers before restoring fds */
-    for (saved_fd_t *s = ctx->saved; s != NULL; s = s->next) {
+    saved_fd_t *next;
+    for (saved_fd_t *s = ctx->saved; s != NULL; s = next) {
+        next = s->next;
         if (s->saved_fd >= 0) {
             dup2(s->saved_fd, s->orig_fd);
             close(s->saved_fd);
@@ -332,6 +346,7 @@ void redirect_restore(redirect_ctx_t *ctx)
             /* fd was not open originally; close it to restore that state */
             close(s->orig_fd);
         }
+        free(s);
     }
     ctx->saved = NULL;
 }
@@ -339,9 +354,12 @@ void redirect_restore(redirect_ctx_t *ctx)
 void redirect_commit(redirect_ctx_t *ctx)
 {
     /* Commit redirections permanently: close saved fds without restoring */
-    for (saved_fd_t *s = ctx->saved; s != NULL; s = s->next) {
+    saved_fd_t *next;
+    for (saved_fd_t *s = ctx->saved; s != NULL; s = next) {
+        next = s->next;
         if (s->saved_fd >= 0)
             close(s->saved_fd);
+        free(s);
     }
     ctx->saved = NULL;
 }
