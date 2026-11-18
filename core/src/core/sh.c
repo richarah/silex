@@ -243,6 +243,11 @@ int applet_sh(int argc, char **argv)
         sh.trap_entry_status = ret;
         int trap_rc = shell_run_string(&sh, exit_action);
         sh.in_trap--;
+        /* The action was taken out of its slot so it cannot fire twice;
+         * shell_free() only frees what is still in a slot, so free it
+         * here (it is heap-owned since trap actions stopped living in the
+         * parse arena -- LeakSanitizer reported it). */
+        shell_trap_action_free((char *)exit_action);
         /* A syntax error is the shell's own failure: it exits 2 whether or
          * not an EXIT trap runs. Letting the trap's status win turned every
          * unparsable script into a successful one as soon as it had a
