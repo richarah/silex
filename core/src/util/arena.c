@@ -18,6 +18,14 @@ COLD void arena_init(arena_t *a, const char *name)
     a->head        = NULL;
     a->total_bytes = 0;
     a->name        = name ? name : "anon";
+    a->block_size  = ARENA_BLOCK_SIZE;
+}
+
+COLD void arena_init_sized(arena_t *a, const char *name, size_t block_size)
+{
+    arena_init(a, name);
+    if (block_size >= 64)
+        a->block_size = block_size;
 }
 
 HOT void *arena_alloc(arena_t *a, size_t size)
@@ -66,7 +74,8 @@ HOT void *arena_alloc(arena_t *a, size_t size)
 
     /* Genuinely out of capacity: grow. */
     {
-        size_t block_data_size = size > ARENA_BLOCK_SIZE ? size : ARENA_BLOCK_SIZE;
+        size_t min_block = a->block_size ? a->block_size : ARENA_BLOCK_SIZE;
+        size_t block_data_size = size > min_block ? size : min_block;
 
         if (a->total_bytes > ARENA_MAX_BYTES - block_data_size) {
             fprintf(stderr, "silex: arena: %s: exceeded maximum size (%u MB)\n",
@@ -196,4 +205,5 @@ void arena_free(arena_t *a)
         blk = next;
     }
     a->head = NULL;
+    a->total_bytes = 0;
 }

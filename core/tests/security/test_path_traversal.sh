@@ -71,32 +71,70 @@ trap 'rm -rf "$TMPDIR_PATH"' EXIT INT TERM
 # We test via the silex tools themselves — e.g., mkdir and cat must not
 # escape the working area due to /../ components in arguments.
 
-# mkdir with /../ traversal should stay within tmpdir or fail
+# `..` is resolved by the kernel, component by component, exactly as POSIX
+# pathname resolution says -- including `..` at / staying at /. That is the
+# CORRECT behaviour for mkdir (GNU and busybox do the same), so these checks
+# assert it, rather than asserting that a path cannot reach a directory it
+# names. They are built so that every path they resolve -- however far up it
+# climbs -- comes back down into $TMPDIR_PATH: the test never creates anything
+# outside its own temp dir. (The old version ran
+# `mkdir -p "$DEEP/../../../../../../../../../etc/injected"` and treated a
+# correct mkdir as a failure, after creating /etc/injected.)
+
+# .. resolves against the real parent: safe/subdir/../../injected is
+# $TMPDIR_PATH/injected, and nothing is created anywhere else.
 mkdir -p "$TMPDIR_PATH/safe/subdir"
 "$SILEX" mkdir -p "$TMPDIR_PATH/safe/subdir/../../injected" > /dev/null 2>&1
 check_exit_zero "mkdir /../ traversal: exits cleanly" "$?"
-# The resolved path should be $TMPDIR_PATH/safe/injected — still inside TMPDIR_PATH
-if [ -d "$TMPDIR_PATH/safe/injected" ] || [ -d "$TMPDIR_PATH/injected" ]; then
-    echo "PASS: mkdir /../: creates directory at normalised path (within tmpdir)"
+if [ -d "$TMPDIR_PATH/injected" ] && [ ! -e "$TMPDIR_PATH/safe/injected" ] &&
+   [ ! -e "$TMPDIR_PATH/safe/subdir/injected" ]; then
+    echo "PASS: mkdir /../: creates the directory at the resolved path"
     PASS=$((PASS + 1))
-elif [ -d "/injected" ]; then
-    echo "FAIL: mkdir /../: escaped to /injected (filesystem root!)"
-    FAIL=$((FAIL + 1))
 else
-    echo "PASS: mkdir /../: did not escape to filesystem root"
-    PASS=$((PASS + 1))
+    echo "FAIL: mkdir /../: directory not created at \$TMPDIR_PATH/injected"
+    FAIL=$((FAIL + 1))
 fi
 
-# Attempt path traversal above TMPDIR root — should not reach /tmp/.. = /
+# Climb all the way to / -- more `..` than there are components, so the extra
+# ones are resolved AT / -- and walk back down into the temp dir. The result
+# must be exactly $TMPDIR_PATH/rooted: .. at / is /, not an error and not
+# somewhere else.
 DEEP="$TMPDIR_PATH/a/b/c/d/e"
 mkdir -p "$DEEP"
-"$SILEX" mkdir -p "$DEEP/../../../../../../../../../etc/injected" > /dev/null 2>&1
-if [ -d "/etc/injected" ]; then
-    echo "FAIL: path traversal: escaped to /etc/injected"
-    FAIL=$((FAIL + 1))
-else
-    echo "PASS: path traversal: did not create /etc/injected"
+REAL_TMP=$(cd "$TMPDIR_PATH" && pwd -P)
+UP=""
+n=0
+depth=$(printf '%s\n' "$DEEP" | tr -cd '/' | wc -c)
+while [ "$n" -lt $((depth + 8)) ]; do UP="$UP../"; n=$((n + 1)); done
+"$SILEX" mkdir -p "$DEEP/$UP${REAL_TMP#/}/rooted" > /dev/null 2>&1
+check_exit_zero "mkdir .. past /: exits cleanly" "$?"
+if [ -d "$TMPDIR_PATH/rooted" ]; then
+    echo "PASS: mkdir .. past /: .. at / resolves to / (back inside tmpdir)"
     PASS=$((PASS + 1))
+else
+    echo "FAIL: mkdir .. past /: \$TMPDIR_PATH/rooted not created"
+    FAIL=$((FAIL + 1))
+fi
+# ...and only there: nothing was created under the intermediate components.
+if [ -z "$(find "$TMPDIR_PATH/a" -name rooted 2>/dev/null)" ]; then
+    echo "PASS: mkdir .. past /: nothing created along the way"
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: mkdir .. past /: stray directory under \$TMPDIR_PATH/a"
+    FAIL=$((FAIL + 1))
+fi
+
+# A `..` through a symlink resolves against the symlink's TARGET (physical
+# resolution, as the kernel does it): lnk -> a/b/c, so lnk/../viasym is
+# a/b/viasym, not $TMPDIR_PATH/viasym.
+ln -s "$TMPDIR_PATH/a/b/c" "$TMPDIR_PATH/lnk"
+"$SILEX" mkdir -p "$TMPDIR_PATH/lnk/../viasym" > /dev/null 2>&1
+if [ -d "$TMPDIR_PATH/a/b/viasym" ] && [ ! -e "$TMPDIR_PATH/viasym" ]; then
+    echo "PASS: mkdir symlink/..: resolved physically (against the target)"
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: mkdir symlink/..: not created at the physical parent"
+    FAIL=$((FAIL + 1))
 fi
 
 # ===========================================================================
@@ -179,21 +217,26 @@ if [ -f "$SPACEINJ" ]; then
 fi
 
 # ===========================================================================
-# Verify path_normalize does not return path above anchor
+# `..` after a missing component is not a lexical shortcut
 # ===========================================================================
 
-# Use silex --canon-path or similar if available, else test via mkdir behaviour
-# Test: normalise /tmp/a/../../../etc -> must not be /etc
-TRAV_PATH="$TMPDIR_PATH/x/../../../etc"
-"$SILEX" cat "$TRAV_PATH/passwd" > /dev/null 2>&1
+# A path through a component that does not exist fails cleanly, however many
+# `..` follow it: x is missing, so x/../inside.txt is an error (ENOENT), not
+# a lexical shortcut to $TMPDIR_PATH/inside.txt.
+printf 'inside\n' > "$TMPDIR_PATH/inside.txt"
+"$SILEX" cat "$TMPDIR_PATH/x/../inside.txt" > /dev/null 2>&1
 RC=$?
 if [ $RC -ne 0 ]; then
-    echo "PASS: path traversal to /etc/passwd: rejected or not found cleanly"
+    echo "PASS: cat through a missing component: rejected cleanly"
     PASS=$((PASS + 1))
 else
-    echo "FAIL: path traversal to /etc/passwd: succeeded (unexpected)"
+    echo "FAIL: cat through a missing component: succeeded (lexical .. resolution)"
     FAIL=$((FAIL + 1))
 fi
+# ...while the same climb through components that DO exist reads the file,
+# again without ever naming anything outside the temp dir.
+got=$("$SILEX" cat "$DEEP/$UP${REAL_TMP#/}/inside.txt" 2>/dev/null)
+check "cat .. past / and back down: reads the file" "$got" "inside"
 
 # ===========================================================================
 # Null byte in path (should be rejected or handled safely)

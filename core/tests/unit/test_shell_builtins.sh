@@ -264,6 +264,42 @@ check "head: --lines N (separated)" \
     "a" \
     "$("$SILEX" sh -c 'printf "a\nb\nc\n" | head --lines 1')"
 
+# --- every applet invocation starts from a clean state ----------------------
+# Inside silex sh an applet is a function call, so a global it sets outlives
+# it. grep's "matched anything" flag was never reset: after one successful
+# `grep -q`, every later `grep -q` in the same shell exited 0.
+ST=$(mktemp -d)
+printf 'a\nb\nc\n' > "$ST/f"
+case "$SILEX" in /*) ;; *) SILEX="$(cd "$(dirname "$SILEX")" && pwd)/$(basename "$SILEX")" ;; esac
+check "grep -q: a miss after a hit still exits 1" \
+    "0 1 0 1" \
+    "$(cd "$ST" && "$SILEX" sh -c 'grep -q a f; r1=$?; grep -q zzz f; r2=$?; grep -q b f; r3=$?; grep -q yyy f; echo $r1 $r2 $r3 $?')"
+check "grep -q: misses stay misses after many hits" \
+    "1" \
+    "$(cd "$ST" && "$SILEX" sh -c 'for i in 1 2 3 4 5; do grep -q a f; done; grep -q zzz f; echo $?')"
+check "grep -c -m1 prints its count (and stops after the match)" \
+    "1" \
+    "$(printf 'a\na\na\n' | "$SILEX" grep -c -m1 a)"
+check "printf: an argument error does not stick to the next printf" \
+    "1 0" \
+    "$("$SILEX" sh -c 'printf %d abc >/dev/null 2>&1; r1=$?; printf %d 1 >/dev/null; echo $r1 $?')"
+check "chmod: a failure does not stick to the next chmod" \
+    "1 0" \
+    "$(cd "$ST" && "$SILEX" sh -c 'chmod 644 nonexist 2>/dev/null; r1=$?; chmod 644 f; echo $r1 $?')"
+check "sort: options do not stick to the next sort" \
+    "c b a a b c" \
+    "$(cd "$ST" && "$SILEX" sh -c 'sort -r f; sort f' | tr '\n' ' ' | sed 's/ $//')"
+check "sed: -n does not stick to the next sed" \
+    "b a b c" \
+    "$(cd "$ST" && "$SILEX" sh -c 'sed -n 2p f; sed p f | sort -u' | tr '\n' ' ' | sed 's/ $//')"
+check "date: TZ is re-read on every invocation" \
+    "21 00" \
+    "$("$SILEX" sh -c 'TZ=UTC+3 date -d @0 +%H; TZ=UTC date -d @0 +%H' | tr '\n' ' ' | sed 's/ $//')"
+check "xargs: -n does not stick to the next xargs" \
+    "a b|c|a b c" \
+    "$(cd "$ST" && "$SILEX" sh -c 'printf "a b c" | xargs -n 2 echo | tr "\n" "|"; printf "a b c" | xargs echo' | sed 's/|$//')"
+rm -rf "$ST"
+
 echo ""
 echo "shell_builtins: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

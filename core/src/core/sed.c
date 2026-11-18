@@ -1452,6 +1452,8 @@ typedef struct {
 } exec_t;
 
 static char REC_DELIM = '\n';
+/* -u: stdin has been switched to unbuffered by THIS invocation. */
+static int  g_stdin_unbuffered;
 
 /* R command streams (persist across cycles) */
 static void out_flush_pending(exec_t *st)
@@ -1569,16 +1571,22 @@ static FILE *open_input(exec_t *st, const char *name)
      * real file called "-" (GNU in-place-hyphen). */
     if (strcmp(name, "-") == 0 && !O.inplace) {
         st->cur_name = "-";
-        /* setvbuf has to happen before any I/O on the stream, and "-" may
-         * appear more than once in the operand list -- `sed -u p - -` came
-         * back through here and called it again on a stream already read
-         * from, which is undefined. Once per process is the whole intent. */
-        if (O.unbuffered) {
-            static int stdin_unbuffered = 0;
-            if (!stdin_unbuffered) {
-                setvbuf(stdin, NULL, _IONBF, 0);
-                stdin_unbuffered = 1;
-            }
+        /* -u: read stdin a byte at a time, so this invocation consumes only
+         * the input it actually processes and the rest of a pipe is left for
+         * whoever reads it next (`sed -u 1q; cat`).
+         *
+         * setvbuf has to happen before any I/O on the stream, and "-" may
+         * appear more than once in the operand list -- `sed -u p - -` comes
+         * back through here, so it is done once per INVOCATION. It used to
+         * be once per PROCESS (a static flag), which inside `silex sh` --
+         * where sed is a function call -- meant only the first `sed -u` of
+         * the session got it, and the shell's stdin then stayed unbuffered
+         * for every later command. The shell now restores stdin's normal
+         * buffering after each applet (see applet_stdio_end in exec.c), so
+         * each `sed -u` has to set it again for itself. */
+        if (O.unbuffered && !g_stdin_unbuffered) {
+            setvbuf(stdin, NULL, _IONBF, 0);
+            g_stdin_unbuffered = 1;
         }
         return stdin;
     }
@@ -2615,6 +2623,7 @@ int applet_sed(int argc, char **argv)
     /* Reset global state: the applet runs in-process and may be invoked
      * repeatedly by the same shell. */
     memset(&O, 0, sizeof(O));
+    g_stdin_unbuffered = 0;
     O.line_len = 70;
     /* COLS sets the default l wrap width, minus one to avoid tty
      * line-wraps (GNU).  -l / --line-length still override it.

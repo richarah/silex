@@ -115,6 +115,51 @@ check "trap set in \$( ) discards inherited entries" "$got" "$(printf "trap -- '
 got=$(yes 2>/dev/null | "$MB" head -n 3 2>/dev/null)
 check "SIGPIPE: head terminates yes cleanly" "$got" "$(printf 'y\ny\ny')"
 
+
+# --- memory stays flat under repeated redefinition ---------------------------
+# Run BODY 20000 times in ONE silex shell after a 2000-run warm-up and print
+# "flat" when VmRSS grew by less than 256 KB over the measured runs. Every
+# BODY below used to copy something into the shell's never-freed parse arena
+# (or leak it some other way) on each run: tens of bytes to kilobytes per
+# iteration, i.e. megabytes here, and an abort at the arena's 64 MB cap in a
+# long enough loop.
+# Not judged under a sanitised build: ASan's allocator and quarantine grow on
+# their own, so VmRSS says nothing there (same rule as tests/leak).
+rss_sanitised() {
+    { command -v nm >/dev/null 2>&1 && nm "$MB" 2>/dev/null | grep __asan_init >/dev/null; } ||
+    { command -v ldd >/dev/null 2>&1 && ldd "$MB" 2>/dev/null | grep libasan >/dev/null; }
+}
+rss_flat() {
+    if [ ! -r /proc/self/status ] || rss_sanitised; then echo flat; return; fi
+    "$MB" -c '
+        rss() { while read -r k v u; do [ "$k" = VmRSS: ] && R=$v; done </proc/$$/status; }
+        i=0; while [ $i -lt 2000 ]; do eval "$1"; i=$((i+1)); done
+        rss; r1=$R
+        i=0; while [ $i -lt 20000 ]; do eval "$1"; i=$((i+1)); done
+        rss; g=$((R - r1))
+        if [ "$g" -lt 256 ]; then echo flat; else echo "grew ${g} KB"; fi
+    ' rss_flat "$1"
+}
+LONG="padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding"
+
+check "re-arming a trap in a loop: memory stays flat" \
+    "$(rss_flat 'trap "echo $i $LONG" USR1')" "flat"
+check "set + reset a trap in a loop: memory stays flat" \
+    "$(rss_flat 'trap "echo $i $LONG" USR1 USR2; trap - USR1 USR2')" "flat"
+check "set + ignore a trap in a loop: memory stays flat" \
+    "$(rss_flat 'trap "echo $i $LONG" HUP; trap "" HUP')" "flat"
+
+# A trap action that re-arms or resets its own trap while it runs: the slot's
+# string is freed, but the running action is a private copy.
+check "a trap action that re-arms its own trap" \
+    "$("$MB" -c 'trap "trap \"echo second\" USR1; echo first" USR1; kill -USR1 $$; kill -USR1 $$; echo done' | tr '\n' ' ')" \
+    "first second done "
+check "a trap action that resets its own trap" \
+    "$("$MB" -c 'trap "trap - USR2; echo once" USR2; kill -USR2 $$; trap "" USR2; kill -USR2 $$; echo done' | tr '\n' ' ')" \
+    "once done "
+check "trap listing after many redefinitions shows the last" \
+    "$("$MB" -c 'for i in 1 2 3; do trap "echo $i" INT; done; trap' )" "trap -- 'echo 3' INT"
+
 echo
 echo "trap tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

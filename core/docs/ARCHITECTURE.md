@@ -87,17 +87,44 @@ The arena is reset between top-level commands (shell main loop), not freed.
 This amortizes allocation overhead across the entire shell session.
 
 Key arenas:
-- `shell_ctx_t.parse_arena`: reset after each top-level command; holds all
-  AST nodes, token strings, word arrays from the last parsed command.
-- `vars_t.arena`: never reset during session; holds variable names and values.
-  Variables are updated by creating new arena_strdup entries.
+- `shell_ctx_t.scratch_arena`: reset after each top-level command; expansions
+  for the command currently executing.
+- Parse arenas: each script file, `eval`/trap string and interactive input
+  line is parsed into a private arena freed when it finishes. (A script read
+  from stdin is parsed into `shell_ctx_t.parse_arena`.)
+- Function definitions: each one owns a small private arena holding a deep
+  copy of its body, freed when the function is redefined or unset. The
+  definition is reference counted, so a body that redefines or unsets the
+  function that is running finishes the body it started with.
+- Function-call variable scopes: a private arena per scope, freed on return.
 
-Heap allocations (`malloc`):
+Heap allocations (`malloc`), freed when the object goes away -- none of these
+may live in a never-reset arena, or redefining them in a loop grows the shell
+without bound:
+- Global shell variables (entry, name, value); freed by `unset`
+- The `NAME=value` strings the shell installs in `environ` for exported
+  variables (via putenv; the previous string is freed on reassignment --
+  glibc's setenv() never frees the old copy)
+- Aliases, trap action strings
 - Module registry entries (long-lived)
 - Filesystem cache entries (long-lived, TTL-invalidated)
 - Job list entries (freed on wait)
 - Sort input lines (freed after output)
 - Regex compiled patterns (freed at sed/grep exit)
+
+## In-process applets and process-wide state
+
+Inside `silex sh` an applet is a function call, so any process-wide state it
+touches outlives it. The rules:
+- Every applet resets its own globals at entry (grep's match flag, sed's
+  options, xargs' -P table, ...) and re-reads the environment it depends on
+  (`tzset()` for TZ).
+- `simple_cmd_applet()` brackets every applet with `applet_stdio_begin/end`
+  (`src/shell/exec.c`): stdin's stale buffer and EOF flag are dropped before
+  it runs; afterwards unread buffered input is handed back to a seekable fd 0
+  (`fflush` on an input stream, POSIX 2008), so `{ head -n1; cat; } <f` splits
+  the file, and any buffering mode the applet chose for stdin/stdout (`sed -u`)
+  is put back.
 
 ## Concurrency model
 

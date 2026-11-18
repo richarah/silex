@@ -54,7 +54,7 @@ static int parse_count(const char *s, long long *val, int *plus_mode)
  */
 #define TAIL_SEEK_CHUNK 65536
 
-static int tail_lines_seek(FILE *fp, long long n)
+static int tail_lines_seek(FILE *fp, long long n, off_t start)
 {
     if (n <= 0) return 0; /* nothing to print */
 
@@ -62,18 +62,18 @@ static int tail_lines_seek(FILE *fp, long long n)
     if (fseeko(fp, 0, SEEK_END) != 0) return -1;
     off_t file_size = ftello(fp);
     if (file_size < 0) return -1;
-    if (file_size == 0) return 0;
+    if (file_size <= start) return 0;
 
     char *buf = malloc(TAIL_SEEK_CHUNK);
     if (!buf) { err_msg("tail", "out of memory"); return 1; }
 
     long long newlines_found = 0;
     off_t scan_pos = file_size;
-    off_t print_from = 0; /* default: from beginning */
+    off_t print_from = start; /* default: from where the input starts */
 
-    while (scan_pos > 0 && newlines_found <= n) {
+    while (scan_pos > start && newlines_found <= n) {
         off_t block_start = scan_pos - TAIL_SEEK_CHUNK;
-        if (block_start < 0) block_start = 0;
+        if (block_start < start) block_start = start;
         size_t block_size = (size_t)(scan_pos - block_start);
 
         if (fseeko(fp, block_start, SEEK_SET) != 0) {
@@ -99,8 +99,8 @@ static int tail_lines_seek(FILE *fp, long long n)
         }
         scan_pos = block_start;
     }
-    /* Reached beginning of file without finding n+1 newlines → print all */
-    print_from = 0;
+    /* Reached the start of the input without finding n+1 newlines → print all */
+    print_from = start;
 
 found_start:
     free(buf);
@@ -132,11 +132,16 @@ static int tail_lines(FILE *fp, long long n, int plus_mode)
      */
     if (!plus_mode && n > 0) {
         struct stat st;
-        if (fstat(fileno(fp), &st) == 0 && S_ISREG(st.st_mode)) {
-            int r = tail_lines_seek(fp, n);
+        /* The input starts at the stream's CURRENT position, not at byte 0:
+         * stdin may be a file an earlier command already read part of
+         * (`{ head -n1; tail -n2; } <f`). */
+        off_t start;
+        if (fstat(fileno(fp), &st) == 0 && S_ISREG(st.st_mode) &&
+            (start = ftello(fp)) >= 0) {
+            int r = tail_lines_seek(fp, n, start);
             if (r >= 0) return r;
             /* r == -1 means seek failed; fall through to full-read path */
-            rewind(fp);
+            if (fseeko(fp, start, SEEK_SET) != 0) rewind(fp);
         }
     }
 
@@ -232,9 +237,13 @@ static int tail_bytes(FILE *fp, long long n, int plus_mode)
      */
     if (!plus_mode && n > 0) {
         struct stat st;
-        if (fstat(fileno(fp), &st) == 0 && S_ISREG(st.st_mode)) {
+        off_t start;
+        if (fstat(fileno(fp), &st) == 0 && S_ISREG(st.st_mode) &&
+            (start = ftello(fp)) >= 0) {
+            /* Never before the stream's current position (see tail_lines). */
             off_t file_size = st.st_size;
             off_t seek_pos = (n >= (long long)file_size) ? 0 : (file_size - (off_t)n);
+            if (seek_pos < start) seek_pos = start;
             if (fseeko(fp, seek_pos, SEEK_SET) == 0) {
                 char outbuf[65536];
                 size_t nr;
@@ -244,7 +253,7 @@ static int tail_bytes(FILE *fp, long long n, int plus_mode)
                 return ferror(fp) ? 1 : 0;
             }
             /* Seek failed — fall through */
-            rewind(fp);
+            if (fseeko(fp, start, SEEK_SET) != 0) rewind(fp);
         }
     }
 

@@ -261,6 +261,18 @@ int shell_run_string(shell_ctx_t *sh, const char *script);
 int shell_run_file(shell_ctx_t *sh, const char *path);
 int shell_run_stdin(shell_ctx_t *sh);
 void shell_free(shell_ctx_t *sh);
+/* Free a trap action string owned by a traps[] slot (no-op for the
+ * SHELL_TRAP_DEFAULT / SHELL_TRAP_IGNORE sentinels). */
+void shell_trap_action_free(char *action);
+/* stdio `stdin` state shared with in-process applets (exec.c).
+ * shell_stdin_setvbuf: set stdin's buffering AND record it as the mode the
+ * shell restores after an applet changed it. shell_stdin_sync: give unread
+ * buffered input back to a seekable fd 0, drop the rest, clear EOF. */
+void shell_stdin_setvbuf(int mode);
+void shell_stdin_sync(void);
+/* Release all function definitions / aliases (exec.c). */
+void shell_funcs_free(shell_ctx_t *sh);
+void shell_aliases_free(shell_ctx_t *sh);
 
 /* Run the EXIT trap, then terminate the shell with `code`. The ONLY way the
  * shell should end: POSIX runs the EXIT trap whenever the shell exits, whatever

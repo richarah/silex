@@ -539,11 +539,14 @@ static int grep_stream(FILE *fp, const char *filename,
         result = 0;
         g_matched_any = 1;
 
-        /* -m: stop after max_matches */
+        /* -m: stop after max_matches. Only reachable with -A context
+         * (otherwise the loop already ended right after the Nth match):
+         * a further match ends the trailing context. `break`, not `goto
+         * done`: the -c count still has to be printed. */
         if (g->max_matches > 0 && count > g->max_matches) {
             count--;
             result = (count > 0) ? 0 : 1;
-            goto done;
+            break;
         }
 
         if (g->opt_q) goto done;
@@ -565,6 +568,8 @@ static int grep_stream(FILE *fp, const char *filename,
                 before_pos = (before_pos + 1) % ctx_B;
                 if (!before_full && before_pos == 0) before_full = 1;
             }
+            if (g->max_matches > 0 && count >= g->max_matches)
+                break;
             continue;
         }
 
@@ -626,6 +631,12 @@ static int grep_stream(FILE *fp, const char *filename,
             before_pos = (before_pos + 1) % ctx_B;
             if (!before_full && before_pos == 0) before_full = 1;
         }
+
+        /* -m N: stop reading right after the Nth match (GNU), so the rest of
+         * a seekable stdin is left for the next reader -- `{ grep -m1 x;
+         * cat; } <f`. With -A, keep going for the trailing context. */
+        if (g->max_matches > 0 && count >= g->max_matches && ctx_A == 0)
+            break;
     }
 
     if (ferror(fp)) {
@@ -916,6 +927,10 @@ int applet_grep(int argc, char **argv)
 {
     grep_opts_t g;
     memset(&g, 0, sizeof(g));
+    /* Process-wide result of the PREVIOUS invocation otherwise: inside
+     * `silex sh` an applet is a function call, so a `grep -q` that matched
+     * once made every later `grep -q` in the same shell exit 0. */
+    g_matched_any = 0;
 
     /* SILEX_SMART=1: enable smart-case and VCS-aware mode by default.
      * Read getenv once: a second call is not guaranteed to return the same

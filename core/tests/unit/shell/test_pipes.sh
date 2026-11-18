@@ -113,6 +113,26 @@ check "pipe: only stdout flows through pipe (not stderr)" "$got" "stdout"
 got=$("$MB" -c 'echo "mixedCASE" | tr A-Z a-z | tr a-z A-Z | cat')
 check "long pipeline: 4 stages" "$got" "MIXEDCASE"
 
+# --- sed -u reads only what it needs, on EVERY run --------------------------
+# sed -u used to switch the shell's stdin to unbuffered once per PROCESS (a
+# static flag): inside silex sh, where sed is a function call, only the first
+# `sed -u` got it, and stdin then stayed unbuffered for every later command.
+got=$("$MB" -c 'printf "1\n2\n3\n" | { sed -u 1q; cat; }' | tr '\n' ' ')
+check "sed -u 1q on a pipe leaves the rest for cat" "$got" "1 2 3 "
+got=$("$MB" -c 'for r in a b c; do printf "$r-1\n$r-2\n$r-3\n" | { sed -u 1q; cat; }; done' | tr '\n' ' ')
+check "sed -u 1q leaves the rest for cat on every run" "$got" "a-1 a-2 a-3 b-1 b-2 b-3 c-1 c-2 c-3 "
+got=$("$MB" -c 'printf "x\ny\n" | { sed -u 1q; sed -u 1q; }' | tr '\n' ' ')
+check "two sed -u 1q in a row on one pipe" "$got" "x y "
+# ...and the unbuffering is THAT sed's, not the session's: a later buffered
+# reader on a pipe reads ahead as usual (GNU head under dash does the same --
+# one read takes the whole short pipe), so cat after head gets nothing.
+got=$("$MB" -c 'sed -u 1q </dev/null; printf "1\n2\n3\n" | { head -n1; cat; }' | tr '\n' ' ')
+check "after sed -u, a later head keeps normal (buffered) stdin" "$got" "1 "
+# stdout too: sed -u's unbuffered stdout must not outlive it (output from a
+# later applet still arrives, in order, through the restored buffer).
+got=$("$MB" -c 'echo a | sed -u p; echo b | sed p; printf "c\n" | cat' | tr '\n' ' ')
+check "sed -u then sed: output intact and in order" "$got" "a a b b c "
+
 echo ""
 echo "pipe tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
