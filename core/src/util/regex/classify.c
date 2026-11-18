@@ -155,6 +155,8 @@ mb_class_t mb_classify(const char *pat, int flags)
      * expands them (a{2,4} -> a a a? a?). */
     if (has_interval)
         return SX_CLASS_BACKREF;
+#else
+    (void)has_interval;
 #endif
 
     /* Has metacharacters but no backrefs */
