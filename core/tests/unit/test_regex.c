@@ -280,6 +280,120 @@ static void test_empty_alternation(void)
     bre("^a\\{1,\\}", "aaa", 1, "BRE: \\{1,\\} matches multiple");
 }
 
+/*
+ * Match bounds and the match-only fast path, both against libc.
+ * The checks above only compare "matched or not" through the bounded
+ * search, so they missed that the engine returned the SHORTEST match
+ * (grep -o 'a.*' printed "a") and that the match-only path used by plain
+ * grep never matched $ on a non-empty line.
+ */
+static void check_bounds(const char *pat, int mb_flags, int posix_flags,
+                         const char *text, const char *label)
+{
+    const char *err = NULL;
+    mb_regex *re = mb_regex_compile(pat, mb_flags | SX_REG_NOSUB, &err);
+    regex_t pre;
+    if (!re || regcomp(&pre, pat, posix_flags) != 0) {
+        if (re) mb_regex_free(re);
+        g_failed++;
+        printf("  FAIL: %s (compile)\n", label);
+        return;
+    }
+    size_t n = strlen(text);
+    mb_match m = {NULL, NULL};
+    int got   = mb_regex_search(re, text, n, &m);
+    int fast  = mb_regex_search(re, text, n, NULL);
+    regmatch_t pm;
+    int want  = regexec(&pre, text, 1, &pm, 0) == 0;
+    int ok = got == want && fast == want;
+    if (ok && want)
+        ok = (m.start - text) == pm.rm_so && (m.end - text) == pm.rm_eo;
+    if (ok) {
+        g_passed++;
+    } else {
+        g_failed++;
+        printf("  FAIL: %s\n        pat='%s' text='%s' mb=%d fast=%d posix=%d",
+               label, pat, text, got, fast, want);
+        if (got)  printf(" mb=[%ld,%ld)", (long)(m.start - text), (long)(m.end - text));
+        if (want) printf(" posix=[%ld,%ld)", (long)pm.rm_so, (long)pm.rm_eo);
+        printf("\n");
+    }
+    regfree(&pre);
+    mb_regex_free(re);
+}
+
+/* mb_regex_search_from: ^ must not match at the offset, only at s[0]. */
+static void check_from(const char *pat, const char *text, size_t from,
+                       long want_s, long want_e, const char *label)
+{
+    const char *err = NULL;
+    mb_regex *re = mb_regex_compile(pat, SX_REG_NOSUB, &err);
+    mb_match m = {NULL, NULL};
+    int got = re && mb_regex_search_from(re, text, strlen(text), from, &m);
+    long gs = got ? (long)(m.start - text) : -1;
+    long ge = got ? (long)(m.end - text) : -1;
+    if (gs == want_s && ge == want_e) {
+        g_passed++;
+    } else {
+        g_failed++;
+        printf("  FAIL: %s\n        pat='%s' text='%s' from=%zu got=[%ld,%ld) want=[%ld,%ld)\n",
+               label, pat, text, from, gs, ge, want_s, want_e);
+    }
+    if (re) mb_regex_free(re);
+}
+
+static void test_bounds(void)
+{
+    printf("--- Match bounds (leftmost-longest) ---\n");
+    check_bounds("a.*", 0, 0, "abc", "BRE: a.* takes the whole rest");
+    check_bounds("b*c", 0, 0, "abbbc", "BRE: b*c from the first b");
+    check_bounds("b*", 0, 0, "abbb", "BRE: b* is empty at 0");
+    check_bounds("x*", 0, 0, "abc", "BRE: x* empty match at 0");
+    check_bounds("a[a-z]*", 0, 0, "abcd ef", "BRE: class star is greedy");
+    check_bounds("o\\{2\\}", 0, 0, "foo", "BRE: interval");
+    check_bounds("a+", SX_REG_ERE, REG_EXTENDED, "baaa", "ERE: a+ greedy");
+    check_bounds("(ab)+", SX_REG_ERE, REG_EXTENDED, "xababy", "ERE: group plus greedy");
+    check_bounds("a|ab", SX_REG_ERE, REG_EXTENDED, "ab", "ERE: longest alternative");
+    check_bounds("ab|a", SX_REG_ERE, REG_EXTENDED, "ab", "ERE: longest alternative, reversed");
+    check_bounds("[0-9]+", SX_REG_ERE, REG_EXTENDED, "v12345x", "ERE: digits greedy");
+    check_bounds("$", 0, 0, "abc", "BRE: $ alone on a non-empty line");
+    check_bounds("x*$", 0, 0, "abc", "BRE: x*$ at the end");
+    check_bounds("c$", 0, 0, "abc", "BRE: c$");
+    check_bounds("a$", 0, 0, "xa", "BRE: a$ (libc fallback class)");
+    check_bounds("a$", 0, 0, "ab", "BRE: a$ no match");
+    check_bounds("^", 0, 0, "abc", "BRE: ^ alone");
+    check_bounds("^a*", 0, 0, "aab", "BRE: ^a* greedy");
+    check_bounds("\\(ab\\)\\1", 0, 0, "xababy", "BRE: backref bounds (libc fallback)");
+
+    printf("--- Intervals (used to be treated as +) ---\n");
+    check_bounds("ab\\{0,1\\}c", 0, 0, "ac", "BRE: \\{0,1\\} allows none");
+    check_bounds("ab\\{0,1\\}c", 0, 0, "abbc", "BRE: \\{0,1\\} rejects two");
+    check_bounds("x\\{2\\}", 0, 0, "axb", "BRE: \\{2\\} needs two");
+    check_bounds("x\\{2,\\}", 0, 0, "axxxxb", "BRE: \\{2,\\} greedy");
+    check_bounds("\\(ab\\)\\{2\\}", 0, 0, "xababy", "BRE: group interval");
+    check_bounds("a{0,1}b", SX_REG_ERE, REG_EXTENDED, "b", "ERE: {0,1}");
+    check_bounds("a{2,3}", SX_REG_ERE, REG_EXTENDED, "aaaa", "ERE: {2,3} greedy");
+    check_bounds("(a|b){2}", SX_REG_ERE, REG_EXTENDED, "xaby", "ERE: group {2}");
+    check_bounds("x{0}y", SX_REG_ERE, REG_EXTENDED, "xy", "ERE: {0}");
+
+    printf("--- Anchors in the middle ---\n");
+    check_bounds("a^b", 0, 0, "a^b", "BRE: ^ not first is literal");
+    check_bounds("a$b", 0, 0, "a$b", "BRE: $ not last is literal");
+    check_bounds("x*^", 0, 0, "c", "BRE: trailing ^ is literal");
+    check_bounds("\\(^a\\)", 0, 0, "ab", "BRE: ^ after \\( is an anchor");
+    check_bounds("a*^(b|)", SX_REG_ERE, REG_EXTENDED, "ab", "ERE: ^ after a* (was a*(^|b))");
+    check_bounds("^^", SX_REG_ERE, REG_EXTENDED, "b", "ERE: ^^ is two anchors");
+    check_bounds("$^", SX_REG_ERE, REG_EXTENDED, "", "ERE: $^ on an empty line");
+    check_bounds("x$", SX_REG_ERE, REG_EXTENDED, "axbx", "ERE: x$ at the end");
+
+    printf("--- Search from an offset ---\n");
+    check_from("^a", "aaa", 1, -1, -1, "^a does not match mid-line");
+    check_from("^a", "aaa", 0, 0, 1, "^a matches at 0");
+    check_from("a", "aaa", 1, 1, 2, "plain a from offset 1");
+    check_from("a$", "xaya", 2, 3, 4, "a$ from offset 2 (libc fallback)");
+    check_from("^b\\|c", "abc", 1, 2, 3, "^ inside alternation not at offset");
+}
+
 /* ---- Main ----------------------------------------------------------------- */
 
 int main(void)
@@ -299,6 +413,7 @@ int main(void)
     test_only_metachar();
     test_backref_fallback();
     test_empty_alternation();
+    test_bounds();
 
     printf("\nResults: %d passed, %d failed\n", g_passed, g_failed);
 

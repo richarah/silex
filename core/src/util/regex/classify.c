@@ -92,6 +92,12 @@ mb_class_t mb_classify(const char *pat, int flags)
             }
         }
 
+        /* ERE: ^ anywhere is an anchor, so "^^" or "a^b" is not a plain
+         * "^literal" prefix (it was classified as one: ^^ looked for a
+         * literal ^ at the start). In BRE a ^ that is not first is literal. */
+        if (ere && c == '^')
+            has_meta = 1;
+
         /* $ in middle of pattern is a metachar */
         if (c == '$' && p[1] != '\0') {
             has_meta = 1;

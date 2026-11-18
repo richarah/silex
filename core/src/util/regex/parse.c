@@ -95,6 +95,107 @@ static int tokenize_class(tokenizer_t *t)
     return tok_push(t, tok);
 }
 
+/*
+ * Intervals: a{m}, a{m,}, a{m,n} (ERE) and a\{m,n\} (BRE).
+ * They used to be approximated as "+" (a{0,1} matched "aa" but not "",
+ * x{2} matched "x"). Now the preceding atom is repeated at the token level:
+ * a{2,4} -> a a a? a?, a{2,} -> a a a*. Anything this cannot express
+ * (a bad interval, nothing to repeat, too large) makes the parse fail, and
+ * the pattern then goes to the libc engine, which handles it exactly.
+ */
+#define INTERVAL_MAX 255   /* RE_DUP_MAX */
+
+/* Parse "m", "m," or "m,n" at t->p up to the closing "}" (ERE) or "\}"
+ * (BRE). On success consume it and return 0; otherwise leave t->p alone
+ * and return -1. max = -1 means no upper bound. */
+static int parse_interval(tokenizer_t *t, int *min, int *max)
+{
+    const char *p = t->p;
+    int lo = 0, hi, digits = 0;
+    while (p < t->end && isdigit((unsigned char)*p)) {
+        lo = lo * 10 + (*p++ - '0');
+        if (lo > INTERVAL_MAX) return -1;
+        digits++;
+    }
+    if (!digits) return -1;
+    hi = lo;
+    if (p < t->end && *p == ',') {
+        p++;
+        if (p < t->end && isdigit((unsigned char)*p)) {
+            hi = 0;
+            while (p < t->end && isdigit((unsigned char)*p)) {
+                hi = hi * 10 + (*p++ - '0');
+                if (hi > INTERVAL_MAX) return -1;
+            }
+            if (hi < lo) return -1;
+        } else {
+            hi = -1;
+        }
+    }
+    if (t->ere) {
+        if (p >= t->end || *p != '}') return -1;
+        p++;
+    } else {
+        if (p + 1 >= t->end || p[0] != '\\' || p[1] != '}') return -1;
+        p += 2;
+    }
+    t->p = p;
+    *min = lo;
+    *max = hi;
+    return 0;
+}
+
+/* Repeat the atom that ends the token buffer according to {min,max}. */
+static int expand_interval(tokenizer_t *t, int min, int max)
+{
+    if (t->n == 0) return -1;
+    int a = t->n - 1;
+    tok_t last = t->buf[a].type;
+    if (last == TOK_RPAREN) {
+        int depth = 0;
+        for (; a >= 0; a--) {
+            if (t->buf[a].type == TOK_RPAREN) depth++;
+            else if (t->buf[a].type == TOK_LPAREN && --depth == 0) break;
+        }
+        if (a < 0) return -1;
+    } else if (last != TOK_LITERAL && last != TOK_CLASS && last != TOK_DOT) {
+        return -1;   /* e.g. a*{2}, ^{2}, |{2}: leave it to libc */
+    }
+
+    int k = t->n - a;
+    long total = (long)k * (max < 0 ? min + 1 : max) + (max < 0 ? 1 : max - min);
+    if (total > MAX_TOKENS / 2 || a + total >= MAX_TOKENS) return -1;
+
+    static token atom[MAX_TOKENS / 2];   /* large: keep it off the stack */
+    if (k > MAX_TOKENS / 2) return -1;
+    memcpy(atom, &t->buf[a], (size_t)k * sizeof(token));
+    t->n = a;
+
+    token q;
+    memset(&q, 0, sizeof(q));
+    for (int i = 0; i < min; i++)
+        for (int j = 0; j < k; j++) t->buf[t->n++] = atom[j];
+    if (max < 0) {
+        for (int j = 0; j < k; j++) t->buf[t->n++] = atom[j];
+        q.type = TOK_STAR;
+        t->buf[t->n++] = q;
+    } else {
+        for (int i = min; i < max; i++) {
+            for (int j = 0; j < k; j++) t->buf[t->n++] = atom[j];
+            q.type = TOK_QUEST;
+            t->buf[t->n++] = q;
+        }
+    }
+    return 0;
+}
+
+static int interval_fail(tokenizer_t *t)
+{
+    if (t->errstr) *t->errstr = "interval not supported here";
+    t->err = 1;
+    return -1;
+}
+
 /* Main tokenizer: consume one logical token from t->p */
 static int tokenize_one(tokenizer_t *t)
 {
@@ -115,12 +216,11 @@ static int tokenize_one(tokenizer_t *t)
             if (n == '+') { tok.type = TOK_PLUS;   return tok_push(t, tok); }
             if (n == '?') { tok.type = TOK_QUEST;  return tok_push(t, tok); }
             if (n == '{') {
-                /* BRE {n,m}: skip to \} and approximate as PLUS */
-                while (t->p + 1 < t->end && !(t->p[0] == '\\' && t->p[1] == '}'))
-                    t->p++;
-                if (t->p + 1 < t->end) t->p += 2;
-                tok.type = TOK_PLUS;
-                return tok_push(t, tok);
+                int lo, hi;
+                if (parse_interval(t, &lo, &hi) != 0 ||
+                    expand_interval(t, lo, hi) != 0)
+                    return interval_fail(t);
+                return 0;
             }
         } else {
             /* ERE: \1-\9 are backreferences (caller should have used POSIX) */
@@ -157,10 +257,16 @@ static int tokenize_one(tokenizer_t *t)
         if (c == '+') { tok.type = TOK_PLUS;   return tok_push(t, tok); }
         if (c == '?') { tok.type = TOK_QUEST;  return tok_push(t, tok); }
         if (c == '{') {
-            /* ERE {n,m}: skip to closing } and approximate as PLUS */
-            while (t->p < t->end && *t->p != '}') t->p++;
-            if (t->p < t->end) t->p++; /* consume } */
-            tok.type = TOK_PLUS;
+            int lo, hi;
+            if (parse_interval(t, &lo, &hi) == 0) {
+                if (expand_interval(t, lo, hi) != 0)
+                    return interval_fail(t);
+                return 0;
+            }
+            /* Not an interval ("a{", "{x"): a literal brace, as in GNU. */
+            tok.type     = TOK_LITERAL;
+            tok.c        = '{';
+            tok.is_ichar = 0;
             return tok_push(t, tok);
         }
     }
@@ -170,8 +276,24 @@ static int tokenize_one(tokenizer_t *t)
 
     /* Common metacharacters */
     if (c == '.') { tok.type = TOK_DOT; return tok_push(t, tok); }
-    if (c == '^') { tok.type = TOK_BOL; return tok_push(t, tok); }
-    if (c == '$') { tok.type = TOK_EOL; return tok_push(t, tok); }
+    /* BRE: ^ is an anchor only first in the pattern or right after \( or
+     * \|, and $ only last or right before \) or \|; elsewhere they are
+     * ordinary characters (a^b matches "a^b"). ERE: always anchors. */
+    if (c == '^') {
+        int prev = t->n ? (int)t->buf[t->n - 1].type : -1;
+        if (t->ere || prev < 0 || prev == TOK_LPAREN || prev == TOK_PIPE) {
+            tok.type = TOK_BOL;
+            return tok_push(t, tok);
+        }
+    } else if (c == '$') {
+        int last = t->p >= t->end ||
+                   (t->p + 1 < t->end && t->p[0] == '\\' &&
+                    (t->p[1] == ')' || t->p[1] == '|'));
+        if (t->ere || last) {
+            tok.type = TOK_EOL;
+            return tok_push(t, tok);
+        }
+    }
     if (t->ere && c == '*') { tok.type = TOK_STAR; return tok_push(t, tok); }
     if (c == '[') return tokenize_class(t);
 
@@ -203,9 +325,14 @@ static int tokenize(tokenizer_t *t, const char *pat, int flags,
 
 /* ---- Insert explicit concatenation operators ------------------------------ */
 /*
- * After an atom (LITERAL, CLASS, DOT, EOL) or a postfix op (STAR/PLUS/QUEST)
- * or RPAREN, if the next token starts another atom or is LPAREN or BOL,
- * insert a CONCAT between them.
+ * After an atom (LITERAL, CLASS, DOT, BOL, EOL) or a postfix op
+ * (STAR/PLUS/QUEST) or RPAREN, if the next token starts another atom or is
+ * LPAREN, BOL or EOL, insert a CONCAT between them.
+ *
+ * BOL used to be missing on the left and EOL on the right, so "^(" and
+ * "x$" got no CONCAT. Most such patterns then failed to parse and quietly
+ * fell back to libc, but some compiled wrongly: in "a*^(b|)" the empty
+ * alternative absorbed the ^, giving a*(^|b), which matched "ab".
  */
 static int insert_concat(token *in, int n_in, token *out, int *n_out)
 {
@@ -220,6 +347,7 @@ static int insert_concat(token *in, int n_in, token *out, int *n_out)
         int left_atom = (in[i].type == TOK_LITERAL ||
                          in[i].type == TOK_CLASS   ||
                          in[i].type == TOK_DOT     ||
+                         in[i].type == TOK_BOL     ||
                          in[i].type == TOK_EOL     ||
                          in[i].type == TOK_RPAREN  ||
                          in[i].type == TOK_STAR    ||
@@ -230,6 +358,7 @@ static int insert_concat(token *in, int n_in, token *out, int *n_out)
                           in[i+1].type == TOK_CLASS   ||
                           in[i+1].type == TOK_DOT     ||
                           in[i+1].type == TOK_BOL     ||
+                          in[i+1].type == TOK_EOL     ||
                           in[i+1].type == TOK_LPAREN);
 
         if (left_atom && right_atom) {

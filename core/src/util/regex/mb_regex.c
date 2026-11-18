@@ -73,7 +73,11 @@ mb_regex *mb_regex_compile(const char *pat, int flags, const char **errstr)
         if (flags & SX_REG_ERE)     rflags |= REG_EXTENDED;
         if (flags & SX_REG_ICASE)   rflags |= REG_ICASE;
         if (flags & SX_REG_NEWLINE) rflags |= REG_NEWLINE;
-        if (flags & SX_REG_NOSUB)   rflags |= REG_NOSUB;
+        /* No REG_NOSUB: with it regexec() does not fill in the match
+         * bounds, and callers such as grep -o/-x/-w/--color read them
+         * through mb_regex_search(). Those bounds were left uninitialised,
+         * so -o printed nothing for patterns like a$ and --color printed
+         * stray memory. */
 
         int rc = regcomp(&re->posix_re, pat, rflags);
         if (rc != 0) {
@@ -99,7 +103,25 @@ mb_regex *mb_regex_compile(const char *pat, int flags, const char **errstr)
 
 /* ---- mb_regex_search ------------------------------------------------------ */
 
+static int search_impl(const mb_regex *re, const char *s, size_t n,
+                       mb_match *m, int notbol);
+
 int mb_regex_search(const mb_regex *re, const char *s, size_t n, mb_match *m)
+{
+    return search_impl(re, s, n, m, 0);
+}
+
+int mb_regex_search_from(const mb_regex *re, const char *s, size_t n,
+                         size_t from, mb_match *m)
+{
+    if (!re || !s || from > n) return 0;
+    int notbol = from > 0 &&
+                 !((re->flags & SX_REG_NEWLINE) && s[from - 1] == '\n');
+    return search_impl(re, s + from, n - from, m, notbol);
+}
+
+static int search_impl(const mb_regex *re, const char *s, size_t n,
+                       mb_match *m, int notbol)
 {
     if (!re || !s) return 0;
 
@@ -119,7 +141,7 @@ int mb_regex_search(const mb_regex *re, const char *s, size_t n, mb_match *m)
 
     case SX_CLASS_PREFIX: {
         /* Pattern: ^literal — only matches at start of string */
-        if (re->fixed_len > n) return 0;
+        if (notbol || re->fixed_len > n) return 0;
         int match;
         if (re->flags & SX_REG_ICASE) {
             match = (strncasecmp(s, re->fixed_str, re->fixed_len) == 0);
@@ -133,7 +155,7 @@ int mb_regex_search(const mb_regex *re, const char *s, size_t n, mb_match *m)
 
     case SX_CLASS_ANCHORED: {
         /* Pattern: ^literal$ — must match entire string */
-        if (re->fixed_len != n) return 0;
+        if (notbol || re->fixed_len != n) return 0;
         int match;
         if (re->flags & SX_REG_ICASE) {
             match = (strncasecmp(s, re->fixed_str, n) == 0);
@@ -157,13 +179,16 @@ int mb_regex_search(const mb_regex *re, const char *s, size_t n, mb_match *m)
                 re->prog.instrs[first->x].op == I_BOL)
                 anchor_bol = 1;
         }
-        return mb_thompson_search(&re->prog, re->flags, s, n, m, anchor_bol);
+        if (anchor_bol && notbol) return 0;
+        return mb_thompson_search(&re->prog,
+                                  re->flags | (notbol ? SX_REG_NOTBOL_ : 0),
+                                  s, n, m, anchor_bol);
     }
 
     case SX_CLASS_BACKREF: {
         if (!re->posix_ok) return 0;
         regmatch_t pm;
-        int rc = regexec(&re->posix_re, s, 1, &pm, 0);
+        int rc = regexec(&re->posix_re, s, 1, &pm, notbol ? REG_NOTBOL : 0);
         if (rc != 0) return 0;
         if (m) {
             m->start = s + pm.rm_so;
@@ -183,7 +208,16 @@ int mb_regex_match(const mb_regex *re, const char *s, size_t n, mb_match *m)
      * For most use cases, just wrap in anchors. Simplest approach:
      * do a search and check if the result covers [0, n). */
     mb_match tmp;
-    if (!mb_regex_search(re, s, n, &tmp)) return 0;
+    if (re && s && (re->class == SX_CLASS_SIMPLE ||
+                    re->class == SX_CLASS_CHARCLASS)) {
+        /* Only a match that starts at 0 can cover the string: try that
+         * start alone instead of every start position. The match found is
+         * the longest from 0, so it reaches n if any match from 0 does. */
+        if (!mb_thompson_search(&re->prog, re->flags, s, n, &tmp, 1))
+            return 0;
+    } else if (!mb_regex_search(re, s, n, &tmp)) {
+        return 0;
+    }
     if (tmp.start != s || tmp.end != s + n) return 0;
     if (m) *m = tmp;
     return 1;

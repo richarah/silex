@@ -98,6 +98,9 @@ int mb_parse(const char *pat, int flags, mb_prog *prog,
 /* Simulate NFA/DFA search on text.
  * Returns 1 if matched, fills *out on match (if non-NULL).
  * anchor_bol: if 1, only try from position 0 (^ anchored). */
+/* Internal search flag: position 0 of the text is not a beginning of line. */
+#define SX_REG_NOTBOL_ (1 << 30)
+
 int mb_thompson_search(const mb_prog *prog, int flags,
                        const char *text, size_t n,
                        mb_match *out, int anchor_bol);
