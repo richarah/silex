@@ -66,5 +66,6 @@ void         vars_import_env(vars_t *v);    /* import all environ vars as export
 void         vars_print_exports(vars_t *v); /* print `export` declarations for all exported vars */
 void         vars_print_all(vars_t *v);     /* print all vars as NAME='value' (POSIX `set` no-args) */
 void         vars_print_readonly(vars_t *v); /* print `readonly` declarations (POSIX `readonly -p`) */
+void         vars_free(vars_t *v);          /* release global entries (teardown) */
 
 #endif /* SILEX_VARS_H */

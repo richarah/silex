@@ -282,6 +282,65 @@ check "empty argv: a failed redirection skips the assignment" \
 check "empty argv: set -e acts on the substitution's status" \
     "$("$MB" -c 'set -e; $(false); echo reached')" ""
 
+
+# --- memory stays flat under repeated redefinition ---------------------------
+# Run BODY 20000 times in ONE silex shell after a 2000-run warm-up and print
+# "flat" when VmRSS grew by less than 256 KB over the measured runs. Every
+# BODY below used to copy something into the shell's never-freed parse arena
+# (or leak it some other way) on each run: tens of bytes to kilobytes per
+# iteration, i.e. megabytes here, and an abort at the arena's 64 MB cap in a
+# long enough loop.
+# Not judged under a sanitised build: ASan's allocator and quarantine grow on
+# their own, so VmRSS says nothing there (same rule as tests/leak).
+rss_sanitised() {
+    { command -v nm >/dev/null 2>&1 && nm "$MB" 2>/dev/null | grep __asan_init >/dev/null; } ||
+    { command -v ldd >/dev/null 2>&1 && ldd "$MB" 2>/dev/null | grep libasan >/dev/null; }
+}
+rss_flat() {
+    if [ ! -r /proc/self/status ] || rss_sanitised; then echo flat; return; fi
+    "$MB" -c '
+        rss() { while read -r k v u; do [ "$k" = VmRSS: ] && R=$v; done </proc/$$/status; }
+        i=0; while [ $i -lt 2000 ]; do eval "$1"; i=$((i+1)); done
+        rss; r1=$R
+        i=0; while [ $i -lt 20000 ]; do eval "$1"; i=$((i+1)); done
+        rss; g=$((R - r1))
+        if [ "$g" -lt 256 ]; then echo flat; else echo "grew ${g} KB"; fi
+    ' rss_flat "$1"
+}
+LONG="padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding"
+
+check "reassigning an exported variable in a loop: memory stays flat" \
+    "$(rss_flat 'export EV=/usr/bin:$i:$LONG')" "flat"
+check "assigning an already-exported variable in a loop: memory stays flat" \
+    "$(rss_flat 'PATH_X=/usr/bin:$i:$LONG; export PATH_X; PATH_X=$PATH_X:x')" "flat"
+check "export + unset in a loop: memory stays flat" \
+    "$(rss_flat 'export EU=$i$LONG; unset EU')" "flat"
+check "VAR=value prefix on an applet in a loop: memory stays flat" \
+    "$(rss_flat 'EP=$i$LONG basename a >/dev/null')" "flat"
+check "global assign + unset in a loop: memory stays flat" \
+    "$(rss_flat 'GV=$i$LONG; unset GV')" "flat"
+
+# ...while the environment still always carries the CURRENT value, for
+# children and for in-process applets that read it with getenv().
+check "child sees each new value of an exported variable" \
+    "$("$MB" -c 'export EV=one; sh -c "echo \$EV"; EV=two; sh -c "echo \$EV"; EV=three; env | grep "^EV="' | tr '\n' ' ')" \
+    "one two EV=three "
+check "unset removes an exported variable from the environment" \
+    "$("$MB" -c 'export EV=one; EV=two; unset EV; env | grep -c "^EV="')" "0"
+check "re-export after unset carries the new value" \
+    "$("$MB" -c 'export EV=one; unset EV; EV=two; export EV; env | grep "^EV="')" "EV=two"
+TD1=$(mktemp -d); TD2=$(mktemp -d)
+got=$("$MB" -c 'export TMPDIR="$1"; a=$(mktemp); TMPDIR="$2"; b=$(mktemp); case $a in "$1"/*) echo a-ok;; esac; case $b in "$2"/*) echo b-ok;; esac' sh "$TD1" "$TD2" | tr '\n' ' ')
+check "in-process mktemp follows each new TMPDIR" "$got" "a-ok b-ok "
+rm -rf "$TD1" "$TD2"
+check "in-process date sees the current TZ after reassignment" \
+    "$("$MB" -c 'export TZ=UTC; date -d @0 +%H; TZ=UTC+5; date -d @0 +%H')" "$(printf '00\n19')"
+check "exported variable inherited from the environment can be reassigned" \
+    "$(EVI=orig "$MB" -c 'EVI=new; sh -c "echo \$EVI"; unset EVI; sh -c "echo \${EVI-gone}"' | tr '\n' ' ')" "new gone "
+check "a value assigned from itself survives a growing reassignment" \
+    "$("$MB" -c 'x=ab; x=$x$x$x$x$x$x$x$x; x=${x#a}; echo $x; y=12; y=$y$y$y$y; y=$y; echo $y')" \
+    "$(printf 'bababababababab\n12121212')"
+
 echo ""
 echo "variable tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

@@ -323,6 +323,11 @@ int applet_date(int argc, char **argv)
     };
     opt_t o;
     int c;
+    /* Re-read TZ on every invocation. localtime_r() is not required to
+     * (glibc's only does on first use), so inside silex sh -- where this
+     * applet is a function call -- the zone of the FIRST invocation stuck:
+     * `TZ=UTC+3 date; date` printed UTC-3 twice (date, stat, touch -d). */
+    tzset();
 
     opt_init(&o, argc, argv, "uRI::s:d:", longs, 0);
     for (;;) {
@@ -462,7 +467,10 @@ int applet_date(int argc, char **argv)
      * For -u, set TZ=UTC so strftime %Z returns "UTC" (not "GMT" from gmtime). */
     struct tm tm_val;
     if (opt_u) {
-        const char *old_tz = getenv("TZ");
+        /* COPY the old value: setenv() may free the string getenv()
+         * returned (musl does), and the restore reads it afterwards. */
+        const char *cur_tz = getenv("TZ");
+        char *old_tz = cur_tz ? strdup(cur_tz) : NULL;
         setenv("TZ", "UTC", 1);
         tzset();
         localtime_r(&t, &tm_val);
@@ -471,6 +479,7 @@ int applet_date(int argc, char **argv)
             setenv("TZ", old_tz, 1);
         else
             unsetenv("TZ");
+        free(old_tz);
         tzset();
     } else {
         localtime_r(&t, &tm_val);

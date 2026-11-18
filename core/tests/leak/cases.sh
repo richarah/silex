@@ -32,16 +32,21 @@
 # badsums (mismatching list), script.sed, tmp/.
 
 # `stdin-redirect` is not an applet: a group of its own (one silex sh
-# process), run after the applets. KNOWN BUG, found by this suite: an in-process applet reads the
-# shell's process-wide stdio `stdin`. A `<file` redirect dup2()s fd 0 under
-# it, but nothing discards that FILE's read-ahead buffer or clears its EOF
-# flag -- not before the applet runs, not before the redirect is undone. So
-# the FIRST `tr a-z A-Z <f` works and every later stdin-reading applet in the
-# same shell sees EOF at once (or the previous file's leftover bytes):
-#     head -n1 <f5; tr a b <g2    -> tr prints the rest of f5, then g2
-# The pipeline path already resets stdin (exec_pipeline: fflush+clearerr
-# before dup2); simple_cmd_applet() does not. The tr/tee/xargs cases feed stdin
-# through a pipeline so their applet is still exercised on every run.
+# process), run after the applets. It is the regression guard for a bug this
+# suite found: an in-process applet reads the shell's process-wide stdio
+# `stdin`. A `<file` redirect dup2()s fd 0 under it, and nothing used to
+# discard that FILE's read-ahead buffer or clear its EOF flag, so the FIRST
+# `tr a-z A-Z <f` worked and every later stdin-reading applet in the same
+# shell saw EOF at once (or the previous file's leftover bytes) -- and still
+# exited 0. The same read-ahead also swallowed the rest of a shared file:
+# `{ head -n1; cat; } <f` gave cat nothing. simple_cmd_applet() now resets
+# stdin around every applet (applet_stdio_begin/end in exec.c), handing
+# unread input back to a seekable fd 0. The cases below re-run those shapes
+# a few thousand times in one shell; any state that leaks between runs shows
+# up as UNSTABLE.
+#
+# The grep -q pair guards the same class of bug in an applet's own globals:
+# a match in one invocation made every later `grep -q` exit 0.
 
 # shellcheck disable=SC2034
 LEAK_CASES='
@@ -74,6 +79,9 @@ find|ok|find d -name x
 find|err|find nonexist
 find|err|find d -bogus-predicate
 grep|ok|grep a f
+grep|ok|grep -q a f
+grep|err|grep -q zzz f
+grep|ok|{ grep -m1 a; cat; } <f
 grep|ok|grep -c -E "a|b" f
 grep|err|grep "\\(" f
 grep|err|grep a nonexist
@@ -111,6 +119,7 @@ sed|ok|sed 1q f
 sed|ok|sed -e "\$!d" -e "y/abc/xyz/" f
 sed|ok|sed -f script.sed f
 sed|ok|sed -i.bak "s/a/a/" g
+sed|ok|cat f | { sed -u 1q; cat; }
 sed|err|sed "s/a/b/;s/x" f
 sed|err|sed "/[/p" f
 sed|err|sed "s/\\(a\\)/\\2/" f
@@ -153,5 +162,10 @@ xargs|ok|cat f | xargs echo
 xargs|err|xargs -n x echo <f
 xargs|err|cat f | xargs /nonexistent/cmd
 
-stdin-redirect|ok,xfail|tr a-z A-Z <f
+stdin-redirect|ok|tr a-z A-Z <f
+stdin-redirect|ok|head -n1 <f
+stdin-redirect|ok|{ head -n1; cat; } <f
+stdin-redirect|ok|{ head -n1; tail -n1; } <f
+stdin-redirect|ok|{ sed 1q; sort; } <f
+stdin-redirect|ok|{ sed -u 1q; wc -l; } <f
 '

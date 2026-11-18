@@ -329,6 +329,62 @@ check "real ! negation is unaffected" \
 check "same-parse-unit alias is not expanded (like bash)" \
     "$("$MB" -c 'alias zz="echo Z"; zz 2>/dev/null || echo notfound')" "notfound"
 
+
+# --- memory stays flat under repeated redefinition ---------------------------
+# Run BODY 20000 times in ONE silex shell after a 2000-run warm-up and print
+# "flat" when VmRSS grew by less than 256 KB over the measured runs. Every
+# BODY below used to copy something into the shell's never-freed parse arena
+# (or leak it some other way) on each run: tens of bytes to kilobytes per
+# iteration, i.e. megabytes here, and an abort at the arena's 64 MB cap in a
+# long enough loop.
+# Not judged under a sanitised build: ASan's allocator and quarantine grow on
+# their own, so VmRSS says nothing there (same rule as tests/leak).
+rss_sanitised() {
+    { command -v nm >/dev/null 2>&1 && nm "$MB" 2>/dev/null | grep __asan_init >/dev/null; } ||
+    { command -v ldd >/dev/null 2>&1 && ldd "$MB" 2>/dev/null | grep libasan >/dev/null; }
+}
+rss_flat() {
+    if [ ! -r /proc/self/status ] || rss_sanitised; then echo flat; return; fi
+    "$MB" -c '
+        rss() { while read -r k v u; do [ "$k" = VmRSS: ] && R=$v; done </proc/$$/status; }
+        i=0; while [ $i -lt 2000 ]; do eval "$1"; i=$((i+1)); done
+        rss; r1=$R
+        i=0; while [ $i -lt 20000 ]; do eval "$1"; i=$((i+1)); done
+        rss; g=$((R - r1))
+        if [ "$g" -lt 256 ]; then echo flat; else echo "grew ${g} KB"; fi
+    ' rss_flat "$1"
+}
+LONG="padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding"
+
+check "redefining a function in a loop: memory stays flat" \
+    "$(rss_flat 'f() { echo "$i $LONG"; echo "$1 $LONG"; echo "$2 $LONG"; }')" "flat"
+check "defining and unsetting a function in a loop: memory stays flat" \
+    "$(rss_flat 'g() { echo "$i $LONG"; }; unset -f g')" "flat"
+check "redefining an alias in a loop: memory stays flat" \
+    "$(rss_flat 'alias x="echo $i $LONG"')" "flat"
+check "alias + unalias in a loop: memory stays flat" \
+    "$(rss_flat 'alias y="echo $i $LONG"; unalias y')" "flat"
+check "unalias -a in a loop: memory stays flat" \
+    "$(rss_flat 'alias y="echo $i $LONG" z="echo $LONG"; unalias -a')" "flat"
+
+# A definition is reference counted, so a body that redefines or unsets the
+# very function that is running keeps executing the body it started with.
+check "a function that redefines itself finishes its old body" \
+    "$("$MB" -c 'f() { f() { echo new; }; echo old1; echo old2; }; f; f' | tr '\n' ' ')" \
+    "old1 old2 new "
+check "a function that unsets itself finishes, then is gone" \
+    "$("$MB" -c 'g() { unset -f g; echo still; }; g; g 2>/dev/null || echo gone' | tr '\n' ' ')" \
+    "still gone "
+check "recursive call into a redefined function" \
+    "$("$MB" -c 'r() { if [ "$1" = 0 ]; then r() { echo v2; }; r; echo back; else echo v1; fi; }; r 0; r 1' | tr '\n' ' ')" \
+    "v2 back v2 "
+check "redefined alias takes the new value" \
+    "$("$MB" -c 'alias a1="echo one"
+alias a1="echo two"
+a1
+unalias a1
+a1 2>/dev/null || echo none' | tr '\n' ' ')" "two none "
+
 echo ""
 echo "function tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

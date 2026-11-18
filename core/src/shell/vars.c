@@ -22,6 +22,139 @@ static unsigned int fnv1a(const char *s)
     return hash & (VARS_HASH_SIZE - 1);
 }
 
+/* -------------------------------------------------------------------------
+ * The process environment.
+ *
+ * Exported variables have to be in `environ` at all times, not just in
+ * forked children: in-process applets read it with getenv() (mktemp and
+ * TMPDIR, date and TZ, sort and LC_ALL, ...). setenv() was used for that,
+ * but glibc's setenv() never frees a string it has handed to `environ` (it
+ * cannot know nobody still holds the old getenv() pointer), so every
+ * assignment to an exported variable leaked a copy of the old value: a loop
+ * updating an exported PATH grew without bound.
+ *
+ * Instead the shell builds "NAME=value" itself, installs it with putenv()
+ * -- which stores the pointer, not a copy -- and remembers it here. When the
+ * name is reassigned or removed, the new string replaces the old one in
+ * `environ` first and the old one is freed afterwards. Strings that the
+ * shell did not create (the inherited environment, libc's own setenv
+ * copies) are never freed here.
+ * ------------------------------------------------------------------------- */
+typedef struct env_own {
+    char           *str;    /* "NAME=value", malloc'd, currently ours */
+    size_t          nlen;   /* length of NAME */
+    struct env_own *next;
+} env_own_t;
+
+static env_own_t *g_env_owned[VARS_HASH_SIZE];
+
+static env_own_t **env_own_slot(const char *name, size_t nlen)
+{
+    unsigned int hash = 2166136261u;
+    for (size_t i = 0; i < nlen; i++) {
+        hash ^= (unsigned int)(unsigned char)name[i];
+        hash *= 16777619u;
+    }
+    env_own_t **pp = &g_env_owned[hash & (VARS_HASH_SIZE - 1)];
+    while (*pp && !((*pp)->nlen == nlen && memcmp((*pp)->str, name, nlen) == 0))
+        pp = &(*pp)->next;
+    return pp;
+}
+
+static void env_put(const char *name, const char *value)
+{
+    size_t nlen = strlen(name), vlen = strlen(value);
+    env_own_t **pp = env_own_slot(name, nlen);
+    env_own_t  *o  = *pp;
+
+    /* Same value, and environ still holds our string: nothing to do. */
+    if (o && getenv(name) == o->str + nlen + 1 &&
+        strcmp(o->str + nlen + 1, value) == 0)
+        return;
+
+    char *str = malloc(nlen + vlen + 2);
+    if (!str) {
+        setenv(name, value, 1);       /* degrade: correct, merely leaky */
+        return;
+    }
+    memcpy(str, name, nlen);
+    str[nlen] = '=';
+    memcpy(str + nlen + 1, value, vlen + 1);
+    if (putenv(str) != 0) {
+        free(str);
+        setenv(name, value, 1);
+        return;
+    }
+    if (o) {
+        free(o->str);                 /* no longer referenced by environ */
+        o->str = str;
+        return;
+    }
+    o = malloc(sizeof(*o));
+    if (!o) {
+        /* Cannot track it: leave it installed (a one-off leak, not a loop). */
+        return;
+    }
+    o->str  = str;
+    o->nlen = nlen;
+    o->next = NULL;
+    *pp = o;
+}
+
+static void env_drop(const char *name)
+{
+    unsetenv(name);
+    env_own_t **pp = env_own_slot(name, strlen(name));
+    env_own_t  *o  = *pp;
+    if (o) {
+        *pp = o->next;
+        free(o->str);
+        free(o);
+    }
+}
+
+/* -------------------------------------------------------------------------
+ * Entries.
+ *
+ * An entry in a function scope lives in that scope's private arena and dies
+ * with it. A GLOBAL entry lives as long as the variable does -- and no
+ * longer: it is heap-allocated (arena == NULL) and freed by unset. In the
+ * persistent arena every unset abandoned the entry, and every `VAR=x applet`
+ * prefix on an unset VAR creates and unsets one, so that grew per command.
+ * ------------------------------------------------------------------------- */
+static var_entry_t *entry_new(arena_t *ar, const char *name)
+{
+    var_entry_t *e;
+    if (ar) {
+        e       = arena_alloc(ar, sizeof(var_entry_t));
+        e->name = arena_strdup(ar, name);
+    } else {
+        e = malloc(sizeof(var_entry_t));
+        char *nm = strdup(name);
+        if (!e || !nm) {
+            perror("silex: variable");
+            abort();
+        }
+        e->name = nm;
+    }
+    e->arena     = ar;
+    e->value     = NULL;
+    e->value_cap = 0;
+    e->exported  = 0;
+    e->readonly  = 0;
+    e->next      = NULL;
+    return e;
+}
+
+static void entry_free(var_entry_t *e)
+{
+    if (e->arena)
+        return;                       /* reclaimed with its scope */
+    free(e->name);
+    free(e->value);
+    free(e);
+}
+
 void vars_init(vars_t *v, arena_t *a)
 {
     v->arena = a;
@@ -31,7 +164,7 @@ void vars_init(vars_t *v, arena_t *a)
     var_scope_t *g = arena_alloc(a, sizeof(var_scope_t));
     memset(g->buckets, 0, sizeof(g->buckets));
     g->parent  = NULL;
-    g->arena   = a;
+    g->arena   = NULL;   /* global entries are heap-allocated: see entry_new */
     g->has_own = 0;
     v->scope   = g;
 }
@@ -126,13 +259,7 @@ static var_entry_t *declare_global_unset(vars_t *v, const char *name)
         return NULL;
     while (global->parent != NULL)
         global = global->parent;
-    var_entry_t *e   = arena_alloc(global->arena, sizeof(var_entry_t));
-    e->arena         = global->arena;
-    e->name          = arena_strdup(global->arena, name);
-    e->value         = NULL;   /* declared but unset */
-    e->value_cap     = 0;
-    e->exported      = 0;
-    e->readonly      = 0;
+    var_entry_t *e   = entry_new(global->arena, name);   /* declared but unset */
     e->next          = global->buckets[idx];
     global->buckets[idx] = e;
     return e;
@@ -158,16 +285,29 @@ static void var_store_value(vars_t *v, var_entry_t *e, const char *value)
     (void)v;   /* storage arena now comes from e->arena, not v->arena */
     size_t need = strlen(value) + 1;
     if (e->value != NULL && e->value_cap >= need) {
-        memcpy(e->value, value, need);
+        memmove(e->value, value, need);   /* value may point into e->value */
     } else {
         size_t cap = need * 2;
         if (cap < need) cap = need;      /* overflow guard */
         /* Allocate from the entry's own scope arena (e->arena), not v->arena:
-         * a local's storage must be reclaimed when its scope is popped, and a
-         * global's must persist. */
-        e->value     = arena_alloc(e->arena, cap);
+         * a local's storage must be reclaimed when its scope is popped. A
+         * global's is heap memory, so the outgrown buffer is freed (after
+         * the copy: `value` may point into it). */
+        char *nv;
+        if (e->arena) {
+            nv = arena_alloc(e->arena, cap);
+        } else {
+            nv = malloc(cap);
+            if (!nv) {
+                perror("silex: variable");
+                abort();
+            }
+        }
+        memcpy(nv, value, need);
+        if (!e->arena)
+            free(e->value);
+        e->value     = nv;
         e->value_cap = cap;
-        memcpy(e->value, value, need);
     }
 
     /* Keep the process environment in sync with an already-exported variable.
@@ -185,7 +325,7 @@ static void var_store_value(vars_t *v, var_entry_t *e, const char *value)
      * that are actually exported.
      */
     if (e->exported)
-        setenv(e->name, e->value, 1);
+        env_put(e->name, e->value);
 }
 
 /* Diagnostic for an attempt to write or unset a read-only variable. `ctx` is
@@ -235,15 +375,7 @@ int vars_set_context(vars_t *v, const char *name, const char *value, const char 
         return 1;                       /* no scope to set in */
     while (global->parent != NULL)
         global = global->parent;
-    var_entry_t *e    = arena_alloc(global->arena, sizeof(var_entry_t));
-    e->arena          = global->arena;
-    e->name           = arena_strdup(global->arena, name);
-    /* arena_alloc does not zero. Every field var_store_value() reads --
-     * value, value_cap, exported -- must be initialised BEFORE the store. */
-    e->value          = NULL;
-    e->value_cap      = 0;
-    e->exported       = 0;
-    e->readonly       = 0;
+    var_entry_t *e    = entry_new(global->arena, name);
     var_store_value(v, e, value);
     e->next               = global->buckets[idx];
     global->buckets[idx]  = e;
@@ -276,14 +408,7 @@ int vars_set_local(vars_t *v, const char *name, const char *value)
     }
 
     /* Create in current scope */
-    e               = arena_alloc(v->scope->arena, sizeof(var_entry_t));
-    e->arena        = v->scope->arena;
-    e->name         = arena_strdup(v->scope->arena, name);
-    /* arena_alloc does not zero: init everything var_store_value reads first. */
-    e->value        = NULL;
-    e->value_cap    = 0;
-    e->exported     = 0;
-    e->readonly     = 0;
+    e               = entry_new(v->scope->arena, name);
     var_store_value(v, e, value);
     e->next         = v->scope->buckets[idx];
     v->scope->buckets[idx] = e;
@@ -313,7 +438,7 @@ int vars_export_context(vars_t *v, const char *name, const char *ctx)
     }
     e->exported = 1;
     if (e->value)                 /* keep a declared-but-unset var out of environ */
-        setenv(name, e->value, 1);
+        env_put(name, e->value);
     return 0;
 }
 
@@ -327,7 +452,7 @@ void vars_unexport(vars_t *v, const char *name)
     var_entry_t *e = vars_find(v, name);
     if (e)
         e->exported = 0;
-    unsetenv(name);
+    env_drop(name);
 }
 
 int vars_is_readonly(vars_t *v, const char *name)
@@ -394,7 +519,7 @@ int vars_unset_context(vars_t *v, const char *name, const char *ctx)
                     e->value     = NULL;
                     e->value_cap = 0;
                     e->exported  = 0;
-                    unsetenv(name);
+                    env_drop(name);
                     return 0;
                 }
                 *pp = e->next;
@@ -405,7 +530,8 @@ int vars_unset_context(vars_t *v, const char *name, const char *ctx)
                  * removes the variable entirely. This also made modernish
                  * falsely detect BUG_EXPORTUNS, because it reuses `_Msh_test`
                  * (exported with a value, later unset) as a scratch name. */
-                unsetenv(name);
+                env_drop(name);
+                entry_free(e);
                 return 0;
             }
             pp = &e->next;
@@ -413,7 +539,7 @@ int vars_unset_context(vars_t *v, const char *name, const char *ctx)
     }
     /* Not in the shell table, but a bare `environ` entry may still linger
      * (e.g. inherited but never imported): clear it too so unset is complete. */
-    unsetenv(name);
+    env_drop(name);
     return 0;
 }
 
@@ -439,7 +565,7 @@ void vars_export_env(vars_t *v)
         for (int i = 0; i < VARS_HASH_SIZE; i++) {
             for (var_entry_t *e = s->buckets[i]; e != NULL; e = e->next) {
                 if (e->exported && e->value)  /* skip declared-but-unset exports */
-                    setenv(e->name, e->value, 1);
+                    env_put(e->name, e->value);
             }
         }
     }
@@ -476,19 +602,12 @@ void vars_import_env(vars_t *v)
             /* Only import if not already set (don't override IFS etc.) */
             if (!vars_get(v, name)) {
                 unsigned int idx = fnv1a(name);
-                arena_t *ar = v->scope->arena;
-                var_entry_t *e = arena_alloc(ar, sizeof(var_entry_t));
-                e->arena    = ar;
-                e->name     = arena_strdup(ar, name);
-                e->value    = arena_strdup(ar, eq + 1);
-                /* value_cap must reflect the real allocation: a later
-                 * reassignment checks it to decide whether the buffer can be
-                 * overwritten in place. Leaving it uninitialised risked an
-                 * out-of-bounds memcpy on the next assignment to an imported
-                 * env var. */
-                e->value_cap = strlen(eq + 1) + 1;
+                var_entry_t *e = entry_new(v->scope->arena, name);
+                /* Store the value without exporting yet: the entry is
+                 * already in `environ` as inherited, and value_cap must
+                 * reflect the real allocation for later reassignments. */
+                var_store_value(v, e, eq + 1);
                 e->exported = 1;
-                e->readonly = 0;
                 e->next     = v->scope->buckets[idx];
                 v->scope->buckets[idx] = e;
             }
@@ -635,5 +754,25 @@ void vars_print_exports(vars_t *v)
                 }
             }
         }
+    }
+}
+
+/* Release the global scope's heap entries and the environment strings the
+ * shell installed (shell teardown). Function scopes are popped first. */
+void vars_free(vars_t *v)
+{
+    while (v->scope && v->scope->parent)
+        vars_pop_scope(v);
+    var_scope_t *g = v->scope;
+    if (!g)
+        return;
+    for (int i = 0; i < VARS_HASH_SIZE; i++) {
+        var_entry_t *e = g->buckets[i];
+        while (e) {
+            var_entry_t *next = e->next;
+            entry_free(e);
+            e = next;
+        }
+        g->buckets[i] = NULL;
     }
 }

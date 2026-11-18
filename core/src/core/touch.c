@@ -249,6 +249,11 @@ int applet_touch(int argc, char **argv)
     };
     opt_t o;
     int c;
+    /* Re-read TZ on every invocation. localtime_r() is not required to
+     * (glibc's only does on first use), so inside silex sh -- where this
+     * applet is a function call -- the zone of the FIRST invocation stuck:
+     * `TZ=UTC+3 date; date` printed UTC-3 twice (date, stat, touch -d). */
+    tzset();
 
     /* Short flags may be clustered: -am, -ac, etc. */
     opt_init(&o, argc, argv, "amct:r:d:", longs, 0);

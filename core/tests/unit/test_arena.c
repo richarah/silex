@@ -95,6 +95,31 @@ static void test_strdup(void)
     arena_free(&a);
 }
 
+/* arena_init_sized: a small per-object arena (a function body) must not take a
+ * 64 KB block, must still grow past its block size, and arena_free must leave
+ * it reusable with nothing accounted. */
+static void test_sized_arena(void)
+{
+    arena_t a;
+    arena_init_sized(&a, "small", 1024);
+    (void)arena_alloc(&a, 100);
+    check("sized arena: first block is the requested size", a.total_bytes == 1024);
+    (void)arena_alloc(&a, 4000);
+    check("sized arena: an oversized request still succeeds",
+          a.total_bytes == 1024 + 4000);
+    arena_free(&a);
+    check("sized arena: free releases everything", a.head == NULL && a.total_bytes == 0);
+    (void)arena_alloc(&a, 8);
+    check("sized arena: usable again after free, same block size", a.total_bytes == 1024);
+    arena_free(&a);
+
+    arena_t d;
+    arena_init(&d, "default");
+    (void)arena_alloc(&d, 8);
+    check("default arena: block is ARENA_BLOCK_SIZE", d.total_bytes == ARENA_BLOCK_SIZE);
+    arena_free(&d);
+}
+
 int main(void)
 {
     printf("=== test_arena ===\n");
@@ -102,6 +127,7 @@ int main(void)
     test_oversized_alloc();
     test_strdup();
     test_reset_reuses_capacity();
+    test_sized_arena();
 
     printf("\nResults: %s\n", failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;

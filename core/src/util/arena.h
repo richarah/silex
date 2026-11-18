@@ -22,9 +22,14 @@ typedef struct {
     arena_block_t *head;
     size_t         total_bytes;  /* total bytes allocated across all blocks */
     const char    *name;         /* for diagnostics; identifies which arena aborted */
+    size_t         block_size;   /* minimum size of a new block (0: ARENA_BLOCK_SIZE) */
 } arena_t;
 
 void  arena_init(arena_t *a, const char *name);
+/* Same, with a smaller (or larger) minimum block. For arenas that hold one
+ * small long-lived object each -- a function body -- where a 64 KB block per
+ * object would dwarf the object itself. */
+void  arena_init_sized(arena_t *a, const char *name, size_t block_size);
 void *arena_alloc(arena_t *a, size_t size);   /* aborts on OOM */
 char *arena_strdup(arena_t *a, const char *s);
 char *arena_strndup(arena_t *a, const char *s, size_t n);

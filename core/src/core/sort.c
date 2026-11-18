@@ -619,9 +619,14 @@ static int read_lines(FILE *fp, line_t **lines, size_t *nlines, size_t *cap,
     {
         int fd = fileno(fp);
         struct stat st;
+        /* The input begins at the stream's CURRENT position, which is not
+         * byte 0 when stdin is a file an earlier command already read part
+         * of (`{ head -n1; sort; } <f`). */
+        off_t start = -1;
         if (fd >= 0 && !zero_term &&
             fstat(fd, &st) == 0 && S_ISREG(st.st_mode) &&
             st.st_size > 65536 &&
+            (start = ftello(fp)) >= 0 && start < st.st_size &&
             (size_t)st.st_size <= ((size_t)-1) / 2 &&
             g_n_mmaps < MAX_MMAP_REGIONS)
         {
@@ -637,8 +642,8 @@ static int read_lines(FILE *fp, line_t **lines, size_t *nlines, size_t *cap,
                 g_n_mmaps++;
 
                 /* Scan lines from the mapped region */
-                char *p   = (char *)map;
-                char *end = p + map_size;
+                char *p   = (char *)map + start;
+                char *end = (char *)map + map_size;
                 while (p < end) {
                     char *nl = memchr(p, '\n', (size_t)(end - p));
                     char *line_end = nl ? nl : end;
@@ -665,6 +670,9 @@ static int read_lines(FILE *fp, line_t **lines, size_t *nlines, size_t *cap,
 
                     p = nl ? nl + 1 : end;
                 }
+                /* Consumed through EOF: leave the offset there, as the
+                 * read path does, for whoever reads this file next. */
+                fseeko(fp, 0, SEEK_END);
                 return ferror(fp) ? 1 : 0;
             }
             /* mmap failed: fall through to getline path */

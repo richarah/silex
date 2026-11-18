@@ -236,6 +236,54 @@ check "a suffix redirect on the same loop still works" \
     "$("$SILEX" -c 'for i in 1 2; do echo $i; done > '"$TMPDIR_REDIR"'/suf.txt; cat '"$TMPDIR_REDIR"'/suf.txt' | tr '\n' ' ')" \
     "1 2 "
 
+# --- stdin redirects into in-process applets -------------------------------
+# An applet inside silex sh is a function call reading the SHELL's stdio
+# `stdin`. Its read-ahead buffer and EOF flag used to survive into the next
+# command: the second `tr <f` printed nothing and still exited 0.
+printf 'l1\nl2\nl3\n' > "$T/in3"
+printf 'm1\nm2\n' > "$T/in2"
+got=$("$MB" -c "tr a-z A-Z <'$T/in3'; echo rc=\$?; tr a-z A-Z <'$T/in3'; echo rc=\$?" | tr '\n' ' ')
+check "<file into an applet works on every run, not just the first" "$got" "L1 L2 L3 rc=0 L1 L2 L3 rc=0 "
+got=$("$MB" -c "head -n1 <'$T/in3'; head -n1 <'$T/in2'; cat <'$T/in2'" | tr '\n' ' ')
+check "a later <file sees its own file, not the previous one's leftovers" "$got" "l1 m1 m1 m2 "
+got=$("$MB" -c "i=0; while [ \$i -lt 50 ]; do wc -l <'$T/in3'; i=\$((i+1)); done" | sort -u | tr -d ' ')
+check "50 x wc -l <file in one shell: always 3" "$got" "3"
+
+# --- one file split across commands ------------------------------------------
+# POSIX: a utility that stops reading a seekable input early leaves the offset
+# just past what it processed. head's stdio read-ahead used to swallow the
+# whole file, so the command after it got nothing.
+got=$("$MB" -c "{ head -n1; cat; } <'$T/in3'" | tr '\n' ' ')
+check "{ head -n1; cat; } <f: head takes line 1, cat the rest" "$got" "l1 l2 l3 "
+got=$("$MB" -c "{ head -n1; head -n1; head -n1; } <'$T/in3'" | tr '\n' ' ')
+check "three head -n1 share one file" "$got" "l1 l2 l3 "
+got=$("$MB" -c "{ sed 1q; tr a-z A-Z; } <'$T/in3'" | tr '\n' ' ')
+check "{ sed 1q; tr; } <f" "$got" "l1 L2 L3 "
+got=$("$MB" -c "{ grep -m1 l; cat; } <'$T/in3'" | tr '\n' ' ')
+check "{ grep -m1; cat; } <f: grep stops after its match" "$got" "l1 l2 l3 "
+got=$("$MB" -c "{ head -n1; tail -n1; } <'$T/in3'" | tr '\n' ' ')
+check "{ head -n1; tail -n1; } <f" "$got" "l1 l3 "
+got=$("$MB" -c "{ head -n1 >/dev/null; tail -n5; } <'$T/in3'" | tr '\n' ' ')
+check "tail -n N larger than the rest starts where the input starts" "$got" "l2 l3 "
+got=$("$MB" -c "{ head -n2 >/dev/null; tail -c 100; } <'$T/in3'" | tr '\n' ' ')
+check "tail -c N larger than the rest starts where the input starts" "$got" "l3 "
+got=$("$MB" -c "{ head -n1 >/dev/null; sort -r; } <'$T/in3'" | tr '\n' ' ')
+check "{ head -n1; sort -r; } <f" "$got" "l3 l2 "
+got=$("$MB" -c "{ head -n1; wc -l; } <'$T/in3'" | tr -d ' ' | tr '\n' ' ')
+check "{ head -n1; wc -l; } <f" "$got" "l1 2 "
+got=$("$MB" -c "{ head -n1; sh -c 'head -n1'; cat; } <'$T/in3'" | tr '\n' ' ')
+check "a forked applet (sh -c) leaves the shared offset right too" "$got" "l1 l2 l3 "
+got=$("$MB" -c "exec <'$T/in3'; head -n1; read -r x; echo \"read=\$x\"; cat" | tr '\n' ' ')
+check "exec <f: head, then the read builtin, then cat" "$got" "l1 read=l2 l3 "
+# A file bigger than sort's mmap threshold (64 KB): sort must start at the
+# current offset, not map the file from byte 0.
+i=0; : > "$T/big"
+while [ $i -lt 9000 ]; do echo "line-$i-xxxxxxxx"; i=$((i+1)); done >> "$T/big"
+got=$("$MB" -c "{ head -n1 >/dev/null; sort | wc -l; } <'$T/big'" | tr -d ' ')
+check "{ head -n1; sort; } <bigfile: sort sees only the rest" "$got" "8999"
+got=$("$MB" -c "{ head -n1 >/dev/null; sort >/dev/null; cat | wc -c; } <'$T/big'" | tr -d ' ')
+check "sort reading via mmap leaves the offset at EOF" "$got" "0"
+
 echo ""
 echo "redirect tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

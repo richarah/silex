@@ -612,19 +612,28 @@ compat-test: $(TARGET)
 	@echo "=== Running compatibility tests ==="
 	@bash tests/compat/run.sh $(TARGET)
 
+# Every script's status counts, not just the last one's: a bare `for` loop
+# exits with the status of its final iteration, so a failure in any earlier
+# script was reported and then discarded. Run them all, fail if any failed.
 shell-test: $(TARGET)
 	@echo "=== Running shell conformance tests ==="
-	@for f in tests/unit/shell/test_*.sh; do \
+	@rc=0; failed=""; \
+	for f in tests/unit/shell/test_*.sh; do \
 	    echo "--- $$f ---"; \
-	    bash $$f $(TARGET); \
-	done
+	    bash $$f $(TARGET) || { rc=1; failed="$$failed $$f"; }; \
+	done; \
+	if [ $$rc -ne 0 ]; then echo "FAILED:$$failed"; fi; \
+	exit $$rc
 
 security-test: $(TARGET)
 	@echo "=== Running security tests ==="
-	@for f in tests/security/test_*.sh; do \
+	@rc=0; failed=""; \
+	for f in tests/security/test_*.sh; do \
 	    echo "--- $$f ---"; \
-	    bash $$f $(TARGET); \
-	done
+	    bash $$f $(TARGET) || { rc=1; failed="$$failed $$f"; }; \
+	done; \
+	if [ $$rc -ne 0 ]; then echo "FAILED:$$failed"; fi; \
+	exit $$rc
 
 # The `for` loop here used to discard each script's exit status, so this target
 # could not fail -- the same bug shell-test and security-test had. A benchmark
@@ -797,10 +806,14 @@ $(FUZZ_DIR)/fuzz_sed_expr: tests/fuzz/fuzz_sed_expr.c \
 ITERS ?= 1000000
 fuzz-run: fuzz
 	@mkdir -p corpus
-	@for f in $(FUZZ_DIR)/fuzz_*; do \
+	@rc=0; failed=""; \
+	for f in $(FUZZ_DIR)/fuzz_*; do \
 	    echo "Fuzzing $$f ($(ITERS) iterations)..."; \
-	    $$f -max_total_time=60 -runs=$(ITERS) -rss_limit_mb=2048 -max_len=65536 corpus/; \
-	done
+	    $$f -max_total_time=60 -runs=$(ITERS) -rss_limit_mb=2048 -max_len=65536 corpus/ \
+	        || { rc=1; failed="$$failed $$f"; }; \
+	done; \
+	if [ $$rc -ne 0 ]; then echo "FAILED:$$failed"; fi; \
+	exit $$rc
 
 # --- Static analysis ----------------------------------------------------------
 analyze: $(ALL_SRCS)

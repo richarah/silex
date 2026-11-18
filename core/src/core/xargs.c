@@ -373,6 +373,9 @@ int applet_xargs(int argc, char **argv)
 {
     xargs_opts_t opts;
     memset(&opts, 0, sizeof(opts));
+    /* The -P slot table is process-wide: start every invocation empty. */
+    memset(g_procs, 0, sizeof(g_procs));
+    g_nprocs = 0;
     opts.opt_n = DEFAULT_MAX_ARGS;
     opts.opt_P = 1;
 

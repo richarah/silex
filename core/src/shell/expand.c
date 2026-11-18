@@ -1263,6 +1263,7 @@ static char *cmd_subst(shell_ctx_t *sh, const char *cmd)
             sub.trap_entry_status = ex;
             int trap_rc = shell_run_string(&sub, exit_act);
             sub.in_trap--;
+            shell_trap_action_free((char *)exit_act);  /* out of its slot */
             ex = (trap_rc >= 0 && trap_rc <= 255) ? trap_rc : 0;
         }
         shell_free(&sub);

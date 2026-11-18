@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 /* -------------------------------------------------------------------------
@@ -52,7 +53,12 @@ void shell_signal_handler(int sig)
     sh->in_trap++;
     sh->trap_entry_status = save_status;
     sh->errexit_fired = 0;
-    int rc = shell_run_string(sh, action);
+    /* Run a private copy: the action may re-arm or reset its own trap
+     * (`trap 'trap - USR1; ...' USR1`), which frees the slot's string while
+     * the lexer is still reading it. */
+    char *copy = strdup(action);
+    int rc = shell_run_string(sh, copy ? copy : action);
+    free(copy);
     sh->in_trap--;
     if (sh->errexit_fired && !sh->interactive) {
         sh->errexit_fired = 0;
@@ -615,6 +621,34 @@ static int input_incomplete(const char *s)
  * and parse it from a string, so a command runs on its own Enter. Reading via
  * the fp lexer instead made parse_list peek past the newline for the next
  * command, blocking on the next line -- so each command ran one line late. */
+/* The interactive REPL reads its command lines through a PRIVATE FILE over a
+ * dup of fd 0, not the global `stdin`: in-process applets use `stdin` too,
+ * and the shell resets it around every applet (discarding its buffer -- see
+ * applet_stdio_begin in exec.c), which would throw away command lines already
+ * read ahead from a pipe. The dup is re-made whenever fd 0 stops being the
+ * file it was taken from (`exec <file`), so the shell still reads its
+ * commands from whatever fd 0 is, as before. */
+static FILE *interactive_input(FILE *cur)
+{
+    struct stat s0, sc;
+    if (cur && cur != stdin && fstat(STDIN_FILENO, &s0) == 0 &&
+        fstat(fileno(cur), &sc) == 0 &&
+        s0.st_dev == sc.st_dev && s0.st_ino == sc.st_ino &&
+        s0.st_rdev == sc.st_rdev)
+        return cur;
+    if (cur && cur != stdin)
+        fclose(cur);
+    int fd = fcntl(STDIN_FILENO, F_DUPFD_CLOEXEC, 10);
+    if (fd < 0)
+        return stdin;                 /* out of descriptors: degrade */
+    FILE *fp = fdopen(fd, "r");
+    if (!fp) {
+        close(fd);
+        return stdin;
+    }
+    return fp;
+}
+
 static int shell_run_interactive(shell_ctx_t *sh)
 {
     char   *buf = NULL;
@@ -622,6 +656,7 @@ static int shell_run_interactive(shell_ctx_t *sh)
     char   *line = NULL;
     size_t  linecap = 0;
     int     rc = 0;
+    FILE   *in = NULL;
 
     for (;;) {
         const char *prompt;
@@ -640,12 +675,13 @@ static int shell_run_interactive(shell_ctx_t *sh)
         fflush(stderr);
 
         interactive_sigint = 0;
-        ssize_t r = getline(&line, &linecap, stdin);
+        in = interactive_input(in);
+        ssize_t r = getline(&line, &linecap, in);
         if (r < 0) {
             if (errno == EINTR && interactive_sigint) {
                 /* ^C at the prompt: drop the pending line, redraw PS1. */
                 interactive_sigint = 0;
-                clearerr(stdin);
+                clearerr(in);
                 buflen = 0;
                 putchar('\n');
                 continue;
@@ -658,7 +694,11 @@ static int shell_run_interactive(shell_ctx_t *sh)
         if (buflen + (size_t)r + 1 > bufcap) {
             size_t ncap = (buflen + (size_t)r + 1) * 2;
             char *nb = realloc(buf, ncap);
-            if (!nb) { free(buf); free(line); return 1; }
+            if (!nb) {
+                free(buf); free(line);
+                if (in && in != stdin) fclose(in);
+                return 1;
+            }
             buf = nb; bufcap = ncap;
         }
         memcpy(buf + buflen, line, (size_t)r);
@@ -677,9 +717,16 @@ static int shell_run_interactive(shell_ctx_t *sh)
         }
         lexer_t  lex;
         parser_t par;
-        lexer_init_str(&lex, buf, &sh->parse_arena);
+        /* Each input line's parse tree lives in its own arena, freed once
+         * the line has run -- not in the persistent parse_arena, which grew
+         * by every line typed for the life of the session. A function the
+         * line defines is deep-copied by func_register, and alias text by the
+         * lexer, so nothing outlives the line. */
+        arena_t line_arena;
+        arena_init(&line_arena, "interactive-line");
+        lexer_init_str(&lex, buf, &line_arena);
         lexer_set_verbose(&lex, &sh->opt_v);
-        parser_init(&par, &lex, &sh->parse_arena);
+        parser_init(&par, &lex, &line_arena);
         parser_set_aliases(&par, shell_alias_lookup_cb, sh);
         for (;;) {
             node_t *node = parser_parse(&par);
@@ -692,9 +739,12 @@ static int shell_run_interactive(shell_ctx_t *sh)
             }
         }
         lexer_free(&lex);
+        arena_free(&line_arena);
         buflen = 0;
     }
 
+    if (in && in != stdin)
+        fclose(in);
     free(buf);
     free(line);
     return sh->last_exit;
@@ -720,7 +770,7 @@ int shell_run_stdin(shell_ctx_t *sh)
      * See the detailed note in shell_run_file. stdin can't be slurped up front
      * (it may stream), so keep the fd position honest instead. It also means a
      * `read` in the script consumes exactly its bytes and no more. */
-    setvbuf(stdin, NULL, _IONBF, 0);
+    shell_stdin_setvbuf(_IONBF);
 
     /* Read the script through a PRIVATE FILE over a dup of fd 0, never the
      * global `stdin` object. In-process applets that read stdin (wc, sort,
@@ -801,8 +851,27 @@ void path_cache_clear(shell_ctx_t *sh);
 /* Declared in exec.c — free the positional list if this shell owns it */
 void positional_free(shell_ctx_t *sh);
 
+void shell_trap_action_free(char *action)
+{
+    /* SHELL_TRAP_DEFAULT (NULL) and SHELL_TRAP_IGNORE ("") are not owned;
+     * every other action string was strdup()ed by the trap builtin. */
+    if (action && action[0] != '\0')
+        free(action);
+}
+
 void shell_free(shell_ctx_t *sh)
 {
+    for (int ti = 0; ti < NSIG; ti++) {
+        /* An inherited (display-only) entry borrows the parent's string. */
+        if (!sh->traps[ti].inherited)
+            shell_trap_action_free(sh->traps[ti].action);
+        sh->traps[ti].action    = SHELL_TRAP_DEFAULT;
+        sh->traps[ti].inherited = 0;
+    }
+    shell_funcs_free(sh);
+    shell_aliases_free(sh);
+    vars_free(&sh->vars);
+
     for (int hi = 0; hi < sh->history_n; hi++)
         free(sh->history[hi]);
     free(sh->history);

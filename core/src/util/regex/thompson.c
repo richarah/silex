@@ -87,6 +87,16 @@ typedef struct {
     int  gen;   /* generation counter for deduplication */
 } nfa_list;
 
+/* Copy only the live part of a state list. A plain struct assignment
+ * copied all MAX_NFA_STATES entries (16 KB) on every DFA cache miss, which
+ * was 95% of the run time of grep -x/-w/-o/--color. */
+static inline void nfa_list_copy(nfa_list *dst, const nfa_list *src)
+{
+    dst->n   = src->n;
+    dst->gen = src->gen;
+    memcpy(dst->states, src->states, (size_t)src->n * sizeof(src->states[0]));
+}
+
 /* Per-state "last generation added" for deduplication */
 static int state_last[MAX_NFA_STATES];
 static int global_gen = 0;
@@ -238,6 +248,7 @@ typedef struct {
 typedef struct {
     dfa_state_t states[DFA_CACHE_MAX];
     int         count;
+    unsigned    epoch;   /* bumped on every reset */
 } dfa_cache_t;
 
 static uint32_t fnv1a(const int *data, int n)
@@ -250,13 +261,45 @@ static uint32_t fnv1a(const int *data, int n)
     return h;
 }
 
+/* Empty the cache. Only the in_use flags need clearing: a slot's other
+ * fields are all written when it is (re)created. */
+static void dfa_cache_reset(dfa_cache_t *cache)
+{
+    for (int i = 0; i < DFA_CACHE_MAX; i++)
+        cache->states[i].in_use = 0;
+    cache->count = 0;
+    cache->epoch++;
+}
+
+/*
+ * The cache is about 4.4 MB (each state holds a full NFA state array). It
+ * used to be malloc'ed and memset to zero on EVERY bounded search, i.e. once
+ * per line for grep -x/-w/-o/--color: tens of seconds on a large file.
+ * Allocate it once and reset it cheaply per search instead. The cache is
+ * still emptied at the start of every search, so results never depend on
+ * an earlier search (transitions are computed with position-dependent
+ * end-of-line state, so they must not be shared between texts).
+ * silex is single-threaded; the cache is never freed (it is reachable).
+ */
+static dfa_cache_t *dfa_cache_get(void)
+{
+    static dfa_cache_t *cache;
+    if (!cache) {
+        cache = malloc(sizeof(dfa_cache_t));
+        if (!cache) return NULL;
+        for (int i = 0; i < DFA_CACHE_MAX; i++)
+            cache->states[i].in_use = 0;
+    }
+    dfa_cache_reset(cache);
+    return cache;
+}
+
 static int dfa_find_or_create(dfa_cache_t *cache, const mb_prog *prog,
                                const nfa_list *states)
 {
     if (cache->count >= DFA_CACHE_MAX) {
         /* Cache full: clear and start over */
-        memset(cache->states, 0, sizeof(cache->states));
-        cache->count = 0;
+        dfa_cache_reset(cache);
     }
 
     /* Compute hash */
@@ -318,7 +361,8 @@ HOT static int thompson_search_nosub(const mb_prog *prog, int flags,
     pclist->gen = ++global_gen;
     memset(state_last, 0, (size_t)prog->len * sizeof(int));
     addstate(prog, pclist, 0, 0);
-    process_assertions(prog, flags, pclist, /*at_bol=*/1, n == 0);
+    process_assertions(prog, flags, pclist,
+                       /*at_bol=*/!(flags & SX_REG_NOTBOL_), n == 0);
     if (contains_match(prog, pclist)) return 1;
     if (n == 0) return 0;
 
@@ -327,7 +371,7 @@ HOT static int thompson_search_nosub(const mb_prog *prog, int flags,
     pclist->gen = ++global_gen;
 
     for (size_t i = 0; i < n; i++) {
-        int at_bol = (i == 0) ||
+        int at_bol = (i == 0 && !(flags & SX_REG_NOTBOL_)) ||
                      (newline_mode && i > 0 && text[i - 1] == '\n');
 
         /* Start a new match attempt from position i */
@@ -351,13 +395,26 @@ HOT static int thompson_search_nosub(const mb_prog *prog, int flags,
         pnlist = tmp;
     }
 
-    /* EOL assertion at end of string */
-    if (pclist->n > 0) {
-        process_assertions(prog, flags, pclist, 0, 1);
-        if (contains_match(prog, pclist)) return 1;
+    /* A match can also start at the very end of the text: the pattern $
+     * (or x*$) matches the empty string there. The loop above only adds
+     * the start state at positions 0..n-1, so "grep $" matched no
+     * non-empty line. Add it at n too, then apply the end-of-line
+     * assertion. */
+    addstate(prog, pclist, 0, 0);
+    {
+        int at_bol_end = newline_mode && text[n - 1] == '\n';
+        process_assertions(prog, flags, pclist, at_bol_end, 1);
     }
+    if (contains_match(prog, pclist)) return 1;
 
     return 0;
+}
+
+/* Is position `pos` of text a beginning of line? (^ holds there.) */
+static int at_bol_at(int flags, const char *text, size_t pos)
+{
+    if (pos == 0) return !(flags & SX_REG_NOTBOL_);
+    return (flags & SX_REG_NEWLINE) && text[pos - 1] == '\n';
 }
 
 /* ---- Main search function ------------------------------------------------- */
@@ -378,10 +435,8 @@ HOT int mb_thompson_search(const mb_prog *prog, int flags,
     nfa_list clist, nlist;
 
     /* DFA cache (stack-allocated for thread safety) */
-    dfa_cache_t *dfa = malloc(sizeof(dfa_cache_t));
+    dfa_cache_t *dfa = dfa_cache_get();
     if (!dfa) goto no_dfa;  /* fall back to pure NFA simulation */
-
-    memset(dfa, 0, sizeof(dfa_cache_t));
 
     /* Try matching from each start position */
     for (size_t start = 0; start <= n; start++) {
@@ -395,18 +450,37 @@ HOT int mb_thompson_search(const mb_prog *prog, int flags,
         addstate(prog, &clist, 0, 0);  /* entry is always 0; depth starts at 0 */
 
         /* Handle BOL assertion at this position */
-        int at_bol = (start == 0) || (newline_mode && start > 0 &&
+        int at_bol = (start == 0 && !(flags & SX_REG_NOTBOL_)) || (newline_mode && start > 0 &&
                                        text[start - 1] == '\n');
-        process_assertions(prog, flags, &clist, at_bol, 0);
+        /* $ can hold at the start position too: at the end of the text
+         * (empty text, or a start at n) or before a newline. Passing 0 here
+         * made "$^" and "^$^" miss on an empty line. */
+        int at_eol0 = (start == n) ||
+                      (newline_mode && start < n && text[start] == '\n');
+        process_assertions(prog, flags, &clist, at_bol, at_eol0);
+
+        /* POSIX wants the leftmost-LONGEST match. Returning at the first
+         * accepting state gave the shortest one (grep -o 'a.*' printed "a",
+         * grep -x 'a.*' rejected "ab"). When the caller wants the match
+         * bounds, remember the last accepting position and keep going
+         * until no thread is alive. best_end < 0: no match from here yet. */
+        long best_end = -1;
+        int  ran_out  = 0;  /* every thread died before the end of text */
 
         /* Check for immediate match (empty pattern or all-assertions) */
         if (contains_match(prog, &clist)) {
-            if (out) { out->start = text + start; out->end = text + start; }
-            free(dfa);
-            return 1;
+            if (!out) { return 1; }
+            best_end = (long)start;
         }
 
-        if (clist.n == 0) continue;
+        if (clist.n == 0) {
+            if (best_end >= 0) {
+                out->start = text + start; out->end = text + best_end;
+                
+                return 1;
+            }
+            continue;
+        }
 
         /* Get DFA state for this initial state set */
         int dfa_id = dfa_find_or_create(dfa, prog, &clist);
@@ -430,24 +504,24 @@ HOT int mb_thompson_search(const mb_prog *prog, int flags,
                     int at_bol_next = newline_mode && c == '\n';
                     process_assertions(prog, flags, &nlist, at_bol_next, at_eol_next);
 
+                    unsigned epoch = dfa->epoch;
                     int new_id = dfa_find_or_create(dfa, prog, &nlist);
-                    if (dfa_id >= 0 && new_id >= 0)
+                    /* If the cache was reset while making new_id, slot
+                     * dfa_id may now hold a different state: do not
+                     * record a transition from it. */
+                    if (dfa_id >= 0 && new_id >= 0 && dfa->epoch == epoch)
                         dfa->states[dfa_id].next[c] = new_id;
                     dfa_id = new_id;
 
                     /* Update clist for next iteration */
-                    clist = nlist;
+                    nfa_list_copy(&clist, &nlist);
                 }
 
-                if (dfa_id < 0) break;
+                if (dfa_id < 0) { ran_out = 1; break; }
 
                 if (dfa->states[dfa_id].is_match) {
-                    if (out) {
-                        out->start = text + start;
-                        out->end   = text + i + 1;
-                    }
-                    free(dfa);
-                    return 1;
+                    if (!out) { return 1; }
+                    best_end = (long)(i + 1);
                 }
 
                 /* Update clist from DFA state */
@@ -468,32 +542,34 @@ HOT int mb_thompson_search(const mb_prog *prog, int flags,
                 process_assertions(prog, flags, &nlist, at_bol_next, at_eol_next);
 
                 if (contains_match(prog, &nlist)) {
-                    if (out) {
-                        out->start = text + start;
-                        out->end   = text + i + 1;
-                    }
-                    free(dfa);
-                    return 1;
+                    if (!out) { return 1; }
+                    best_end = (long)(i + 1);
                 }
 
-                clist = nlist;
-                if (clist.n == 0) break;
+                nfa_list_copy(&clist, &nlist);
+                if (clist.n == 0) { ran_out = 1; break; }
             }
         }
 
         /* Check EOL assertion at end of string */
-        if (clist.n > 0) {
+        if (!ran_out && clist.n > 0) {
             int at_eol = 1;
-            process_assertions(prog, flags, &clist, 0, at_eol);
+            process_assertions(prog, flags, &clist, at_bol_at(flags, text, n), at_eol);
             if (contains_match(prog, &clist)) {
-                if (out) { out->start = text + start; out->end = text + n; }
-                free(dfa);
-                return 1;
+                if (!out) { return 1; }
+                best_end = (long)n;
             }
+        }
+
+        if (best_end >= 0) {
+            out->start = text + start;
+            out->end   = text + best_end;
+            
+            return 1;
         }
     }
 
-    free(dfa);
+    
     return 0;
 
 no_dfa:
@@ -506,16 +582,24 @@ no_dfa:
         memset(state_last, 0, (size_t)prog->len * sizeof(int));
         addstate(prog, &clist, 0, 0);
 
-        int at_bol = (start == 0) || (newline_mode && start > 0 &&
+        int at_bol = (start == 0 && !(flags & SX_REG_NOTBOL_)) || (newline_mode && start > 0 &&
                                        text[start - 1] == '\n');
-        process_assertions(prog, flags, &clist, at_bol, 0);
+        /* $ can hold at the start position too: at the end of the text
+         * (empty text, or a start at n) or before a newline. Passing 0 here
+         * made "$^" and "^$^" miss on an empty line. */
+        int at_eol0 = (start == n) ||
+                      (newline_mode && start < n && text[start] == '\n');
+        process_assertions(prog, flags, &clist, at_bol, at_eol0);
+
+        long best_end = -1;  /* leftmost-longest, as in the DFA path */
+        int  ran_out  = 0;
 
         if (contains_match(prog, &clist)) {
-            if (out) { out->start = text + start; out->end = text + start; }
-            return 1;
+            if (!out) return 1;
+            best_end = (long)start;
         }
 
-        for (size_t i = start; i < n; i++) {
+        for (size_t i = start; i < n && clist.n > 0; i++) {
             unsigned char c = (unsigned char)text[i];
             step(prog, flags, &clist, c, &nlist, 0);
             int at_eol_next = (i + 1 >= n) ||
@@ -524,19 +608,25 @@ no_dfa:
             process_assertions(prog, flags, &nlist, at_bol_next, at_eol_next);
 
             if (contains_match(prog, &nlist)) {
-                if (out) { out->start = text + start; out->end = text + i + 1; }
-                return 1;
+                if (!out) return 1;
+                best_end = (long)(i + 1);
             }
-            clist = nlist;
-            if (clist.n == 0) break;
+            nfa_list_copy(&clist, &nlist);
+            if (clist.n == 0) { ran_out = 1; break; }
         }
 
-        if (clist.n > 0) {
-            process_assertions(prog, flags, &clist, 0, 1);
+        if (!ran_out && clist.n > 0) {
+            process_assertions(prog, flags, &clist, at_bol_at(flags, text, n), 1);
             if (contains_match(prog, &clist)) {
-                if (out) { out->start = text + start; out->end = text + n; }
-                return 1;
+                if (!out) return 1;
+                best_end = (long)n;
             }
+        }
+
+        if (best_end >= 0) {
+            out->start = text + start;
+            out->end   = text + best_end;
+            return 1;
         }
     }
     return 0;

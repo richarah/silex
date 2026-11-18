@@ -20,6 +20,7 @@
 #include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdio_ext.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/resource.h>
@@ -150,6 +151,97 @@ static const applet_t *find_applet_by_name(const char *name)
  * the external utility it stands in for would. The disposition is restored
  * immediately afterwards, so the shell's own writes are unaffected. */
 static volatile sig_atomic_t applet_got_sigpipe;
+
+/* -------------------------------------------------------------------------
+ * Process-wide stdio state around an in-process applet.
+ *
+ * An applet inside `silex sh` is a function call, so the stdio `stdin` and
+ * `stdout` objects it uses are the SHELL's, and whatever it leaves in them
+ * outlives it:
+ *
+ *   - stdin's read-ahead buffer and EOF flag. A `<file` redirect dup2()s
+ *     fd 0 underneath the FILE, so the next applet saw the previous file's
+ *     leftover bytes, or EOF at once: `tr a-z A-Z <f` printed nothing the
+ *     second time and still exited 0.
+ *   - the fd 0 OFFSET. A buffered reader consumes more than it processes,
+ *     so in `{ head -n1; cat; } <f` head's 4 KB read-ahead swallowed the
+ *     rest of the file and cat got nothing. POSIX (1.4, INPUT FILES): a
+ *     utility that stops reading a seekable input early leaves the offset
+ *     just past the last byte it processed. fflush() on a seekable input
+ *     stream does exactly that (POSIX 2008; glibc and musl both implement
+ *     it): it lseek()s fd 0 back over the unconsumed buffer.
+ *   - buffering MODES set with setvbuf (sed -u on stdin and stdout, sort's
+ *     and grep's private buffers). A mode an applet chose for itself must
+ *     not become the shell's mode for the rest of the session.
+ *
+ * applet_stdio_begin() runs after the command's redirections are applied,
+ * applet_stdio_end() after the applet returns and BEFORE the redirections
+ * are undone, so the offset fix lands on the right file.
+ * ------------------------------------------------------------------------- */
+static int  g_stdin_bufmode = -1;     /* -1: libc default; else a _IO*BF set
+                                       * by the shell (shell_stdin_setvbuf) */
+static char g_stdin_buf[BUFSIZ];
+static char g_stdout_buf[BUFSIZ];
+
+typedef struct {
+    size_t in_size,  out_size;
+    int    in_lbf,   out_lbf;
+} stdio_snap_t;
+
+void shell_stdin_setvbuf(int mode)
+{
+    g_stdin_bufmode = mode;
+    if (mode == _IONBF)
+        setvbuf(stdin, NULL, _IONBF, 0);
+    else
+        setvbuf(stdin, g_stdin_buf, mode, sizeof(g_stdin_buf));
+}
+
+/* Hand any unread buffered input back to fd 0 (seekable files) and drop
+ * the rest, along with the EOF/error flags. */
+void shell_stdin_sync(void)
+{
+    /* cppcheck-suppress fflushOnInputStream */
+    fflush(stdin);
+    __fpurge(stdin);
+    clearerr(stdin);
+}
+
+static void applet_stdio_begin(stdio_snap_t *snap)
+{
+    /* Whatever is buffered belongs to an earlier reader -- and, after a
+     * redirect, possibly to a different file. Drop it; do NOT fflush here:
+     * fd 0 may already be the new file, and the seek would land on it. */
+    __fpurge(stdin);
+    clearerr(stdin);
+    snap->in_size  = __fbufsize(stdin);
+    snap->in_lbf   = __flbf(stdin);
+    snap->out_size = __fbufsize(stdout);
+    snap->out_lbf  = __flbf(stdout);
+}
+
+static void applet_stdio_end(const stdio_snap_t *snap)
+{
+    shell_stdin_sync();
+    if (__fbufsize(stdin) != snap->in_size || __flbf(stdin) != snap->in_lbf) {
+        /* The applet chose a buffering mode for itself (sed -u, sort):
+         * back to the shell's. The buffer is empty after the sync, which is
+         * what makes setvbuf on a used stream well-defined in practice. */
+        if (g_stdin_bufmode == _IONBF)
+            setvbuf(stdin, NULL, _IONBF, 0);
+        else if (g_stdin_bufmode >= 0)
+            setvbuf(stdin, g_stdin_buf, g_stdin_bufmode, sizeof(g_stdin_buf));
+        else
+            setvbuf(stdin, g_stdin_buf,
+                    isatty(STDIN_FILENO) ? _IOLBF : _IOFBF, sizeof(g_stdin_buf));
+    }
+    if (__fbufsize(stdout) != snap->out_size || __flbf(stdout) != snap->out_lbf) {
+        fflush(stdout);
+        setvbuf(stdout, g_stdout_buf,
+                isatty(STDOUT_FILENO) ? _IOLBF : _IOFBF, sizeof(g_stdout_buf));
+    }
+}
+
 static void applet_sigpipe_handler(int sig)
 {
     (void)sig;
@@ -436,11 +528,40 @@ static int is_special_builtin(const char *name)
  * sh->funcs[256] is used as a simple open-addressing hash.
  * ------------------------------------------------------------------------- */
 
+/* A function definition owns its body: a private arena holding a deep copy
+ * of the parse tree. Redefining or unsetting the function releases it, so
+ * `while :; do f() { ...; }; done` stays flat instead of copying a fresh body
+ * into the shell's persistent parse_arena on every iteration (which grew
+ * without bound and eventually abort()ed at the arena cap).
+ *
+ * A body can be replaced while it is RUNNING -- `f() { f() { :; }; ...; }`,
+ * or a body that unsets itself -- so the definition is reference counted:
+ * the registry holds one reference, and every active call holds another
+ * (func_def_retain/release around simple_cmd_function's exec_node). */
+typedef struct func_def {
+    arena_t  arena;
+    node_t  *body;
+    int      refs;
+} func_def_t;
+
 typedef struct func_entry {
     char        *name;
-    node_t      *body;
+    func_def_t  *def;
     struct func_entry *next;
 } func_entry_t;
+
+static void func_def_retain(func_def_t *d)
+{
+    if (d) d->refs++;
+}
+
+static void func_def_release(func_def_t *d)
+{
+    if (!d) return;
+    if (--d->refs > 0) return;
+    arena_free(&d->arena);
+    free(d);
+}
 
 static unsigned int func_hash(const char *s)
 {
@@ -456,35 +577,55 @@ static void func_register(shell_ctx_t *sh, const char *name, node_t *body)
 {
     /* The body may have been parsed into a transient arena (an eval string, a
      * sourced line) that its runner frees as soon as the definition finishes.
-     * Copy it into the persistent parse_arena so the function survives. */
-    node_t *persistent_body = node_dup(&sh->parse_arena, body);
+     * Copy it into the definition's own arena so the function survives, and
+     * so it can be freed again when the function is redefined. */
+    func_def_t *d = malloc(sizeof(*d));
+    if (!d) {
+        perror("silex: function definition");
+        abort();
+    }
+    arena_init_sized(&d->arena, "function", 2048);
+    d->body = node_dup(&d->arena, body);
+    d->refs = 1;                       /* the registry's reference */
 
     unsigned int idx = func_hash(name);
     func_entry_t *e  = sh->funcs[idx];
     while (e) {
         if (strcmp(e->name, name) == 0) {
-            e->body = persistent_body;
+            func_def_t *old = e->def;
+            e->def = d;
+            func_def_release(old);     /* freed now unless it is running */
             return;
         }
         e = e->next;
     }
-    /* Allocate new entry in arena */
-    func_entry_t *ne = arena_alloc(&sh->parse_arena, sizeof(func_entry_t));
-    ne->name  = arena_strdup(&sh->parse_arena, name);
-    ne->body  = persistent_body;
+    func_entry_t *ne = malloc(sizeof(func_entry_t));
+    char         *nm = strdup(name);
+    if (!ne || !nm) {
+        perror("silex: function definition");
+        abort();
+    }
+    ne->name  = nm;
+    ne->def   = d;
     ne->next  = sh->funcs[idx];
     sh->funcs[idx] = ne;
 }
 
-static node_t *func_lookup(shell_ctx_t *sh, const char *name)
+static func_def_t *func_lookup_def(shell_ctx_t *sh, const char *name)
 {
     unsigned int idx = func_hash(name);
     func_entry_t *e  = sh->funcs[idx];
     while (e) {
-        if (strcmp(e->name, name) == 0) return e->body;
+        if (strcmp(e->name, name) == 0) return e->def;
         e = e->next;
     }
     return NULL;
+}
+
+static node_t *func_lookup(shell_ctx_t *sh, const char *name)
+{
+    func_def_t *d = func_lookup_def(sh, name);
+    return d ? d->body : NULL;
 }
 
 static void func_unregister(shell_ctx_t *sh, const char *name)
@@ -493,10 +634,30 @@ static void func_unregister(shell_ctx_t *sh, const char *name)
     func_entry_t **pp = (func_entry_t **)&sh->funcs[idx];
     while (*pp) {
         if (strcmp((*pp)->name, name) == 0) {
-            *pp = (*pp)->next;   /* unlink (arena-allocated; not freed) */
+            func_entry_t *e = *pp;
+            *pp = e->next;
+            func_def_release(e->def);
+            free(e->name);
+            free(e);
             return;
         }
         pp = &(*pp)->next;
+    }
+}
+
+/* Release every function definition (shell teardown). */
+void shell_funcs_free(shell_ctx_t *sh)
+{
+    for (int i = 0; i < 256; i++) {
+        func_entry_t *e = sh->funcs[i];
+        while (e) {
+            func_entry_t *next = e->next;
+            func_def_release(e->def);
+            free(e->name);
+            free(e);
+            e = next;
+        }
+        sh->funcs[i] = NULL;
     }
 }
 
@@ -512,22 +673,44 @@ typedef struct alias_entry {
     struct alias_entry *next;
 } alias_entry_t;
 
+/* Alias entries and their values are heap-allocated and freed on
+ * redefinition / unalias: they used to be copied into the persistent
+ * parse_arena on every `alias x=...`, so redefining an alias in a loop grew
+ * the arena without bound. Nothing keeps a pointer to a value past the
+ * lookup -- the lexer copies the text it splices in (push_text). */
+static void alias_entry_free(alias_entry_t *e)
+{
+    free(e->name);
+    free(e->value);
+    free(e);
+}
+
 static void alias_register(shell_ctx_t *sh, const char *name, const char *value)
 {
     unsigned int idx = func_hash(name);  /* Reuse func_hash for aliases */
     alias_entry_t *e = sh->aliases[idx];
+    char *nv = strdup(value);
+    if (!nv) {
+        perror("silex: alias");
+        abort();
+    }
     while (e) {
         if (strcmp(e->name, name) == 0) {
             /* Update existing alias */
-            e->value = arena_strdup(&sh->parse_arena, value);
+            free(e->value);
+            e->value = nv;
             return;
         }
         e = e->next;
     }
-    /* Allocate new entry in arena */
-    alias_entry_t *ne = arena_alloc(&sh->parse_arena, sizeof(alias_entry_t));
-    ne->name  = arena_strdup(&sh->parse_arena, name);
-    ne->value = arena_strdup(&sh->parse_arena, value);
+    alias_entry_t *ne = malloc(sizeof(alias_entry_t));
+    char          *nm = strdup(name);
+    if (!ne || !nm) {
+        perror("silex: alias");
+        abort();
+    }
+    ne->name  = nm;
+    ne->value = nv;
     ne->next  = sh->aliases[idx];
     sh->aliases[idx] = ne;
 }
@@ -555,7 +738,9 @@ static void alias_unregister(shell_ctx_t *sh, const char *name)
     alias_entry_t **pp = (alias_entry_t **)&sh->aliases[idx];
     while (*pp) {
         if (strcmp((*pp)->name, name) == 0) {
-            *pp = (*pp)->next;   /* unlink (arena-allocated; not freed) */
+            alias_entry_t *e = *pp;
+            *pp = e->next;
+            alias_entry_free(e);
             return;
         }
         pp = &(*pp)->next;
@@ -565,8 +750,20 @@ static void alias_unregister(shell_ctx_t *sh, const char *name)
 static void alias_clear_all(shell_ctx_t *sh)
 {
     for (int i = 0; i < 256; i++) {
+        alias_entry_t *e = sh->aliases[i];
+        while (e) {
+            alias_entry_t *next = e->next;
+            alias_entry_free(e);
+            e = next;
+        }
         sh->aliases[i] = NULL;
     }
+}
+
+/* Release every alias (shell teardown). */
+void shell_aliases_free(shell_ctx_t *sh)
+{
+    alias_clear_all(sh);
 }
 
 /* -------------------------------------------------------------------------
@@ -1412,6 +1609,9 @@ static int simple_cmd_applet(shell_ctx_t *sh, const simple_cmd_t *c, const apple
             }
             int aret = ap->fn(argc, expanded);
             fflush(NULL);
+            /* fd 0 is shared with the parent: leave its offset just past
+             * what this child consumed. */
+            shell_stdin_sync();
             _exit(aret);
         }
         int astatus;
@@ -1468,6 +1668,9 @@ static int simple_cmd_applet(shell_ctx_t *sh, const simple_cmd_t *c, const apple
     applet_got_sigpipe = 0;
     int pipe_hooked = (sigaction(SIGPIPE, &sa_pipe, &sa_pipe_prev) == 0);
 
+    stdio_snap_t stdio_snap;
+    applet_stdio_begin(&stdio_snap);
+
     cmd_rc = ap->fn(argc, expanded);
 
     if (pipe_hooked) {
@@ -1488,6 +1691,9 @@ static int simple_cmd_applet(shell_ctx_t *sh, const simple_cmd_t *c, const apple
             cmd_rc = 1;
         clearerr(stdout);
     }
+    /* Before redirect_restore: the stdin offset fix must reach the file
+     * this command's redirection opened. */
+    applet_stdio_end(&stdio_snap);
     if (redirs) redirect_restore(&rctx);
     return cmd_rc;
 }
@@ -1870,9 +2076,13 @@ static int exec_simple_cmd_inner(shell_ctx_t *sh, char **words, char **assigns,
 
     /* 4. Check for shell function (user-defined functions override applets).
      * `command NAME` bypasses functions (POSIX), so skip the lookup then. */
-    node_t *fnbody = sh->in_command_builtin ? NULL : func_lookup(sh, cmd);
-    if (fnbody) {
-        cmd_rc = simple_cmd_function(sh, &c, fnbody);
+    func_def_t *fndef = sh->in_command_builtin ? NULL : func_lookup_def(sh, cmd);
+    if (fndef) {
+        /* Hold the definition for the duration of the call: the body may
+         * redefine or unset the very function that is running. */
+        func_def_retain(fndef);
+        cmd_rc = simple_cmd_function(sh, &c, fndef->body);
+        func_def_release(fndef);
         goto cmd_done;
     }
 
@@ -1994,16 +2204,11 @@ int exec_pipeline(shell_ctx_t *sh, node_t *node)
                  * et al., giving the builtin stale data.  fflush(stdin) on
                  * glibc discards the read buffer, preventing this stale-read
                  * bug in builtins that use stdio (e.g. tr with getchar()). */
-                /* fflush() on an INPUT stream is undefined behaviour in ISO C.
-                 * glibc defines it as discarding the read buffer, which is
-                 * exactly what we want here -- but musl and the BSDs do not, so
-                 * only do it where it is defined. Everywhere else, clearerr()
-                 * alone is the portable part. */
-#ifdef __GLIBC__
-                /* cppcheck-suppress fflushOnInputStream */
-                fflush(stdin);
-#endif
-                clearerr(stdin);
+                /* fflush() on a seekable INPUT stream is defined by POSIX
+                 * (2008): it repositions the fd to the stream's position.
+                 * __fpurge then discards what a pipe cannot take back, and
+                 * clearerr the EOF flag. See shell_stdin_sync. */
+                shell_stdin_sync();
                 dup2(pipes[i - 1][0], STDIN_FILENO);
                 close(pipes[i - 1][0]);
                 close(pipes[i - 1][1]);
@@ -3756,6 +3961,8 @@ static int exec_builtin_trap(shell_ctx_t *sh, int argc, char **argv)
      * lists). */
     for (int wi = 0; wi < NSIG; wi++) {
         if (sh->traps[wi].inherited) {
+            /* Not freed: an inherited string is borrowed from the parent's
+             * table (a forked child's copy of it), not owned by this entry. */
             sh->traps[wi].action    = SHELL_TRAP_DEFAULT;
             sh->traps[wi].inherited = 0;
         }
@@ -3782,16 +3989,28 @@ static int exec_builtin_trap(shell_ctx_t *sh, int argc, char **argv)
             continue;
         }
 
+        /* The action string is heap-owned by its slot and freed when the
+         * slot changes: it used to be copied into the persistent parse_arena
+         * on every `trap`, so re-arming a trap in a loop grew the arena
+         * without bound. The new value is installed BEFORE the old one is
+         * freed, so the slot never points at freed memory. A trap action
+         * that is running is safe: shell_signal_handler runs a copy. */
+        char *old_act = sh->traps[sig].action;
         if (strcmp(action, "-") == 0) {
             sh->traps[sig].action = SHELL_TRAP_DEFAULT;
-            sh->traps[sig].set_in_this_shell = 1;
         } else if (strcmp(action, "") == 0) {
             sh->traps[sig].action = SHELL_TRAP_IGNORE;
-            sh->traps[sig].set_in_this_shell = 1;
         } else {
-            sh->traps[sig].action = arena_strdup(&sh->parse_arena, trap_action);
-            sh->traps[sig].set_in_this_shell = 1;
+            char *na = strdup(trap_action);
+            if (!na) {
+                perror("silex: trap");
+                rc = 1;
+                continue;
+            }
+            sh->traps[sig].action = na;
         }
+        sh->traps[sig].set_in_this_shell = 1;
+        shell_trap_action_free(old_act);
 
         /* Install the signal handler */
         struct sigaction sa;

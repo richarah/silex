@@ -1078,6 +1078,9 @@ int applet_find(int argc, char **argv)
 {
     find_args_t fa;
     memset(&fa, 0, sizeof(fa));
+    /* Every invocation starts clean: re-probe statx rather than inherit a
+     * previous run's verdict. */
+    g_statx_ok = 1;
     fa.maxdepth = -1; /* unlimited */
     fa.mindepth = 0;
 

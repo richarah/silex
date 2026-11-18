@@ -91,6 +91,9 @@ typedef struct {
 /* ------------------------------------------------------------------ */
 
 static int g_matched_any = 0; /* set to 1 if any match ever found */
+/* A context group was printed for an earlier file in this run: the next
+ * group, even in another file, is preceded by "--" (GNU). Reset per run. */
+static int g_ctx_output = 0;
 
 /* ------------------------------------------------------------------ */
 /* Helpers                                                             */
@@ -182,35 +185,29 @@ static int regex_match(const mb_regex *re, const char *line, int opt_w, int opt_
     mb_match m;
 
     /* -x: require match of entire line */
-    if (opt_x) {
-        if (!mb_regex_search(re, line, len, &m))
-            return 0;
-        return (m.start == line && m.end == line + len);
-    }
+    if (opt_x)
+        return mb_regex_match(re, line, len, NULL);
 
     if (!opt_w) {
         return mb_regex_search(re, line, len, NULL);
     }
 
-    /* -w: check word boundaries */
-    const char *p   = line;
-    size_t      rem = len;
+    /* -w: check word boundaries. Each retry starts one byte after the
+     * start of the previous candidate (GNU), searching the same line so
+     * that ^ only matches at its real start. */
+    size_t from = 0;
 
     for (;;) {
-        if (!mb_regex_search(re, p, rem, &m))
+        if (!mb_regex_search_from(re, line, len, from, &m))
             return 0;
-        int ms = (int)(m.start - line);
-        int me = (int)(m.end   - line);
+        size_t ms = (size_t)(m.start - line);
+        size_t me = (size_t)(m.end   - line);
         int before_ok = (ms == 0) || !is_word_char(line[ms - 1]);
-        int after_ok  = (me >= (int)len) || !is_word_char(line[me]);
+        int after_ok  = (me >= len) || !is_word_char(line[me]);
         if (before_ok && after_ok)
             return 1;
-        /* Advance past this match */
-        size_t advance = (size_t)(m.end - p);
-        if (advance == 0) advance = 1;
-        if (advance > rem) return 0;
-        p   += advance;
-        rem -= advance;
+        from = ms + 1;
+        if (from > len) return 0;
     }
 }
 
@@ -275,6 +272,55 @@ static int line_matches_any(const char *line, const grep_opts_t *g)
     return 0;
 }
 
+
+/*
+ * Find the next match of ANY pattern in line[from..len): the leftmost one,
+ * and the longest of those that start there (POSIX). With -w only whole-word
+ * matches count. Used by -o and --color, which used to look at the first
+ * pattern only (grep -o -e foo -e bar never printed "bar").
+ * Returns 1 and sets *ms_out and *me_out (offsets into line) if found.
+ */
+static int next_match(const grep_opts_t *g, const char *line, size_t len,
+                      size_t from, size_t *ms_out, size_t *me_out)
+{
+    int    found = 0;
+    size_t best_s = 0, best_e = 0;
+
+    for (int i = 0; i < g->npatterns; i++) {
+        size_t f = from;
+        while (f <= len) {
+            size_t ms, me;
+            if (g->opt_F) {
+                const char *pat = g->patterns[i];
+                const char *hit = g->opt_i ? stristr(line + f, pat)
+                                           : strstr(line + f, pat);
+                if (!hit) break;
+                ms = (size_t)(hit - line);
+                me = ms + strlen(pat);
+            } else {
+                mb_match m;
+                if (!g->compiled_ok[i] ||
+                    !mb_regex_search_from(g->mb_compiled[i], line, len, f, &m))
+                    break;
+                ms = (size_t)(m.start - line);
+                me = (size_t)(m.end   - line);
+            }
+            if (g->opt_w &&
+                !((ms == 0 || !is_word_char(line[ms - 1])) &&
+                  (me >= len || !is_word_char(line[me])))) {
+                f = ms + 1;            /* not a whole word: look further */
+                continue;
+            }
+            if (!found || ms < best_s || (ms == best_s && me > best_e)) {
+                found = 1; best_s = ms; best_e = me;
+            }
+            break;
+        }
+    }
+    if (found) { *ms_out = best_s; *me_out = best_e; }
+    return found;
+}
+
 /* ANSI color codes */
 #define COL_MATCH   "\033[01;31m"
 #define COL_FNAME   "\033[35m"
@@ -283,54 +329,23 @@ static int line_matches_any(const char *line, const grep_opts_t *g)
 #define COL_RESET   "\033[0m"
 
 /*
- * Highlight a single fixed-string match in line with ANSI codes.
- * Prints the line (with prefix already printed).
+ * Print line with every match highlighted (--color).
+ * The tail after the last match is written once. (The old regex version
+ * wrote it twice: "abc" | grep --color b gave "abcc".)
  */
-static void print_line_color_fixed(const char *line, const char *pattern,
-                                   int opt_i)
+static void print_line_color(const char *line, const grep_opts_t *g)
 {
-    size_t plen = strlen(pattern);
-    const char *p = line;
-    for (;;) {
-        const char *found = opt_i ? stristr(p, pattern) : strstr(p, pattern);
-        if (!found) {
-            fputs(p, stdout);
-            break;
-        }
-        /* Print up to match */
-        fwrite(p, 1, (size_t)(found - p), stdout);
-        fputs(COL_MATCH, stdout);
-        fwrite(found, 1, plen, stdout);
-        fputs(COL_RESET, stdout);
-        p = found + plen;
-    }
-}
+    size_t len = strlen(line), done = 0, from = 0, ms, me;
 
-/*
- * Highlight regex matches in line with ANSI codes.
- */
-static void print_line_color_regex(const mb_regex *re, const char *line)
-{
-    const char *p   = line;
-    size_t      rem = strlen(line);
-
-    for (;;) {
-        mb_match m;
-        if (!mb_regex_search(re, p, rem, &m) || m.start == m.end) {
-            fwrite(p, 1, rem, stdout);
-            break;
-        }
-        fwrite(p, 1, (size_t)(m.start - p), stdout);
+    while (from <= len && next_match(g, line, len, from, &ms, &me)) {
+        if (me == ms) { from = ms + 1; continue; }   /* nothing to show */
+        fwrite(line + done, 1, ms - done, stdout);
         fputs(COL_MATCH, stdout);
-        fwrite(m.start, 1, (size_t)(m.end - m.start), stdout);
+        fwrite(line + ms, 1, me - ms, stdout);
         fputs(COL_RESET, stdout);
-        size_t advance = (size_t)(m.end - p);
-        if (advance == 0) advance = 1;
-        if (advance > rem) break;
-        p   += advance;
-        rem -= advance;
+        done = from = me;
     }
-    if (*p != '\0') fputs(p, stdout);
+    fwrite(line + done, 1, len - done, stdout);
 }
 
 /* Print the line prefix (filename + linenum + byte offset) into strbuf out */
@@ -369,36 +384,21 @@ static int grep_print_prefix(strbuf_t *out, const char *filename,
 static void grep_print_only_match(const char *line, const grep_opts_t *g,
                                   const char *prefix)
 {
-    if (g->opt_F) {
-        if (g->npatterns == 0) return;
-        size_t plen = strlen(g->patterns[0]);
-        const char *p = line;
-        for (;;) {
-            const char *found = g->opt_i ? stristr(p, g->patterns[0])
-                                          : strstr(p, g->patterns[0]);
-            if (!found) break;
-            printf("%s", prefix);
-            fwrite(found, 1, plen, stdout);
-            putchar('\n');
-            p = found + (plen > 0 ? plen : 1);
-        }
-    } else {
-        if (g->npatterns == 0 || !g->compiled_ok[0]) return;
-        const char *p   = line;
-        size_t      rem = strlen(line);
-        for (;;) {
-            mb_match m;
-            if (!mb_regex_search(g->mb_compiled[0], p, rem, &m)) break;
-            size_t mlen = (size_t)(m.end - m.start);
-            printf("%s", prefix);
-            fwrite(m.start, 1, mlen, stdout);
-            putchar('\n');
-            size_t advance = (size_t)(m.end - p);
-            if (advance == 0) advance = 1;
-            if (advance > rem) break;
-            p   += advance;
-            rem -= advance;
-        }
+    size_t len = strlen(line), from = 0, ms, me;
+
+    if (g->opt_x) {                  /* the match is the whole line */
+        printf("%s%s%s%s\n", prefix, g->opt_color ? COL_MATCH : "", line,
+               g->opt_color ? COL_RESET : "");
+        return;
+    }
+    while (from <= len && next_match(g, line, len, from, &ms, &me)) {
+        if (me == ms) { from = ms + 1; continue; }  /* GNU skips empty matches */
+        printf("%s", prefix);
+        if (g->opt_color) fputs(COL_MATCH, stdout);
+        fwrite(line + ms, 1, me - ms, stdout);
+        if (g->opt_color) fputs(COL_RESET, stdout);
+        putchar('\n');
+        from = me;
     }
 }
 
@@ -494,35 +494,42 @@ static int grep_stream(FILE *fp, const char *filename,
             linelen--;
         }
 
-        /* Prefilter: if required first char is absent, line cannot match */
-        if (g->prefilter_char &&
-            !memchr(linebuf, g->prefilter_char, (size_t)linelen)) {
-            if (ctx_B > 0) {
-                free(before_buf[before_pos]);
-                before_buf[before_pos]  = strdup(linebuf);
-                before_lnum[before_pos] = linenum;
-                before_boff[before_pos] = line_start_offset;
-                before_pos = (before_pos + 1) % ctx_B;
-                if (!before_full && before_pos == 0) before_full = 1;
-            }
-            continue;
-        }
-
-        int matched = line_matches_any(linebuf, g);
+        /* Prefilter: if the required first char is absent, the line cannot
+         * match, so skip the regex. It must still go through the non-match
+         * path below: it may be after-context of an earlier match (-A).
+         * Skipping the line outright used to drop it from -A output. */
+        int matched = 0;
+        if (!g->prefilter_char ||
+            memchr(linebuf, g->prefilter_char, (size_t)linelen))
+            matched = line_matches_any(linebuf, g);
         if (g->opt_v) matched = !matched;
+
+        /* Past the -m limit (only reachable with -A): GNU prints further
+         * lines, matching or not, as trailing context, then stops. A
+         * matching line used to end the context early. */
+        int past_limit = g->max_matches > 0 && count >= g->max_matches;
+        if (past_limit) matched = 0;
 
         if (!matched) {
             /* Print as after-context if needed */
             if (after_left > 0 && !g->opt_c && !g->opt_q && !g->opt_l && !g->opt_L) {
-                sb_reset(&out);
-                if (grep_print_prefix(&out, filename, show_fname,
-                                       linenum, line_start_offset, g, 1) < 0) goto oom;
-                fputs(sb_str(&out), stdout);
-                fputs(linebuf, stdout);
-                putchar('\n');
+                /* With -o, GNU prints no context lines, but they still
+                 * join groups, so "--" appears only between real gaps. */
+                if (!g->opt_o) {
+                    sb_reset(&out);
+                    if (grep_print_prefix(&out, filename, show_fname,
+                                           linenum, line_start_offset, g, 1) < 0) goto oom;
+                    fputs(sb_str(&out), stdout);
+                    fputs(linebuf, stdout);
+                    putchar('\n');
+                }
                 last_printed = linenum;
                 after_left--;
             }
+            /* -m: the trailing context is done, stop reading (so the rest
+             * of a seekable stdin is left for the next command). */
+            if (past_limit && after_left <= 0)
+                break;
             /* Store in before-context ring buffer */
             if (ctx_B > 0) {
                 free(before_buf[before_pos]);
@@ -538,13 +545,6 @@ static int grep_stream(FILE *fp, const char *filename,
         count++;
         result = 0;
         g_matched_any = 1;
-
-        /* -m: stop after max_matches */
-        if (g->max_matches > 0 && count > g->max_matches) {
-            count--;
-            result = (count > 0) ? 0 : 1;
-            goto done;
-        }
 
         if (g->opt_q) goto done;
         if (g->opt_L) continue; /* suppress output; track match status only */
@@ -565,28 +565,48 @@ static int grep_stream(FILE *fp, const char *filename,
                 before_pos = (before_pos + 1) % ctx_B;
                 if (!before_full && before_pos == 0) before_full = 1;
             }
+            if (g->max_matches > 0 && count >= g->max_matches)
+                break;
             continue;
         }
 
-        /* Print separator between context groups */
-        if ((ctx_A > 0 || ctx_B > 0) && last_printed >= 0 &&
-            last_printed < linenum - 1) {
+        /* Print separator between context groups. The group starts at
+         * the first before-context line still to be printed, not at this
+         * match: comparing with the match printed "--" between touching
+         * groups (grep -B1 on a,x,a gave a,--,x,a). */
+        int n_avail = 0, bstart = 0;
+        long first_line = linenum;
+        if (ctx_B > 0) {
+            n_avail = before_full ? ctx_B : before_pos;
+            bstart  = before_full ? before_pos : 0;
+            for (int k = 0; k < n_avail; k++) {
+                int idx = (bstart + k) % ctx_B;
+                if (before_buf[idx] && before_lnum[idx] > last_printed) {
+                    first_line = before_lnum[idx];
+                    break;
+                }
+            }
+        }
+        if ((ctx_A > 0 || ctx_B > 0) &&
+            ((last_printed >= 0 && last_printed < first_line - 1) ||
+             (last_printed < 0 && g_ctx_output))) {
             puts("--");
         }
+        g_ctx_output = 1;
 
-        /* Print before-context lines */
+        /* Print before-context lines (not with -o, as in GNU) */
         if (ctx_B > 0) {
-            int n_avail = before_full ? ctx_B : before_pos;
-            int start   = before_full ? before_pos : 0;
             for (int k = 0; k < n_avail; k++) {
-                int idx = (start + k) % ctx_B;
+                int idx = (bstart + k) % ctx_B;
                 if (!before_buf[idx] || before_lnum[idx] <= last_printed) continue;
-                sb_reset(&out);
-                if (grep_print_prefix(&out, filename, show_fname,
-                                       before_lnum[idx], before_boff[idx], g, 1) < 0) goto oom;
-                fputs(sb_str(&out), stdout);
-                fputs(before_buf[idx], stdout);
-                putchar('\n');
+                if (!g->opt_o) {
+                    sb_reset(&out);
+                    if (grep_print_prefix(&out, filename, show_fname,
+                                           before_lnum[idx], before_boff[idx], g, 1) < 0) goto oom;
+                    fputs(sb_str(&out), stdout);
+                    fputs(before_buf[idx], stdout);
+                    putchar('\n');
+                }
                 last_printed = before_lnum[idx];
             }
             for (int k = 0; k < ctx_B; k++) {
@@ -606,10 +626,8 @@ static int grep_stream(FILE *fp, const char *filename,
             grep_print_only_match(linebuf, g, prefix_str);
         } else {
             fputs(prefix_str, stdout);
-            if (g->opt_color && !g->opt_F && g->npatterns > 0 && g->compiled_ok[0]) {
-                print_line_color_regex(g->mb_compiled[0], linebuf);
-            } else if (g->opt_color && g->opt_F && g->npatterns > 0) {
-                print_line_color_fixed(linebuf, g->patterns[0], g->opt_i);
+            if (g->opt_color && !g->opt_v && g->npatterns > 0) {
+                print_line_color(linebuf, g);
             } else {
                 fputs(linebuf, stdout);
             }
@@ -626,6 +644,12 @@ static int grep_stream(FILE *fp, const char *filename,
             before_pos = (before_pos + 1) % ctx_B;
             if (!before_full && before_pos == 0) before_full = 1;
         }
+
+        /* -m N: stop reading right after the Nth match (GNU), so the rest of
+         * a seekable stdin is left for the next reader -- `{ grep -m1 x;
+         * cat; } <f`. With -A, keep going for the trailing context. */
+        if (g->max_matches > 0 && count >= g->max_matches && ctx_A == 0)
+            break;
     }
 
     if (ferror(fp)) {
@@ -916,6 +940,11 @@ int applet_grep(int argc, char **argv)
 {
     grep_opts_t g;
     memset(&g, 0, sizeof(g));
+    /* Process-wide result of the PREVIOUS invocation otherwise: inside
+     * `silex sh` an applet is a function call, so a `grep -q` that matched
+     * once made every later `grep -q` in the same shell exit 0. */
+    g_matched_any = 0;
+    g_ctx_output = 0;
 
     /* SILEX_SMART=1: enable smart-case and VCS-aware mode by default.
      * Read getenv once: a second call is not guaranteed to return the same

@@ -48,6 +48,15 @@ mb_regex *mb_regex_compile(const char *pat, int flags, const char **errstr);
 int mb_regex_search(const mb_regex *re, const char *s, size_t n, mb_match *m);
 
 /*
+ * Like mb_regex_search, but search s[from..n-1] of a longer line s[0..n-1].
+ * ^ matches only at s[0] (or after a newline with SX_REG_NEWLINE), never at
+ * s[from] for from > 0. Use this to find the next match after an earlier
+ * one (grep -o, -w, --color) without ^ matching again mid-line.
+ */
+int mb_regex_search_from(const mb_regex *re, const char *s, size_t n,
+                         size_t from, mb_match *m);
+
+/*
  * Test whether re matches the string s[0..n-1] (full match from position 0).
  * If m is non-NULL and a match is found, fills m->start and m->end.
  * Returns 1 if matched, 0 if not.
