@@ -96,7 +96,7 @@ static int tokenize_class(tokenizer_t *t)
 }
 
 /*
- * Intervals: a{m}, a{m,}, a{m,n} (ERE) and a\{m,n\} (BRE).
+ * Intervals: a{m}, a{m,}, a{m,n}, a{,n} (ERE) and a\{m,n\} (BRE).
  * They used to be approximated as "+" (a{0,1} matched "aa" but not "",
  * x{2} matched "x"). Now the preceding atom is repeated at the token level:
  * a{2,4} -> a a a? a?, a{2,} -> a a a*. Anything this cannot express
@@ -117,7 +117,9 @@ static int parse_interval(tokenizer_t *t, int *min, int *max)
         if (lo > INTERVAL_MAX) return -1;
         digits++;
     }
-    if (!digits) return -1;
+    /* GNU extension: {,n} means {0,n}. */
+    if (!digits && !(p + 1 < t->end && *p == ',' && isdigit((unsigned char)p[1])))
+        return -1;
     hi = lo;
     if (p < t->end && *p == ',') {
         p++;

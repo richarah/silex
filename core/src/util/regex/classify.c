@@ -11,6 +11,20 @@
  * Classify a BRE/ERE pattern into one of the fast-path categories.
  * This runs at compile time (once per pattern).
  */
+/* Does p start "m}", "m,}", "m,n}" or GNU's ",n}" (close = the closing
+ * char)? */
+static int is_interval(const char *p, char close)
+{
+    if (!(*p >= '0' && *p <= '9') && !(p[0] == ',' && p[1] >= '0' && p[1] <= '9'))
+        return 0;
+    while (*p >= '0' && *p <= '9') p++;
+    if (*p == ',') {
+        p++;
+        while (*p >= '0' && *p <= '9') p++;
+    }
+    return *p == close;
+}
+
 mb_class_t mb_classify(const char *pat, int flags)
 {
     int ere  = (flags & SX_REG_ERE) != 0;
@@ -26,6 +40,7 @@ mb_class_t mb_classify(const char *pat, int flags)
     int has_anchor_eol = 0;
     int has_backref = 0;
     int has_charclass = 0;
+    int has_interval = 0;
 
     const char *p = pat;
     size_t len = strlen(pat);
@@ -61,6 +76,7 @@ mb_class_t mb_classify(const char *pat, int flags)
                            next == '}' || next == '|' || next == '+' ||
                            next == '?') {
                     has_meta = 1;
+                    if (next == '{') has_interval = 1;
                 }
             } else {
                 /* ERE: \1-\9 are backrefs */
@@ -76,6 +92,10 @@ mb_class_t mb_classify(const char *pat, int flags)
             if (c == '.' || c == '*' || c == '+' || c == '?' ||
                 c == '|' || c == '{' || c == '}') {
                 has_meta = 1;
+                /* Only a real interval ({m}, {m,}, {m,n}) counts: GNU takes
+                 * "a{" as a literal brace, but libc rejects it. */
+                if (c == '{' && is_interval(p + 1, '}'))
+                    has_interval = 1;
             } else if (c == '(' || c == ')') {
                 has_meta = 1;
             } else if (c == '[') {
@@ -101,6 +121,8 @@ mb_class_t mb_classify(const char *pat, int flags)
         /* $ in middle of pattern is a metachar */
         if (c == '$' && p[1] != '\0') {
             has_meta = 1;
+            if (ere)
+                has_anchor_eol = 1;   /* an anchor anywhere in ERE */
         }
 
         p++;
@@ -121,6 +143,19 @@ mb_class_t mb_classify(const char *pat, int flags)
             return SX_CLASS_FIXED;
         /* has trailing $ but no ^ (e.g. "abc$"): fall through to Thompson NFA */
     }
+
+    /* Patterns with a $ anchor go to the libc engine. They always did in
+     * effect (the parser used to reject them), and the Thompson match-only
+     * path, which has no DFA cache, is 2-4x slower than glibc on them. */
+    if (has_anchor_eol)
+        return SX_CLASS_BACKREF;
+#ifdef SILEX_LIBC_GLIBC
+    /* Intervals likewise: glibc runs them about 3x faster than the
+     * expanded NFA. Elsewhere (musl, whose regex is slow) the parser
+     * expands them (a{2,4} -> a a a? a?). */
+    if (has_interval)
+        return SX_CLASS_BACKREF;
+#endif
 
     /* Has metacharacters but no backrefs */
     if (!has_meta && has_charclass)

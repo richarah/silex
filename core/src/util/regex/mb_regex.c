@@ -188,7 +188,10 @@ static int search_impl(const mb_regex *re, const char *s, size_t n,
     case SX_CLASS_BACKREF: {
         if (!re->posix_ok) return 0;
         regmatch_t pm;
-        int rc = regexec(&re->posix_re, s, 1, &pm, notbol ? REG_NOTBOL : 0);
+        /* Ask for the bounds only when the caller wants them: with
+         * nmatch 0 glibc takes its faster match-only path. */
+        int rc = regexec(&re->posix_re, s, m ? 1 : 0, m ? &pm : NULL,
+                         notbol ? REG_NOTBOL : 0);
         if (rc != 0) return 0;
         if (m) {
             m->start = s + pm.rm_so;

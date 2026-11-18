@@ -59,6 +59,7 @@ check "BRE \\{0,1\\} rejects two" "0" "$(echo abbc | "$SILEX" grep -c 'ab\{0,1\}
 check "ERE x{2} needs two" "0" "$(echo x | "$SILEX" grep -cE 'x{2}')"
 check "ERE -o a{2,3}" "aaa" "$(echo aaaa | "$SILEX" grep -oE 'a{2,3}')"
 check "ERE a{ is a literal brace" "1" "$(echo 'a{' | "$SILEX" grep -cE 'a{')"
+check "ERE x{,1}y (GNU {,n})" "xy,y" "$(printf 'xy\ny\nxxy\n' | "$SILEX" grep -xE 'x{,1}y' | paste -sd, -)"
 check "BRE a^b is literal" "1" "$(echo 'a^b' | "$SILEX" grep -c 'a^b')"
 check "BRE x*^ needs a literal ^" "0" "$(echo c | "$SILEX" grep -c 'x*^')"
 
