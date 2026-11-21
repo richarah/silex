@@ -311,6 +311,10 @@ only in that silex grep does not use exit code 2 for `--quiet` suppression.
 **grep patterns** are parsed with GNU grep's rules (dfa.c grammar, glibc's
 error checks) and give GNU grep's results in the C locale; invalid patterns
 are reported as `silex: grep: invalid regex 'PAT': MSG` with GNU's MSG.
+Two known differences: `{}` right after an assertion, as in `\w\>{}`, is rejected as an invalid
+interval (GNU takes it as text), and patterns with back-references are compiled by libc, so a
+stacked repeat such as `\(a\)\1\{1,2\}*` is rejected there too. A 60,000-case random comparison
+with GNU grep found only the first.
 Differences that remain: binary files (a file is treated as binary from its
 first NUL line on and reported as `Binary file F matches`), and, on musl,
 back-reference patterns using GNU extensions (musl's regcomp lacks them) or
