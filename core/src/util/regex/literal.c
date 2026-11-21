@@ -87,6 +87,7 @@ static inline unsigned probe(const mb_litset *ls, int k, const char *q)
 HOT static const char *find_one_sse2(const mb_litset *ls, const char *p,
                                      const char *end)
 {
+    if (!p) return NULL;
     size_t len = ls->len[0];
     const char *last = end - len;          /* last possible start */
     const char *q = p;
@@ -133,6 +134,7 @@ HOT static const char *find_one_sse2(const mb_litset *ls, const char *p,
 HOT static const char *find_bytes_sse2(const mb_litset *ls, const char *p,
                                        const char *end)
 {
+    if (!p) return NULL;
     __m128i B[MB_LIT_MAX], F[MB_LIT_MAX];
     int n = ls->n;
     for (int k = 0; k < n; k++) {
@@ -160,6 +162,7 @@ HOT static const char *find_bytes_sse2(const mb_litset *ls, const char *p,
 HOT static const char *find_multi_sse2(const mb_litset *ls, const char *p,
                                        const char *end)
 {
+    if (!p) return NULL;
     __m128i B1[MB_LIT_MAX], B2[MB_LIT_MAX], F1[MB_LIT_MAX], F2[MB_LIT_MAX];
     int n = ls->n;
     for (int k = 0; k < n; k++) {

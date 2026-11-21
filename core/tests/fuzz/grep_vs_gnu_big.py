@@ -54,6 +54,8 @@ N = int(sys.argv[2]) if len(sys.argv) > 2 else 200
 for it in range(N):
     pat = random.choice(pats)
     o = random.choice(opts)
+    if pat in ('.', 'x*', '') and any('o' in f[1:] for f in o if f.startswith('-')):
+        continue          # one output line per byte: gigabytes on the large inputs
     mode = random.choice(['file', 'files', 'stdin', 'pipe'])
     args = ['-E'] + o + ['-e', pat]
     if '-F' in ''.join(o): args = o + ['-e', pat]

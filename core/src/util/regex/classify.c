@@ -413,9 +413,9 @@ static int musts_plain(const mb_ast *t, const int *roots, int nroots,
         out->n++;
     }
     /* "contains A or contains AB" is "contains A" */
-    for (int i = 0; i < out->n && i < SS_MAX; i++) {
+    for (int i = 0; i < out->n && i < MB_LIT_MAX; i++) {
         const size_t li = out->len[i];
-        for (int j = 0; j < out->n && j < SS_MAX; j++) {
+        for (int j = 0; j < out->n && j < MB_LIT_MAX; j++) {
             const size_t lj = out->len[j];
             if (i == j || lj > li || (lj == li && j > i)) continue;
             int found = 0;
