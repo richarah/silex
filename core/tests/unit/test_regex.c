@@ -394,6 +394,188 @@ static void test_bounds(void)
     check_from("^b\\|c", "abc", 1, 2, 3, "^ inside alternation not at offset");
 }
 
+
+/* ---- Pattern sets, scanning, GNU extensions -------------------------------- */
+
+static void expect(int cond, const char *label)
+{
+    if (cond) { g_passed++; return; }
+    g_failed++;
+    printf("  FAIL: %s\n", label);
+}
+
+/* first match bounds of pat (flags) in text, or [-1,-1) */
+static void check_next(const char *pat, int flags, const char *text, size_t from,
+                       long ws, long we, const char *label)
+{
+    const char *err = NULL;
+    int ep;
+    mb_regex *re = mb_regex_compile_set(&pat, 1, flags, &err, &ep, NULL);
+    size_t a = 0, b = 0;
+    int got = re && mb_regex_next(re, text, strlen(text), from, &a, &b);
+    long gs = got ? (long)a : -1, ge = got ? (long)b : -1;
+    if (gs == ws && ge == we) {
+        g_passed++;
+    } else {
+        g_failed++;
+        printf("  FAIL: %s\n        pat='%s' text='%s' got=[%ld,%ld) want=[%ld,%ld)%s%s\n",
+               label, pat, text, gs, ge, ws, we, re ? "" : " compile: ", re ? "" : err);
+    }
+    if (re) mb_regex_free(re);
+}
+
+static void test_gnu_extensions(void)
+{
+    printf("--- GNU extensions ---\n");
+    check_next("\\<w", 0, "hello world", 0, 6, 7, "\\< word start");
+    check_next("o\\>", 0, "hello world", 0, 4, 5, "\\> word end");
+    check_next("\\bb", 0, "ab b", 0, 3, 4, "\\b");
+    check_next("\\Bb", 0, "ab b", 0, 1, 2, "\\B");
+    check_next("\\w\\+", 0, "-- ab_1 --", 0, 3, 7, "\\w");
+    check_next("\\W\\+", 0, "ab -- cd", 0, 2, 6, "\\W");
+    check_next("\\s", 0, "ab\tc", 0, 2, 3, "\\s");
+    check_next("\\S*", 0, "  ab", 2, 2, 4, "\\S from an offset");
+    check_next("\\`a", 0, "aa", 1, -1, -1, "\\` only at the line start");
+    check_next("a\\'", 0, "aa", 0, 1, 2, "\\' at the line end");
+    check_next("\\<b", 0, "ab b", 1, 3, 4, "\\< sees the byte before the offset");
+    check_next("a{,2}", SX_REG_ERE, "aaa", 0, 0, 2, "ERE {,n}");
+    check_next("a{1", SX_REG_ERE, "xa{1", 0, 1, 4, "ERE a{1 is literal");
+    check_next("x)", SX_REG_ERE, "x)", 0, 0, 2, "ERE unmatched ) is literal");
+    check_next("ab", SX_REG_ICASE, "xAB", 0, 1, 3, "-i literal");
+    check_next("[a-c]+", SX_REG_ERE | SX_REG_ICASE, "xAbC", 0, 1, 4, "-i range");
+    check_next("a.c", SX_REG_FIXED, "abc a.c", 0, 4, 7, "-F");
+}
+
+static void test_word_line(void)
+{
+    printf("--- -w / -x bounds ---\n");
+    check_next("[a-z ]*", SX_REG_WORD, "foo bar1", 0, 0, 3, "-w: shorter match at the same start");
+    check_next("foo", SX_REG_WORD, "xfoo foo", 0, 5, 8, "-w: later start");
+    check_next("foo", SX_REG_WORD | SX_REG_FIXED, "foox foo", 0, 5, 8, "-wF");
+    check_next("a.*", SX_REG_LINE, "abc", 0, 0, 3, "-x whole line");
+    check_next("a", SX_REG_LINE, "ab", 0, -1, -1, "-x no match");
+}
+
+static int line_ok(mb_regex *re, const char *s)
+{
+    return mb_regex_line(re, s, strlen(s));
+}
+
+static void test_sets_and_scan(void)
+{
+    printf("--- pattern sets and scanning ---\n");
+    const char *err = NULL;
+    int ep = -1;
+    const char *pats[] = { "foo", "ba[rz]", "x\ny" };
+    mb_regex *re = mb_regex_compile_set(pats, 3, 0, &err, &ep, NULL);
+    expect(re != NULL, "compile a set");
+    if (re) {
+        expect(line_ok(re, "a foo"), "set: first pattern");
+        expect(line_ok(re, "baz"), "set: second pattern");
+        expect(line_ok(re, "y"), "set: a newline splits a pattern");
+        expect(!line_ok(re, "bat"), "set: no match");
+        const char *buf = "one\ntwo bar\nthree\nfoo";
+        size_t ls = 0, le = 0;
+        expect(mb_regex_scan(re, buf, strlen(buf), &ls, &le) && ls == 4 && le == 11,
+               "scan finds the first matching line");
+        expect(mb_regex_scan(re, buf + 12, strlen(buf + 12), &ls, &le) && ls == 6 && le == 9,
+               "scan: unterminated last line");
+        mb_regex_free(re);
+    }
+    const char *bad[] = { "ok", "a[b" };
+    re = mb_regex_compile_set(bad, 2, 0, &err, &ep, NULL);
+    expect(re == NULL && ep == 1 && err && strcmp(err, "Unmatched [, [^, [:, [., or [=") == 0,
+           "error names the failing pattern");
+    const char *none = NULL;
+    re = mb_regex_compile_set(&none, 0, 0, &err, &ep, NULL);
+    expect(re && !line_ok(re, "anything"), "no patterns match nothing");
+    if (re) mb_regex_free(re);
+    const char *all = "x*";
+    re = mb_regex_compile_set(&all, 1, 0, &err, &ep, NULL);
+    expect(re && mb_regex_all_lines(re), "x* matches every line");
+    if (re) mb_regex_free(re);
+    const char *some = "x";
+    re = mb_regex_compile_set(&some, 1, 0, &err, &ep, NULL);
+    expect(re && !mb_regex_all_lines(re), "x does not match every line");
+    if (re) mb_regex_free(re);
+    {
+        const char *nl = "a\nb\n\nccccccccccccccccccccccc\n";
+        expect(mb_regex_count_nl(nl, strlen(nl)) == 4, "count newlines");
+    }
+}
+
+/*
+ * Property test: on pseudo-random text the block scanner, the per-line
+ * matcher and libc regexec() must agree, for patterns where GNU and POSIX
+ * syntax mean the same thing. Includes a pattern whose DFA has more states
+ * than the cache holds, so the flush path runs.
+ */
+static unsigned long g_rng = 12345;
+static unsigned rnd(unsigned n)
+{
+    g_rng = g_rng * 6364136223846793005UL + 1442695040888963407UL;
+    return (unsigned)((g_rng >> 33) % n);
+}
+
+static void test_scan_property(void)
+{
+    printf("--- scan vs line vs libc ---\n");
+    static const char *pats[] = {
+        "ab", "a.c", "(foo|bar)+x", "^b", "c$", "[0-9]{2,3}", "a|b|cd",
+        "x*", "(a|b)*a(a|b){13}", "q[^q]*q", "^$", "[[:upper:]][a-z]+",
+    };
+    static const char alpha[] = "abcqx0123 AZfoobar\n\n";
+    char *buf = malloc(200001);
+    if (!buf) return;
+    int bad = 0;
+    for (size_t pi = 0; pi < sizeof(pats) / sizeof(pats[0]); pi++) {
+        size_t n = 1000 + rnd(199000);
+        for (size_t i = 0; i < n; i++) buf[i] = alpha[rnd(sizeof(alpha) - 1)];
+        buf[n] = '\0';
+        const char *err = NULL;
+        int ep;
+        mb_regex *re = mb_regex_compile_set(&pats[pi], 1, SX_REG_ERE, &err, &ep, NULL);
+        regex_t px;
+        if (!re || regcomp(&px, pats[pi], REG_EXTENDED | REG_NOSUB) != 0) {
+            if (re) mb_regex_free(re);
+            bad++;
+            continue;
+        }
+        size_t pos = 0;
+        while (pos <= n && !bad) {
+            size_t ls, le;
+            int f = mb_regex_scan(re, buf + pos, n - pos, &ls, &le);
+            size_t stop = f ? pos + ls : n;
+            /* every line before the hit must not match, the hit must */
+            size_t p = pos;
+            while (p < stop) {
+                char *e = memchr(buf + p, '\n', stop - p);
+                size_t l = e ? (size_t)(e - buf) - p : stop - p;
+                char save = buf[p + l];
+                buf[p + l] = '\0';
+                int a = mb_regex_line(re, buf + p, l);
+                int b = regexec(&px, buf + p, 0, NULL, 0) == 0;
+                buf[p + l] = save;
+                if (a || b) { bad++; printf("  FAIL: %s skipped a matching line at %zu\n", pats[pi], p); break; }
+                p += l + 1;
+            }
+            if (!f) break;
+            size_t a0 = pos + ls, b0 = pos + le;
+            char save = buf[b0];
+            buf[b0] = '\0';
+            int b = regexec(&px, buf + a0, 0, NULL, 0) == 0;
+            int a = mb_regex_line(re, buf + a0, b0 - a0);
+            buf[b0] = save;
+            if (!a || !b) { bad++; printf("  FAIL: %s reported a non-matching line at %zu\n", pats[pi], a0); }
+            pos = b0 + 1;
+        }
+        regfree(&px);
+        mb_regex_free(re);
+    }
+    free(buf);
+    expect(bad == 0, "scan, line and regexec agree on random text");
+}
+
 /* ---- Main ----------------------------------------------------------------- */
 
 int main(void)
@@ -414,6 +596,10 @@ int main(void)
     test_backref_fallback();
     test_empty_alternation();
     test_bounds();
+    test_gnu_extensions();
+    test_word_line();
+    test_sets_and_scan();
+    test_scan_property();
 
     printf("\nResults: %d passed, %d failed\n", g_passed, g_failed);
 

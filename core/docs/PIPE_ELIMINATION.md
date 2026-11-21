@@ -78,8 +78,9 @@ The current applet code has several non-thread-safe elements:
 
 | Issue | Location | Mitigation |
 |-------|----------|------------|
-| `g_matched_any` global | `src/core/grep.c:74` | Move to `grep_opts_t` (per-invocation state) |
-| Static `grep_iobuf` | `src/core/grep.c:665` | Change to stack-allocated or per-call heap |
+| `g_matched_any`, `g_ctx_output` globals | `src/core/grep.c` | Move to `grep_opts_t` (per-invocation state) |
+| Static input buffer `g_rbuf` (kept between runs) | `src/core/grep.c` | Make it per-thread, or drop the reuse |
+| Lazily built DFA caches inside `mb_regex` | `src/util/regex/thompson.c` | Per-invocation already (one `mb_regex` per grep run); static `lower_tab`/`freq_fold` tables are write-once |
 | `g_last_re`, `g_last_src` in sed | `src/core/sed.c` | Already per-invocation after UAF fix |
 | Arena allocator (single-threaded) | `src/util/arena.c` | Use per-thread arenas (already stack-local in shell) |
 | `isatty()` stdout check | grep, sed, sort | Thread-safe (read-only syscall) |
@@ -111,7 +112,7 @@ Thread creation is ~50 µs vs fork ~500 µs on Linux (x86_64, glibc).
 ### Implementation plan (v0.3.0)
 
 1. **Refactor `grep_opts_t`**: move `g_matched_any` into `grep_opts_t` (already per-call)
-2. **Make `grep_iobuf` per-call**: stack-allocate (128 KB is too large for stack) or use `malloc` with `free` on exit
+2. **Make grep's input buffer per-call**: `g_rbuf` (32 KB-1 MB, kept between runs to save a malloc per call) would have to be per thread
 3. **Add `pipeline_all_pure(stages, nstages)`** predicate: checks each stage's first word against the pure-applet whitelist
 4. **Thread wrapper**: `pipeline_run_threaded(sh, stages, nstages)` using `pthread_create` + `pthread_join`
 5. **fd isolation**: each thread gets its own stdin/stdout via `dup()/dup2()` before calling the applet

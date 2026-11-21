@@ -1,4 +1,12 @@
-/* grep.c — grep builtin: search files for patterns */
+/* grep.c — grep builtin: search files for patterns
+ *
+ * Input is read in large blocks straight from the file descriptor. With no
+ * context options, a whole block of lines is handed to the regex engine,
+ * which finds the next matching line itself (literal prefilter + DFA), so
+ * lines that cannot match are never visited one by one; with -v the lines
+ * between matches are written out as one run. Context (-A/-B/-C) and files
+ * that turn out to be binary are processed line by line.
+ */
 
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
@@ -8,7 +16,6 @@
 #include "../util/opt.h"
 #include "../util/path.h"
 #include "../util/strbuf.h"
-#include "../util/charclass.h"
 #include "../util/regex/regex.h"
 #include "../util/vcsignore.h"
 #include "../module/registry.h"
@@ -19,19 +26,23 @@
 #include <fcntl.h>
 #include <fnmatch.h>
 #include <limits.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
 
 /* Maximum number of -e patterns or -f pattern files */
 #define MAX_PATTERNS 256
 /* Maximum number of --include/--exclude globs each */
 #define MAX_GLOBS    64
-/* Large stdio read buffer — reduces getline() syscall count from ~136 to ~6
- * for a 550KB file (system grep uses 96KB mmap-style reads). */
-#define GREP_STDIO_BUFSZ (1 << 17)  /* 128 KB */
+/* Input is read in blocks of this size (the buffer grows for longer
+ * lines). 256 KB: ~190 read() calls for a 50 MB file. */
+#define GREP_READ_CHUNK (1 << 18)
+#define GREP_READ_SMALL (1 << 15)
+#define GREP_KEEP_BUF   (1 << 20)
 
 /* ------------------------------------------------------------------ */
 /* Option state                                                        */
@@ -40,6 +51,7 @@
 typedef struct {
     int opt_E;           /* -E: extended (ERE) */
     int opt_F;           /* -F: fixed string */
+    int opt_G;           /* -G: basic (BRE), the default */
     int opt_c;           /* -c: count matches */
     int opt_i;           /* -i: case insensitive */
     int opt_l;           /* -l: list filenames only */
@@ -57,17 +69,18 @@ typedef struct {
     int opt_x;           /* -x: match whole line */
     int opt_b;           /* -b: print byte offset */
     int opt_Z;           /* -Z: NUL-terminate filenames */
-    int max_matches;     /* -m N: stop after N matches (0 = unlimited) */
+    int max_matches;     /* -m N: stop after N matches (<= 0 = unlimited) */
+    int max_given;       /* -m seen (-m 0: nothing can be selected) */
     int context_A;       /* -A N: N lines of after-context */
     int context_B;       /* -B N: N lines of before-context */
 
     /* Patterns */
     char  *patterns[MAX_PATTERNS];
     int    npatterns;
+    int    pattern_given;  /* -e or -f seen (-f /dev/null: no patterns) */
 
-    /* Compiled regexes (one per pattern, when not -F) */
-    mb_regex *mb_compiled[MAX_PATTERNS];
-    int       compiled_ok[MAX_PATTERNS]; /* 1 if mb_compiled[i] is valid */
+    /* All patterns, compiled as one set */
+    mb_regex *re;
 
     /* Glob filters */
     char *include_globs[MAX_GLOBS];
@@ -75,15 +88,22 @@ typedef struct {
     char *exclude_globs[MAX_GLOBS];
     int   n_exclude;
 
-    /* Prefilter: required first literal byte (0 = disabled) */
-    unsigned char prefilter_char;
-
     /* --vcs: skip VCS dirs, hidden files, binary files */
     int opt_vcs;
     /* -S: smart case (case-insensitive when pattern is all-lowercase) */
     int opt_smart;
     /* VCS ignore context (loaded when opt_vcs) */
     vcsignore_t *vcs_ign;
+
+    /* stdout is /dev/null: the first selected line of a file decides
+     * everything observable, so stop reading there (as GNU grep does) */
+    int devnull;
+    /* the patterns match every line */
+    int all_lines;
+
+    /* input buffer, reused for every file of the run */
+    char  *rbuf;
+    size_t rcap;
 } grep_opts_t;
 
 /* ------------------------------------------------------------------ */
@@ -91,128 +111,23 @@ typedef struct {
 /* ------------------------------------------------------------------ */
 
 static int g_matched_any = 0; /* set to 1 if any match ever found */
+/* input buffer kept between runs (see grep_opts_free) */
+static char  *g_rbuf;
+static size_t g_rcap;
 /* A context group was printed for an earlier file in this run: the next
  * group, even in another file, is preceded by "--" (GNU). Reset per run. */
 static int g_ctx_output = 0;
 
 /* ------------------------------------------------------------------ */
-/* Helpers                                                             */
+/* Patterns                                                            */
 /* ------------------------------------------------------------------ */
 
-/*
- * Case-fold search: locate needle in haystack (case insensitive).
- * Returns pointer to first match, or NULL.
- *
- * Precomputes the lowercase first character of needle so the outer loop
- * can reject non-matching positions with a single comparison.
- */
-static const char *stristr(const char *haystack, const char *needle)
+static void grep_warn(const char *msg)
 {
-    size_t nlen = strlen(needle);
-    if (nlen == 0)
-        return haystack;
-    int fc = tolower((unsigned char)*needle);  /* first char, precomputed */
-    for (; *haystack; haystack++) {
-        if (tolower((unsigned char)*haystack) == fc) {
-            size_t i;
-            for (i = 1; i < nlen; i++) {
-                if (tolower((unsigned char)haystack[i]) !=
-                    tolower((unsigned char)needle[i]))
-                    break;
-            }
-            if (i == nlen)
-                return haystack;
-        }
-    }
-    return NULL;
+    err_msg("grep", "warning: %s", msg);
 }
 
-/* Check whether character is a word character for -w */
-static int is_word_char(char c)
-{
-    return is_name_char((unsigned char)c);
-}
-
-/*
- * Fixed-string match for one pattern against line.
- * Respects -i (case fold) and -w (word boundary).
- * Returns 1 if matched.
- */
-static int fixed_match(const char *line, const char *pattern,
-                       int opt_i, int opt_w, int opt_x)
-{
-    size_t plen = strlen(pattern);
-    if (plen == 0)
-        return 1;
-
-    /* -x: require exact match of entire line */
-    if (opt_x) {
-        size_t llen = strlen(line);
-        if (llen != plen)
-            return 0;
-        if (opt_i)
-            return strncasecmp(line, pattern, plen) == 0;
-        else
-            return strncmp(line, pattern, plen) == 0;
-    }
-
-    const char *p = line;
-    for (;;) {
-        const char *found = opt_i ? stristr(p, pattern) : strstr(p, pattern);
-        if (!found)
-            return 0;
-        if (opt_w) {
-            /* Check boundaries */
-            int before_ok = (found == line) || !is_word_char(*(found - 1));
-            int after_ok  = !is_word_char(*(found + plen));
-            if (!before_ok || !after_ok) {
-                p = found + 1;
-                continue;
-            }
-        }
-        return 1;
-    }
-}
-
-/*
- * Regex match for one compiled pattern against line.
- * Respects -w (word boundaries checked manually).
- * Returns 1 if matched.
- */
-static int regex_match(const mb_regex *re, const char *line, int opt_w, int opt_x)
-{
-    size_t len = strlen(line);
-    mb_match m;
-
-    /* -x: require match of entire line */
-    if (opt_x)
-        return mb_regex_match(re, line, len, NULL);
-
-    if (!opt_w) {
-        return mb_regex_search(re, line, len, NULL);
-    }
-
-    /* -w: check word boundaries. Each retry starts one byte after the
-     * start of the previous candidate (GNU), searching the same line so
-     * that ^ only matches at its real start. */
-    size_t from = 0;
-
-    for (;;) {
-        if (!mb_regex_search_from(re, line, len, from, &m))
-            return 0;
-        size_t ms = (size_t)(m.start - line);
-        size_t me = (size_t)(m.end   - line);
-        int before_ok = (ms == 0) || !is_word_char(line[ms - 1]);
-        int after_ok  = (me >= len) || !is_word_char(line[me]);
-        if (before_ok && after_ok)
-            return 1;
-        from = ms + 1;
-        if (from > len) return 0;
-    }
-}
-
-
-/* Compile all patterns into mb_compiled[]. */
+/* Compile all patterns into one mb_regex set. */
 static int compile_patterns(grep_opts_t *g)
 {
     /* Smart case (-S): if all patterns are all-lowercase, enable -i.
@@ -227,99 +142,29 @@ static int compile_patterns(grep_opts_t *g)
         if (all_lower) g->opt_i = 1;
     }
 
-    int mb_flags = SX_REG_NOSUB;
-    if (g->opt_E)
-        mb_flags |= SX_REG_ERE;
-    if (g->opt_i)
-        mb_flags |= SX_REG_ICASE;
+    int flags = 0;
+    if (g->opt_F)      flags |= SX_REG_FIXED;
+    else if (g->opt_E) flags |= SX_REG_ERE;
+    if (g->opt_i)      flags |= SX_REG_ICASE;
+    if (g->opt_x)      flags |= SX_REG_LINE;     /* -x wins over -w (GNU) */
+    else if (g->opt_w) flags |= SX_REG_WORD;
 
-    for (int i = 0; i < g->npatterns; i++) {
-        const char *err = NULL;
-        g->mb_compiled[i] = mb_regex_compile(g->patterns[i], mb_flags, &err);
-        if (!g->mb_compiled[i]) {
-            err_msg("grep", "invalid regex '%s': %s", g->patterns[i],
-                    err ? err : "unknown error");
-            return 1;
-        }
-        g->compiled_ok[i] = 1;
-    }
-
-    /* Prefilter: single pattern, not inverted, not case-insensitive */
-    if (g->npatterns == 1 && !g->opt_v && !g->opt_i && g->compiled_ok[0])
-        g->prefilter_char = mb_regex_first_char(g->mb_compiled[0]);
-
-    return 0;
-}
-
-/*
- * Test line against all patterns.
- * Returns 1 if ANY pattern matches (before -v inversion).
- */
-static int line_matches_any(const char *line, const grep_opts_t *g)
-{
-    for (int i = 0; i < g->npatterns; i++) {
-        int m;
-        if (g->opt_F) {
-            m = fixed_match(line, g->patterns[i], g->opt_i, g->opt_w, g->opt_x);
-        } else {
-            if (!g->compiled_ok[i])
-                continue;
-            m = regex_match(g->mb_compiled[i], line, g->opt_w, g->opt_x);
-        }
-        if (m)
-            return 1;
+    const char *err = NULL;
+    int ep = 0;
+    g->re = mb_regex_compile_set((const char *const *)g->patterns, g->npatterns,
+                                 flags, &err, &ep, grep_warn);
+    if (!g->re) {
+        err_msg("grep", "invalid regex '%s': %s",
+                (ep >= 0 && ep < g->npatterns) ? g->patterns[ep] : "",
+                err ? err : "unknown error");
+        return 1;
     }
     return 0;
 }
 
-
-/*
- * Find the next match of ANY pattern in line[from..len): the leftmost one,
- * and the longest of those that start there (POSIX). With -w only whole-word
- * matches count. Used by -o and --color, which used to look at the first
- * pattern only (grep -o -e foo -e bar never printed "bar").
- * Returns 1 and sets *ms_out and *me_out (offsets into line) if found.
- */
-static int next_match(const grep_opts_t *g, const char *line, size_t len,
-                      size_t from, size_t *ms_out, size_t *me_out)
-{
-    int    found = 0;
-    size_t best_s = 0, best_e = 0;
-
-    for (int i = 0; i < g->npatterns; i++) {
-        size_t f = from;
-        while (f <= len) {
-            size_t ms, me;
-            if (g->opt_F) {
-                const char *pat = g->patterns[i];
-                const char *hit = g->opt_i ? stristr(line + f, pat)
-                                           : strstr(line + f, pat);
-                if (!hit) break;
-                ms = (size_t)(hit - line);
-                me = ms + strlen(pat);
-            } else {
-                mb_match m;
-                if (!g->compiled_ok[i] ||
-                    !mb_regex_search_from(g->mb_compiled[i], line, len, f, &m))
-                    break;
-                ms = (size_t)(m.start - line);
-                me = (size_t)(m.end   - line);
-            }
-            if (g->opt_w &&
-                !((ms == 0 || !is_word_char(line[ms - 1])) &&
-                  (me >= len || !is_word_char(line[me])))) {
-                f = ms + 1;            /* not a whole word: look further */
-                continue;
-            }
-            if (!found || ms < best_s || (ms == best_s && me > best_e)) {
-                found = 1; best_s = ms; best_e = me;
-            }
-            break;
-        }
-    }
-    if (found) { *ms_out = best_s; *me_out = best_e; }
-    return found;
-}
+/* ------------------------------------------------------------------ */
+/* Output                                                              */
+/* ------------------------------------------------------------------ */
 
 /* ANSI color codes */
 #define COL_MATCH   "\033[01;31m"
@@ -328,334 +173,614 @@ static int next_match(const grep_opts_t *g, const char *line, size_t len,
 #define COL_SEP     "\033[36m"
 #define COL_RESET   "\033[0m"
 
-/*
- * Print line with every match highlighted (--color).
- * The tail after the last match is written once. (The old regex version
- * wrote it twice: "abc" | grep --color b gave "abcc".)
- */
-static void print_line_color(const char *line, const grep_opts_t *g)
+static inline void out(const char *p, size_t n)
 {
-    size_t len = strlen(line), done = 0, from = 0, ms, me;
-
-    while (from <= len && next_match(g, line, len, from, &ms, &me)) {
-        if (me == ms) { from = ms + 1; continue; }   /* nothing to show */
-        fwrite(line + done, 1, ms - done, stdout);
-        fputs(COL_MATCH, stdout);
-        fwrite(line + ms, 1, me - ms, stdout);
-        fputs(COL_RESET, stdout);
-        done = from = me;
-    }
-    fwrite(line + done, 1, len - done, stdout);
+    if (n) fwrite(p, 1, n, stdout);
 }
 
-/* Print the line prefix (filename + linenum + byte offset) into strbuf out */
-static int grep_print_prefix(strbuf_t *out, const char *filename,
-                              int show_fname, long linenum, long byte_offset,
-                              const grep_opts_t *g, int is_context)
+/* Write a line and its newline; the newline is in the buffer when the line
+ * has one, so it goes out in the same call. */
+static inline void out_line(const char *p, size_t n, int has_nl)
 {
+    if (has_nl) {
+        fwrite(p, 1, n + 1, stdout);
+    } else {
+        out(p, n);
+        putc('\n', stdout);
+    }
+}
+
+static char *fmt_ulong(char *end, unsigned long long v)
+{
+    do { *--end = (char)('0' + v % 10); v /= 10; } while (v);
+    return end;
+}
+
+/* Build the line prefix (filename, line number, byte offset) in out.
+ * GNU order: FILE:LINE:OFFSET: */
+static int grep_print_prefix(strbuf_t *sb, const char *filename,
+                             int show_fname, long linenum, long long byte_offset,
+                             const grep_opts_t *g, int is_context)
+{
+    char sep = is_context ? '-' : ':';
+    char num[32];
     if (show_fname && filename) {
         if (g->opt_color) {
-            if (sb_append(out, COL_FNAME)  != 0) return -1;
-            if (sb_append(out, filename)    != 0) return -1;
-            if (sb_append(out, COL_RESET)   != 0) return -1;
-            if (sb_appendc(out, is_context ? '-' : ':') != 0) return -1;
+            if (sb_append(sb, COL_FNAME) != 0) return -1;
+            if (sb_append(sb, filename)  != 0) return -1;
+            if (sb_append(sb, COL_RESET) != 0) return -1;
         } else {
-            if (sb_append(out, filename) != 0) return -1;
-            if (sb_appendc(out, is_context ? '-' : ':') != 0) return -1;
+            if (sb_append(sb, filename) != 0) return -1;
         }
-    }
-    if (g->opt_b) {
-        if (sb_appendf(out, "%ld%c", byte_offset,
-                       is_context ? '-' : ':') != 0) return -1;
+        if (sb_appendc(sb, sep) != 0) return -1;
     }
     if (g->opt_n) {
-        if (g->opt_color) {
-            if (sb_appendf(out, COL_LINENO "%ld" COL_RESET "%c",
-                           linenum, is_context ? '-' : ':') != 0) return -1;
-        } else {
-            if (sb_appendf(out, "%ld%c", linenum,
-                           is_context ? '-' : ':') != 0) return -1;
-        }
+        char *s = fmt_ulong(num + sizeof(num), (unsigned long long)linenum);
+        if (g->opt_color && sb_append(sb, COL_LINENO) != 0) return -1;
+        if (sb_appendn(sb, s, (size_t)(num + sizeof(num) - s)) != 0) return -1;
+        if (g->opt_color && sb_append(sb, COL_RESET) != 0) return -1;
+        if (sb_appendc(sb, sep) != 0) return -1;
+    }
+    if (g->opt_b) {
+        char *s = fmt_ulong(num + sizeof(num), (unsigned long long)byte_offset);
+        if (sb_appendn(sb, s, (size_t)(num + sizeof(num) - s)) != 0) return -1;
+        if (sb_appendc(sb, sep) != 0) return -1;
     }
     return 0;
 }
 
-/* Print matched portions of line (for -o flag) */
-static void grep_print_only_match(const char *line, const grep_opts_t *g,
-                                  const char *prefix)
+/*
+ * Print line with every match highlighted (--color).
+ * The tail after the last match is written once.
+ */
+static void print_line_color(const char *line, size_t len, const grep_opts_t *g)
 {
-    size_t len = strlen(line), from = 0, ms, me;
+    size_t done = 0, from = 0, ms, me;
 
-    if (g->opt_x) {                  /* the match is the whole line */
-        printf("%s%s%s%s\n", prefix, g->opt_color ? COL_MATCH : "", line,
-               g->opt_color ? COL_RESET : "");
-        return;
+    while (from <= len && mb_regex_next(g->re, line, len, from, &ms, &me)) {
+        if (me == ms) { from = ms + 1; continue; }   /* nothing to show */
+        out(line + done, ms - done);
+        fputs(COL_MATCH, stdout);
+        out(line + ms, me - ms);
+        fputs(COL_RESET, stdout);
+        done = from = me;
     }
-    while (from <= len && next_match(g, line, len, from, &ms, &me)) {
+    out(line + done, len - done);
+}
+
+/* Print matched portions of line (for -o flag). With -b each match is
+ * prefixed with its own byte offset, as in GNU grep. */
+static int grep_print_only_match(const char *line, size_t len,
+                                 const grep_opts_t *g, strbuf_t *sb,
+                                 const char *filename, int show_fname,
+                                 long linenum, long long line_off)
+{
+    size_t from = 0, ms, me;
+
+    sb_reset(sb);
+    if (grep_print_prefix(sb, filename, show_fname, linenum, line_off, g, 0) < 0)
+        return -1;
+    while (from <= len && mb_regex_next(g->re, line, len, from, &ms, &me)) {
         if (me == ms) { from = ms + 1; continue; }  /* GNU skips empty matches */
-        printf("%s", prefix);
+        if (g->opt_b) {
+            sb_reset(sb);
+            if (grep_print_prefix(sb, filename, show_fname, linenum,
+                                  line_off + (long long)ms, g, 0) < 0)
+                return -1;
+        }
+        out(sb_str(sb), sb_len(sb));
         if (g->opt_color) fputs(COL_MATCH, stdout);
-        fwrite(line + ms, 1, me - ms, stdout);
+        out(line + ms, me - ms);
         if (g->opt_color) fputs(COL_RESET, stdout);
-        putchar('\n');
+        putc('\n', stdout);
         from = me;
+    }
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Input                                                               */
+/* ------------------------------------------------------------------ */
+
+typedef struct {
+    int     fd;
+    char   *buf;
+    size_t  cap, len, pos;   /* data buf[0..len), processed up to pos */
+    long long base;          /* stream offset of buf[0] */
+    int     eof;
+    int     nreads;
+    size_t  nul;             /* offset of a NUL byte (SIZE_MAX: none seen) */
+} rd_t;
+
+/* Read more input after the unprocessed tail. 1: got data, 0: EOF,
+ * -1: read error (errno set). */
+static int rd_fill(rd_t *r)
+{
+    if (r->pos > 0) {
+        memmove(r->buf, r->buf + r->pos, r->len - r->pos);
+        r->len -= r->pos;
+        r->base += (long long)r->pos;
+        if (r->nul != SIZE_MAX) r->nul = r->nul >= r->pos ? r->nul - r->pos : 0;
+        r->pos = 0;
+    }
+    /* Start small (most files grep sees are), go to full-size reads from
+     * the third one on, and grow further only for lines that need it. */
+    size_t want = r->nreads >= 2 ? GREP_READ_CHUNK / 2 : GREP_READ_SMALL / 2;
+    if (r->cap - r->len < want || (r->nreads >= 2 && r->cap < GREP_READ_CHUNK)) {
+        size_t nc = r->cap ? r->cap * 2 : GREP_READ_SMALL;
+        if (r->nreads >= 2 && nc < GREP_READ_CHUNK) nc = GREP_READ_CHUNK;
+        while (nc - r->len < want) nc *= 2;
+        char *nb = realloc(r->buf, nc);
+        if (!nb) { errno = ENOMEM; return -1; }
+        r->buf = nb;
+        r->cap = nc;
+    }
+    ssize_t n;
+    do {
+        n = read(r->fd, r->buf + r->len, r->cap - r->len);
+    } while (n < 0 && errno == EINTR);
+    if (n < 0) return -1;
+    if (n == 0) { r->eof = 1; return 0; }
+    r->nreads++;
+    if (r->nul == SIZE_MAX) {
+        const char *z = memchr(r->buf + r->len, '\0', (size_t)n);
+        if (z) r->nul = (size_t)(z - r->buf);
+    }
+    r->len += (size_t)n;
+    return 1;
+}
+
+/* Make buf[pos..*lim) a non-empty run of whole lines (the last line of
+ * the input may lack its newline). 1: ok, 0: end of input, -1: error. */
+static int rd_lines(rd_t *r, size_t *lim)
+{
+    size_t lo = r->pos;    /* [pos, lo) is known to hold no newline */
+    for (;;) {
+        size_t i = r->len;
+        while (i > lo && r->buf[i - 1] != '\n') i--;
+        if (i > lo) { *lim = i; return 1; }
+        lo = r->len;
+        if (r->eof) {
+            if (r->len > r->pos) { *lim = r->len; return 1; }
+            return 0;
+        }
+        size_t shift = r->pos;
+        if (rd_fill(r) < 0) return -1;
+        lo -= shift;
     }
 }
 
+/* ------------------------------------------------------------------ */
+/* Search                                                              */
+/* ------------------------------------------------------------------ */
+
+enum { SEL_GO, SEL_STOP, SEL_DONE, SEL_OOM };
+
+typedef struct {
+    const char *filename;
+    int   show_fname;
+    long  count;
+    long  linenum;
+    int   result;
+    int   stop_early;      /* the first selected line decides the result */
+    strbuf_t out;
+} sel_t;
+
 /*
- * Search one open FILE stream for matches.
+ * A selected line in the fast path (no context): count it, and print it
+ * unless -c/-l/-L/-q. SEL_STOP: stop reading (-m, or the result is
+ * decided); SEL_DONE: return at once (-q, -l).
+ */
+static int select_line(grep_opts_t *g, sel_t *s, const char *line, size_t len,
+                       int has_nl, long long off)
+{
+    s->count++;
+    s->result = 0;
+    g_matched_any = 1;
+
+    if (g->opt_q) return SEL_DONE;
+    if (g->opt_L) return s->stop_early ? SEL_STOP : SEL_GO;
+    if (g->opt_l) {
+        if (g->opt_Z && s->filename) {
+            fputs(s->filename, stdout);
+            putc('\0', stdout);
+        } else {
+            fputs(s->filename ? s->filename : "(stdin)", stdout);
+            putc('\n', stdout);
+        }
+        return SEL_DONE;
+    }
+    if (s->stop_early) return SEL_STOP;
+    if (g->opt_c)
+        return (g->max_matches > 0 && s->count >= g->max_matches) ? SEL_STOP : SEL_GO;
+
+    if (g->opt_o) {
+        if (!g->opt_v &&
+            grep_print_only_match(line, len, g, &s->out, s->filename,
+                                  s->show_fname, s->linenum, off) < 0)
+            return SEL_OOM;
+    } else {
+        if (s->show_fname || g->opt_n || g->opt_b) {
+            sb_reset(&s->out);
+            if (grep_print_prefix(&s->out, s->filename, s->show_fname,
+                                  s->linenum, off, g, 0) < 0) return SEL_OOM;
+            out(sb_str(&s->out), sb_len(&s->out));
+        }
+        if (g->opt_color && !g->opt_v) {
+            print_line_color(line, len, g);
+            putc('\n', stdout);
+        } else {
+            out_line(line, len, has_nl);
+        }
+    }
+    if (g->max_matches > 0 && s->count >= g->max_matches) return SEL_STOP;
+    return SEL_GO;
+}
+
+/* Save a line in the before-context ring */
+static int ring_put(char **buf, size_t *blen, long *lnum, long long *boff,
+                    int *pos, int *full, int n, const char *line, size_t len,
+                    long linenum, long long off)
+{
+    char *c = malloc(len + 1);
+    if (!c) return -1;
+    memcpy(c, line, len);
+    c[len] = '\0';
+    free(buf[*pos]);
+    buf[*pos]  = c;
+    blen[*pos] = len;
+    lnum[*pos] = linenum;
+    boff[*pos] = off;
+    *pos = (*pos + 1) % n;
+    if (!*full && *pos == 0) *full = 1;
+    return 0;
+}
+
+/*
+ * Search one open file descriptor for matches.
  * filename: displayed name (NULL if reading from stdin with no label).
  * show_fname: prepend filename to output lines.
  * Returns 0 if matches found, 1 if none, 2 on read error.
  */
-static int grep_stream(FILE *fp, const char *filename,
-                       int show_fname, const grep_opts_t *g)
+static int grep_stream(int fd, const char *filename, int show_fname,
+                       grep_opts_t *g, int is_stdin)
 {
-    char    *linebuf = NULL;
-    size_t   linecap = 0;
-    ssize_t  linelen;
-    long     linenum  = 0;
-    long     byte_offset = 0;  /* -b: track byte position */
-    long     count    = 0;
-    int      binary   = 0;
-    int      binary_matched = 0;   /* pattern found within a binary file */
-    int      result   = 1; /* assume no match */
+    rd_t r;
+    memset(&r, 0, sizeof(r));
+    r.fd  = fd;
+    r.buf = g->rbuf;
+    r.cap = g->rcap;
+    r.nul = SIZE_MAX;
+
+    sel_t s;
+    memset(&s, 0, sizeof(s));
+    s.filename   = filename;
+    s.show_fname = show_fname;
+    s.result     = 1;   /* assume no match */
+    /* Once a line is selected nothing more can be observed: output to
+     * /dev/null, or -L (which prints only files WITHOUT a match). Not for
+     * stdin, whose read offset the next command sees. */
+    s.stop_early = !is_stdin && (g->devnull || (g->opt_L && !g->opt_c));
+
+    int binary = 0;
+    int binary_matched = 0;   /* pattern found within a binary file */
+    int stopped = 0;
+    int ret;
 
     /* Context support */
     int ctx_B = g->context_B;
     int ctx_A = g->context_A;
     int after_left  = 0;
     long last_printed = -1;
+    int line_mode = ctx_A > 0 || ctx_B > 0;
 
-    char  **before_buf  = NULL;
-    long   *before_lnum = NULL;
-    long   *before_boff = NULL;  /* byte offsets for -b */
-    int     before_pos  = 0;
-    int     before_full = 0;
+    char      **before_buf  = NULL;
+    size_t     *before_len  = NULL;
+    long       *before_lnum = NULL;
+    long long  *before_boff = NULL;  /* byte offsets for -b */
+    int         before_pos  = 0;
+    int         before_full = 0;
     if (ctx_B > 0) {
         before_buf  = calloc((size_t)ctx_B, sizeof(char *));
+        before_len  = calloc((size_t)ctx_B, sizeof(size_t));
         before_lnum = calloc((size_t)ctx_B, sizeof(long));
-        before_boff = calloc((size_t)ctx_B, sizeof(long));
-        if (!before_buf || !before_lnum || !before_boff) {
-            free(before_buf); free(before_lnum); free(before_boff);
+        before_boff = calloc((size_t)ctx_B, sizeof(long long));
+        if (!before_buf || !before_len || !before_lnum || !before_boff) {
+            free(before_buf); free(before_len); free(before_lnum); free(before_boff);
             err_msg("grep", "out of memory");
             return 2;
         }
     }
 
-    /* Use a strbuf to build output lines */
-    strbuf_t out;
-    if (sb_init(&out, 256) != 0) {
-        free(before_buf); free(before_lnum); free(before_boff);
+    if (sb_init(&s.out, 256) != 0) {
+        free(before_buf); free(before_len); free(before_lnum); free(before_boff);
         err_msg("grep", "out of memory");
         return 2;
     }
 
-    while ((linelen = getline(&linebuf, &linecap, fp)) >= 0) {
-        long line_start_offset = byte_offset;  /* save offset at start of line */
-        linenum++;
-        byte_offset += linelen;  /* track byte position (includes newline) */
+    for (;;) {
+        size_t lim;
+        int st = rd_lines(&r, &lim);
+        if (st < 0) goto read_error;
+        if (st == 0) break;
 
-        /* Binary detection: check for NUL bytes. A binary file is still
-         * SEARCHED -- GNU grep only reports "Binary file matches" when the
-         * pattern is actually present (exit 1 with no output otherwise).
-         * The old code stopped at the first NUL and reported a match
-         * unconditionally, which made autoconf's float-word-ordering probe
-         * (grep noonsees conftest) see both byte orders at once and abort
-         * cpython's configure. Match each NUL-separated segment. */
-        {
-            int line_has_nul = 0;
-            for (ssize_t k = 0; k < linelen; k++) {
-                if (linebuf[k] == '\0') { line_has_nul = 1; break; }
+        if (!line_mode) {
+            /* Fast path. Stop before a line holding a NUL byte: from there
+             * the file is binary and goes line by line. */
+            size_t stop = lim;
+            if (r.nul != SIZE_MAX && r.nul < lim) {
+                stop = r.nul;
+                while (stop > r.pos && r.buf[stop - 1] != '\n') stop--;
+                line_mode = 1;
             }
-            if (line_has_nul) binary = 1;
+            const char *B = r.buf;
+            size_t p = r.pos, cnt_pos = r.pos;
+            if (g->all_lines && p < stop) {
+                /* Every line matches (x*, the empty pattern...) */
+                int unterm = B[stop - 1] != '\n';
+                if (g->opt_v) {
+                    p = stop;                       /* nothing selected */
+                } else if (g->opt_c && !g->max_matches && !s.stop_early) {
+                    s.count += (long)mb_regex_count_nl(B + p, stop - p) + unterm;
+                    s.result = 0;
+                    g_matched_any = 1;
+                    p = stop;
+                } else if (!g->opt_n && !g->opt_b && !show_fname && !g->opt_o &&
+                           !g->opt_color && !g->opt_c && !g->opt_q && !g->opt_l &&
+                           !g->opt_L && !g->max_matches && !s.stop_early) {
+                    s.count++;
+                    s.result = 0;
+                    g_matched_any = 1;
+                    out(B + p, stop - p);
+                    if (unterm) putc('\n', stdout);
+                    p = stop;
+                }
+            }
+            while (p < stop) {
+                size_t ls = 0, le = 0;
+                int f = mb_regex_scan(g->re, B + p, stop - p, &ls, &le);
+                ls += p;
+                le += p;
+                size_t gap_end = f ? ls : stop;
+
+                if (g->opt_v && gap_end > p) {
+                    /* every line in [p, gap_end) is selected */
+                    if (!g->opt_n && !g->opt_b && !show_fname && !g->opt_o &&
+                        !g->opt_c && !g->opt_q && !g->opt_l && !g->opt_L &&
+                        !g->max_matches && !s.stop_early) {
+                        int nl_end = B[gap_end - 1] == '\n';
+                        s.count++;
+                        s.result = 0;
+                        g_matched_any = 1;
+                        out(B + p, gap_end - p);
+                        if (!nl_end) putc('\n', stdout);
+                    } else if (g->opt_c && !g->max_matches && !s.stop_early) {
+                        s.count += (long)mb_regex_count_nl(B + p, gap_end - p);
+                        if (B[gap_end - 1] != '\n') s.count++;
+                        s.result = 0;
+                        g_matched_any = 1;
+                    } else {
+                        while (p < gap_end) {
+                            const char *e = memchr(B + p, '\n', gap_end - p);
+                            size_t le2 = e ? (size_t)(e - B) : gap_end;
+                            if (g->opt_n) {
+                                s.linenum += (long)mb_regex_count_nl(B + cnt_pos, p - cnt_pos) + 1;
+                                cnt_pos = e ? le2 + 1 : gap_end;
+                            }
+                            int act = select_line(g, &s, B + p, le2 - p, e != NULL,
+                                                  r.base + (long long)p);
+                            p = e ? le2 + 1 : gap_end;
+                            if (act == SEL_OOM) goto oom;
+                            if (act == SEL_DONE) { r.pos = p; goto done; }
+                            if (act == SEL_STOP) { stopped = 1; break; }
+                        }
+                        if (stopped) break;
+                    }
+                }
+                if (!f) { p = stop; break; }
+
+                size_t a = ls, b = le;
+                int has_nl = b < stop;
+                size_t nxt = has_nl ? b + 1 : stop;
+                if (!g->opt_v) {
+                    if (g->opt_n) {
+                        s.linenum += (long)mb_regex_count_nl(B + cnt_pos, a - cnt_pos) + 1;
+                        cnt_pos = nxt;
+                    }
+                    int act = select_line(g, &s, B + a, b - a, has_nl,
+                                          r.base + (long long)a);
+                    p = nxt;
+                    if (act == SEL_OOM) goto oom;
+                    if (act == SEL_DONE) { r.pos = p; goto done; }
+                    if (act == SEL_STOP) { stopped = 1; break; }
+                } else {
+                    p = nxt;
+                }
+            }
+            if (g->opt_n && !stopped)
+                s.linenum += (long)mb_regex_count_nl(B + cnt_pos, p - cnt_pos);
+            r.pos = p;
+            if (stopped) break;
+            if (!line_mode) continue;
+            lim = (r.pos < lim) ? lim : r.pos;
         }
-        if (binary) {
-            if (!binary_matched) {
-                ssize_t blen = linelen;
-                if (blen > 0 && linebuf[blen - 1] == '\n')
-                    linebuf[--blen] = '\0';
-                const char *seg = linebuf;
-                const char *bend = linebuf + blen;
-                while (seg < bend + 1) {
-                    if (*seg && line_matches_any(seg, g)) {
-                        binary_matched = 1;
+
+        /* Line by line: context, binary files */
+        while (r.pos < lim) {
+            char  *line = r.buf + r.pos;
+            char  *e    = memchr(line, '\n', lim - r.pos);
+            size_t linelen = e ? (size_t)(e - line) : lim - r.pos;
+            long long line_start_offset = r.base + (long long)r.pos;
+            r.pos += linelen + (e ? 1 : 0);
+            s.linenum++;
+            long linenum = s.linenum;
+
+            /* Binary detection: check for NUL bytes. A binary file is still
+             * SEARCHED -- GNU grep only reports "Binary file matches" when the
+             * pattern is actually present (exit 1 with no output otherwise).
+             * Match each NUL-separated segment. */
+            if (!binary && memchr(line, '\0', linelen)) binary = 1;
+            if (binary) {
+                if (!binary_matched) {
+                    const char *seg = line, *bend = line + linelen;
+                    for (;;) {
+                        const char *z = memchr(seg, '\0', (size_t)(bend - seg));
+                        size_t sl = z ? (size_t)(z - seg) : (size_t)(bend - seg);
+                        if (sl > 0 && mb_regex_line(g->re, seg, sl)) {
+                            binary_matched = 1;
+                            break;
+                        }
+                        if (!z) break;
+                        seg = z + 1;
+                    }
+                }
+                if (s.stop_early && binary_matched && !g->opt_v) { stopped = 1; break; }
+                continue;
+            }
+
+            int matched = mb_regex_line(g->re, line, linelen);
+            if (g->opt_v) matched = !matched;
+
+            /* Past the -m limit (only reachable with -A): GNU prints further
+             * lines, matching or not, as trailing context, then stops. */
+            int past_limit = g->max_matches > 0 && s.count >= g->max_matches;
+            if (past_limit) matched = 0;
+
+            if (!matched) {
+                /* Print as after-context if needed */
+                if (after_left > 0 && !g->opt_c && !g->opt_q && !g->opt_l && !g->opt_L) {
+                    /* With -o, GNU prints no context lines, but they still
+                     * join groups, so "--" appears only between real gaps. */
+                    if (!g->opt_o) {
+                        sb_reset(&s.out);
+                        if (grep_print_prefix(&s.out, filename, show_fname,
+                                              linenum, line_start_offset, g, 1) < 0) goto oom;
+                        out(sb_str(&s.out), sb_len(&s.out));
+                        out(line, linelen);
+                        putc('\n', stdout);
+                    }
+                    last_printed = linenum;
+                    after_left--;
+                }
+                /* -m: the trailing context is done, stop reading (so the rest
+                 * of a seekable stdin is left for the next command). */
+                if (past_limit && after_left <= 0) { stopped = 1; break; }
+                /* Store in before-context ring buffer */
+                if (ctx_B > 0 &&
+                    ring_put(before_buf, before_len, before_lnum, before_boff,
+                             &before_pos, &before_full, ctx_B, line, linelen,
+                             linenum, line_start_offset) < 0) goto oom;
+                continue;
+            }
+
+            s.count++;
+            s.result = 0;
+            g_matched_any = 1;
+
+            if (g->opt_q) goto done;
+            if (g->opt_L) {
+                if (s.stop_early) { stopped = 1; break; }
+                continue; /* suppress output; track match status only */
+            }
+            if (g->opt_l) {
+                if (g->opt_Z && filename) {
+                    fputs(filename, stdout);
+                    putc('\0', stdout);
+                } else {
+                    fputs(filename ? filename : "(stdin)", stdout);
+                    putc('\n', stdout);
+                }
+                goto done;
+            }
+            if (s.stop_early) { stopped = 1; break; }
+            if (g->opt_c) {
+                if (ctx_B > 0 &&
+                    ring_put(before_buf, before_len, before_lnum, before_boff,
+                             &before_pos, &before_full, ctx_B, line, linelen,
+                             linenum, line_start_offset) < 0) goto oom;
+                if (g->max_matches > 0 && s.count >= g->max_matches) { stopped = 1; break; }
+                continue;
+            }
+
+            /* Print separator between context groups. The group starts at
+             * the first before-context line still to be printed. */
+            int n_avail = 0, bstart = 0;
+            long first_line = linenum;
+            if (ctx_B > 0) {
+                n_avail = before_full ? ctx_B : before_pos;
+                bstart  = before_full ? before_pos : 0;
+                for (int k = 0; k < n_avail; k++) {
+                    int idx = (bstart + k) % ctx_B;
+                    if (before_buf[idx] && before_lnum[idx] > last_printed) {
+                        first_line = before_lnum[idx];
                         break;
                     }
-                    seg += strlen(seg) + 1;
                 }
             }
-            continue;
-        }
-
-        /* Strip trailing newline for matching */
-        if (linelen > 0 && linebuf[linelen - 1] == '\n') {
-            linebuf[linelen - 1] = '\0';
-            linelen--;
-        }
-
-        /* Prefilter: if the required first char is absent, the line cannot
-         * match, so skip the regex. It must still go through the non-match
-         * path below: it may be after-context of an earlier match (-A).
-         * Skipping the line outright used to drop it from -A output. */
-        int matched = 0;
-        if (!g->prefilter_char ||
-            memchr(linebuf, g->prefilter_char, (size_t)linelen))
-            matched = line_matches_any(linebuf, g);
-        if (g->opt_v) matched = !matched;
-
-        /* Past the -m limit (only reachable with -A): GNU prints further
-         * lines, matching or not, as trailing context, then stops. A
-         * matching line used to end the context early. */
-        int past_limit = g->max_matches > 0 && count >= g->max_matches;
-        if (past_limit) matched = 0;
-
-        if (!matched) {
-            /* Print as after-context if needed */
-            if (after_left > 0 && !g->opt_c && !g->opt_q && !g->opt_l && !g->opt_L) {
-                /* With -o, GNU prints no context lines, but they still
-                 * join groups, so "--" appears only between real gaps. */
-                if (!g->opt_o) {
-                    sb_reset(&out);
-                    if (grep_print_prefix(&out, filename, show_fname,
-                                           linenum, line_start_offset, g, 1) < 0) goto oom;
-                    fputs(sb_str(&out), stdout);
-                    fputs(linebuf, stdout);
-                    putchar('\n');
-                }
-                last_printed = linenum;
-                after_left--;
+            if ((ctx_A > 0 || ctx_B > 0) &&
+                ((last_printed >= 0 && last_printed < first_line - 1) ||
+                 (last_printed < 0 && g_ctx_output))) {
+                fputs("--\n", stdout);
             }
-            /* -m: the trailing context is done, stop reading (so the rest
-             * of a seekable stdin is left for the next command). */
-            if (past_limit && after_left <= 0)
-                break;
-            /* Store in before-context ring buffer */
+            g_ctx_output = 1;
+
+            /* Print before-context lines (not with -o, as in GNU) */
             if (ctx_B > 0) {
-                free(before_buf[before_pos]);
-                before_buf[before_pos]  = strdup(linebuf);
-                before_lnum[before_pos] = linenum;
-                before_boff[before_pos] = line_start_offset;
-                before_pos = (before_pos + 1) % ctx_B;
-                if (!before_full && before_pos == 0) before_full = 1;
+                for (int k = 0; k < n_avail; k++) {
+                    int idx = (bstart + k) % ctx_B;
+                    if (!before_buf[idx] || before_lnum[idx] <= last_printed) continue;
+                    if (!g->opt_o) {
+                        sb_reset(&s.out);
+                        if (grep_print_prefix(&s.out, filename, show_fname,
+                                              before_lnum[idx], before_boff[idx], g, 1) < 0) goto oom;
+                        out(sb_str(&s.out), sb_len(&s.out));
+                        out(before_buf[idx], before_len[idx]);
+                        putc('\n', stdout);
+                    }
+                    last_printed = before_lnum[idx];
+                }
+                for (int k = 0; k < ctx_B; k++) {
+                    free(before_buf[k]); before_buf[k] = NULL;
+                    before_lnum[k] = 0; before_boff[k] = 0; before_len[k] = 0;
+                }
+                before_pos = 0; before_full = 0;
             }
-            continue;
-        }
 
-        count++;
-        result = 0;
-        g_matched_any = 1;
-
-        if (g->opt_q) goto done;
-        if (g->opt_L) continue; /* suppress output; track match status only */
-        if (g->opt_l) {
-            if (g->opt_Z && filename) {
-                printf("%s%c", filename, '\0');
+            /* Print this matched line */
+            if (g->opt_o) {
+                if (!g->opt_v &&
+                    grep_print_only_match(line, linelen, g, &s.out, filename,
+                                          show_fname, linenum,
+                                          line_start_offset) < 0)
+                    goto oom;
             } else {
-                printf("%s\n", filename ? filename : "(stdin)");
+                sb_reset(&s.out);
+                if (grep_print_prefix(&s.out, filename, show_fname, linenum,
+                                      line_start_offset, g, 0) < 0) goto oom;
+                out(sb_str(&s.out), sb_len(&s.out));
+                if (g->opt_color && !g->opt_v && g->npatterns > 0)
+                    print_line_color(line, linelen, g);
+                else
+                    out(line, linelen);
+                putc('\n', stdout);
             }
-            goto done;
-        }
-        if (g->opt_c) {
-            if (ctx_B > 0) {
-                free(before_buf[before_pos]);
-                before_buf[before_pos]  = strdup(linebuf);
-                before_lnum[before_pos] = linenum;
-                before_boff[before_pos] = line_start_offset;
-                before_pos = (before_pos + 1) % ctx_B;
-                if (!before_full && before_pos == 0) before_full = 1;
-            }
-            if (g->max_matches > 0 && count >= g->max_matches)
+            last_printed = linenum;
+            after_left   = ctx_A;
+
+            if (ctx_B > 0 &&
+                ring_put(before_buf, before_len, before_lnum, before_boff,
+                         &before_pos, &before_full, ctx_B, line, linelen,
+                         linenum, line_start_offset) < 0) goto oom;
+
+            /* -m N: stop reading right after the Nth match (GNU), so the rest of
+             * a seekable stdin is left for the next reader -- `{ grep -m1 x;
+             * cat; } <f`. With -A, keep going for the trailing context. */
+            if (g->max_matches > 0 && s.count >= g->max_matches && ctx_A == 0) {
+                stopped = 1;
                 break;
-            continue;
-        }
-
-        /* Print separator between context groups. The group starts at
-         * the first before-context line still to be printed, not at this
-         * match: comparing with the match printed "--" between touching
-         * groups (grep -B1 on a,x,a gave a,--,x,a). */
-        int n_avail = 0, bstart = 0;
-        long first_line = linenum;
-        if (ctx_B > 0) {
-            n_avail = before_full ? ctx_B : before_pos;
-            bstart  = before_full ? before_pos : 0;
-            for (int k = 0; k < n_avail; k++) {
-                int idx = (bstart + k) % ctx_B;
-                if (before_buf[idx] && before_lnum[idx] > last_printed) {
-                    first_line = before_lnum[idx];
-                    break;
-                }
             }
         }
-        if ((ctx_A > 0 || ctx_B > 0) &&
-            ((last_printed >= 0 && last_printed < first_line - 1) ||
-             (last_printed < 0 && g_ctx_output))) {
-            puts("--");
-        }
-        g_ctx_output = 1;
-
-        /* Print before-context lines (not with -o, as in GNU) */
-        if (ctx_B > 0) {
-            for (int k = 0; k < n_avail; k++) {
-                int idx = (bstart + k) % ctx_B;
-                if (!before_buf[idx] || before_lnum[idx] <= last_printed) continue;
-                if (!g->opt_o) {
-                    sb_reset(&out);
-                    if (grep_print_prefix(&out, filename, show_fname,
-                                           before_lnum[idx], before_boff[idx], g, 1) < 0) goto oom;
-                    fputs(sb_str(&out), stdout);
-                    fputs(before_buf[idx], stdout);
-                    putchar('\n');
-                }
-                last_printed = before_lnum[idx];
-            }
-            for (int k = 0; k < ctx_B; k++) {
-                free(before_buf[k]); before_buf[k] = NULL;
-                before_lnum[k] = 0; before_boff[k] = 0;
-            }
-            before_pos = 0; before_full = 0;
-        }
-
-        /* Build prefix for this matched line */
-        sb_reset(&out);
-        if (grep_print_prefix(&out, filename, show_fname, linenum, line_start_offset, g, 0) < 0)
-            goto oom;
-        const char *prefix_str = sb_str(&out);
-
-        if (g->opt_o) {
-            grep_print_only_match(linebuf, g, prefix_str);
-        } else {
-            fputs(prefix_str, stdout);
-            if (g->opt_color && !g->opt_v && g->npatterns > 0) {
-                print_line_color(linebuf, g);
-            } else {
-                fputs(linebuf, stdout);
-            }
-            putchar('\n');
-        }
-        last_printed = linenum;
-        after_left   = ctx_A;
-
-        if (ctx_B > 0) {
-            free(before_buf[before_pos]);
-            before_buf[before_pos]  = strdup(linebuf);
-            before_lnum[before_pos] = linenum;
-            before_boff[before_pos] = line_start_offset;
-            before_pos = (before_pos + 1) % ctx_B;
-            if (!before_full && before_pos == 0) before_full = 1;
-        }
-
-        /* -m N: stop reading right after the Nth match (GNU), so the rest of
-         * a seekable stdin is left for the next reader -- `{ grep -m1 x;
-         * cat; } <f`. With -A, keep going for the trailing context. */
-        if (g->max_matches > 0 && count >= g->max_matches && ctx_A == 0)
-            break;
-    }
-
-    if (ferror(fp)) {
-        if (!g->opt_s && filename)
-            err_sys("grep", "%s", filename);
-        goto cleanup_err;
+        if (stopped) break;
     }
 
     if (binary) {
@@ -668,41 +793,49 @@ static int grep_stream(FILE *fp, const char *filename,
             } else if (g->opt_l && filename) {
                 printf("%s\n", filename);
             }
-            result = 0;
+            s.result = 0;
             g_matched_any = 1;
-        } else {
-            result = 1;
         }
+        /* else: a text line before the first NUL may already have matched
+         * (and been printed); that still counts as a match. */
     }
 
     if (g->opt_c) {
         if (show_fname && filename)
-            printf("%s:%ld\n", filename, count);
+            printf("%s:%ld\n", filename, s.count);
         else
-            printf("%ld\n", count);
-        if (count > 0)
-            result = 0;
+            printf("%ld\n", s.count);
+        if (s.count > 0)
+            s.result = 0;
     }
 
 done:
-    if (ctx_B > 0) {
-        for (int k = 0; k < ctx_B; k++) free(before_buf[k]);
-        free(before_buf); free(before_lnum); free(before_boff);
-    }
-    sb_free(&out);
-    free(linebuf);
-    return result;
+    ret = s.result;
+    goto cleanup;
+
+read_error:
+    if (!g->opt_s && filename)
+        err_sys("grep", "%s", filename);
+    ret = 2;
+    goto cleanup;
 
 oom:
     err_msg("grep", "out of memory building output line");
-cleanup_err:
+    ret = 2;
+
+cleanup:
+    /* Stopped early: hand the unread input back to a seekable stdin, so
+     * the next command reads on from just after the last line used. */
+    if (is_stdin && r.pos < r.len)
+        (void)lseek(fd, -(off_t)(r.len - r.pos), SEEK_CUR);
     if (ctx_B > 0) {
         for (int k = 0; k < ctx_B; k++) free(before_buf[k]);
-        free(before_buf); free(before_lnum); free(before_boff);
+        free(before_buf); free(before_len); free(before_lnum); free(before_boff);
     }
-    sb_free(&out);
-    free(linebuf);
-    return 2;
+    sb_free(&s.out);
+    g->rbuf = r.buf;
+    g->rcap = r.cap;
+    return ret;
 }
 
 /* Check if filename matches any exclude glob or fails include globs. */
@@ -728,10 +861,10 @@ static int glob_excluded(const char *basename, const grep_opts_t *g)
 
 /* Forward declaration for recursive use */
 static int grep_path(const char *path, int show_fname, int in_recursion,
-                    const grep_opts_t *g);
+                    grep_opts_t *g);
 
 /* Recursively grep a directory. */
-static int grep_dir(const char *dirpath, const grep_opts_t *g)
+static int grep_dir(const char *dirpath, grep_opts_t *g)
 {
     DIR *dir = opendir(dirpath);
     if (!dir) {
@@ -783,11 +916,11 @@ static int grep_dir(const char *dirpath, const grep_opts_t *g)
 
 /* Grep one path (file or directory). show_fname: prepend filename. */
 static int grep_path(const char *path, int show_fname, int in_recursion,
-                    const grep_opts_t *g)
+                    grep_opts_t *g)
 {
     /* POSIX: "-" means stdin */
     if (strcmp(path, "-") == 0) {
-        return grep_stream(stdin, "(standard input)", show_fname, g);
+        return grep_stream(STDIN_FILENO, "(standard input)", show_fname, g, 1);
     }
 
     /* stat() for a path the user NAMED, lstat() only while recursing.
@@ -849,23 +982,16 @@ static int grep_path(const char *path, int show_fname, int in_recursion,
         }
     }
 
-    FILE *fp = fopen(path, "r");
-    if (!fp) {
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
         if (!g->opt_s)
             err_sys("grep", "%s", path);
         return 2;
     }
+    posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL); /* advisory */
 
-    posix_fadvise(fileno(fp), 0, 0, POSIX_FADV_SEQUENTIAL); /* advisory */
-    /* Enlarge stdio read buffer to reduce getline() syscall overhead.
-     * Must supply an explicit buffer — passing NULL to setvbuf() still uses
-     * glibc's internal 4KB allocation.  With a 128KB explicit buffer the
-     * read() count drops from ~136 to ~5 for a 550KB file. */
-    static char grep_iobuf[GREP_STDIO_BUFSZ];
-    setvbuf(fp, grep_iobuf, _IOFBF, sizeof(grep_iobuf));
-
-    int r = grep_stream(fp, path, show_fname, g);
-    fclose(fp);
+    int r = grep_stream(fd, path, show_fname, g, 0);
+    close(fd);
     /* -L: print filename of files with NO match */
     if (g->opt_L && r == 1) {
         if (g->opt_Z) {
@@ -923,12 +1049,19 @@ static void grep_opts_free(grep_opts_t *g)
     for (int i = 0; i < g->npatterns; i++) {
         free(g->patterns[i]);
         g->patterns[i] = NULL;
-        if (g->compiled_ok[i] && g->mb_compiled[i])
-            mb_regex_free(g->mb_compiled[i]);
-        g->compiled_ok[i] = 0;
-        g->mb_compiled[i] = NULL;
     }
     g->npatterns = 0;
+    if (g->re) { mb_regex_free(g->re); g->re = NULL; }
+    /* The input buffer is kept for the next run (inside `silex sh` grep is
+     * a function call, often a short one): unless a long line grew it. */
+    if (g->rbuf && g->rcap <= GREP_KEEP_BUF) {
+        g_rbuf = g->rbuf;
+        g_rcap = g->rcap;
+    } else {
+        free(g->rbuf);
+    }
+    g->rbuf = NULL;
+    g->rcap = 0;
     if (g->vcs_ign) { vcsignore_free(g->vcs_ign); g->vcs_ign = NULL; }
 }
 
@@ -945,6 +1078,10 @@ int applet_grep(int argc, char **argv)
      * once made every later `grep -q` in the same shell exit 0. */
     g_matched_any = 0;
     g_ctx_output = 0;
+    g.rbuf = g_rbuf;
+    g.rcap = g_rcap;
+    g_rbuf = NULL;
+    g_rcap = 0;
 
     /* SILEX_SMART=1: enable smart-case and VCS-aware mode by default.
      * Read getenv once: a second call is not guaranteed to return the same
@@ -969,6 +1106,7 @@ int applet_grep(int argc, char **argv)
     static const opt_long_t longs[] = {
         { "extended-regexp",    OPT_BARE,              'E'       },
         { "fixed-strings",      OPT_BARE,              'F'       },
+        { "basic-regexp",       OPT_BARE,              'G'       },
         { "count",              OPT_BARE,              'c'       },
         { "ignore-case",        OPT_BARE,              'i'       },
         { "files-with-matches", OPT_BARE,              'l'       },
@@ -992,11 +1130,12 @@ int applet_grep(int argc, char **argv)
     opt_t o;
     int c;
 
-    opt_init(&o, argc, argv, "EFcilLHhnqsvwrRoxbZSm:A:B:C:e:f:", longs, 0);
+    opt_init(&o, argc, argv, "EFGcilLHhnqsvwrRoxbZSm:A:B:C:e:f:", longs, 0);
     while ((c = opt_next(&o)) != OPT_DONE) {
         switch (c) {
         case 'E': g.opt_E = 1; break;
         case 'F': g.opt_F = 1; break;
+        case 'G': g.opt_G = 1; break;
         case 'c': g.opt_c = 1; break;
         case 'i': g.opt_i = 1; break;
         case 'l': g.opt_l = 1; break;
@@ -1033,12 +1172,13 @@ int applet_grep(int argc, char **argv)
             if (g.n_exclude >= MAX_GLOBS) { err_msg("grep", "too many --exclude globs"); goto parse_error; }
             g.exclude_globs[g.n_exclude++] = (char *)o.arg;
             break;
-        case 'm': g.max_matches = atoi(o.arg); break;
+        case 'm': g.max_matches = atoi(o.arg); g.max_given = 1; break;
         case 'A': g.context_A = atoi(o.arg); break;
         case 'B': g.context_B = atoi(o.arg); break;
         case 'C': g.context_A = g.context_B = atoi(o.arg); break;
         case 'e':
         case L_REGEXP:
+            g.pattern_given = 1;
             if (g.npatterns >= MAX_PATTERNS) {
                 err_msg("grep", "too many patterns");
                 goto parse_error;
@@ -1052,6 +1192,7 @@ int applet_grep(int argc, char **argv)
             break;
         case 'f':
         case L_FILE:
+            g.pattern_given = 1;
             if (load_pattern_file(o.arg, &g) != 0)
                 goto parse_error;
             break;
@@ -1088,8 +1229,16 @@ int applet_grep(int argc, char **argv)
     }
     int i = o.ind;
 
-    /* If no -e/-f patterns, first non-option arg is the pattern */
-    if (g.npatterns == 0) {
+    /* -G names the default matcher; together with -E or -F it is a
+     * conflict, as in GNU grep. */
+    if (g.opt_G && (g.opt_E || g.opt_F)) {
+        err_msg("grep", "conflicting matchers specified");
+        goto parse_error;
+    }
+
+    /* If no -e/-f patterns, first non-option arg is the pattern. An -f
+     * file with no lines gives no patterns at all: nothing matches. */
+    if (g.npatterns == 0 && !g.pattern_given) {
         if (i >= argc) {
             err_usage("grep", "[-EFciln qsvwrR] [-e PAT] [-f FILE] PATTERN [FILE...]");
             goto parse_error;
@@ -1121,12 +1270,37 @@ int applet_grep(int argc, char **argv)
         g.vcs_ign = vcsignore_load(vcs_root);
     }
 
-    /* Compile regex patterns unless -F */
-    if (!g.opt_F) {
-        if (compile_patterns(&g) != 0) {
+    if (compile_patterns(&g) != 0) {
+        grep_opts_free(&g);
+        goto parse_error;
+    }
+
+    /* GNU quits without reading any input when nothing can be selected:
+     * -m 0, or -v with only empty patterns (which match every line), or no
+     * patterns at all (-f /dev/null) without -v. No output, not even -c's
+     * count, and no diagnostics for unreadable files. Not for -L, which
+     * lists exactly the files where nothing was selected. */
+    if (!g.opt_L) {
+        int all_empty = 1;
+        for (int k = 0; k < g.npatterns && all_empty; k++)
+            if (g.patterns[k][strspn(g.patterns[k], "\n")] != '\0') all_empty = 0;
+        int nokeys = g.npatterns == 0;
+        int inv = g.opt_v ^ nokeys;
+        if ((g.max_given && g.max_matches == 0) ||
+            (all_empty && inv && (nokeys || (!g.opt_x && !g.opt_w)))) {
             grep_opts_free(&g);
-            goto parse_error;
+            return 1;
         }
+    }
+
+    g.all_lines = mb_regex_all_lines(g.re);
+
+    /* Output to /dev/null (GNU's test: same inode as /dev/null) */
+    {
+        struct stat so, sn;
+        g.devnull = fstat(STDOUT_FILENO, &so) == 0 && S_ISCHR(so.st_mode) &&
+                    stat("/dev/null", &sn) == 0 &&
+                    so.st_ino == sn.st_ino && so.st_dev == sn.st_dev;
     }
 
     int final_result = 1; /* no match yet */
@@ -1140,7 +1314,17 @@ int applet_grep(int argc, char **argv)
 
     if (nfiles == 0) {
         /* Read from stdin */
-        int r = grep_stream(stdin, NULL, 0, &g);
+        /* named "(standard input)" for -H, -l, -L and errors, as in GNU */
+        int r = grep_stream(STDIN_FILENO, "(standard input)",
+                            g.opt_H && !g.opt_h, &g, 1);
+        if (g.opt_L && r == 1) {
+            if (g.opt_Z) {
+                fputs("(standard input)", stdout);
+                putc('\0', stdout);
+            } else {
+                puts("(standard input)");
+            }
+        }
         if (r == 0)
             final_result = 0;
         else if (r == 2)

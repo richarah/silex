@@ -206,13 +206,20 @@ All silex builtins implement the following POSIX utility conventions:
 
 | Flag | POSIX | GNU | silex | Module | Notes |
 |------|-------|-----|----------|--------|-------|
-| -E/-F | Y | Y | Y | - | |
+| -E/-F | Y | Y | Y | - | -E with -F: -F wins (GNU: error) |
+| -G / --basic-regexp | N | Y | Y | - | with -E or -F: "conflicting matchers specified" |
 | -c/-i/-l/-n/-q/-s/-v | Y | Y | Y | - | |
-| -e/-f | Y | Y | Y | - | |
+| -e/-f | Y | Y | Y | - | a newline in a pattern separates patterns |
+| -x/-o/-b/-m/-A/-B/-C/-H/-h/-L/-Z | N | Y | Y | - | -o -b prints each match's offset |
 | -r/-R | N | Y | Y | - | |
-| -w | N | Y | Y | - | |
+| -w | N | Y | Y | - | GNU rules, incl. retrying shorter matches |
+| `\<` `\>` `\b` `\B` `\w` `\W` `\s` `\S` `` \` `` `\'` | N | Y | Y | - | GNU regex extensions |
+| back-references `\1`-`\9` | Y | Y | Y | - | matched by libc regexec() (POSIX syntax on musl) |
 | --include/--exclude | N | Y | Y | - | |
-| --color | N | Y | Y | - | |
+| --color | N | Y | Y | - | the escape sequences are not byte-identical to GNU's (no `\33[K`, `\33[0m` instead of `\33[m`) |
+| -z/--null-data, --line-buffered, --label, -I, --binary-files | N | Y | N | - | not implemented: unrecognised option, exit 2 |
+| options after the first operand | N | Y | N | - | silex stops reading options at the first operand (POSIX), so `grep PAT FILE -c` treats `-c` as a file; GNU accepts it |
+| files with NUL bytes | N | Y | partly | - | the message is `Binary file NAME matches` on stdout and `-c` stops counting at the first NUL; GNU prints its message on stderr |
 | -P (PCRE) | N | Y | N | Y | grep_pcre.so |
 
 ## sed
@@ -300,6 +307,18 @@ or missing required arguments; the tool prints a message to stderr and exits 2.
 **grep exit codes** match POSIX strictly: 0 if any line matched, 1 if no line matched,
 2 if an error occurred (file not found, bad pattern, etc.). This differs from GNU grep
 only in that silex grep does not use exit code 2 for `--quiet` suppression.
+
+**grep patterns** are parsed with GNU grep's rules (dfa.c grammar, glibc's
+error checks) and give GNU grep's results in the C locale; invalid patterns
+are reported as `silex: grep: invalid regex 'PAT': MSG` with GNU's MSG.
+Two known differences: `{}` right after an assertion, as in `\w\>{}`, is rejected as an invalid
+interval (GNU takes it as text), and patterns with back-references are compiled by libc, so a
+stacked repeat such as `\(a\)\1\{1,2\}*` is rejected there too. A 60,000-case random comparison
+with GNU grep found only the first.
+Differences that remain: binary files (a file is treated as binary from its
+first NUL line on and reported as `Binary file F matches`), and, on musl,
+back-reference patterns using GNU extensions (musl's regcomp lacks them) or
+stacked repetitions in a BRE (`a\?\{2\}`), which POSIX regcomp rejects.
 
 **Shell (sh) exit codes**: the shell exits with the exit status of the last command
 executed. With `set -e`, the shell exits immediately when any command exits non-zero

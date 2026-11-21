@@ -684,6 +684,35 @@ run_test "grep: -r recursive" \
 run_test "grep: -m max count" \
     "grep -m 2 a $T/fruits.txt" "grep -m 2 a $T/fruits.txt" "grep"
 
+# These compare with the system grep, so they only make sense against GNU grep
+# (BusyBox grep, as on Alpine, differs on -w/-o, -b, \| and {,n}).
+if grep --version 2>&1 | grep -q 'GNU grep'; then
+# The regex engine against the system grep: GNU extensions, -w/-o rules,
+# multiple patterns, the literal prefilter and the DFA. Inputs are files so
+# that grep is the first word (see the note below).
+printf 'hello world\nworldly hello\nfoo bar1\nxfoo foo foox\nfoobar foo\nab cd\n- a\nGET /api/v1/users\nkernel module status=404 id=12\n\nend\n' > "$T/re.txt"
+for _args in \
+    "-o '\<w[a-z]*'" "-o 'o\>'" "-c '\bfoo\b'" "'\Bar'" "-o '\w\+'" "-c '\W'" \
+    "-c '\s'" "-o '\S\+'" "-ow '[a-z ]*'" "-w '[a-z ]*'" "-ow 'foo\|foobar'" \
+    "-ob 'o'" "-nb 'foo'" "-nbo 'o'" "-x 'end'" "-xv 'end'" "-c ''" "-vc 'o'" \
+    "-E 'GET /api/v[0-9]+/users'" "-E 'status=[45]0[0-9]'" "-iE 'HELLO|KERNEL'" \
+    "-E 'foo|bar|baz'" "-oE 'foo|bar'" "-cE '(foo|bar)+'" "-e foo -e bar" \
+    "-w -e foo -e foobar" "-F -e 'a.b' -e foo" "-Fx end" "-Fw foo" "-wi FOO" \
+    "-G 'a\|b'" "-c 'x*'" "-n '^$'" "-E 'a{,2}b'" "-E 'x)'" "-o '[[:digit:]]\{2\}'" \
+    "-m 1 -n o" "-A 1 'foo bar1'" "-B 1 -n end" "-C 1 kernel"; do
+    run_test "grep: engine $_args" "grep $_args $T/re.txt" "grep $_args $T/re.txt" "grep"
+done
+run_test "grep: empty pattern with -v selects nothing" \
+    "grep -v '' $T/re.txt; echo \$?" "grep -v '' $T/re.txt; echo \$?" "grep"
+run_test "grep: -f /dev/null matches nothing" \
+    "grep -f /dev/null $T/re.txt; echo \$?" "grep -f /dev/null $T/re.txt; echo \$?" "grep"
+run_test "grep: -m 0" "grep -m 0 o $T/re.txt; echo \$?" "grep -m 0 o $T/re.txt; echo \$?" "grep"
+run_test "grep: no trailing newline" \
+    "grep -c '^no newline$' $T/nonewline.txt" "grep -c '^no newline$' $T/nonewline.txt" "grep"
+else
+    skip_test "grep: regex engine cases (the system grep is not GNU grep)"
+fi
+
 # COV-04: POSIX character classes (exercises charclass_re.c)
 #
 # READ THIS BEFORE ADDING A PIPELINE TO ANY TEST IN THIS FILE.

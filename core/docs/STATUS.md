@@ -14,7 +14,7 @@
 | Core builtins | 27 (`src/core/`) |
 | Shell | 8 (`src/shell/`) |
 | Utilities | 15 (`src/util/`) |
-| Regex engine | 6 (`src/util/regex/`) |
+| Regex engine | 7 (`src/util/regex/`) |
 | Module system | 2 (`src/module/`) |
 | Batch I/O | 3 (`src/batch/`) |
 | Cache | 2 (`src/cache/`) |
@@ -107,7 +107,7 @@ Remaining gap:
 | B-8 | XC-02 dead command elimination: `mkdir -p` skipped when dirs confirmed in fscache | DONE |
 | B-9 | io_uring: skip for single-op batches (use direct syscall) | DONE |
 
-Regex classifier dispatch order: BMH (literal) → prefix-anchor → full Thompson NFA.
+Regex engine (2026-11, OPTIMISATIONS.md O-22..O-29): GNU BRE/ERE parser → literal prefilter (SIMD) → lazy DFA; libc `regexec()` only for back-references. (The 2026-03 BMH → prefix-anchor → Thompson NFA dispatch, and its "closes the gap" claim, are gone.)
 
 ---
 
@@ -125,9 +125,9 @@ Audit performed 2026-03-30. All FAIL/MISSING items were fixed.
 | Intern table | String length bound | MISSING | FIXED: rejects `n > PATH_MAX`; returns original ptr |
 | `fscache` | Entry count cap | MISSING | FIXED: `FSCACHE_MAX_ENTRIES = 100 000`; skips caching at cap |
 | Module registry | Entry count cap | MISSING | FIXED: `REGISTRY_MAX_ENTRIES = 1 024`; `registry_count` tracking |
-| Thompson `addstate()` | Recursion depth guard | FAIL (depth unbounded up to `MB_MAX_INSTRS`) | FIXED: `depth` parameter; returns at `MB_MAX_INSTRS` |
-| DFA cache | Slot count cap | PASS | `DFA_CACHE_MAX = 256` (pre-existing) |
-| NFA bytecode | Instruction count cap | PASS | `MB_MAX_INSTRS = 4096` (pre-existing) |
+| Thompson `addstate()` | Recursion depth guard | FAIL (depth unbounded up to `MB_MAX_INSTRS`) | FIXED: `depth` parameter; returns at `MB_MAX_INSTRS`. (2026-11: replaced; the DFA's closure uses an explicit stack, no recursion) |
+| DFA cache | Slot count cap | PASS | `DFA_CACHE_MAX = 256` (pre-existing). 2026-11: `MAX_STATES = 10 000` and 16 MB of state sets per DFA, flushed when full |
+| NFA bytecode | Instruction count cap | PASS | `MB_MAX_INSTRS = 4096` (pre-existing). 2026-11: `SX_MAX_INSTRS = 2M`; larger patterns fail with "Regular expression too big" |
 | io_uring queue | Depth cap | PASS | 256 (pre-existing) |
 | Stack usage | VLA with user-controlled size | PASS | None present |
 | Stack usage | Recursion cap | PASS | `SHELL_MAX_CALL_DEPTH = 1000` in exec.c |
@@ -169,11 +169,11 @@ Measured on host (glibc dynamic build, x86-64-v3, no musl).
 | Metric | silex | Reference | Ratio |
 |--------|----------|-----------|-------|
 | Startup latency (`sh -c 'exit 0'`, 100 iters) | ~690 µs | ~670 µs (dash) | 1.03× |
-| `grep` 10 000-line file (100 iters) | 1.48 ms/iter | 0.98 ms/iter (GNU grep) | 1.51× slower |
+| `grep` 10 000-line file (100 iters) | 1.48 ms/iter | 0.98 ms/iter (GNU grep) | 1.51× slower (2026-03; for 2026-11 see OPTIMISATIONS.md (measurement method section for O-22 to O-30)) |
 | `sort` 10 000-line file (100 iters) | 3.28 ms/iter | 5.41 ms/iter (GNU sort) | 1.65× faster |
 | Binary size (glibc) | 292 KB | — | — |
 
-Startup is within 3% of dash. grep is ~50% slower than GNU grep (expected: GNU grep has PCRE-JIT and AVX2 SIMD for character scanning). Sort is 65% faster than GNU sort on this workload.
+Startup is within 3% of dash. The grep figure is from 2026-03 and the explanation given for it then ("GNU grep has PCRE-JIT") was wrong: GNU grep uses no PCRE for -G/-E/-F. Since the 2026-11 engine rewrite silex grep is 0.2-1.6x GNU grep's time on a 49 MB file across 44 cases (OPTIMISATIONS.md (measurement method section for O-22 to O-30)). Sort is 65% faster than GNU sort on this workload.
 
 ---
 
@@ -235,8 +235,8 @@ No musl-gcc on this machine. `make` builds glibc dynamic PIE.
 | shell_builtins | — | 19 | 0 | 19 |
 | test_charclass (C) | — | PASS | 0 | all |
 | test_linescan (C) | — | PASS | 0 | all |
-| test_regex (C) | — | 111 | 0 | 111 |
-| Compat (TAP) | `make compat-test` | **167** | **0** | **167** |
+| test_regex (C) | — | 187 | 0 | 187 |
+| Compat (TAP) | `make compat-test` | **216** | **0** | **216** |
 | Integration | `make integration-test` | 36 | 0 | 36 |
 | Security (rm safety) | `make security-test` | 22 | 0 | 22 |
 | Shell: test_control | `tests/unit/shell/test_control.sh` | **40** | **0** | 40 |
@@ -250,7 +250,7 @@ No musl-gcc on this machine. `make` builds glibc dynamic PIE.
 | **Shell total** | — | **203** | **1** | **204** |
 | VCS/smart features | `tests/unit/test_vcs.sh` | **26** | **0** | **26** |
 
-**Compat: 167/167 (all passing)** (up from 54 in v0.2.0; 113 new tests added for previously-uncovered builtins)
+**Compat: 216/216 (all passing)** (up from 54 in v0.2.0; 113 new tests added for previously-uncovered builtins, 44 grep regex-engine cases on 2026-11-19)
 
 **Shell conformance failures (1):**
 1. `test_redirects`: `&>` bash extension (not POSIX) — annotated as SKIP

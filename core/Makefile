@@ -168,6 +168,7 @@ REGEX_SRCS = \
     $(SRCDIR)/util/regex/compile.c \
     $(SRCDIR)/util/regex/parse.c \
     $(SRCDIR)/util/regex/thompson.c \
+    $(SRCDIR)/util/regex/literal.c \
     $(SRCDIR)/util/regex/mb_regex.c
 
 UTIL_SRCS = \
@@ -265,7 +266,9 @@ HOT_OBJS = \
     $(OBJDIR)/cache/hashmap.o \
     $(OBJDIR)/util/regex/thompson.o \
     $(OBJDIR)/util/regex/classify.o \
-    $(OBJDIR)/util/regex/compile.o
+    $(OBJDIR)/util/regex/compile.o \
+    $(OBJDIR)/util/regex/literal.o \
+    $(OBJDIR)/util/regex/mb_regex.o
 
 # COLD_OBJS: compiled at -Os in release builds (rarely executed paths)
 COLD_OBJS = \
@@ -282,7 +285,7 @@ $(COLD_OBJS): PERFILE_OPT = $(if $(RELEASE_OPT),-Os)
 # --- Targets ------------------------------------------------------------------
 TARGET = $(BINDIR)/silex
 
-.PHONY: all clean debug release release-glibc release-docker test install check \
+.PHONY: fuzz-grep-gnu all clean debug release release-glibc release-docker test install check \
         test-asan test-poison poison-build compat-test shell-test security-test \
         bench bench-ci coverage integration-test fuzz fuzz-run \
         analyze cppcheck test-valgrind test-leak test-leak-asan cross-check \
@@ -420,6 +423,7 @@ REGEX_TEST_SRCS = \
     $(SRCDIR)/util/regex/compile.c \
     $(SRCDIR)/util/regex/parse.c \
     $(SRCDIR)/util/regex/thompson.c \
+    $(SRCDIR)/util/regex/literal.c \
     $(SRCDIR)/util/regex/mb_regex.c
 
 $(TEST_CHARCLASS): tests/unit/test_charclass.c $(SRCDIR)/util/charclass.c \
@@ -813,6 +817,18 @@ fuzz-run: fuzz
 	        || { rc=1; failed="$$failed $$f"; }; \
 	done; \
 	if [ $$rc -ne 0 ]; then echo "FAILED:$$failed"; fi; \
+	exit $$rc
+
+# Differential fuzz of grep against the system GNU grep (needs python3). Not part
+# of `make test`: it needs GNU grep, and runs for a while. SEEDS and CASES tune it.
+SEEDS ?= 1 2 3 4 5 6 7 8
+CASES ?= 500
+fuzz-grep-gnu: $(TARGET)
+	@rc=0; \
+	for s in $(SEEDS); do \
+	    SILEX=$(CURDIR)/$(TARGET) python3 tests/fuzz/grep_vs_gnu.py $$s $(CASES) || rc=1; \
+	    SILEX=$(CURDIR)/$(TARGET) python3 tests/fuzz/grep_vs_gnu_big.py $$s 100 || rc=1; \
+	done; \
 	exit $$rc
 
 # --- Static analysis ----------------------------------------------------------
