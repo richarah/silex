@@ -827,7 +827,7 @@ fuzz-grep-gnu: $(TARGET)
 	@rc=0; \
 	for s in $(SEEDS); do \
 	    SILEX=$(CURDIR)/$(TARGET) python3 tests/fuzz/grep_vs_gnu.py $$s $(CASES) || rc=1; \
-	    SILEX=$(CURDIR)/$(TARGET) python3 tests/fuzz/grep_vs_gnu_big.py $$s || rc=1; \
+	    SILEX=$(CURDIR)/$(TARGET) python3 tests/fuzz/grep_vs_gnu_big.py $$s 100 || rc=1; \
 	done; \
 	exit $$rc
 

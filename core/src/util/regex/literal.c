@@ -72,6 +72,7 @@ static const char *scalar_one(const mb_litset *ls, int k, const char *p,
 }
 
 #ifdef HAVE_SSE2
+__attribute__((nonnull(1, 3)))
 static inline unsigned probe(const mb_litset *ls, int k, const char *q)
 {
     __m128i v1 = _mm_loadu_si128((const __m128i *)(const void *)(q + ls->o1[k]));

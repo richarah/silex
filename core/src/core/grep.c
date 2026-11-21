@@ -554,13 +554,11 @@ static int grep_stream(int fd, const char *filename, int show_fname,
                         g_matched_any = 1;
                         out(B + p, gap_end - p);
                         if (!nl_end) putc('\n', stdout);
-                        p = gap_end;
                     } else if (g->opt_c && !g->max_matches && !s.stop_early) {
                         s.count += (long)mb_regex_count_nl(B + p, gap_end - p);
                         if (B[gap_end - 1] != '\n') s.count++;
                         s.result = 0;
                         g_matched_any = 1;
-                        p = gap_end;
                     } else {
                         while (p < gap_end) {
                             const char *e = memchr(B + p, '\n', gap_end - p);

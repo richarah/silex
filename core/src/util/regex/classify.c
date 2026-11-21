@@ -305,8 +305,8 @@ void mb_litset_prepare(mb_litset *ls)
  * contains AB" is just "contains A". */
 static void ss_minimise(sset *a)
 {
-    for (int i = 0; i < a->n; i++) {
-        for (int j = 0; j < a->n; j++) {
+    for (int i = 0; i < a->n && i < SS_MAX; i++) {
+        for (int j = 0; j < a->n && j < SS_MAX; j++) {
             if (i == j || a->len[j] > a->len[i]) continue;
             if (a->len[j] == a->len[i] && j > i) continue;
             int found = 0;
@@ -412,8 +412,8 @@ static int musts_plain(const mb_ast *t, const int *roots, int nroots,
         out->n++;
     }
     /* "contains A or contains AB" is "contains A" */
-    for (int i = 0; i < out->n; i++) {
-        for (int j = 0; j < out->n; j++) {
+    for (int i = 0; i < out->n && i < SS_MAX; i++) {
+        for (int j = 0; j < out->n && j < SS_MAX; j++) {
             if (i == j || out->len[j] > out->len[i] ||
                 (out->len[j] == out->len[i] && j > i)) continue;
             int found = 0;
@@ -451,6 +451,10 @@ void mb_musts(const mb_ast *t, const int *roots, int nroots, int icase,
 
     info_t *inf = malloc(((size_t)maxroot + 1) * sizeof(info_t));
     if (!inf) return;
+    for (int i = 0; i <= maxroot; i++) {      /* no information until computed */
+        ss_unknown(&inf[i].in); ss_unknown(&inf[i].left);
+        ss_unknown(&inf[i].right); ss_unknown(&inf[i].is);
+    }
 
     for (int i = 0; i <= maxroot; i++) {
         const ast_node *n = &t->n[i];

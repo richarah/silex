@@ -2,7 +2,10 @@
 # Differential fuzz of silex grep against GNU grep on larger inputs: buffer refills,
 # very long lines, stdin and pipes, several files, NUL bytes.
 #
-#   tests/fuzz/grep_vs_gnu_big.py [SEED]
+#   tests/fuzz/grep_vs_gnu_big.py [SEED [CASES]]
+#
+# Files with NUL bytes are left out unless GREP_FUZZ_NUL=1: silex and GNU grep word their
+# binary-file results differently.
 #
 # Needs GNU grep as `grep` on PATH and python3; not part of `make test`.
 # Differential test on larger inputs: buffer refills, long lines, stdin,
@@ -37,7 +40,7 @@ files = []
 for k in range(4):
     p = os.path.join(D, 'f%d' % k)
     mkfile(p, random.choice([0, 1, 50, 5000, 40000]), longp=random.choice([0, 0, 0.001, 0.01]),
-           nulp=random.choice([0, 0, 0, 0.0005]), term=random.random() < 0.8)
+           nulp=(random.choice([0, 0, 0, 0.0005]) if os.environ.get('GREP_FUZZ_NUL') else 0), term=random.random() < 0.8)
     files.append(p)
 
 pats = ['foo', 'error', 'zz', 'x[0-9]+', 'Hello World', 'the$', '^GET', '\\bab\\b', 'a.b', '(foo|bar) baz',

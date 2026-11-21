@@ -83,6 +83,7 @@ enum { FT_END, FT_CHAR, FT_CLOSE, FT_OTHER };
 static int ft(P *s, const char **q, unsigned char *c)
 {
     const char *r = *q;
+    *c = 0;
     if (r >= s->end) return FT_END;
     if (*r == '\\') {
         if (r + 1 >= s->end) { *q = r + 1; *c = 0; return FT_END; }

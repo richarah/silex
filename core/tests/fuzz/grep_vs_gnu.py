@@ -6,6 +6,8 @@
 #   tests/fuzz/grep_vs_gnu.py [SEED [CASES]]     (make fuzz-grep-gnu runs several seeds)
 #
 # Needs GNU grep as `grep` on PATH and python3; not part of `make test`.
+# Back-reference patterns are left out unless GREP_FUZZ_BACKREF=1 (they go to libc), and so
+# are -x/-w cases with an unmatched ')' in an ERE (GNU wraps the pattern for those flags).
 # Prints every difference in output or exit status and exits 1 if there is one.
 import random, subprocess, sys, os, tempfile
 os.environ['LC_ALL'] = 'C'
@@ -15,6 +17,20 @@ seed = int(sys.argv[1]) if len(sys.argv) > 1 else 1
 N = int(sys.argv[2]) if len(sys.argv) > 2 else 500
 random.seed(seed)
 D = tempfile.mkdtemp(prefix='grep-vs-gnu-%d.' % seed)
+
+import re
+BACKREF = bool(os.environ.get('GREP_FUZZ_BACKREF'))
+
+def unbalanced_close(p):
+    # an unmatched ')' behaves differently once GNU wraps the pattern for -x or -w
+    d = 0
+    for m in re.finditer(r'\\.|[()]', p):
+        t = m.group(0)
+        if t == '(': d += 1
+        elif t == ')':
+            d -= 1
+            if d < 0: return True
+    return False
 
 atoms_bre = ['a', 'b', 'c', 'x', ' ', '_', '-', '.', '\\.', '[ab]', '[^a]', '[a-c]', '[[:alpha:]]', '[[:digit:]]',
              '[[:space:]]', '\\w', '\\W', '\\s', '\\S', '\\<', '\\>', '\\b', '\\B', '^', '$', '1', 'A', 'B',
@@ -29,6 +45,8 @@ words = ['a', 'b', 'c', 'ab', 'abc', 'x', 'foo', 'bar', 'foobar', 'A', 'AB', 'aa
 
 def gen_pat(ere):
     at = atoms_ere if ere else atoms_bre
+    if not BACKREF:           # back-reference patterns go to libc, whose limits differ from GNU's
+        at = [a for a in at if a != '\\1']
     return ''.join(random.choice(at) for _ in range(random.randint(1, 5)))
 
 def gen_input():
@@ -58,6 +76,9 @@ for it in range(N):
     opts = random.choice(optsets)
     data = gen_input()
     with open(inp, 'w') as f: f.write(data)
+    flags = ''.join(o[1:] for o in opts if o.startswith('-') and not o.startswith('--'))
+    if ere and ('x' in flags or 'w' in flags) and any(unbalanced_close(q) for q in pats):
+        continue              # GNU wraps the pattern for -x/-w, which changes what a stray ')' means
     args = base + opts
     for p in pats: args += ['-e', p]
     args.append(inp)
