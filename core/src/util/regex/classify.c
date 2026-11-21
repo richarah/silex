@@ -306,12 +306,13 @@ void mb_litset_prepare(mb_litset *ls)
 static void ss_minimise(sset *a)
 {
     for (int i = 0; i < a->n && i < SS_MAX; i++) {
+        const size_t li = a->len[i];
         for (int j = 0; j < a->n && j < SS_MAX; j++) {
-            if (i == j || a->len[j] > a->len[i]) continue;
-            if (a->len[j] == a->len[i] && j > i) continue;
+            const size_t lj = a->len[j];
+            if (i == j || lj > li || (lj == li && j > i)) continue;
             int found = 0;
-            for (size_t k = 0; k + a->len[j] <= a->len[i]; k++)
-                if (memcmp(a->s[i] + k, a->s[j], a->len[j]) == 0) { found = 1; break; }
+            for (size_t k = 0; k + lj <= li; k++)
+                if (memcmp(a->s[i] + k, a->s[j], lj) == 0) { found = 1; break; }
             if (found) {
                 a->n--;
                 if (i != a->n) {
@@ -413,12 +414,13 @@ static int musts_plain(const mb_ast *t, const int *roots, int nroots,
     }
     /* "contains A or contains AB" is "contains A" */
     for (int i = 0; i < out->n && i < SS_MAX; i++) {
+        const size_t li = out->len[i];
         for (int j = 0; j < out->n && j < SS_MAX; j++) {
-            if (i == j || out->len[j] > out->len[i] ||
-                (out->len[j] == out->len[i] && j > i)) continue;
+            const size_t lj = out->len[j];
+            if (i == j || lj > li || (lj == li && j > i)) continue;
             int found = 0;
-            for (size_t k = 0; k + out->len[j] <= out->len[i]; k++)
-                if (memcmp(out->s[i] + k, out->s[j], out->len[j]) == 0) { found = 1; break; }
+            for (size_t k = 0; k + lj <= li; k++)
+                if (memcmp(out->s[i] + k, out->s[j], lj) == 0) { found = 1; break; }
             if (found) {
                 free(out->s[i]);
                 out->n--;
@@ -449,7 +451,7 @@ void mb_musts(const mb_ast *t, const int *roots, int nroots, int icase,
     for (int i = 0; i < nroots; i++) if (roots[i] > maxroot) maxroot = roots[i];
     if (maxroot < 0) return;
 
-    info_t *inf = malloc(((size_t)maxroot + 1) * sizeof(info_t));
+    info_t *inf = calloc((size_t)maxroot + 1, sizeof(info_t));
     if (!inf) return;
     for (int i = 0; i <= maxroot; i++) {      /* no information until computed */
         ss_unknown(&inf[i].in); ss_unknown(&inf[i].left);
@@ -469,12 +471,15 @@ void mb_musts(const mb_ast *t, const int *roots, int nroots, int icase,
             x->left = x->right = x->in = x->is;
             break;
         case A_CAT:
+            if (n->a < 0 || n->a >= i || n->b < 0 || n->b >= i) { info_unknown(x); break; }
             info_cat(&inf[n->a], &inf[n->b], x);
             break;
         case A_ALT:
+            if (n->a < 0 || n->a >= i || n->b < 0 || n->b >= i) { info_unknown(x); break; }
             info_alt(&inf[n->a], &inf[n->b], x);
             break;
         case A_REP:
+            if (n->a < 0 || n->a >= i) { info_unknown(x); break; }
             info_rep(&inf[n->a], n->min, n->max, x);
             break;
         default:

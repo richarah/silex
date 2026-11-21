@@ -216,7 +216,10 @@ All silex builtins implement the following POSIX utility conventions:
 | `\<` `\>` `\b` `\B` `\w` `\W` `\s` `\S` `` \` `` `\'` | N | Y | Y | - | GNU regex extensions |
 | back-references `\1`-`\9` | Y | Y | Y | - | matched by libc regexec() (POSIX syntax on musl) |
 | --include/--exclude | N | Y | Y | - | |
-| --color | N | Y | Y | - | |
+| --color | N | Y | Y | - | the escape sequences are not byte-identical to GNU's (no `\33[K`, `\33[0m` instead of `\33[m`) |
+| -z/--null-data, --line-buffered, --label, -I, --binary-files | N | Y | N | - | not implemented: unrecognised option, exit 2 |
+| options after the first operand | N | Y | N | - | silex stops reading options at the first operand (POSIX), so `grep PAT FILE -c` treats `-c` as a file; GNU accepts it |
+| files with NUL bytes | N | Y | partly | - | the message is `Binary file NAME matches` on stdout and `-c` stops counting at the first NUL; GNU prints its message on stderr |
 | -P (PCRE) | N | Y | N | Y | grep_pcre.so |
 
 ## sed
