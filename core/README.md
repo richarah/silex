@@ -205,7 +205,7 @@ POSIX sh only. Bash syntax requires modules.
 LC_ALL=C always. No interactive use. grep is
 within 1.6x of GNU grep on regexes and 1.1x on
 fixed strings (often faster, docs/OPTIMISATIONS.md
-R-00); backreferences fall back to libc. sort is faster on small inputs, slower on
+the measurement method section of OPTIMISATIONS.md); backreferences fall back to libc. sort is faster on small inputs, slower on
 inputs exceeding memory.
 
 ## Requirements

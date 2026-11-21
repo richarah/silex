@@ -9,6 +9,14 @@ case "$SILEX" in /*) ;; *) SILEX="$(cd "$(dirname "$SILEX")" && pwd)/$(basename 
 PASS=0; FAIL=0
 export LC_ALL=C
 
+# Two checks depend on the system: a GNU grep as the reference (BusyBox grep has no
+# -b with the same meaning), and a libc whose regcomp has ERE back-references
+# (musl has none, so grep -E '(ab)\1' cannot match there, before and after the
+# regex engine rewrite).
+GNU_GREP=0; grep --version 2>&1 | grep -q 'GNU grep' && GNU_GREP=1
+IS_MUSL=0; ls /lib/ld-musl-* >/dev/null 2>&1 && IS_MUSL=1
+skip() { echo "  SKIP: $1"; }
+
 check() {
     local desc="$1" expected="$2" actual="$3"
     if [ "$actual" = "$expected" ]; then
@@ -93,9 +101,13 @@ check 'large interval' '1' "$(R 'x\n' -E 'a{32767}')"
 check 'nested intervals' 'aaaa' "$(G 'aaaa\n' -oE '(a{2}){2}')"
 check 'empty alternative' 'x' "$(G 'x\n' -E 'a||x')"
 check 'empty group' 'x' "$(G 'x\n' -E '()x')"
+if [ "$IS_MUSL" = 1 ]; then
+    skip 'ERE back-references (musl regcomp has none)'
+else
 check 'back-reference' 'abab' "$(G 'abab\nabba\n' -E '(ab)\1')"
 check 'back-reference with -w' 'abab' "$(G 'abab\nababx\n' -wE '(ab)\1')"
 check 'back-reference mixed with plain patterns' 'abab|xyz' "$(G 'abab\nxyz\nqq\n' -E -e '(ab)\1' -e 'x.z')"
+fi
 
 echo "--- errors (exit 2, silex message) ---"
 check '[ alone' "silex: grep: invalid regex '[': Invalid regular expression" "$(G 'a\n' '[')"
@@ -163,8 +175,12 @@ check 'count across reads' '60' "$("$SILEX" grep -c needle "$T/big")"
 check 'regex count across reads' '60' "$("$SILEX" grep -cE 'ne+dle h' "$T/big")"
 check '-n across reads' '1000:line 1000 needle here|60000:line 60000 needle here' \
     "$("$SILEX" grep -n needle "$T/big" | sed -n '1p;$p' | paste -sd'|' -)"
+if [ "$GNU_GREP" = 1 ]; then
 check '-b across reads' "$(grep -b needle "$T/big" | tail -1 | cut -d: -f1)" \
     "$("$SILEX" grep -b needle "$T/big" | tail -1 | cut -d: -f1)"
+else
+    skip '-b across reads (needs GNU grep as the reference)'
+fi
 check '-v count across reads' '59940' "$("$SILEX" grep -vc needle "$T/big")"
 check '-v output across reads' "$(grep -v needle "$T/big" | cksum)" "$("$SILEX" grep -v needle "$T/big" | cksum)"
 check 'a 700 KB line' '2' "$("$SILEX" grep -c needle "$T/long")"

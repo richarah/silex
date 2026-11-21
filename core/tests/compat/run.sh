@@ -684,6 +684,9 @@ run_test "grep: -r recursive" \
 run_test "grep: -m max count" \
     "grep -m 2 a $T/fruits.txt" "grep -m 2 a $T/fruits.txt" "grep"
 
+# These compare with the system grep, so they only make sense against GNU grep
+# (BusyBox grep, as on Alpine, differs on -w/-o, -b, \| and {,n}).
+if grep --version 2>&1 | grep -q 'GNU grep'; then
 # The regex engine against the system grep: GNU extensions, -w/-o rules,
 # multiple patterns, the literal prefilter and the DFA. Inputs are files so
 # that grep is the first word (see the note below).
@@ -706,6 +709,9 @@ run_test "grep: -f /dev/null matches nothing" \
 run_test "grep: -m 0" "grep -m 0 o $T/re.txt; echo \$?" "grep -m 0 o $T/re.txt; echo \$?" "grep"
 run_test "grep: no trailing newline" \
     "grep -c '^no newline$' $T/nonewline.txt" "grep -c '^no newline$' $T/nonewline.txt" "grep"
+else
+    skip_test "grep: regex engine cases (the system grep is not GNU grep)"
+fi
 
 # COV-04: POSIX character classes (exercises charclass_re.c)
 #

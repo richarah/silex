@@ -107,7 +107,7 @@ Remaining gap:
 | B-8 | XC-02 dead command elimination: `mkdir -p` skipped when dirs confirmed in fscache | DONE |
 | B-9 | io_uring: skip for single-op batches (use direct syscall) | DONE |
 
-Regex engine (2026-11, OPTIMISATIONS.md R-01..R-08): GNU BRE/ERE parser → literal prefilter (SIMD) → lazy DFA; libc `regexec()` only for back-references. (The 2026-03 BMH → prefix-anchor → Thompson NFA dispatch, and its "closes the gap" claim, are gone.)
+Regex engine (2026-11, OPTIMISATIONS.md O-22..O-29): GNU BRE/ERE parser → literal prefilter (SIMD) → lazy DFA; libc `regexec()` only for back-references. (The 2026-03 BMH → prefix-anchor → Thompson NFA dispatch, and its "closes the gap" claim, are gone.)
 
 ---
 
@@ -169,11 +169,11 @@ Measured on host (glibc dynamic build, x86-64-v3, no musl).
 | Metric | silex | Reference | Ratio |
 |--------|----------|-----------|-------|
 | Startup latency (`sh -c 'exit 0'`, 100 iters) | ~690 µs | ~670 µs (dash) | 1.03× |
-| `grep` 10 000-line file (100 iters) | 1.48 ms/iter | 0.98 ms/iter (GNU grep) | 1.51× slower (2026-03; for 2026-11 see OPTIMISATIONS.md R-00) |
+| `grep` 10 000-line file (100 iters) | 1.48 ms/iter | 0.98 ms/iter (GNU grep) | 1.51× slower (2026-03; for 2026-11 see OPTIMISATIONS.md (measurement method section for O-22 to O-30)) |
 | `sort` 10 000-line file (100 iters) | 3.28 ms/iter | 5.41 ms/iter (GNU sort) | 1.65× faster |
 | Binary size (glibc) | 292 KB | — | — |
 
-Startup is within 3% of dash. The grep figure is from 2026-03 and the explanation given for it then ("GNU grep has PCRE-JIT") was wrong: GNU grep uses no PCRE for -G/-E/-F. Since the 2026-11 engine rewrite silex grep is 0.2-1.6x GNU grep's time on a 49 MB file across 44 cases (OPTIMISATIONS.md R-00). Sort is 65% faster than GNU sort on this workload.
+Startup is within 3% of dash. The grep figure is from 2026-03 and the explanation given for it then ("GNU grep has PCRE-JIT") was wrong: GNU grep uses no PCRE for -G/-E/-F. Since the 2026-11 engine rewrite silex grep is 0.2-1.6x GNU grep's time on a 49 MB file across 44 cases (OPTIMISATIONS.md (measurement method section for O-22 to O-30)). Sort is 65% faster than GNU sort on this workload.
 
 ---
 

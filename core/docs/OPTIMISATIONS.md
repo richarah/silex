@@ -21,15 +21,15 @@ measurements, and whether it was kept or reverted.
 | O-10 | Compiled glob for find | CPU+Bug | bench_find_glob (600-file, suffix) | broken (always matched) | working + fnmatch-free | correctness fix + fast path | +0.3K | KEPT |
 | O-11 | statx minimal mask | Syscall | strace statx vs newfstatat (600-file tree) | 601 newfstatat | 601 statx (minimal mask) | same call count, less kernel data/call | +0.2K | KEPT |
 | O-12 | Binary layout HOT/COLD | ICache | bench_startup | 3.0969±0.2128ms | 3.0984±0.2266ms | ~1.00x (within noise; section attrs guide linker placement) | +0.1K | KEPT |
-| O-13 | Thompson NFA/DFA regex | CPU | grep BRE 5.4MB no-match scan | 4x slower than GNU | ≤1.5x claimed, never true (see R-00) | claim withdrawn | +12K | SUPERSEDED by R-01..R-09 |
+| O-13 | Thompson NFA/DFA regex | CPU | grep BRE 5.4MB no-match scan | 4x slower than GNU | ≤1.5x claimed, never true (see the measurement method section for O-22 to O-30) | claim withdrawn | +12K | SUPERSEDED by O-22..O-30 |
 | O-14 | Explicit stdout buffer | Syscall | strace write count (grep 100k lines) | 1365 writes | ~45 writes | 30x fewer writes | +0.1K | KEPT |
 | O-15 | cat splice zero-copy | IO | cat 550KB to pipe | 3ms | 3ms | 1.00x (zero-copy) | +0.1K | KEPT |
 | O-16 | sort mmap input | Alloc/IO | sort 100KB+ regular files | per-line malloc | mmap pointer scan | eliminates line malloc | +0.1K | KEPT |
 | O-17 | head/tail early exit | IO | head -n 10 from 550KB | read entire file | stop after N lines | O(output) not O(file) | +0.1K | KEPT |
 | O-18 | find d_type skip | Syscall | find -type f 600-file tree | 621 statx | 1 statx | 620x syscall reduction | +0.1K | KEPT |
 | O-19 | Buffer size audit | IO | grep/sort/sed read syscalls | default 4KB | 128–256KB explicit | 22–136x fewer reads | +0.1K | KEPT |
-| O-20 | NFA O(n²)→O(n) + ptr swap | CPU | grep ERE 6MB regex (10 runs) | 68.5s | 0.35s | 196x faster | +0.3K | SUPERSEDED by R-02 |
-| O-21 | grep memchr prefilter | CPU | grep ERE 6MB regex (10 runs) | 0.35s | 0.036s | 9.7x faster ("tied with GNU" was a /dev/null artefact, see R-00) | +0.1K | SUPERSEDED by R-04 |
+| O-20 | NFA O(n²)→O(n) + ptr swap | CPU | grep ERE 6MB regex (10 runs) | 68.5s | 0.35s | 196x faster | +0.3K | SUPERSEDED by O-23 |
+| O-21 | grep memchr prefilter | CPU | grep ERE 6MB regex (10 runs) | 0.35s | 0.036s | 9.7x faster ("tied with GNU" was a /dev/null artefact, see the measurement method section) | +0.1K | SUPERSEDED by O-25 |
 | V-01 | vcsignore parser | Correctness/UX | — | — | full gitignore(5) semantics | — | +3.5K | KEPT |
 | V-02 | grep --vcs | Correctness/UX | grep -r on repo with VCS noise | all files scanned | skips .git/node_modules/binary | — | +0.5K | KEPT |
 | V-03 | find --vcs | Correctness/UX | find on repo tree | all entries visited | skips hidden/VCS/noise dirs | — | +0.3K | KEPT |
@@ -48,19 +48,19 @@ measurements, and whether it was kept or reverted.
 | I-02 | expand_word_full: plain-word fast path | Alloc/CPU | bench_interpreter (test builtin 100k) | 199ms | 141ms | 1.41x | +0.1K | KEPT |
 | I-03 | expand_word_assign: single-segment path | Alloc | bench_interpreter (param expansion 50k) | — | folded into I-04 row | — | +0.0K | KEPT |
 | I-04 | exec: no overlay for a lone assignment | Alloc | bench_interpreter (param expansion 50k) | 122ms | 73ms | 1.67x | +0.0K | KEPT |
-| R-01 | grep: GNU BRE/ERE parser, no libc regex without back-references | CPU/Compat | bench_grep_vs_gnu.sh, 44 cases (R-00) | 1.1-3.6x (fixed), 1.0-140x (regex) of GNU | 0.25-1.2x (fixed), 0.15-1.3x (regex) | see R-00 | +0.8K | KEPT |
-| R-02 | grep: lazy DFA for the match-only paths | CPU | bre-dotstar (49 MB) | 768 ms | 27 ms | 28x | — | KEPT |
-| R-03 | grep: block scanning, read(2) instead of getline | CPU/IO | fixed (49 MB) | 103 ms | 20 ms | 5.1x | — | KEPT |
-| R-04 | grep: required-literal prefilter, SIMD literal search | CPU | ere-alt-lit-rare | 1552 ms | 23 ms | 66x | — | KEPT |
-| R-05 | grep: start-state skip in the DFA loop | CPU | re-start-class | 88 ms (R-04) | 37 ms | 2.4x | — | KEPT |
-| R-06 | grep: lines that all match, GNU's "nothing can match" exits | CPU | re-empty-star (-c 'x*') | 179 ms | 5-18 ms | 10-36x | — | KEPT |
-| R-07 | grep: stop at the first selected line when stdout is /dev/null | IO | fixed, > /dev/null | 103 ms | ~1 ms | — | — | KEPT |
-| R-08 | grep: per-invocation cost (lazy DFA, literal -w/-x, kept buffer) | Alloc | callgrind, 300x `grep -q root /etc/passwd` in silex sh | 8.45 M instr | 8.17 M instr | 1.03x | — | KEPT |
-| R-09 | grep: two interleaved DFA chains | CPU | x[0-9]+y | 22 ms | 42 ms | 0.5x | — | REVERTED |
+| O-22 | grep: GNU BRE/ERE parser, no libc regex without back-references | CPU/Compat | bench_grep_vs_gnu.sh, 44 cases (see the measurement method section) | 1.1-3.6x (fixed), 1.0-140x (regex) of GNU | 0.25-1.2x (fixed), 0.15-1.3x (regex) | see the measurement method section | +0.8K | KEPT |
+| O-23 | grep: lazy DFA for the match-only paths | CPU | bre-dotstar (49 MB) | 768 ms | 27 ms | 28x | — | KEPT |
+| O-24 | grep: block scanning, read(2) instead of getline | CPU/IO | fixed (49 MB) | 103 ms | 20 ms | 5.1x | — | KEPT |
+| O-25 | grep: required-literal prefilter, SIMD literal search | CPU | ere-alt-lit-rare | 1552 ms | 23 ms | 66x | — | KEPT |
+| O-26 | grep: start-state skip in the DFA loop | CPU | re-start-class | 88 ms (O-25) | 37 ms | 2.4x | — | KEPT |
+| O-27 | grep: lines that all match, GNU's "nothing can match" exits | CPU | re-empty-star (-c 'x*') | 179 ms | 5-18 ms | 10-36x | — | KEPT |
+| O-28 | grep: stop at the first selected line when stdout is /dev/null | IO | fixed, > /dev/null | 103 ms | ~1 ms | — | — | KEPT |
+| O-29 | grep: per-invocation cost (lazy DFA, literal -w/-x, kept buffer) | Alloc | callgrind, 300x `grep -q root /etc/passwd` in silex sh | 8.45 M instr | 8.17 M instr | 1.03x | — | KEPT |
+| O-30 | grep: two interleaved DFA chains | CPU | x[0-9]+y | 22 ms | 42 ms | 0.5x | — | REVERTED |
 
-(R-02..R-06: "before" is the original engine and "after" the finished one,
+(O-23..O-27: "before" is the original engine and "after" the finished one,
 on the benchmark case where that step is the one that matters; the steps
-were not measured in isolation except R-05 and R-09, whose before/after are
+were not measured in isolation except O-26 and O-30, whose before/after are
 consecutive builds.)
 
 ---
@@ -69,7 +69,7 @@ consecutive builds.)
 
 ## R: the grep regex engine, rewritten (2026-11-19)
 
-### R-00: what was measured, and how
+### Measurement method for the grep entries (O-22 to O-30): what was measured, and how
 
 Every claim below comes from one benchmark, now in the tree as
 `tests/bench/bench_grep_vs_gnu.sh` (the numbers here were taken with an
@@ -89,7 +89,7 @@ output is /dev/null and stops at the first match, so `grep pat big > /dev/null`
 -- and hyperfine, whose default is to discard output -- measures how far
 into the file the first match is. That is how O-21 came to report silex
 "tied with GNU grep" at 3.6 ms vs 3.8 ms on a 6 MB file: GNU had read one
-buffer. silex now does the same (R-07), so both behaviours are covered
+buffer. silex now does the same (O-28), so both behaviours are covered
 below.
 
 Before (git 38cf563) and after, file output, milliseconds. "ratio" is
@@ -150,14 +150,14 @@ busier during the "before" run; the ratios are what carry over. Before:
 9.4x). After: no fixed-string case over 1.2x (limit 1.5x), no regex case over
 1.3x (limit 2x), 35 of 44 faster than GNU.
 
-With stdout = /dev/null (`MODE=null`), after R-07: 43 of 44 cases between
+With stdout = /dev/null (`MODE=null`), after O-28: 43 of 44 cases between
 0.24x and 1.3x of GNU's time (both stop at the first match: 0.5-7 ms). The
 exception is `-q 'zzz.*q'`, which has no match and reads the whole file:
 6.0-6.2 ms for silex against 9-12 ms for GNU in most runs, but 18 ms in
 some (it is the case most exposed to the machine's noise: page cache,
 other tenants).
 
-### R-01: one GNU-compatible parser, no libc regex without back-references
+### O-22: one GNU-compatible parser, no libc regex without back-references
 
 **Problem.** Patterns went three ways: a home-grown tokenizer for some,
 glibc `regexec()` for every pattern with `$`, an interval (on glibc) or
@@ -172,7 +172,7 @@ errors glibc reports during GNU grep's syntax check (same messages:
 "Unmatched [, [^, [:, [., or [=", "Invalid range end", "Trailing
 backslash", ...) and dfa.c's warnings ("* at start of expression").
 `charclass_re.c` follows glibc's bracket parser. The AST feeds the DFA
-(R-02); only patterns with back-references, which no automaton can match,
+(O-23); only patterns with back-references, which no automaton can match,
 go to `regcomp()` -- rewritten first where GNU syntax is more lenient than
 POSIX regcomp (a literal `{`, a leading `*`).
 
@@ -192,7 +192,7 @@ places silex does not rewrite (stacked repetitions such as `c\?\{,2\}` in
 a BRE; on musl also the GNU extensions). GNU accepts those; silex reports
 the libc error.
 
-### R-02: a lazy DFA for the match-only paths
+### O-23: a lazy DFA for the match-only paths
 
 **Problem.** The issue's main point: the DFA cache existed only for match
 positions; plain grep, -c, -l, -q, -v stepped the NFA state set byte by byte.
@@ -216,7 +216,7 @@ anchored: all match ends at a start) to reproduce GNU's leftmost-longest
 search and its -w retry loop, including the off-by-offset truncation GNU
 applies when retrying shorter matches after an earlier -o match.
 
-### R-03: block scanning
+### O-24: block scanning
 
 grep read lines with `getline()` and matched each one. It now `read()`s
 blocks (32 KB, then 256 KB from the third read; longer lines grow the
@@ -229,7 +229,7 @@ logic as before. On early stop (-m, -q, -l) the unread input is handed back
 to a seekable stdin with lseek, as POSIX asks and as `{ grep -m1 x; cat; } <f`
 needs.
 
-### R-04: required literals anywhere, alternations, SIMD search
+### O-25: required literals anywhere, alternations, SIMD search
 
 **Problem.** The prefilter used the pattern's first byte only, and only for
 one pattern without -i or -v.
@@ -246,12 +246,12 @@ patterns are exactly the literals (-F, "foo|bar"), a hit is a match and the
 DFA is never built. Lines without a literal are skipped; candidate lines are
 verified with the DFA; if more than a third of the text ends up verified the
 prefilter switches itself off for the rest of the file, and a set of
-one-byte literals is not used for block scans at all (R-05 does that job
+one-byte literals is not used for block scans at all (O-26 does that job
 without scanning twice). -w and -x on plain strings check the literal hits'
 boundaries directly. Not available on non-x86 targets: a portable memchr
 loop is used there instead.
 
-### R-05: start-state skip
+### O-26: start-state skip
 
 In the start state of an unanchored DFA most bytes lead back to the start
 state. The loop checks four such bytes at a time with loads that do not
@@ -259,7 +259,7 @@ depend on each other (the general loop's loads each depend on the previous
 one). re-start-class (`-cE '[A-Z][a-z]+ [A-Z]'`, no usable literal): 88 ms
 -> 37 ms.
 
-### R-06: patterns that match every line, and GNU's early exits
+### O-27: patterns that match every line, and GNU's early exits
 
 A pattern whose line-start state matches before every byte and at the end
 (`x*`, `''`, `^`) makes every line match: -c counts newlines, output is
@@ -267,7 +267,7 @@ written as one run, -v selects nothing. GNU grep also quits without reading
 input when nothing can be selected (`-m 0`, `-v ''`, `-f /dev/null`) --
 printing nothing, not even -c's count; silex now does the same.
 
-### R-07: output to /dev/null
+### O-28: output to /dev/null
 
 When stdout is /dev/null (GNU's test: same device and inode), the first
 selected line of a file decides everything observable, so reading stops
@@ -276,7 +276,7 @@ exact, a text line matched before the first NUL of a binary file now counts
 as a match (exit 0): it used to be overridden by the binary-file result,
 so silex printed the line and exited 1. GNU exits 0.
 
-### R-08: per-invocation cost
+### O-29: per-invocation cost
 
 Inside `silex sh` grep is a function call, usually on a small file, so
 setup counts. The NFA programs and DFAs are built on first use (a plain
@@ -302,11 +302,11 @@ in `silex sh`, shell loop included:
 and is still 7% dearer per call, about 1.7 K instructions.) Binary size:
 440 528 -> 441 360 bytes.
 
-### R-09: two interleaved DFA chains -- REVERTED
+### O-30: two interleaved DFA chains -- REVERTED
 
 A DFA's table lookups form one dependency chain, so a second chain started
 at a line boundary in the middle of the block should run in the gaps of the
-first. Measured: no gain once R-05 existed (`-E '[A-Za-z]+[0-9]+[A-Za-z]+'`
+first. Measured: no gain once O-26 existed (`-E '[A-Za-z]+[0-9]+[A-Za-z]+'`
 100 ms either way) and a 2x loss when matches are frequent, because the
 second chain's work is thrown away at every match (`-E 'x[0-9]+y'`: 22 ms
 single, 42 ms dual). Removed.
@@ -326,7 +326,7 @@ single, 42 ms dual). Removed.
   `x\`, `[[:foo:]]`, `[[.ab.]]`; the message keeps silex's format
   ("silex: grep: invalid regex 'PAT': MSG") with GNU's MSG. `\t`, `\n` are
   the letters t and n, `[\]` is a backslash, as in GNU.
-- Binary files: unchanged, except the exit status in R-07.
+- Binary files: unchanged, except the exit status in O-28.
 
 Tests: `tests/unit/test_grep_engine.sh` (119 checks, expected values from
 GNU grep 3.11), `tests/unit/test_regex.c` (pattern sets, scanning, -w/-x
@@ -385,7 +385,7 @@ tail -c N: fseeko(fp, size-N, SEEK_SET) directly.
 
 ### Final comparison table
 
-(Historical, from 2026-03. The grep rows are superseded by R-00 above; the
+(Historical, from 2026-03. The grep rows are superseded by the O-22 to O-30 entries and their measurement method section above; the
 "fixed-string 550KB EQUAL" row was not reproducible by 2026-11, when silex
 grep was 1.1-3.6x slower than GNU on fixed strings and 4-140x on regexes.)
 
@@ -412,9 +412,9 @@ It was not. O-13's DFA cache was only used where a match POSITION was needed
 (-o, -w, -x, --color); plain grep, -c, -l, -q and -v stepped the NFA one
 state set per byte; every pattern with `$` or an interval went to libc
 regexec(); and O-21's "tied with GNU grep" came from timing with output to
-/dev/null, where GNU grep stops at the first match (see R-00). Re-measured
-on 2026-11-19 (R-00 table, "before" column): regexes up to 140x slower than
-GNU grep (median 9.4x), fixed strings up to 3.6x. R-01..R-08 replace the engine; R-00 has the
+/dev/null, where GNU grep stops at the first match (see the measurement method section for O-22 to O-30). Re-measured
+on 2026-11-19 (measurement method table, "before" column): regexes up to 140x slower than
+GNU grep (median 9.4x), fixed strings up to 3.6x. O-22..O-29 replace the engine; the measurement method section has the
 numbers. Remaining gap: none of the 44 benchmark cases is over 1.3x GNU, and
 35 are faster.
 
@@ -715,7 +715,7 @@ Reason kept: Zero maintenance cost, simple table definition, no correctness risk
 
 Date: 2026-03-30
 Status: SUPERSEDED (2026-11) — stristr() is gone; -F and -i literals go
-  through the R-04 literal search.
+  through the O-25 literal search.
 Benchmark: bench_grep.sh (case-insensitive fixed-string scenarios)
 Before: tolower(*needle) evaluated on every outer-loop iteration in stristr(),
   which is called in fixed_match() for every line in -i mode.
@@ -740,7 +740,7 @@ Baseline: silex -c true = 3.0969±0.2128ms (bench_startup.sh 100 iter 2026-03-30
 
 ## PENDING: SIMD for grep fixed-string
 
-Status: DONE in R-04 (2026-11). O-02/O-09 did not close the gap: in 2026-11
+Status: DONE in O-25 (2026-11). O-02/O-09 did not close the gap: in 2026-11
   silex was still 2.5x slower than GNU on a no-match fixed-string scan.
 Original note (2026-03-30): DEFERRED — confirmed bottleneck by bench_grep.sh
 Measurement: silex fixed-str-100k = 12.3395±0.5479ms vs system 3.7738±0.2351ms
@@ -1100,7 +1100,7 @@ Reason kept: Measurable improvement in grep and overall builtin throughput.
 ## O-13: Thompson NFA/DFA regex engine
 
 Date: 2026-03-30
-Status: SUPERSEDED by R-01..R-09 (2026-11). Corrections to the text below:
+Status: SUPERSEDED by O-22..O-30 (2026-11). Corrections to the text below:
   - "always O(n) ... lazy DFA cache": the DFA cache was used only by the
     bounded search (-o/-w/-x/--color), and was 4.4 MB, reset per search.
     The match-only path used by plain grep, -c, -l, -q and -v simulated
@@ -1111,7 +1111,7 @@ Status: SUPERSEDED by R-01..R-09 (2026-11). Corrections to the text below:
   - "sed.c uses mb_regex for address matching": sed never used it; sed
     compiles with regcomp().
   - "Closes known 4x performance gap": never measured as closed; 2026-11
-    measurement in R-00.
+    measurement in the measurement method section.
 Category: CPU — closes BRE/ERE 4x performance gap vs GNU grep
 Files: src/util/regex/regex.h (new), src/util/regex/regex_internal.h (new),
        src/util/regex/classify.c (new), src/util/regex/charclass_re.c (new),
@@ -1277,7 +1277,7 @@ Category: IO — ensures all stdio buffers are 128–256KB, not default 4KB
 Files: src/core/grep.c, src/core/sort.c, src/core/sed.c, src/core/wc.c
 
 Input buffers (setvbuf on FILE* fp before reading):
-  grep:   128KB (added Phase 1) — 136 read() calls → 5. Since R-03 grep
+  grep:   128KB (added Phase 1) — 136 read() calls → 5. Since O-24 grep
           reads with read(2) itself: 32 KB for the first two reads, then
           256 KB blocks (~190 reads for 50 MB).
   sort:   128KB (added Phase 1)
@@ -1443,9 +1443,9 @@ Complements the shell's `set -x` option (which sets `opt_x` flag on the same pat
 
 ### O-20: Thompson NFA O(n²) → O(n) + pointer swap
 
-*(2026-11: superseded by R-02. The table's "After O(n) only" row is garbled
+*(2026-11: superseded by O-23. The table's "After O(n) only" row is garbled
 — 6.8 s for 10 runs is 680 ms per run, not 35 ms — and the "vs GNU grep"
-column compared against a GNU grep writing to /dev/null; see R-00.)*
+column compared against a GNU grep writing to /dev/null; see the measurement method section.)*
 
 **Category**: CPU / algorithmic
 **Files**: `src/util/regex/thompson.c`
@@ -1480,9 +1480,9 @@ runtime even after the O(n²) fix was applied.
 
 ### O-21: grep memchr prefilter (G-01)
 
-*(2026-11: superseded by R-04. "tied with GNU grep" does not hold: the GNU
+*(2026-11: superseded by O-25. "tied with GNU grep" does not hold: the GNU
 figure of 3.8 ms for a 6 MB file is GNU grep stopping at the first match
-because its output was /dev/null — see R-00. Searching the whole file, GNU
+because its output was /dev/null — see the measurement method section. Searching the whole file, GNU
 took ~10x that.)*
 
 **Category**: CPU / algorithmic

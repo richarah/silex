@@ -1,11 +1,11 @@
 #!/bin/bash
 # tests/bench/bench_grep_vs_gnu.sh — silex grep against the system (GNU) grep
 #
-# The measurement behind docs/OPTIMISATIONS.md R-01..R-09. A ~50 MB, 800k-line
+# The measurement behind docs/OPTIMISATIONS.md O-22..O-30. A ~50 MB, 800k-line
 # synthetic log is generated (deterministic: awk's srand(42)), and every case
 # is run as `grep ARGS FILE > OUT` for both greps, alternating, best of N.
 #
-# OUT is a regular file on purpose: GNU grep (and, since R-07, silex) stop at
+# OUT is a regular file on purpose: GNU grep (and, since O-28, silex) stop at
 # the first match when stdout is /dev/null, so timing `> /dev/null` -- which
 # is what hyperfine does by default -- measures how early the first match is,
 # not the search. Set GREP_BENCH_OUT=/dev/null to see that case.
