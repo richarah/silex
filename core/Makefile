@@ -168,6 +168,7 @@ REGEX_SRCS = \
     $(SRCDIR)/util/regex/compile.c \
     $(SRCDIR)/util/regex/parse.c \
     $(SRCDIR)/util/regex/thompson.c \
+    $(SRCDIR)/util/regex/literal.c \
     $(SRCDIR)/util/regex/mb_regex.c
 
 UTIL_SRCS = \
@@ -265,7 +266,9 @@ HOT_OBJS = \
     $(OBJDIR)/cache/hashmap.o \
     $(OBJDIR)/util/regex/thompson.o \
     $(OBJDIR)/util/regex/classify.o \
-    $(OBJDIR)/util/regex/compile.o
+    $(OBJDIR)/util/regex/compile.o \
+    $(OBJDIR)/util/regex/literal.o \
+    $(OBJDIR)/util/regex/mb_regex.o
 
 # COLD_OBJS: compiled at -Os in release builds (rarely executed paths)
 COLD_OBJS = \
@@ -420,6 +423,7 @@ REGEX_TEST_SRCS = \
     $(SRCDIR)/util/regex/compile.c \
     $(SRCDIR)/util/regex/parse.c \
     $(SRCDIR)/util/regex/thompson.c \
+    $(SRCDIR)/util/regex/literal.c \
     $(SRCDIR)/util/regex/mb_regex.c
 
 $(TEST_CHARCLASS): tests/unit/test_charclass.c $(SRCDIR)/util/charclass.c \

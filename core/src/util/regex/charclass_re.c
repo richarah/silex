@@ -1,4 +1,12 @@
-/* charclass_re.c — parse regex character classes into 256-bit bitmaps */
+/* charclass_re.c — bracket expressions -> 256-bit byte sets
+ *
+ * Follows glibc's parse_bracket_exp() (which GNU grep runs on every pattern
+ * to validate it) for what is an error and what each error is called, and
+ * GNU dfa.c for the one extra error it adds ("[:space:]" without the outer
+ * brackets). C locale: one byte is one character, collating elements and
+ * equivalence classes are single characters, ranges are byte ranges.
+ * A backslash is an ordinary character inside brackets.
+ */
 
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
@@ -8,168 +16,196 @@
 #include <ctype.h>
 #include <string.h>
 
-/*
- * Parse a POSIX character class name (without the enclosing [: :]).
- * Sets the corresponding bits in cc. Returns 1 on success, 0 on unknown class.
- */
-static int apply_posix_class(mb_charclass *cc, const char *name, int negate)
+#define E_BADPAT   "Invalid regular expression"
+#define E_EBRACK   "Unmatched [, [^, [:, [., or [="
+#define E_ERANGE   "Invalid range end"
+#define E_ECTYPE   "Invalid character class name"
+#define E_ECOLLATE "Invalid collation character"
+#define E_COLON    "character class syntax is [[:space:]], not [:space:]"
+
+#define NAME_MAX_ 32   /* glibc BRACKET_NAME_BUF_SIZE */
+
+enum { EL_CHAR, EL_COLL, EL_EQUIV, EL_CLASS };
+
+typedef struct {
+    int  type;
+    unsigned char ch;
+    char name[NAME_MAX_ + 1];
+    size_t nlen;
+} elem_t;
+
+static int class_set(mb_charclass *cc, const char *name, int icase)
 {
-    int found = 0;
-
+    static const char *const names[] = {
+        "alpha", "upper", "lower", "digit", "xdigit", "space",
+        "print", "punct", "graph", "cntrl", "blank", "alnum", NULL
+    };
+    int k;
+    for (k = 0; names[k]; k++)
+        if (strcmp(name, names[k]) == 0) break;
+    if (!names[k]) return -1;
+    /* dfa.c: with -i, [:upper:] and [:lower:] both mean [:alpha:] */
+    if (icase && (k == 1 || k == 2)) k = 0;
     for (int c = 0; c < 256; c++) {
-        int match = 0;
-        unsigned char uc = (unsigned char)c;
-
-        if (strcmp(name, "alpha")  == 0) match = isalpha(uc);
-        else if (strcmp(name, "digit")  == 0) match = isdigit(uc);
-        else if (strcmp(name, "alnum")  == 0) match = isalnum(uc);
-        else if (strcmp(name, "space")  == 0) match = isspace(uc);
-        else if (strcmp(name, "blank")  == 0) match = (uc == ' ' || uc == '\t');
-        else if (strcmp(name, "upper")  == 0) match = isupper(uc);
-        else if (strcmp(name, "lower")  == 0) match = islower(uc);
-        else if (strcmp(name, "print")  == 0) match = isprint(uc);
-        else if (strcmp(name, "punct")  == 0) match = ispunct(uc);
-        else if (strcmp(name, "graph")  == 0) match = isgraph(uc);
-        else if (strcmp(name, "cntrl")  == 0) match = iscntrl(uc);
-        else if (strcmp(name, "xdigit") == 0) match = isxdigit(uc);
-        else { return 0; }  /* unknown class */
-
-        found = 1;
-        if (!negate && match)
-            mb_charclass_set(cc, (unsigned char)c);
+        int m;
+        switch (k) {
+        case 0:  m = isalpha(c);  break;
+        case 1:  m = isupper(c);  break;
+        case 2:  m = islower(c);  break;
+        case 3:  m = isdigit(c);  break;
+        case 4:  m = isxdigit(c); break;
+        case 5:  m = isspace(c);  break;
+        case 6:  m = isprint(c);  break;
+        case 7:  m = ispunct(c);  break;
+        case 8:  m = isgraph(c);  break;
+        case 9:  m = iscntrl(c);  break;
+        case 10: m = (c == ' ' || c == '\t'); break;
+        default: m = isalnum(c);  break;
+        }
+        if (m) mb_charclass_set(cc, (unsigned char)c);
     }
-    return found;
+    return 0;
 }
 
 /*
- * Parse a bracket expression starting after '[' (pat points to first char
- * after '[', end points to the closing ']' or end of string).
- * Handles: [abc], [a-z], [^...], [[:name:]], combinations.
- * Fills out->bits.
- * Returns 1 on success, 0 on error.
+ * Parse one element at *pp. accept_hyphen: a '-' may stand here (first
+ * element, or the end of a range).
  */
-int mb_charclass_parse(const char *pat, const char *end,
-                       mb_charclass *out, int flags)
+static int parse_elem(const char **pp, const char *end, int accept_hyphen,
+                      elem_t *el, const char **err)
 {
-    int icase = (flags & SX_REG_ICASE) != 0;
-    memset(out->bits, 0, sizeof(out->bits));
+    const char *p = *pp;
+    if (p >= end) { *err = E_EBRACK; return -1; }
+    if (*p == '[' && p + 1 < end &&
+        (p[1] == '.' || p[1] == '=' || p[1] == ':')) {
+        char delim = p[1];
+        p += 2;
+        if (p >= end) { *err = E_EBRACK; return -1; }
+        size_t i = 0;
+        for (;; i++) {
+            if (i >= NAME_MAX_) { *err = E_EBRACK; return -1; }
+            if (p >= end) { *err = E_EBRACK; return -1; }
+            char ch = *p++;
+            if (p >= end) { *err = E_EBRACK; return -1; }
+            if (ch == delim && *p == ']') break;
+            el->name[i] = ch;
+        }
+        p++;   /* the ']' */
+        el->name[i] = '\0';
+        el->nlen = i;
+        el->type = delim == '.' ? EL_COLL : delim == '=' ? EL_EQUIV : EL_CLASS;
+        *pp = p;
+        return 0;
+    }
+    if (*p == '-' && !accept_hyphen) {
+        /* A '-' that does not start a range must be the last character. */
+        if (!(p + 1 < end && p[1] == ']')) { *err = E_ERANGE; return -1; }
+    }
+    el->type = EL_CHAR;
+    el->ch = (unsigned char)*p;
+    *pp = p + 1;
+    return 0;
+}
 
-    const char *p = pat;
-    int negate = 0;
+/* The single character an element names, for a range endpoint. */
+static int elem_char(const elem_t *el, unsigned char *c, const char **err)
+{
+    if (el->type == EL_CHAR) { *c = el->ch; return 0; }
+    if (el->type == EL_COLL) {
+        if (el->nlen != 1) { *err = E_ECOLLATE; return -1; }
+        *c = (unsigned char)el->name[0];
+        return 0;
+    }
+    *err = E_ERANGE;
+    return -1;
+}
 
-    /* Negation */
+int mb_bracket_parse(const char *p, const char *end, int icase,
+                     mb_charclass *out, const char **endp, const char **err)
+{
+    memset(out, 0, sizeof(*out));
+    int invert = 0;
+
+    if (p >= end) { *err = E_BADPAT; return -1; }
     if (*p == '^') {
-        negate = 1;
+        invert = 1;
         p++;
+        if (p >= end) { *err = E_BADPAT; return -1; }
     }
 
-    /* ] as first char is literal */
-    if (*p == ']') {
-        mb_charclass_set(out, (unsigned char)']');
-        p++;
-    }
+    /* dfa.c's "[:space:]" check: 1 = starts with ':', 2 = last element
+     * is ':', 4 = some other element, 8 = a class or range (no warning) */
+    int colon = (*p == ':');
+    int first = 1;
 
-    while (p < end && *p != ']') {
-        /* POSIX named class: [:name:] */
-        if (*p == '[' && p[1] == ':') {
-            const char *cls_start = p + 2;
-            const char *cls_end = cls_start;
-            while (cls_end < end && *cls_end != ':') cls_end++;
-            if (*cls_end == ':' && cls_end[1] == ']') {
-                /* Valid POSIX class */
-                char name[32];
-                size_t nlen = (size_t)(cls_end - cls_start);
-                if (nlen < sizeof(name)) {
-                    memcpy(name, cls_start, nlen);
-                    name[nlen] = '\0';
-                    /* Apply to out (we'll negate at the end if needed) */
-                    mb_charclass tmp;
-                    memset(tmp.bits, 0, sizeof(tmp.bits));
-                    apply_posix_class(&tmp, name, 0);
-                    /* Merge into out */
-                    for (int i = 0; i < 32; i++)
-                        out->bits[i] |= tmp.bits[i];
+    for (;;) {
+        elem_t a;
+        memset(&a, 0, sizeof(a));
+        if (parse_elem(&p, end, first, &a, err) < 0) return -1;
+        first = 0;
+
+        int is_range = 0;
+        elem_t b;
+        memset(&b, 0, sizeof(b));
+        if (a.type != EL_CLASS && a.type != EL_EQUIV) {
+            if (p >= end) { *err = E_EBRACK; return -1; }
+            if (*p == '-') {
+                const char *q = p + 1;
+                if (q >= end) { *err = E_EBRACK; return -1; }
+                if (*q != ']') {
+                    p = q;
+                    if (parse_elem(&p, end, 1, &b, err) < 0) return -1;
+                    is_range = 1;
                 }
-                p = cls_end + 2; /* skip :] */
-                continue;
+                /* else: "-]" -- the '-' is a literal, read next round */
             }
         }
 
-        /* Collating element [. .] — treat as literal char */
-        if (*p == '[' && p[1] == '.') {
-            p += 2;
-            unsigned char lit = (p < end) ? (unsigned char)*p : 0;
-            while (p < end && !(*p == '.' && p[1] == ']')) p++;
-            if (p < end) p += 2; /* skip .] */
-            mb_charclass_set(out, lit);
-            continue;
-        }
-
-        /* Equivalence class [= =] — treat as literal char */
-        if (*p == '[' && p[1] == '=') {
-            p += 2;
-            unsigned char lit = (p < end) ? (unsigned char)*p : 0;
-            while (p < end && !(*p == '=' && p[1] == ']')) p++;
-            if (p < end) p += 2; /* skip =] */
-            mb_charclass_set(out, lit);
-            continue;
-        }
-
-        /* Range: a-z */
-        if (p + 2 < end && p[1] == '-' && p[2] != ']') {
-            unsigned char lo = (unsigned char)*p;
-            unsigned char hi = (unsigned char)p[2];
-            if (lo > hi) {
-                /* Invalid range: treat as three literal chars */
-                mb_charclass_set(out, lo);
-                mb_charclass_set(out, (unsigned char)'-');
-                mb_charclass_set(out, hi);
-            } else {
-                for (unsigned int c = lo; c <= hi; c++)
-                    mb_charclass_set(out, (unsigned char)c);
-            }
-            p += 3;
-            continue;
-        }
-
-        /* Literal char (including escaped) */
-        unsigned char c;
-        if (*p == '\\' && p + 1 < end) {
-            p++;
-            switch (*p) {
-            case 'n': c = '\n'; break;
-            case 't': c = '\t'; break;
-            case 'r': c = '\r'; break;
-            default:  c = (unsigned char)*p; break;
-            }
+        colon &= ~2;
+        if (is_range) {
+            unsigned char lo, hi;
+            if (elem_char(&a, &lo, err) < 0) return -1;
+            if (elem_char(&b, &hi, err) < 0) return -1;
+            if (lo > hi) { *err = E_ERANGE; return -1; }
+            for (unsigned c = lo; c <= hi; c++)
+                mb_charclass_set(out, (unsigned char)c);
+            colon |= 8;
         } else {
-            c = (unsigned char)*p;
+            switch (a.type) {
+            case EL_CHAR:
+                mb_charclass_set(out, a.ch);
+                colon |= (a.ch == ':') ? 2 : 4;
+                break;
+            case EL_COLL:
+            case EL_EQUIV:
+                if (a.nlen != 1) { *err = E_ECOLLATE; return -1; }
+                mb_charclass_set(out, (unsigned char)a.name[0]);
+                colon |= 8;
+                break;
+            case EL_CLASS:
+                if (class_set(out, a.name, icase) < 0) { *err = E_ECTYPE; return -1; }
+                colon |= 8;
+                break;
+            }
         }
-        mb_charclass_set(out, c);
-        p++;
+
+        if (p >= end) { *err = E_EBRACK; return -1; }
+        if (*p == ']') { p++; break; }
     }
 
-    /* Apply case-insensitive: for every set char, also set its counterpart */
     if (icase) {
-        mb_charclass tmp;
-        memcpy(&tmp, out, sizeof(tmp));
+        mb_charclass tmp = *out;
         for (int c = 0; c < 256; c++) {
             if (mb_charclass_test(&tmp, (unsigned char)c)) {
-                unsigned char lo = (unsigned char)tolower((unsigned char)c);
-                unsigned char up = (unsigned char)toupper((unsigned char)c);
-                mb_charclass_set(out, lo);
-                mb_charclass_set(out, up);
+                mb_charclass_set(out, (unsigned char)tolower(c));
+                mb_charclass_set(out, (unsigned char)toupper(c));
             }
         }
     }
+    if (invert)
+        for (int i = 0; i < 32; i++) out->bits[i] ^= 0xFF;
 
-    /* Apply negation */
-    if (negate) {
-        for (int i = 0; i < 32; i++)
-            out->bits[i] ^= 0xFF;
-        /* Never match NUL in negated class */
-        out->bits[0] &= (uint8_t)~1u;
-    }
-
-    return 1;
+    *endp = p;
+    if (colon == 7) { *err = E_COLON; return 1; }   /* valid, but dfa.c rejects */
+    return 0;
 }

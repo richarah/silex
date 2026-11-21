@@ -206,11 +206,15 @@ All silex builtins implement the following POSIX utility conventions:
 
 | Flag | POSIX | GNU | silex | Module | Notes |
 |------|-------|-----|----------|--------|-------|
-| -E/-F | Y | Y | Y | - | |
+| -E/-F | Y | Y | Y | - | -E with -F: -F wins (GNU: error) |
+| -G / --basic-regexp | N | Y | Y | - | with -E or -F: "conflicting matchers specified" |
 | -c/-i/-l/-n/-q/-s/-v | Y | Y | Y | - | |
-| -e/-f | Y | Y | Y | - | |
+| -e/-f | Y | Y | Y | - | a newline in a pattern separates patterns |
+| -x/-o/-b/-m/-A/-B/-C/-H/-h/-L/-Z | N | Y | Y | - | -o -b prints each match's offset |
 | -r/-R | N | Y | Y | - | |
-| -w | N | Y | Y | - | |
+| -w | N | Y | Y | - | GNU rules, incl. retrying shorter matches |
+| `\<` `\>` `\b` `\B` `\w` `\W` `\s` `\S` `` \` `` `\'` | N | Y | Y | - | GNU regex extensions |
+| back-references `\1`-`\9` | Y | Y | Y | - | matched by libc regexec() (POSIX syntax on musl) |
 | --include/--exclude | N | Y | Y | - | |
 | --color | N | Y | Y | - | |
 | -P (PCRE) | N | Y | N | Y | grep_pcre.so |
@@ -300,6 +304,14 @@ or missing required arguments; the tool prints a message to stderr and exits 2.
 **grep exit codes** match POSIX strictly: 0 if any line matched, 1 if no line matched,
 2 if an error occurred (file not found, bad pattern, etc.). This differs from GNU grep
 only in that silex grep does not use exit code 2 for `--quiet` suppression.
+
+**grep patterns** are parsed with GNU grep's rules (dfa.c grammar, glibc's
+error checks) and give GNU grep's results in the C locale; invalid patterns
+are reported as `silex: grep: invalid regex 'PAT': MSG` with GNU's MSG.
+Differences that remain: binary files (a file is treated as binary from its
+first NUL line on and reported as `Binary file F matches`), and, on musl,
+back-reference patterns using GNU extensions (musl's regcomp lacks them) or
+stacked repetitions in a BRE (`a\?\{2\}`), which POSIX regcomp rejects.
 
 **Shell (sh) exit codes**: the shell exits with the exit status of the last command
 executed. With `set -e`, the shell exits immediately when any command exits non-zero

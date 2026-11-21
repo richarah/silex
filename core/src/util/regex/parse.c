@@ -1,4 +1,25 @@
-/* parse.c — BRE/ERE → NFA via postfix/shunting-yard + Thompson construction */
+/* parse.c — GNU grep BRE/ERE syntax -> AST
+ *
+ * The grammar and the meaning of every construct follow GNU grep's dfa.c,
+ * which is what decides what a GNU grep pattern matches:
+ *
+ *   regexp  := branch ('|' branch)*
+ *   branch  := closure+
+ *   closure := atom ('*' | '+' | '?' | '{m,n}')*
+ *   atom    := char | set | '.' | anchor | backref | '(' regexp ')' | empty
+ *
+ * with the context rules of the two syntaxes (RE_SYNTAX_GREP for -G,
+ * RE_SYNTAX_EGREP for -E): in a BRE, '*' at the start of an expression and
+ * '^'/'$' away from the ends are ordinary characters; in an ERE they are
+ * always operators, and a leading repetition applies to the empty string
+ * (with the same warning GNU grep prints).
+ *
+ * GNU grep also runs every pattern through glibc's regex compiler, which
+ * rejects some patterns dfa.c would accept; the errors here are the union
+ * of both, named the way glibc names them.
+ *
+ * GNU extensions: \< \> \b \B \w \W \s \S \` \' and \{,n\}.
+ */
 
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
@@ -7,815 +28,520 @@
 #include "regex_internal.h"
 #include <ctype.h>
 #include <string.h>
-#include <stdio.h>
 
-/* ---- Tokens ---------------------------------------------------------------- */
+#define RE_DUP_MAX_ 0x7fff
 
-typedef enum {
-    TOK_LITERAL,  /* a literal char or ICHAR */
-    TOK_CLASS,    /* [...]  */
-    TOK_DOT,      /* .      */
-    TOK_BOL,      /* ^      */
-    TOK_EOL,      /* $      */
-    TOK_STAR,     /* *      */
-    TOK_PLUS,     /* +      */
-    TOK_QUEST,    /* ?      */
-    TOK_PIPE,     /* |      */
-    TOK_LPAREN,   /* (      */
-    TOK_RPAREN,   /* )      */
-    TOK_CONCAT,   /* synthetic concatenation operator */
-} tok_t;
+#define E_EESCAPE "Trailing backslash"
+#define E_EPAREN  "Unmatched ( or \\("
+#define E_ERPAREN "Unmatched ) or \\)"
+#define E_EBRACE  "Unmatched \\{"
+#define E_BADBR   "Invalid content of \\{\\}"
+#define E_ESIZE   "Regular expression too big"
+#define E_ESUBREG "Invalid back reference"
+#define E_ESPACE  "Memory exhausted"
+
+enum {
+    T_END, T_CHAR, T_SET, T_ANY, T_ASSERT, T_BACKREF,
+    T_STAR, T_PLUS, T_QMARK, T_REPMN, T_OR, T_LPAREN, T_RPAREN
+};
 
 typedef struct {
-    tok_t        type;
-    char         c;         /* for LITERAL */
-    int          is_ichar;  /* 1 if case-insensitive char */
-    mb_charclass cc;        /* for CLASS */
-} token;
+    mb_ast      *t;
+    const char  *p, *end;
+    int          ere, icase;
+    int          tok, lasttok, laststart;
+    unsigned char c;          /* T_CHAR */
+    mb_charclass set;         /* T_SET */
+    int          kind;        /* T_ASSERT, T_BACKREF */
+    int          minrep, maxrep;
+    int          parens;
+    int          ngroups;
+    int         *gstack;      /* open group numbers */
+    int          completed[10];
+    int          has_backref;
+    const char  *err;
+    int          esize;
+    int          glibc;       /* parse as glibc's regex does (see mb_parse) */
+    int          nlalt;       /* '\n' separates alternatives */
+    int          quirk;       /* glibc would read this pattern differently */
+    int          rparen_lit;  /* an unmatched ')' was taken literally */
+    mb_parsed   *out;         /* libc edits are recorded here */
+    const char  *deferred;    /* dfa.c-only error, reported if all else ok */
+    const char  *start;
+    void       (*warn)(void *, const char *);
+    void        *wctx;
+} P;
 
-#define MAX_TOKENS 8192
-
-/* ---- Tokenizer ------------------------------------------------------------- */
-
-typedef struct {
-    const char  *p;
-    const char  *end;
-    int          ere;
-    int          icase;
-    int          flags;
-    const char **errstr;
-    token        buf[MAX_TOKENS];
-    int          n;
-    int          err;
-} tokenizer_t;
-
-static int tok_push(tokenizer_t *t, token tok)
+static void warn(P *s, const char *m)
 {
-    if (t->n >= MAX_TOKENS) {
-        if (t->errstr) *t->errstr = "pattern too long";
-        t->err = 1;
-        return -1;
-    }
-    t->buf[t->n++] = tok;
-    return 0;
+    if (s->warn) s->warn(s->wctx, m);
 }
 
-/* Consume a character class [...] starting after the '[' */
-static int tokenize_class(tokenizer_t *t)
+/* glibc fetch_token() as far as interval parsing needs it */
+enum { FT_END, FT_CHAR, FT_CLOSE, FT_OTHER };
+
+static int ft(P *s, const char **q, unsigned char *c)
 {
-    const char *cls_start = t->p;
-    const char *p = t->p;
+    const char *r = *q;
+    if (r >= s->end) return FT_END;
+    if (*r == '\\') {
+        if (r + 1 >= s->end) { *q = r + 1; *c = 0; return FT_END; }
+        *c = (unsigned char)r[1];
+        *q = r + 2;
+        if (!s->ere && r[1] == '}') return FT_CLOSE;
+        return FT_OTHER;
+    }
+    *c = (unsigned char)*r;
+    *q = r + 1;
+    if (s->ere && *r == '}') return FT_CLOSE;
+    return FT_CHAR;
+}
 
-    /* ']' and '^]' as first (after optional '^') are literal */
-    if (*p == '^') p++;
-    if (*p == ']') p++;
-
-    /* Scan for matching ] */
-    while (p < t->end && *p != ']') {
-        if (*p == '[' && (p[1] == ':' || p[1] == '.' || p[1] == '=')) {
-            /* POSIX class/collating — find closing ]] */
-            char closer = p[1];
-            p += 2;
-            while (p < t->end && !(*p == closer && p[1] == ']')) p++;
-            if (p < t->end) p += 2;
-        } else if (*p == '\\' && p + 1 < t->end) {
-            p += 2;
-        } else {
-            p++;
+/* glibc fetch_number(): -1 no digits, -2 invalid, else the number */
+static long fetch_number(P *s, const char **q, int *last, unsigned char *lastc)
+{
+    long num = -1;
+    for (;;) {
+        unsigned char c;
+        int ty = ft(s, q, &c);
+        *last = ty; *lastc = c;
+        if (ty == FT_END) return -2;
+        if (ty == FT_CLOSE || c == ',') break;
+        if (ty != FT_CHAR || c < '0' || c > '9' || num == -2)
+            num = -2;
+        else if (num == -1)
+            num = c - '0';
+        else {
+            num = num * 10 + (c - '0');
+            if (num > RE_DUP_MAX_ + 1) num = RE_DUP_MAX_ + 1;
         }
     }
-    const char *cls_end = p;  /* points to ']' or end */
-    if (*p == ']') p++;
-    t->p = p;
+    return num;
+}
 
-    token tok;
-    memset(&tok, 0, sizeof(tok));
-    tok.type = TOK_CLASS;
-    mb_charclass_parse(cls_start, cls_end, &tok.cc, t->flags);
-    return tok_push(t, tok);
+/* Interval after '{' / '\{'. 1: interval, 0: ordinary '{' (ERE), -1: error */
+static int interval(P *s)
+{
+    const char *q = s->p;
+    int lt; unsigned char lc;
+    long start = fetch_number(s, &q, &lt, &lc), endv = 0;
+    int st_tok = lt; unsigned char st_c = lc;
+    if (start == -1) {
+        if (st_tok != FT_CLOSE && st_c == ',') start = 0;
+        else { s->err = E_BADBR; return -1; }
+    }
+    if (start != -2) {
+        if (st_tok == FT_CLOSE)      endv = start;
+        else if (st_c == ',')        endv = fetch_number(s, &q, &lt, &lc);
+        else                         endv = -2;
+    }
+    if (start == -2 || endv == -2) {
+        if (!s->ere) {
+            s->err = (lt == FT_END) ? E_EBRACE : E_BADBR;
+            return -1;
+        }
+        return 0;
+    }
+    if ((endv != -1 && start > endv) || lt != FT_CLOSE) {
+        s->err = E_BADBR;
+        return -1;
+    }
+    if ((endv == -1 ? start : endv) > RE_DUP_MAX_) {
+        s->err = E_ESIZE;
+        s->esize = 1;
+        return -1;
+    }
+    s->minrep = (int)start;
+    s->maxrep = (int)endv;
+    s->p = q;
+    return 1;
+}
+
+static void set_char(P *s, unsigned char c)
+{
+    memset(&s->set, 0, sizeof(s->set));
+    mb_charclass_set(&s->set, c);
+    if (s->icase && isalpha(c)) {
+        mb_charclass_set(&s->set, (unsigned char)tolower(c));
+        mb_charclass_set(&s->set, (unsigned char)toupper(c));
+    }
 }
 
 /*
- * Intervals: a{m}, a{m,}, a{m,n}, a{,n} (ERE) and a\{m,n\} (BRE).
- * They used to be approximated as "+" (a{0,1} matched "aa" but not "",
- * x{2} matched "x"). Now the preceding atom is repeated at the token level:
- * a{2,4} -> a a a? a?, a{2,} -> a a a*. Anything this cannot express
- * (a bad interval, nothing to repeat, too large) makes the parse fail, and
- * the pattern then goes to the libc engine, which handles it exactly.
- */
-#define INTERVAL_MAX 255   /* RE_DUP_MAX */
-
-/* Parse "m", "m," or "m,n" at t->p up to the closing "}" (ERE) or "\}"
- * (BRE). On success consume it and return 0; otherwise leave t->p alone
- * and return -1. max = -1 means no upper bound. */
-static int parse_interval(tokenizer_t *t, int *min, int *max)
-{
-    const char *p = t->p;
-    int lo = 0, hi, digits = 0;
-    while (p < t->end && isdigit((unsigned char)*p)) {
-        lo = lo * 10 + (*p++ - '0');
-        if (lo > INTERVAL_MAX) return -1;
-        digits++;
-    }
-    /* GNU extension: {,n} means {0,n}. */
-    if (!digits && !(p + 1 < t->end && *p == ',' && isdigit((unsigned char)p[1])))
-        return -1;
-    hi = lo;
-    if (p < t->end && *p == ',') {
-        p++;
-        if (p < t->end && isdigit((unsigned char)*p)) {
-            hi = 0;
-            while (p < t->end && isdigit((unsigned char)*p)) {
-                hi = hi * 10 + (*p++ - '0');
-                if (hi > INTERVAL_MAX) return -1;
-            }
-            if (hi < lo) return -1;
-        } else {
-            hi = -1;
-        }
-    }
-    if (t->ere) {
-        if (p >= t->end || *p != '}') return -1;
-        p++;
-    } else {
-        if (p + 1 >= t->end || p[0] != '\\' || p[1] != '}') return -1;
-        p += 2;
-    }
-    t->p = p;
-    *min = lo;
-    *max = hi;
-    return 0;
-}
-
-/* Repeat the atom that ends the token buffer according to {min,max}. */
-static int expand_interval(tokenizer_t *t, int min, int max)
-{
-    if (t->n == 0) return -1;
-    int a = t->n - 1;
-    tok_t last = t->buf[a].type;
-    if (last == TOK_RPAREN) {
-        int depth = 0;
-        for (; a >= 0; a--) {
-            if (t->buf[a].type == TOK_RPAREN) depth++;
-            else if (t->buf[a].type == TOK_LPAREN && --depth == 0) break;
-        }
-        if (a < 0) return -1;
-    } else if (last != TOK_LITERAL && last != TOK_CLASS && last != TOK_DOT) {
-        return -1;   /* e.g. a*{2}, ^{2}, |{2}: leave it to libc */
-    }
-
-    int k = t->n - a;
-    long total = (long)k * (max < 0 ? min + 1 : max) + (max < 0 ? 1 : max - min);
-    if (total > MAX_TOKENS / 2 || a + total >= MAX_TOKENS) return -1;
-
-    static token atom[MAX_TOKENS / 2];   /* large: keep it off the stack */
-    if (k > MAX_TOKENS / 2) return -1;
-    memcpy(atom, &t->buf[a], (size_t)k * sizeof(token));
-    t->n = a;
-
-    token q;
-    memset(&q, 0, sizeof(q));
-    for (int i = 0; i < min; i++)
-        for (int j = 0; j < k; j++) t->buf[t->n++] = atom[j];
-    if (max < 0) {
-        for (int j = 0; j < k; j++) t->buf[t->n++] = atom[j];
-        q.type = TOK_STAR;
-        t->buf[t->n++] = q;
-    } else {
-        for (int i = min; i < max; i++) {
-            for (int j = 0; j < k; j++) t->buf[t->n++] = atom[j];
-            q.type = TOK_QUEST;
-            t->buf[t->n++] = q;
-        }
-    }
-    return 0;
-}
-
-static int interval_fail(tokenizer_t *t)
-{
-    if (t->errstr) *t->errstr = "interval not supported here";
-    t->err = 1;
-    return -1;
-}
-
-/* Main tokenizer: consume one logical token from t->p */
-static int tokenize_one(tokenizer_t *t)
-{
-    if (t->p >= t->end) return 0;
-
-    char c = *t->p++;
-    token tok;
-    memset(&tok, 0, sizeof(tok));
-
-    /* Escape sequence */
-    if (c == '\\' && t->p < t->end) {
-        char n = *t->p++;
-        if (!t->ere) {
-            /* BRE metacharacters introduced by backslash */
-            if (n == '(') { tok.type = TOK_LPAREN; return tok_push(t, tok); }
-            if (n == ')') { tok.type = TOK_RPAREN; return tok_push(t, tok); }
-            if (n == '|') { tok.type = TOK_PIPE;   return tok_push(t, tok); }
-            if (n == '+') { tok.type = TOK_PLUS;   return tok_push(t, tok); }
-            if (n == '?') { tok.type = TOK_QUEST;  return tok_push(t, tok); }
-            if (n == '{') {
-                int lo, hi;
-                if (parse_interval(t, &lo, &hi) != 0 ||
-                    expand_interval(t, lo, hi) != 0)
-                    return interval_fail(t);
-                return 0;
-            }
-        } else {
-            /* ERE: \1-\9 are backreferences (caller should have used POSIX) */
-            if (n >= '1' && n <= '9') {
-                /* Emit as literal (approximation — backref in SIMPLE class won't occur) */
-                tok.type     = TOK_LITERAL;
-                tok.c        = n;
-                tok.is_ichar = 0;
-                return tok_push(t, tok);
-            }
-        }
-        /* Standard escapes */
-        char lit;
-        switch (n) {
-        case 'n': lit = '\n'; break;
-        case 't': lit = '\t'; break;
-        case 'r': lit = '\r'; break;
-        case 'a': lit = '\a'; break;
-        case 'f': lit = '\f'; break;
-        case 'v': lit = '\v'; break;
-        default:  lit = n;   break;
-        }
-        tok.type     = TOK_LITERAL;
-        tok.c        = t->icase ? (char)tolower((unsigned char)lit) : lit;
-        tok.is_ichar = t->icase;
-        return tok_push(t, tok);
-    }
-
-    /* ERE metacharacters (unescaped) */
-    if (t->ere) {
-        if (c == '(') { tok.type = TOK_LPAREN; return tok_push(t, tok); }
-        if (c == ')') { tok.type = TOK_RPAREN; return tok_push(t, tok); }
-        if (c == '|') { tok.type = TOK_PIPE;   return tok_push(t, tok); }
-        if (c == '+') { tok.type = TOK_PLUS;   return tok_push(t, tok); }
-        if (c == '?') { tok.type = TOK_QUEST;  return tok_push(t, tok); }
-        if (c == '{') {
-            int lo, hi;
-            if (parse_interval(t, &lo, &hi) == 0) {
-                if (expand_interval(t, lo, hi) != 0)
-                    return interval_fail(t);
-                return 0;
-            }
-            /* Not an interval ("a{", "{x"): a literal brace, as in GNU. */
-            tok.type     = TOK_LITERAL;
-            tok.c        = '{';
-            tok.is_ichar = 0;
-            return tok_push(t, tok);
-        }
-    }
-
-    /* BRE: * is metachar; + ? { are literal unless preceded by \ */
-    if (!t->ere && c == '*') { tok.type = TOK_STAR; return tok_push(t, tok); }
-
-    /* Common metacharacters */
-    if (c == '.') { tok.type = TOK_DOT; return tok_push(t, tok); }
-    /* BRE: ^ is an anchor only first in the pattern or right after \( or
-     * \|, and $ only last or right before \) or \|; elsewhere they are
-     * ordinary characters (a^b matches "a^b"). ERE: always anchors. */
-    if (c == '^') {
-        int prev = t->n ? (int)t->buf[t->n - 1].type : -1;
-        if (t->ere || prev < 0 || prev == TOK_LPAREN || prev == TOK_PIPE) {
-            tok.type = TOK_BOL;
-            return tok_push(t, tok);
-        }
-    } else if (c == '$') {
-        int last = t->p >= t->end ||
-                   (t->p + 1 < t->end && t->p[0] == '\\' &&
-                    (t->p[1] == ')' || t->p[1] == '|'));
-        if (t->ere || last) {
-            tok.type = TOK_EOL;
-            return tok_push(t, tok);
-        }
-    }
-    if (t->ere && c == '*') { tok.type = TOK_STAR; return tok_push(t, tok); }
-    if (c == '[') return tokenize_class(t);
-
-    /* Literal */
-    tok.type     = TOK_LITERAL;
-    tok.c        = t->icase ? (char)tolower((unsigned char)c) : c;
-    tok.is_ichar = t->icase;
-    return tok_push(t, tok);
-}
-
-/* Full tokenization of the regex string */
-static int tokenize(tokenizer_t *t, const char *pat, int flags,
-                    const char **errstr)
-{
-    t->p      = pat;
-    t->end    = pat + strlen(pat);
-    t->ere    = (flags & SX_REG_ERE) != 0;
-    t->icase  = (flags & SX_REG_ICASE) != 0;
-    t->flags  = flags;
-    t->errstr = errstr;
-    t->n      = 0;
-    t->err    = 0;
-
-    while (t->p < t->end && !t->err) {
-        tokenize_one(t);
-    }
-    return t->err ? -1 : 0;
-}
-
-/* ---- Insert explicit concatenation operators ------------------------------ */
-/*
- * After an atom (LITERAL, CLASS, DOT, BOL, EOL) or a postfix op
- * (STAR/PLUS/QUEST) or RPAREN, if the next token starts another atom or is
- * LPAREN, BOL or EOL, insert a CONCAT between them.
+ * GNU grep matches lines with dfa.c but finds the matched text (-o,
+ * --color) with glibc's regex, and the two read a repetition operator
+ * after a zero-width assertion (or, in an ERE, a leading '{') differently:
+ * dfa.c applies it, glibc does not -- in an ERE it drops the operator, in
+ * a BRE it is an ordinary character. The pattern is parsed both ways when
+ * that matters (quirk); glibc's reading drives -o and --color.
  *
- * BOL used to be missing on the left and EOL on the right, so "^(" and
- * "x$" got no CONCAT. Most such patterns then failed to parse and quietly
- * fell back to libc, but some compiled wrongly: in "a*^(b|)" the empty
- * alternative absorbed the ^, giving a*(^|b), which matched "ab".
+ * glibc_op(): in a BRE under glibc rules, the operator is a literal.
  */
-static int insert_concat(token *in, int n_in, token *out, int *n_out)
+static int lex(P *s);
+
+static int glibc_op(P *s, int brace)
 {
-    *n_out = 0;
-
-    for (int i = 0; i < n_in; i++) {
-        out[(*n_out)++] = in[i];
-        if (*n_out > MAX_TOKENS - 2) return -1;
-
-        if (i + 1 >= n_in) break;
-
-        int left_atom = (in[i].type == TOK_LITERAL ||
-                         in[i].type == TOK_CLASS   ||
-                         in[i].type == TOK_DOT     ||
-                         in[i].type == TOK_BOL     ||
-                         in[i].type == TOK_EOL     ||
-                         in[i].type == TOK_RPAREN  ||
-                         in[i].type == TOK_STAR    ||
-                         in[i].type == TOK_PLUS    ||
-                         in[i].type == TOK_QUEST);
-
-        int right_atom = (in[i+1].type == TOK_LITERAL ||
-                          in[i+1].type == TOK_CLASS   ||
-                          in[i+1].type == TOK_DOT     ||
-                          in[i+1].type == TOK_BOL     ||
-                          in[i+1].type == TOK_EOL     ||
-                          in[i+1].type == TOK_LPAREN);
-
-        if (left_atom && right_atom) {
-            token concat;
-            memset(&concat, 0, sizeof(concat));
-            concat.type = TOK_CONCAT;
-            out[(*n_out)++] = concat;
-        }
-    }
-    return 0;
-}
-
-/* ---- Shunting-yard: infix → postfix --------------------------------------- */
-/*
- * Operator precedence (higher = tighter binding):
- *   STAR/PLUS/QUEST: 3
- *   CONCAT:          2
- *   PIPE:            1
- */
-static int prec(tok_t t) {
-    if (t == TOK_STAR || t == TOK_PLUS || t == TOK_QUEST) return 3;
-    if (t == TOK_CONCAT) return 2;
-    if (t == TOK_PIPE)   return 1;
-    return 0;
-}
-static int is_left_assoc(tok_t t) { (void)t; return 1; }
-
-static int infix_to_postfix(token *in, int n_in, token *out, int *n_out,
-                             const char **errstr)
-{
-    token op_stack[MAX_TOKENS];
-    int   op_top = 0;
-    *n_out = 0;
-
-    for (int i = 0; i < n_in; i++) {
-        tok_t ty = in[i].type;
-
-        if (ty == TOK_LITERAL || ty == TOK_CLASS ||
-            ty == TOK_DOT     || ty == TOK_BOL   || ty == TOK_EOL) {
-            /* Operand: push to output */
-            if (*n_out >= MAX_TOKENS) { if (errstr) *errstr = "pattern too complex"; return -1; }
-            out[(*n_out)++] = in[i];
-        } else if (ty == TOK_STAR || ty == TOK_PLUS || ty == TOK_QUEST ||
-                   ty == TOK_CONCAT || ty == TOK_PIPE) {
-            /* Operator: pop higher-or-equal precedence ops to output */
-            while (op_top > 0) {
-                tok_t top = op_stack[op_top - 1].type;
-                if (top != TOK_LPAREN &&
-                    (prec(top) > prec(ty) ||
-                     (prec(top) == prec(ty) && is_left_assoc(ty)))) {
-                    if (*n_out >= MAX_TOKENS) { if (errstr) *errstr = "pattern too complex"; return -1; }
-                    out[(*n_out)++] = op_stack[--op_top];
-                } else break;
-            }
-            if (op_top >= MAX_TOKENS) { if (errstr) *errstr = "pattern too complex"; return -1; }
-            op_stack[op_top++] = in[i];
-        } else if (ty == TOK_LPAREN) {
-            if (op_top >= MAX_TOKENS) { if (errstr) *errstr = "pattern too complex"; return -1; }
-            op_stack[op_top++] = in[i];
-        } else if (ty == TOK_RPAREN) {
-            /* Pop until LPAREN */
-            while (op_top > 0 && op_stack[op_top - 1].type != TOK_LPAREN) {
-                if (*n_out >= MAX_TOKENS) { if (errstr) *errstr = "pattern too complex"; return -1; }
-                out[(*n_out)++] = op_stack[--op_top];
-            }
-            if (op_top == 0) { if (errstr) *errstr = "unmatched )"; return -1; }
-            op_top--; /* pop LPAREN */
-        }
-    }
-
-    /* Pop remaining operators */
-    while (op_top > 0) {
-        if (op_stack[op_top - 1].type == TOK_LPAREN) {
-            if (errstr) *errstr = "unmatched (";
-            return -1;
-        }
-        if (*n_out >= MAX_TOKENS) { if (errstr) *errstr = "pattern too complex"; return -1; }
-        out[(*n_out)++] = op_stack[--op_top];
-    }
-    return 0;
-}
-
-/* ---- Fragment stack + Thompson NFA builder -------------------------------- */
-
-/* "Hole" = instruction index + which output field (0=x, 1=y) needs patching.
- * Using dynamic allocation avoids stack overflow when the fragment stack
- * is stored on the heap. */
-typedef struct { int idx; int use_y; } hole_t;
-
-typedef struct {
-    hole_t *holes;
-    int     n;
-    int     cap;
-} hole_list;
-
-static void hl_init(hole_list *h) { h->holes = NULL; h->n = 0; h->cap = 0; }
-
-static void hl_free(hole_list *h) { free(h->holes); h->holes = NULL; h->n = h->cap = 0; }
-
-static int hl_push(hole_list *h, int idx, int use_y) {
-    if (h->n >= h->cap) {
-        int nc = h->cap ? h->cap * 2 : 4;
-        hole_t *tmp = realloc(h->holes, (size_t)nc * sizeof(hole_t));
-        if (!tmp) return -1;
-        h->holes = tmp;
-        h->cap   = nc;
-    }
-    h->holes[h->n].idx   = idx;
-    h->holes[h->n].use_y = use_y;
-    h->n++;
-    return 0;
-}
-
-static void hl_patch(mb_prog *prog, hole_list *h, int target) {
-    for (int i = 0; i < h->n; i++) {
-        if (h->holes[i].use_y)
-            prog->instrs[h->holes[i].idx].y = target;
-        else
-            prog->instrs[h->holes[i].idx].x = target;
-    }
-}
-
-static int hl_merge(hole_list *dst, hole_list *src) {
-    for (int i = 0; i < src->n; i++) {
-        if (hl_push(dst, src->holes[i].idx, src->holes[i].use_y) < 0)
-            return -1;
-    }
-    return 0;
-}
-
-/* Move src into dst (dst gets src's buffer, src is cleared) */
-static void hl_move(hole_list *dst, hole_list *src) {
-    hl_free(dst);
-    *dst = *src;
-    hl_init(src);
-}
-
-typedef struct {
-    int       start;   /* entry instruction index */
-    hole_list out;     /* unpatched outputs */
-    int       valid;
-} frag;
-
-#define MAX_FSTACK 256
-
-static int emit1(mb_prog *prog, instr_type_t op, char c, int x, int y) {
-    mb_instr in;
-    memset(&in, 0, sizeof(in));
-    in.op    = op;
-    in.arg.c = c;
-    in.x     = x;
-    in.y     = y;
-    return mb_prog_emit(prog, in);
-}
-
-static int emit_class_instr(mb_prog *prog, mb_charclass *cc) {
-    return mb_prog_emit_class(prog, cc, I_CLASS);
-}
-
-static frag build_nfa(token *post, int n_post, mb_prog *prog,
-                      const char **errstr)
-{
-    /* Allocate fragment stack on heap to avoid stack overflow
-     * (each frag has a dynamic hole_list; MAX_FSTACK static frags ≈ safe) */
-    frag *stack = calloc(MAX_FSTACK, sizeof(frag));
-    if (!stack) {
-        if (errstr) *errstr = "out of memory";
-        /* zero-init: the whole struct is returned by value, and callers
-         * read members other than .valid */
-        frag bad = {0}; bad.valid = 0; hl_init(&bad.out); return bad;
-    }
-    int  stk = 0;
-
-#define PUSH(f) do { if (stk >= MAX_FSTACK) goto too_complex; stack[stk++] = (f); } while(0)
-#define POP()   (stack[--stk])
-#define PEEK()  (stack[stk-1])
-
-    for (int i = 0; i < n_post; i++) {
-        token *tok = &post[i];
-
-        switch (tok->type) {
-        case TOK_LITERAL: {
-            instr_type_t op = tok->is_ichar ? I_ICHAR : I_CHAR;
-            int idx = emit1(prog, op, tok->c, -1, 0);
-            if (idx < 0) goto too_complex;
-            frag f; f.valid = 1; f.start = idx;
-            memset(&f.out, 0, sizeof(f.out));
-            hl_push(&f.out, idx, 0);  /* x is the output hole */
-            PUSH(f);
-            break;
-        }
-        case TOK_CLASS: {
-            int idx = emit_class_instr(prog, (mb_charclass*)&tok->cc);
-            if (idx < 0) goto too_complex;
-            frag f; f.valid = 1; f.start = idx;
-            memset(&f.out, 0, sizeof(f.out));
-            hl_push(&f.out, idx, 0);
-            PUSH(f);
-            break;
-        }
-        case TOK_DOT: {
-            int idx = emit1(prog, I_ANY, 0, -1, 0);
-            if (idx < 0) goto too_complex;
-            frag f; f.valid = 1; f.start = idx;
-            memset(&f.out, 0, sizeof(f.out));
-            hl_push(&f.out, idx, 0);
-            PUSH(f);
-            break;
-        }
-        case TOK_BOL: {
-            int idx = emit1(prog, I_BOL, 0, -1, 0);
-            if (idx < 0) goto too_complex;
-            frag f; f.valid = 1; f.start = idx;
-            memset(&f.out, 0, sizeof(f.out));
-            hl_push(&f.out, idx, 0);
-            PUSH(f);
-            break;
-        }
-        case TOK_EOL: {
-            int idx = emit1(prog, I_EOL, 0, -1, 0);
-            if (idx < 0) goto too_complex;
-            frag f; f.valid = 1; f.start = idx;
-            memset(&f.out, 0, sizeof(f.out));
-            hl_push(&f.out, idx, 0);
-            PUSH(f);
-            break;
-        }
-        case TOK_CONCAT: {
-            if (stk < 2) goto bad_pattern;
-            frag e2 = POP();
-            frag e1 = POP();
-            /* Patch e1's outputs to e2.start, then free e1.out */
-            hl_patch(prog, &e1.out, e2.start);
-            hl_free(&e1.out);
-            /* f.out = e2.out (transfer ownership) */
-            frag f; f.valid = 1; f.start = e1.start;
-            hl_init(&f.out); hl_move(&f.out, &e2.out);
-            PUSH(f);
-            break;
-        }
-        case TOK_PIPE: {
-            if (stk < 2) goto bad_pattern;
-            frag e2 = POP();
-            frag e1 = POP();
-            /* Emit SPLIT(e1.start, e2.start) */
-            int idx = emit1(prog, I_SPLIT, 0, e1.start, e2.start);
-            if (idx < 0) { hl_free(&e1.out); hl_free(&e2.out); goto too_complex; }
-            frag f; f.valid = 1; f.start = idx;
-            hl_init(&f.out);
-            if (hl_merge(&f.out, &e1.out) < 0) {
-                hl_free(&e1.out); hl_free(&e2.out); hl_free(&f.out); goto too_complex;
-            }
-            if (hl_merge(&f.out, &e2.out) < 0) {
-                hl_free(&e1.out); hl_free(&e2.out); hl_free(&f.out); goto too_complex;
-            }
-            hl_free(&e1.out);
-            hl_free(&e2.out);
-            PUSH(f);
-            break;
-        }
-        case TOK_STAR: {
-            if (stk < 1) goto bad_pattern;
-            frag e = POP();
-            /* SPLIT(e.start, hole) */
-            int idx = emit1(prog, I_SPLIT, 0, e.start, -1);
-            if (idx < 0) { hl_free(&e.out); goto too_complex; }
-            /* Patch e's outputs back to SPLIT, then free */
-            hl_patch(prog, &e.out, idx);
-            hl_free(&e.out);
-            frag f; f.valid = 1; f.start = idx;
-            hl_init(&f.out);
-            hl_push(&f.out, idx, 1);  /* split.y is the output hole */
-            PUSH(f);
-            break;
-        }
-        case TOK_PLUS: {
-            if (stk < 1) goto bad_pattern;
-            frag e = POP();
-            /* SPLIT(e.start, hole) — entry remains e.start */
-            int idx = emit1(prog, I_SPLIT, 0, e.start, -1);
-            if (idx < 0) { hl_free(&e.out); goto too_complex; }
-            /* Patch e's outputs to SPLIT, then free */
-            hl_patch(prog, &e.out, idx);
-            hl_free(&e.out);
-            frag f; f.valid = 1; f.start = e.start;
-            hl_init(&f.out);
-            hl_push(&f.out, idx, 1);  /* split.y is the output hole */
-            PUSH(f);
-            break;
-        }
-        case TOK_QUEST: {
-            if (stk < 1) goto bad_pattern;
-            frag e = POP();
-            /* SPLIT(e.start, hole) */
-            int idx = emit1(prog, I_SPLIT, 0, e.start, -1);
-            if (idx < 0) { hl_free(&e.out); goto too_complex; }
-            frag f; f.valid = 1; f.start = idx;
-            hl_init(&f.out);
-            hl_push(&f.out, idx, 1);  /* split.y = hole */
-            if (hl_merge(&f.out, &e.out) < 0) {
-                hl_free(&e.out); hl_free(&f.out); goto too_complex;
-            }
-            hl_free(&e.out);
-            PUSH(f);
-            break;
-        }
-        default:
-            goto bad_pattern;
-        }
-    }
-
-    if (stk != 1) goto bad_pattern;
-    {
-        frag result = stack[0];
-        free(stack);
-        return result;
-    }
-
-too_complex:
-    if (errstr) *errstr = "pattern too complex";
-    for (int _i = 0; _i < stk; _i++) hl_free(&stack[_i].out);
-    free(stack);
-    { /* zero-init: the whole struct is returned by value, and callers
-         * read members other than .valid */
-        frag bad = {0}; bad.valid = 0; hl_init(&bad.out); return bad; }
-bad_pattern:
-    if (errstr) *errstr = "invalid pattern";
-    for (int _i = 0; _i < stk; _i++) hl_free(&stack[_i].out);
-    free(stack);
-    { /* zero-init: the whole struct is returned by value, and callers
-         * read members other than .valid */
-        frag bad = {0}; bad.valid = 0; hl_init(&bad.out); return bad; }
-
-#undef PUSH
-#undef POP
-#undef PEEK
-}
-
-/* ---- Public entry point --------------------------------------------------- */
-
-int mb_parse(const char *pat, int flags, mb_prog *prog,
-             const char **errstr)
-{
-    if (errstr) *errstr = NULL;
-
-    /* Handle empty pattern: emit MATCH at 0 */
-    if (!pat || *pat == '\0') {
-        mb_instr in; memset(&in, 0, sizeof(in));
-        in.op = I_MATCH;
-        if (mb_prog_emit(prog, in) < 0) {
-            if (errstr) *errstr = "out of memory";
-            return -1;
-        }
+    (void)brace;
+    if (s->ere) {
+        /* glibc drops it: same meaning as dfa.c's "repeat nothing" unless
+         * an anchor precedes, it is a '{', or a ')' follows -- let the
+         * glibc reading (and its verdict on validity) be computed */
+        if (s->lasttok == T_ASSERT || s->lasttok == T_END ||
+            s->lasttok == T_LPAREN || s->lasttok == T_OR)
+            s->quirk = 1;
         return 0;
     }
+    if (s->lasttok != T_ASSERT) return 0;
+    s->quirk = 1;
+    return s->glibc;
+}
 
-    /* Step 1: tokenize */
-    tokenizer_t tok;
-    memset(&tok, 0, sizeof(tok));
-    if (tokenize(&tok, pat, flags, errstr) < 0)
-        return -1;
+/* Record a rewrite of the pattern for POSIX regcomp (back-references are
+ * left to libc, whose ERE rejects what GNU syntax reads leniently). */
+static void libc_edit(P *s, int kind, const char *at)
+{
+    mb_parsed *o = s->out;
+    if (o->nedits < MB_MAX_EDITS) {
+        o->edit_pos[o->nedits] = (size_t)(at - s->start);
+        o->edit_kind[o->nedits] = (char)kind;
+        o->nedits++;
+    } else {
+        o->edits_overflow = 1;
+    }
+}
 
-    if (tok.n == 0) {
-        /* Empty token stream after parsing — emit MATCH */
-        mb_instr in; memset(&in, 0, sizeof(in));
-        in.op = I_MATCH;
-        mb_prog_emit(prog, in);
-        return 0;
+/* ERE under glibc rules: an operator with nothing to repeat is skipped. */
+static int glibc_skip(P *s)
+{
+    return s->lasttok == T_END || s->lasttok == T_LPAREN ||
+           s->lasttok == T_OR  || s->lasttok == T_ASSERT;
+}
+
+/* After a skipped operator glibc parses the next token as the start of an
+ * expression, where a ')' is an ordinary character (it does not close the
+ * group, so "(*)" is "Unmatched ( or \("). */
+static int glibc_after_skip(P *s)
+{
+    if (s->p < s->end && *s->p == ')') {
+        s->p++;
+        s->laststart = 0;
+        s->c = ')';
+        return s->lasttok = T_CHAR;
+    }
+    return lex(s);
+}
+
+static int lex(P *s)
+{
+    int backslash = 0;
+    if (s->p >= s->end) return s->lasttok = T_END;
+    unsigned char c = (unsigned char)*s->p++;
+    if (c == '\\') {
+        if (s->p >= s->end) { s->err = E_EESCAPE; return s->lasttok = T_END; }
+        backslash = 1;
+        c = (unsigned char)*s->p++;
     }
 
-    /* Step 2: insert explicit concatenation operators */
-    token *with_concat = malloc((size_t)(tok.n * 2 + 1) * sizeof(token));
-    if (!with_concat) {
-        if (errstr) *errstr = "out of memory";
-        return -1;
-    }
-    int n_concat;
-    if (insert_concat(tok.buf, tok.n, with_concat, &n_concat) < 0) {
-        free(with_concat);
-        if (errstr) *errstr = "pattern too complex";
-        return -1;
-    }
-
-    /* Step 3: infix → postfix */
-    token *postfix = malloc((size_t)(n_concat + 1) * sizeof(token));
-    if (!postfix) {
-        free(with_concat);
-        if (errstr) *errstr = "out of memory";
-        return -1;
-    }
-    int n_postfix;
-    if (infix_to_postfix(with_concat, n_concat, postfix, &n_postfix, errstr) < 0) {
-        free(with_concat);
-        free(postfix);
-        return -1;
-    }
-    free(with_concat);
-
-    /* Step 4: build NFA from postfix */
-    frag e = build_nfa(postfix, n_postfix, prog, errstr);
-    free(postfix);
-
-    if (!e.valid)
-        return -1;
-
-    /* Emit MATCH and patch all output holes to it */
-    mb_instr match_in; memset(&match_in, 0, sizeof(match_in));
-    match_in.op = I_MATCH;
-    int match_idx = mb_prog_emit(prog, match_in);
-    if (match_idx < 0) {
-        if (errstr) *errstr = "pattern too complex";
-        return -1;
-    }
-    hl_patch(prog, &e.out, match_idx);
-    hl_free(&e.out);
-
-    /* The entry point is e.start. If e.start != 0, prepend a JUMP.
-     * This ensures callers can always start execution at prog->instrs[0]. */
-    if (e.start != 0) {
-        /* Grow program by 1 at front */
-        if (prog->len >= SX_MAX_INSTRS) {
-            if (errstr) *errstr = "pattern too complex";
-            return -1;
+    switch (c) {
+    case '\n':
+        if (backslash || !s->nlalt) goto normal;
+        s->laststart = 1;
+        return s->lasttok = T_OR;
+    case '^':
+        if (backslash) goto normal;
+        if (s->ere || s->lasttok == T_END || s->lasttok == T_LPAREN ||
+            s->lasttok == T_OR) {
+            s->kind = AS_BOL;
+            return s->lasttok = T_ASSERT;
         }
-        if (prog->len >= prog->cap) {
-            int nc = prog->cap + 1;
-            mb_instr *tmp = realloc(prog->instrs, (size_t)nc * sizeof(mb_instr));
-            if (!tmp) { if (errstr) *errstr = "out of memory"; return -1; }
-            prog->instrs = tmp;
-            prog->cap    = nc;
+        goto normal;
+    case '$':
+        if (backslash) goto normal;
+        if (s->ere || s->p >= s->end ||
+            (s->p + 1 < s->end && s->p[0] == '\\' &&
+             (s->p[1] == ')' || s->p[1] == '|'))) {
+            s->kind = AS_EOL;
+            return s->lasttok = T_ASSERT;
         }
-        memmove(&prog->instrs[1], &prog->instrs[0],
-                (size_t)prog->len * sizeof(mb_instr));
-        prog->len++;
-
-        /* Fix all indices that were >= 0 */
-        for (int i = 1; i < prog->len; i++) {
-            mb_instr *in = &prog->instrs[i];
-            if (in->op == I_SPLIT) {
-                if (in->x >= 0) in->x++;
-                if (in->y >= 0) in->y++;
-            } else if (in->op == I_JUMP) {
-                if (in->x >= 0) in->x++;
-            } else {
-                /* CHAR/CLASS/ANY/BOL/EOL: x is the output (next state) */
-                if (in->x >= 0) in->x++;
-            }
+        goto normal;
+    case '1': case '2': case '3': case '4': case '5':
+    case '6': case '7': case '8': case '9':
+        if (!backslash) goto normal;
+        s->laststart = 0;
+        if (!s->completed[c - '0']) { s->err = E_ESUBREG; return s->lasttok = T_END; }
+        s->kind = c - '0';
+        s->has_backref = 1;
+        return s->lasttok = T_BACKREF;
+    case '`':
+        if (!backslash) goto normal;
+        s->kind = AS_BOL;
+        return s->lasttok = T_ASSERT;
+    case '\'':
+        if (!backslash) goto normal;
+        s->kind = AS_EOL;
+        return s->lasttok = T_ASSERT;
+    case '<':
+        if (!backslash) goto normal;
+        s->kind = AS_WBEG;
+        return s->lasttok = T_ASSERT;
+    case '>':
+        if (!backslash) goto normal;
+        s->kind = AS_WEND;
+        return s->lasttok = T_ASSERT;
+    case 'b':
+        if (!backslash) goto normal;
+        s->kind = AS_WORDB;
+        return s->lasttok = T_ASSERT;
+    case 'B':
+        if (!backslash) goto normal;
+        s->kind = AS_NWORDB;
+        return s->lasttok = T_ASSERT;
+    case '?':
+    case '+':
+        if (s->ere == backslash) goto normal;
+        if (s->laststart && !s->ere) goto normal;
+        if (glibc_op(s, 0)) goto normal;
+        if (s->ere && glibc_skip(s)) {
+            if (s->glibc) return glibc_after_skip(s);
+            libc_edit(s, 'd', s->p - 1);
         }
-
-        /* instrs[0] = JUMP to e.start+1 */
-        mb_instr jmp; memset(&jmp, 0, sizeof(jmp));
-        jmp.op = I_JUMP;
-        jmp.x  = e.start + 1;
-        prog->instrs[0] = jmp;
+        if (s->laststart)
+            warn(s, c == '?' ? "? at start of expression"
+                             : "+ at start of expression");
+        return s->lasttok = (c == '?' ? T_QMARK : T_PLUS);
+    case '*':
+        if (backslash) goto normal;
+        if (s->laststart && !s->ere) goto normal;
+        if (glibc_op(s, 0)) goto normal;
+        if (s->ere && glibc_skip(s)) {
+            if (s->glibc) return glibc_after_skip(s);
+            libc_edit(s, 'd', s->p - 1);
+        }
+        if (s->laststart)
+            warn(s, "* at start of expression");
+        return s->lasttok = T_STAR;
+    case '{': {
+        if (s->ere == backslash) goto normal;
+        if (s->laststart && !s->ere) goto normal;
+        if (glibc_op(s, 1)) goto normal;
+        if (s->glibc && s->ere && glibc_skip(s)) return glibc_after_skip(s);
+        const char *brace = s->p - 1;
+        int r = interval(s);
+        if (r < 0 && s->ere && s->laststart && !s->esize) {
+            /* glibc skips a leading repetition token unvalidated and dfa.c
+             * reads an invalid one as text: "{2,1}" at the start is text. */
+            s->err = NULL;
+            r = 0;
+        }
+        if (r < 0) return s->lasttok = T_END;
+        if (r == 0) goto normal;
+        if (s->ere && glibc_skip(s)) libc_edit(s, 'd', brace);
+        if (s->laststart) warn(s, "{...} at start of expression");
+        s->laststart = 0;
+        return s->lasttok = T_REPMN;
     }
+    case '|':
+        if (s->ere == backslash) goto normal;
+        s->laststart = 1;
+        return s->lasttok = T_OR;
+    case '(':
+        if (s->ere == backslash) goto normal;
+        s->gstack[s->parens++] = ++s->ngroups;
+        s->laststart = 1;
+        return s->lasttok = T_LPAREN;
+    case ')':
+        if (s->ere == backslash) goto normal;
+        if (s->parens == 0) {
+            if (s->ere) { s->rparen_lit = 1; goto normal; }
+            s->err = E_ERPAREN;
+            return s->lasttok = T_END;
+        }
+        {
+            int g = s->gstack[--s->parens];
+            if (g < 10) s->completed[g] = 1;
+        }
+        s->laststart = 0;
+        return s->lasttok = T_RPAREN;
+    case '.':
+        if (backslash) goto normal;
+        s->laststart = 0;
+        memset(&s->set, 0xFF, sizeof(s->set));
+        return s->lasttok = T_ANY;
+    case 's': case 'S': case 'w': case 'W': {
+        if (!backslash) goto normal;
+        s->laststart = 0;
+        memset(&s->set, 0, sizeof(s->set));
+        for (int k = 0; k < 256; k++) {
+            int m = (c == 's' || c == 'S') ? isspace(k) != 0 : mb_is_word((unsigned char)k);
+            if (c == 'S' || c == 'W') m = !m;
+            if (m) mb_charclass_set(&s->set, (unsigned char)k);
+        }
+        return s->lasttok = T_SET;
+    }
+    case '[': {
+        if (backslash) goto normal;
+        s->laststart = 0;
+        const char *e = NULL, *err = NULL;
+        int r = mb_bracket_parse(s->p, s->end, s->icase, &s->set, &e, &err);
+        if (r < 0) { s->err = err; return s->lasttok = T_END; }
+        if (r > 0 && !s->deferred) s->deferred = err;
+        s->p = e;
+        return s->lasttok = T_SET;
+    }
+    default:
+    normal:
+        if (c == '{' && s->ere && !backslash) libc_edit(s, 'e', s->p - 1);
+        s->laststart = 0;
+        s->c = c;
+        return s->lasttok = T_CHAR;
+    }
+}
 
+static int regexp(P *s);
+
+static int atom(P *s)
+{
+    mb_ast *t = s->t;
+    int n;
+    switch (s->tok) {
+    case T_CHAR:
+        set_char(s, s->c);
+        n = mb_ast_set(t, &s->set);
+        s->tok = lex(s);
+        return n;
+    case T_SET:
+    case T_ANY:
+        n = mb_ast_set(t, &s->set);
+        s->tok = lex(s);
+        return n;
+    case T_ASSERT:
+        n = mb_ast_assert(t, s->kind);
+        s->tok = lex(s);
+        return n;
+    case T_BACKREF:
+        n = mb_ast_node(t, A_BACKREF, -1, -1);
+        if (n >= 0) t->n[n].kind = (uint8_t)s->kind;
+        s->tok = lex(s);
+        return n;
+    case T_LPAREN:
+        s->tok = lex(s);
+        if (s->err) return -1;
+        n = regexp(s);
+        if (s->err) return -1;
+        if (s->tok != T_RPAREN) { s->err = E_EPAREN; return -1; }
+        s->tok = lex(s);
+        return n;
+    default:
+        return mb_ast_node(t, A_EMPTY, -1, -1);
+    }
+}
+
+static int closure(P *s)
+{
+    int a = atom(s);
+    while (!s->err && a >= 0 &&
+           (s->tok == T_STAR || s->tok == T_PLUS || s->tok == T_QMARK ||
+            s->tok == T_REPMN)) {
+        int mn = 0, mx = -1;
+        if (s->tok == T_PLUS)  mn = 1;
+        if (s->tok == T_QMARK) mx = 1;
+        if (s->tok == T_REPMN) { mn = s->minrep; mx = s->maxrep; }
+        int r = mb_ast_node(s->t, A_REP, a, -1);
+        if (r < 0) return -1;
+        s->t->n[r].min = mn;
+        s->t->n[r].max = mx;
+        a = r;
+        s->tok = lex(s);
+    }
+    return s->err ? -1 : a;
+}
+
+static int branch(P *s)
+{
+    int a = closure(s);
+    while (!s->err && a >= 0 && s->tok != T_RPAREN && s->tok != T_OR &&
+           s->tok != T_END) {
+        int b = closure(s);
+        if (b < 0) return -1;
+        a = mb_ast_cat(s->t, a, b);
+    }
+    return s->err ? -1 : a;
+}
+
+static int regexp(P *s)
+{
+    int a = branch(s);
+    while (!s->err && a >= 0 && s->tok == T_OR) {
+        s->tok = lex(s);
+        if (s->err) return -1;
+        int b = branch(s);
+        if (b < 0) return -1;
+        a = mb_ast_alt(s->t, a, b);
+    }
+    return s->err ? -1 : a;
+}
+
+int mb_parse(mb_ast *t, const char *pat, size_t len, int flags,
+             mb_parsed *out, const char **err,
+             void (*warnfn)(void *ctx, const char *msg), void *wctx)
+{
+    P s;
+    memset(&s, 0, sizeof(s));
+    s.t     = t;
+    s.p     = pat;
+    s.end   = pat + len;
+    s.ere   = (flags & SX_REG_ERE) != 0;
+    s.icase = (flags & SX_REG_ICASE) != 0;
+    s.lasttok   = T_END;
+    s.laststart = 1;
+    s.warn  = warnfn;
+    s.wctx  = wctx;
+    s.glibc = (flags & SX_P_GLIBC) != 0;
+    s.start = pat;
+    s.out   = out;
+    out->nedits = 0;
+    out->edits_overflow = 0;
+    s.nlalt = (flags & SX_P_NLALT) != 0;
+    int gsmall[64];
+    s.gstack = len < 64 ? gsmall : malloc((len + 1) * sizeof(int));
+    if (!s.gstack) { *err = E_ESPACE; return -1; }
+
+    s.tok = lex(&s);
+    int root = s.err ? -1 : regexp(&s);
+    if (!s.err && root >= 0 && s.tok != T_END)
+        s.err = E_EPAREN;               /* not reachable: ')' is handled in lex */
+    if (!s.err && root >= 0 && s.parens > 0)
+        s.err = E_EPAREN;
+    if (!s.err && t->oom)
+        s.err = E_ESPACE;
+    if (!s.err && s.deferred)
+        s.err = s.deferred;
+    if (s.gstack != gsmall) free(s.gstack);
+
+    if (s.err || root < 0) {
+        *err = s.err ? s.err : E_ESPACE;
+        return -1;
+    }
+    out->root = root;
+    out->has_backref = s.has_backref;
+    out->quirk = s.quirk;
+    out->rparen_lit = s.rparen_lit;
     return 0;
+}
+
+int mb_parse_fixed(mb_ast *t, const char *pat, size_t len, int icase)
+{
+    int a = mb_ast_node(t, A_EMPTY, -1, -1);
+    for (size_t i = 0; i < len && a >= 0; i++) {
+        mb_charclass cc;
+        unsigned char c = (unsigned char)pat[i];
+        memset(&cc, 0, sizeof(cc));
+        mb_charclass_set(&cc, c);
+        if (icase && isalpha(c)) {
+            mb_charclass_set(&cc, (unsigned char)tolower(c));
+            mb_charclass_set(&cc, (unsigned char)toupper(c));
+        }
+        a = mb_ast_cat(t, a, mb_ast_set(t, &cc));
+    }
+    return a;
 }
