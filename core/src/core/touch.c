@@ -256,7 +256,7 @@ int applet_touch(int argc, char **argv)
     tzset();
 
     /* Short flags may be clustered: -am, -ac, etc. */
-    opt_init(&o, argc, argv, "amct:r:d:", longs, 0);
+    opt_init(&o, argc, argv, "amct:r:d:", longs, OPT_GNU);
     while ((c = opt_next(&o)) != OPT_DONE) {
         switch (c) {
         case 'a': opt_a = 1; break;

@@ -374,7 +374,7 @@ int applet_ln(int argc, char **argv)
     opt_t o;
     int c;
 
-    opt_init(&o, argc, argv, "sfivnrTLP", longs, 0);
+    opt_init(&o, argc, argv, "sfivnrTLP", longs, OPT_GNU);
     while ((c = opt_next(&o)) != OPT_DONE) {
         switch (c) {
         case 's': opts.symbolic = 1;  break;

@@ -158,7 +158,7 @@ int applet_mkdir(int argc, char **argv)
     opt_t o;
     int c;
 
-    opt_init(&o, argc, argv, "pvm:", longs, 0);
+    opt_init(&o, argc, argv, "pvm:", longs, OPT_GNU);
     while ((c = opt_next(&o)) != OPT_DONE) {
         switch (c) {
         case 'p': opt_p = 1; break;

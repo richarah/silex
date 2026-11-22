@@ -780,7 +780,7 @@ int applet_sort(int argc, char **argv)
     opt_t o;
     int c;
 
-    opt_init(&o, argc, argv, "bdfinghVMrusczRt:k:o:", longs, 0);
+    opt_init(&o, argc, argv, "bdfinghVMrusczRt:k:o:", longs, OPT_GNU);
     while ((c = opt_next(&o)) != OPT_DONE) {
         switch (c) {
         case 'b': g_opts.ignore_blanks = 1; break;

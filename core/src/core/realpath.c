@@ -104,7 +104,7 @@ int applet_realpath(int argc, char **argv)
     opt_t o;
     int c;
 
-    opt_init(&o, argc, argv, "meLPqsz", longs, 0);
+    opt_init(&o, argc, argv, "meLPqsz", longs, OPT_GNU);
     while ((c = opt_next(&o)) != OPT_DONE) {
         switch (c) {
         case 0x100: rel_to = o.arg; break;

@@ -4,7 +4,9 @@
  * exactly once, left to right, and never allocates: all state lives in an
  * opt_t on the caller's stack, so an applet running in-process as a shell
  * builtin costs no heap traffic for its flags and leaves no global state behind
- * for the next invocation (unlike getopt()'s optind/optarg).
+ * for the next invocation (unlike getopt()'s optind/optarg). The only thing
+ * it ever writes is the ORDER of the argv pointers, and only with OPT_GNU
+ * (options after operands), the way GNU getopt does.
  *
  * The parser only decides WHAT an argument is. Every message is printed by the
  * applet, because the applets do not agree on wording (usage-only vs.
@@ -14,7 +16,9 @@
  * Grammar:
  *   "--"            ends option parsing (permute mode: everything after it is
  *                   an operand)
- *   "-" or "x..."   an operand; ends option parsing unless OPT_PERMUTE
+ *   "-" or "x..."   an operand; ends option parsing unless OPT_PERMUTE or
+ *                   OPT_GNU (and with OPT_GNU, unless POSIXLY_CORRECT is
+ *                   set)
  *   "--name[=val]"  a long option, matched EXACTLY (no abbreviations) against
  *                   the table; the forms each entry accepts are set by its
  *                   flags. A form an entry does not accept is OPT_UNKNOWN.
@@ -37,6 +41,11 @@
  *         }
  *     }
  *     operands are argv[o.ind] .. argv[argc - 1]
+ *
+ * Pass OPT_GNU to let options follow operands as GNU getopt does
+ * (`wc foo.txt -l`); the loop and the operand range stay the same, the
+ * parser reorders argv so the operands end up at argv[o.ind..]. Applets whose
+ * GNU counterpart stops at the first operand (basename, tr) leave it out.
  */
 
 #ifndef SILEX_OPT_H
@@ -69,6 +78,16 @@ typedef struct {
 /* opt_init() flags */
 #define OPT_PERMUTE 0x1  /* operands may precede options; opt_next() returns
                           * them one at a time as OPT_OPERAND               */
+#define OPT_GNU     0x2  /* GNU getopt ordering: options may also follow
+                          * operands (`wc foo -l`). Operands are stepped
+                          * over and argv is reordered in place so that, at
+                          * OPT_DONE, they sit (in their original order) at
+                          * argv[o->ind..argc-1], exactly as without this
+                          * flag. "--" still ends the options and is
+                          * dropped; "-" is still an operand. If
+                          * POSIXLY_CORRECT is set in the environment the
+                          * first operand ends the options as usual.
+                          * Ignored together with OPT_PERMUTE.             */
 
 typedef struct {
     int                argc;
@@ -89,6 +108,10 @@ typedef struct {
     const char        *pos;     /* the character o->opt was read from        */
     int                ddash;   /* OPT_PERMUTE: "--" has been seen           */
     int                done;    /* OPT_DONE has been returned                */
+
+    int                interleave;   /* OPT_GNU in effect (no POSIXLY_CORRECT) */
+    int                first_nonopt; /* OPT_GNU: skipped operands are        */
+    int                last_nonopt;  /*   argv[first_nonopt..last_nonopt)   */
 } opt_t;
 
 /* Start parsing argv[1..argc-1]. longs may be NULL. */
@@ -101,8 +124,10 @@ int opt_next(opt_t *o);
 /* The next whole word, if opt_next() would start on a fresh one that could be
  * an option (not inside a cluster, not after "--" in permute mode, not past
  * the end); NULL otherwise. Lets an applet claim words with a syntax of its
- * own (date's "+FORMAT", chmod's "-w") before the parser sees them. */
-const char *opt_peek(const opt_t *o);
+ * own (date's "+FORMAT", chmod's "-w") before the parser sees them.
+ * With OPT_GNU, operands in the way are stepped over first (collected just as
+ * opt_next() would collect them), so the word returned is never an operand. */
+const char *opt_peek(opt_t *o);
 
 /* Consume the word opt_peek() returned. */
 void opt_skip(opt_t *o);

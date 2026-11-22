@@ -610,7 +610,7 @@ int applet_stat(int argc, char **argv)
      * `TZ=UTC+3 date; date` printed UTC-3 twice (date, stat, touch -d). */
     tzset();
 
-    opt_init(&o, argc, argv, "ftLc:", longs, 0);
+    opt_init(&o, argc, argv, "ftLc:", longs, OPT_GNU);
     while ((c = opt_next(&o)) != OPT_DONE) {
         switch (c) {
         case 'f': opt_fs = 1; break;

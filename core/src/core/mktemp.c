@@ -27,7 +27,7 @@ int applet_mktemp(int argc, char **argv)
 
     opt_t o;
     int c;
-    opt_init(&o, argc, argv, "dup:t", NULL, 0);
+    opt_init(&o, argc, argv, "dup:t", NULL, OPT_GNU);
     while ((c = opt_next(&o)) != OPT_DONE) {
         switch (c) {
         case 'd': opt_d = 1; break;

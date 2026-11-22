@@ -86,7 +86,7 @@ int applet_readlink(int argc, char **argv)
     opt_t o;
     int c;
 
-    opt_init(&o, argc, argv, "femnqsz", longs, 0);
+    opt_init(&o, argc, argv, "femnqsz", longs, OPT_GNU);
     while ((c = opt_next(&o)) != OPT_DONE) {
         switch (c) {
         case 'f': opt_f = 1; break;

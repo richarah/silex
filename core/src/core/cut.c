@@ -234,7 +234,7 @@ int applet_cut(int argc, char **argv)
     opt_t o;
     int c;
 
-    opt_init(&o, argc, argv, "b:c:f:d:s", longs, 0);
+    opt_init(&o, argc, argv, "b:c:f:d:s", longs, OPT_GNU);
     while ((c = opt_next(&o)) != OPT_DONE) {
         switch (c) {
         case 'b': positions = o.arg; opt_b = 1; mode = 'b'; break;

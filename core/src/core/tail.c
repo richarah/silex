@@ -438,7 +438,7 @@ int applet_tail(int argc, char **argv)
     opt_t o;
     int c;
 
-    opt_init(&o, argc, argv, "fqvn:c:", longs, 0);
+    opt_init(&o, argc, argv, "fqvn:c:", longs, OPT_GNU);
     while ((c = opt_next(&o)) != OPT_DONE) {
         switch (c) {
         case 'f': opt_f = 1; break;

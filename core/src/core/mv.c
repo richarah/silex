@@ -314,7 +314,7 @@ int applet_mv(int argc, char **argv)
     opt_t o;
     int c;
 
-    opt_init(&o, argc, argv, "finvuT", longs, 0);
+    opt_init(&o, argc, argv, "finvuT", longs, OPT_GNU);
     while ((c = opt_next(&o)) != OPT_DONE) {
         switch (c) {
         case 'f': opts.force = 1; opts.interactive = 0; break;

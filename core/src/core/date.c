@@ -329,7 +329,7 @@ int applet_date(int argc, char **argv)
      * `TZ=UTC+3 date; date` printed UTC-3 twice (date, stat, touch -d). */
     tzset();
 
-    opt_init(&o, argc, argv, "uRI::s:d:", longs, 0);
+    opt_init(&o, argc, argv, "uRI::s:d:", longs, OPT_GNU);
     for (;;) {
         const char *arg = opt_peek(&o);
         if (arg) {

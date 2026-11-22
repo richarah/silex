@@ -31,6 +31,18 @@ All silex builtins implement the following POSIX utility conventions:
   (cat, grep, sed, sort, wc, head, tail)
 - **Combined flags**: single-character options may be combined (e.g. `-rf`, `-nv`)
   for all tools that take single-character flags
+- **Option order**: as with GNU getopt, options may come after operands as well
+  as before them -- `wc foo.txt -l`, `tail foo.txt -n 5`, `grep PAT FILE -c`,
+  `sed p FILE -n`. This holds for every tool built on the shared option parser
+  (cat, cp, cut, date, dirname, grep, head, install, ln, mkdir, mktemp, mv,
+  readlink, realpath, rm, sed, sha256sum, sort, stat, tail, tee, touch, wc;
+  chmod has always accepted it). A lone `--` still ends option processing and
+  a lone `-` is still an operand. Set `POSIXLY_CORRECT` (e.g.
+  `POSIXLY_CORRECT=1`) to get the strict POSIX rule back: the first operand ends
+  option processing and anything after it is an operand.
+  Exceptions, matching GNU coreutils: `basename` and `tr` always stop at the
+  first operand (`tr a -d` translates `a` to `-`), and tools with their own
+  syntax -- echo, printf, env, find, xargs, test, sh -- are unaffected.
 
 ## Shell
 
@@ -218,7 +230,7 @@ All silex builtins implement the following POSIX utility conventions:
 | --include/--exclude | N | Y | Y | - | |
 | --color | N | Y | Y | - | the escape sequences are not byte-identical to GNU's (no `\33[K`, `\33[0m` instead of `\33[m`) |
 | -z/--null-data, --line-buffered, --label, -I, --binary-files | N | Y | N | - | not implemented: unrecognised option, exit 2 |
-| options after the first operand | N | Y | N | - | silex stops reading options at the first operand (POSIX), so `grep PAT FILE -c` treats `-c` as a file; GNU accepts it |
+| options after the first operand | N | Y | Y | - | `grep PAT FILE -c` works as in GNU; with `POSIXLY_CORRECT` set the first operand ends the options (see "Option order" above) |
 | files with NUL bytes | N | Y | partly | - | the message is `Binary file NAME matches` on stdout and `-c` stops counting at the first NUL; GNU prints its message on stderr |
 | -P (PCRE) | N | Y | N | Y | grep_pcre.so |
 

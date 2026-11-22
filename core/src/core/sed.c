@@ -2706,7 +2706,7 @@ int applet_sed(int argc, char **argv)
     opt_t o;
     int oc;
 
-    opt_init(&o, argc, argv, "nErszue:f:i::l:", longs, 0);
+    opt_init(&o, argc, argv, "nErszue:f:i::l:", longs, OPT_GNU);
     while ((oc = opt_next(&o)) != OPT_DONE) {
         switch (oc) {
         case 'n': case L_QUIET:      O.quiet = 1; break;

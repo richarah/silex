@@ -176,7 +176,7 @@ int applet_rm(int argc, char **argv)
     opt_t o;
     int c;
 
-    opt_init(&o, argc, argv, "rRfiv", longs, 0);
+    opt_init(&o, argc, argv, "rRfiv", longs, OPT_GNU);
     while ((c = opt_next(&o)) != OPT_DONE) {
         switch (c) {
         case 'r': case 'R': opts.recursive = 1; break;

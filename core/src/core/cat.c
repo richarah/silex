@@ -374,7 +374,7 @@ int applet_cat(int argc, char **argv)
 
     opt_t o;
     int c;
-    opt_init(&o, argc, argv, "unbsvetAET", NULL, 0);
+    opt_init(&o, argc, argv, "unbsvetAET", NULL, OPT_GNU);
     while ((c = opt_next(&o)) != OPT_DONE) {
         switch (c) {
         case 'u':

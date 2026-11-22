@@ -84,7 +84,7 @@ int applet_dirname(int argc, char **argv)
     opt_t o;
     int c;
 
-    opt_init(&o, argc, argv, "z", longs, 0);
+    opt_init(&o, argc, argv, "z", longs, OPT_GNU);
     while ((c = opt_next(&o)) != OPT_DONE) {
         switch (c) {
         case 'z': opt_z = 1; break;

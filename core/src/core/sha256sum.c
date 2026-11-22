@@ -238,7 +238,7 @@ int applet_sha256sum(int argc, char **argv)
     opt_t o;
     int c;
 
-    opt_init(&o, argc, argv, "cbt", longs, 0);
+    opt_init(&o, argc, argv, "cbt", longs, OPT_GNU);
     while ((c = opt_next(&o)) != OPT_DONE) {
         switch (c) {
         case 'c': opt_c = 1; break;

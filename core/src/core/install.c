@@ -275,7 +275,7 @@ int applet_install(int argc, char **argv)
     opt_t o;
     int c;
 
-    opt_init(&o, argc, argv, "dDvpsm:o:g:S:t:", longs, 0);
+    opt_init(&o, argc, argv, "dDvpsm:o:g:S:t:", longs, OPT_GNU);
     while ((c = opt_next(&o)) != OPT_DONE) {
         switch (c) {
         case 'd': opt_d = 1; break;

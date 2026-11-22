@@ -192,6 +192,16 @@ in-process builtin runs). It walks argv once, keeps all state in a stack
 exit code stays with the applet. Not covered: echo, printf, find, sh, env,
 xargs and loadable modules, whose syntax is their own.
 
+Options may follow operands, GNU-style, for applets that pass `OPT_GNU` to
+`opt_init()` (all of them except basename and tr, whose GNU counterparts stop
+at the first operand, and chmod, which uses `OPT_PERMUTE`). The parser steps
+over operands and rotates argv in place -- the same lazy block exchange GNU
+getopt uses, still with no allocation -- so when `opt_next()` returns
+`OPT_DONE` the operands sit, in their original order, at `argv[o.ind..]` and
+applets need no argument-sorting code of their own. `--` ends the options, `-`
+is an operand, and `POSIXLY_CORRECT` in the environment restores "the first
+operand ends the options".
+
 ### Memory
 
 - Per-command allocations use `arena_alloc()` from `src/util/arena.h`.

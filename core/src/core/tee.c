@@ -22,7 +22,7 @@ int applet_tee(int argc, char **argv)
     opt_t o;
     int c;
 
-    opt_init(&o, argc, argv, "ai", NULL, 0);
+    opt_init(&o, argc, argv, "ai", NULL, OPT_GNU);
     while ((c = opt_next(&o)) != OPT_DONE) {
         switch (c) {
         case 'a': opt_a = 1; break;

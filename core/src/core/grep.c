@@ -1130,7 +1130,7 @@ int applet_grep(int argc, char **argv)
     opt_t o;
     int c;
 
-    opt_init(&o, argc, argv, "EFGcilLHhnqsvwrRoxbZSm:A:B:C:e:f:", longs, 0);
+    opt_init(&o, argc, argv, "EFGcilLHhnqsvwrRoxbZSm:A:B:C:e:f:", longs, OPT_GNU);
     while ((c = opt_next(&o)) != OPT_DONE) {
         switch (c) {
         case 'E': g.opt_E = 1; break;

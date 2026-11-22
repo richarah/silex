@@ -171,7 +171,7 @@ int applet_wc(int argc, char **argv)
     opt_t o;
     int oc;
 
-    opt_init(&o, argc, argv, "lwcmL", longs, 0);
+    opt_init(&o, argc, argv, "lwcmL", longs, OPT_GNU);
     while ((oc = opt_next(&o)) != OPT_DONE) {
         switch (oc) {
         case 'l': opt_l = 1; break;

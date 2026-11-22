@@ -1,6 +1,7 @@
 /* test_opt.c — shared option parser (src/util/opt.c) */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "util/opt.h"
 
@@ -23,8 +24,8 @@ static const opt_long_t longs[] = {
 /* Run the parser over WORDS and render every result into OUT, e.g.
  * "a b=x ?- !n ." -- option(=arg), ?unknown, !missing, +operand, '.' done
  * followed by the operand index. */
-static void trace(const char *spec, unsigned flags, char **words, int n,
-                  char *out, size_t outsz)
+static void trace_ops(const char *spec, unsigned flags, char **words, int n,
+                      char *out, size_t outsz, int show_ops)
 {
     char *argv[16];
     argv[0] = (char *)"prog";
@@ -51,7 +52,18 @@ static void trace(const char *spec, unsigned flags, char **words, int n,
         if (c == OPT_UNKNOWN || c == OPT_MISSING)
             break;
     }
-    snprintf(out + len, outsz - len, ".%d", o.ind);
+    len += (size_t)snprintf(out + len, outsz - len, ".%d", o.ind);
+    /* With show_ops, also list argv[o.ind..] -- what the applet will treat
+     * as its operands once the loop ends. */
+    if (show_ops)
+        for (int i = o.ind; i < n + 1; i++)
+            len += (size_t)snprintf(out + len, outsz - len, " %s", argv[i]);
+}
+
+static void trace(const char *spec, unsigned flags, char **words, int n,
+                  char *out, size_t outsz)
+{
+    trace_ops(spec, flags, words, n, out, outsz, 0);
 }
 
 #define T(desc, spec, flags, expect, ...) do {                         \
@@ -64,8 +76,22 @@ static void trace(const char *spec, unsigned flags, char **words, int n,
         if (!ok_) printf("    got '%s', expected '%s'\n", got_, expect); \
     } while (0)
 
+/* Like T, but the expectation also lists the operands left at argv[o.ind..]. */
+#define TO(desc, spec, flags, expect, ...) do {                        \
+        char *w_[] = { __VA_ARGS__ };                                   \
+        char got_[256];                                                 \
+        trace_ops(spec, flags, w_, (int)(sizeof(w_) / sizeof(w_[0])),   \
+                  got_, sizeof(got_), 1);                               \
+        int ok_ = strcmp(got_, expect) == 0;                            \
+        check(desc, ok_);                                               \
+        if (!ok_) printf("    got '%s', expected '%s'\n", got_, expect); \
+    } while (0)
+
 int main(void)
 {
+    /* The tests below must not depend on the caller's environment. */
+    unsetenv("POSIXLY_CORRECT");
+
     T("cluster of flags",          "abc",   0, "a b c .3",       "-ab", "-c");
     T("first operand stops",       "ab",    0, "a .2",           "-a", "x", "-b");
     T("lone dash is an operand",   "a",     0, ".1",             "-", "-a");
@@ -91,6 +117,53 @@ int main(void)
     T("long unknown",              "",      0, "?- .2",          "--nope");
     T("permute operands",          "a",     OPT_PERMUTE, "+x a +y .4", "x", "-a", "y");
     T("permute after --",          "a",     OPT_PERMUTE, "a +-a +- .5", "-a", "--", "-a", "-");
+
+    /* OPT_GNU: options may follow operands; argv is reordered so the
+     * operands, in their original order, end up at argv[o.ind..]. */
+    TO("gnu: option after operand",  "a",   OPT_GNU, "a .2 x",        "x", "-a");
+    TO("gnu: operands keep order",   "ab",  OPT_GNU, "a b .3 x y z w",
+       "x", "-a", "y", "z", "-b", "w");
+    TO("gnu: separate argument",     "n:",  OPT_GNU, "n=5 .3 f g",    "f", "-n", "5", "g");
+    TO("gnu: argument looks like operand", "n:a", OPT_GNU, "a n=3 .3 x y",
+       "x", "-an", "3", "y");
+    TO("gnu: long option after operand", "", OPT_GNU, "r=v b .4 x",  "x", "--req", "v", "--bare");
+    TO("gnu: options only",          "ab",  OPT_GNU, "a b .3",        "-a", "-b");
+    TO("gnu: operands only",         "a",   OPT_GNU, ".1 x y",        "x", "y");
+    TO("gnu: -- ends options",       "a",   OPT_GNU, "a .3 x -a y",   "x", "-a", "--", "-a", "y");
+    TO("gnu: leading --",            "a",   OPT_GNU, ".2 -a x",       "--", "-a", "x");
+    TO("gnu: trailing --",           "a",   OPT_GNU, "a .3 x",        "x", "-a", "--");
+    TO("gnu: -- as option argument", "n:",  OPT_GNU, "n=-- .3 x y",   "x", "-n", "--", "y");
+    TO("gnu: lone dash is operand",  "a",   OPT_GNU, "a .2 - x",      "-", "-a", "x");
+    T("gnu: unknown after operand",  "a",   OPT_GNU, "?z .3",         "x", "-z");
+    T("gnu: missing after operand",  "n:",  OPT_GNU, "!n .3",         "x", "-n");
+    T("gnu: OPT_PERMUTE wins",       "a",   OPT_GNU | OPT_PERMUTE, "+x a .3", "x", "-a");
+    TO("flags 0 still stops",        "a",   0,       ".1 x -a",       "x", "-a");
+
+    /* POSIXLY_CORRECT: the first operand ends option parsing again. */
+    setenv("POSIXLY_CORRECT", "1", 1);
+    TO("gnu + POSIXLY_CORRECT stops", "a",  OPT_GNU, "a .2 x -a",     "-a", "x", "-a");
+    TO("gnu + POSIXLY_CORRECT --",    "a",  OPT_GNU, "a .3 x",        "-a", "--", "x");
+    unsetenv("POSIXLY_CORRECT");
+    TO("gnu after unsetenv",          "a",  OPT_GNU, "a a .3 x",      "-a", "x", "-a");
+
+    /* OPT_GNU opt_peek: operands in the way are stepped over, so the word
+     * offered is the next one that could be an option. */
+    {
+        char *argv[] = { (char *)"date", (char *)"x", (char *)"+%F",
+                         (char *)"--iso-8601", (char *)"-u", (char *)"y", NULL };
+        opt_t o;
+        opt_init(&o, 6, argv, "u", NULL, OPT_GNU);
+        const char *p = opt_peek(&o);
+        int ok = p && strcmp(p, "--iso-8601") == 0;
+        ok = ok && opt_peek(&o) == p;          /* idempotent */
+        opt_skip(&o);
+        ok = ok && opt_next(&o) == 'u';
+        ok = ok && opt_peek(&o) == NULL;
+        ok = ok && opt_next(&o) == OPT_DONE && o.ind == 3;
+        ok = ok && strcmp(argv[3], "x") == 0 && strcmp(argv[4], "+%F") == 0 &&
+             strcmp(argv[5], "y") == 0;
+        check("gnu: opt_peek steps over operands", ok);
+    }
 
     /* opt_rest: claim the rest of a cluster (head -5 / -q5). */
     {
