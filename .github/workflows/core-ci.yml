@@ -277,7 +277,7 @@ jobs:
         run: make external-test-docker
 
       - name: Upload test results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: external-test-results
@@ -402,7 +402,7 @@ jobs:
           done
       - name: Upload crashers
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fuzz-crashers
           path: |
